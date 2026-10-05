@@ -1,0 +1,15 @@
+{
+  "name": "dralirashid-clinic",
+  "private": true,
+  "type": "module",
+  "description": "Dr. Ali Rashid's Dental Clinic: website, patient portal and clinic management system",
+  "scripts": {
+    "test": "node --test src/lib/*.test.ts tests/*.test.ts",
+    "test:db": "./supabase/tests/run_local.sh",
+    "test:ui": "node tests/ui.spec.mjs http://localhost:8765/",
+    "serve": "cd web && python3 -m http.server 8765",
+    "build:lib": "./scripts/build-lib.sh",
+    "import:sheet": "node scripts/import-aaj-ki-list.ts"
+  },
+  "engines": { "node": ">=22.18" }
+}
