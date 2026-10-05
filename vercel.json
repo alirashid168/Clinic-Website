@@ -9,17 +9,112 @@
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
-        { "key": "Permissions-Policy", "value": "camera=(self), microphone=(), geolocation=()" },
-        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" },
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://*.supabase.co; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdn.jsdelivr.net; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" }
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(self), microphone=(), geolocation=()"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=63072000; includeSubDomains; preload"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://*.supabase.co; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdn.jsdelivr.net; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        }
       ]
     },
     {
       "source": "/js/(.*)",
-      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    }
+  ],
+  "redirects": [
+    {
+      "source": "/braces{/}?",
+      "destination": "/#/visitor",
+      "permanent": true
+    },
+    {
+      "source": "/services{/}?",
+      "destination": "/#/visitor",
+      "permanent": true
+    },
+    {
+      "source": "/treatments{/}?",
+      "destination": "/#/visitor",
+      "permanent": true
+    },
+    {
+      "source": "/rj-mall-karachi{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/north-nazimabad-karachi{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/dha-karachi{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/gulberg-lahore{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/islamabad{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/contact{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/contact-us{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/locations{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/about-us{/}?",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/(wp-admin|wp-login\\.php|wp-content|wp-includes|category|tag|author|feed)(.*)",
+      "destination": "/",
+      "permanent": false
+    },
+    {
+      "source": "/:slug([a-z0-9-]+)/",
+      "destination": "/",
+      "permanent": false
     }
   ]
 }

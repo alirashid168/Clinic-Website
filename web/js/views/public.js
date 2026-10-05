@@ -2,7 +2,7 @@
 // visitor page.
 import { h, mount, todayISO } from '../ui/dom.js';
 import { state } from '../state.js';
-import { VISITOR, WEEKDAYS } from '../content.js';
+import { VISITOR, WEEKDAYS, HOME, DAY_KEYS } from '../content.js';
 import { CONFIG } from '../config.js';
 
 // ---------------------------------------------------------------- 3D smile
@@ -64,9 +64,56 @@ function header(sub) {
       h('a', { href: '#/login/patient' }, 'Patient login')));
 }
 
+function timingsText() {
+  let t = state.ref.settings?.clinic_timings || {};
+  if (typeof t === 'string') { try { t = JSON.parse(t); } catch { t = {}; } }
+  if (!Object.keys(t).length) return [];
+  const groups = [];
+  for (const [k, label] of DAY_KEYS) {
+    const v = t[k] || 'Closed';
+    const last = groups[groups.length - 1];
+    if (last && last.v === v) last.to = label; else groups.push({ from: label, to: label, v });
+  }
+  return groups.map((g) => `${g.from === g.to ? g.from : g.from + '–' + g.to}: ${g.v.replace('-', ' – ')}`);
+}
+
 function branchesList() {
-  return h('div', { class: 'benefits' }, state.ref.branches.map((b) =>
-    h('div', { class: 'benefit' }, h('h3', {}, b.name), h('p', { class: 'muted' }, b.address || ''))));
+  const hours = timingsText();
+  return h('div', { class: 'branch-grid' }, state.ref.branches.map((b) => {
+    const city = state.ref.cities?.find((c) => c.id === b.city_id)?.name;
+    const q = encodeURIComponent(`Dr. Ali Rashid's Dental Clinic ${b.address || b.name}`);
+    return h('div', { class: 'branch-card' },
+      h('span', { class: 'city' }, city || ''),
+      h('h3', {}, b.name),
+      h('p', { class: 'muted' }, b.address || ''),
+      hours.length ? h('p', { class: 'hours' }, hours.map((x) => h('span', {}, x))) : null,
+      h('div', { class: 'branch-actions' },
+        h('a', { href: `https://www.google.com/maps/search/?api=1&query=${q}`, target: '_blank', rel: 'noopener' }, 'Directions'),
+        h('a', { href: whatsappLink(`Hi, I would like to book an appointment at the ${b.name} branch.`), target: '_blank', rel: 'noopener' }, 'Book on WhatsApp')));
+  }));
+}
+
+function trustStrip() {
+  return h('div', { class: 'trust' }, HOME.trust.map((t) => h('div', {}, h('b', {}, t.big), h('span', {}, t.small))));
+}
+
+function casesGrid(cases, emptyText) {
+  return cases.length
+    ? h('div', { class: 'cases' }, cases.map((c) => h('img', { src: c.url, alt: 'Before and after result', loading: 'lazy' })))
+    : h('p', { class: 'muted' }, emptyText);
+}
+
+function waFloat() {
+  if (!String(state.ref.settings?.whatsapp_number || '').replace(/\D/g, '')) return null;
+  return h('a', { class: 'wa-float', href: whatsappLink('Hi, I would like to book a free consultation.'), target: '_blank', rel: 'noopener', 'aria-label': 'Message us on WhatsApp' },
+    h('span', { 'aria-hidden': 'true' }, '💬'), 'WhatsApp');
+}
+
+function footer() {
+  return h('footer', { class: 'site-footer' },
+    h('div', { class: 'footer-links' }, HOME.social.map((s) => h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.name)),
+      h('a', { href: HOME.reviewsUrl, target: '_blank', rel: 'noopener' }, 'Google reviews')),
+    `© ${new Date().getFullYear()} ${CONFIG.CLINIC_NAME}`);
 }
 
 function whatsappLink(text) {
@@ -77,7 +124,7 @@ function whatsappLink(text) {
 
 // ---------------------------------------------------------------- pages
 export async function renderHome(root) {
-  const schedule = await state.data.schedule().catch(() => []);
+  const [schedule, cases] = await Promise.all([state.data.schedule().catch(() => []), state.data.publicCases().catch(() => [])]);
   mount(root,
     h('div', { class: 'hero' },
       header(false),
@@ -90,13 +137,23 @@ export async function renderHome(root) {
           h('a', { class: 'door', href: '#/visitor' }, h('strong', {}, 'Visitor'), h('span', {}, 'Braces options, results and how to start')),
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))))),
     h('main', { class: 'public-main' },
+      h('section', {}, trustStrip()),
+      h('section', { class: 'about' },
+        h('div', {}, h('h2', {}, HOME.aboutTitle), HOME.about.map((p) => h('p', {}, p)),
+          h('div', { class: 'about-actions' },
+            h('a', { class: 'btn btn-primary', href: whatsappLink('Hi, I would like to book a free consultation.'), target: '_blank', rel: 'noopener' }, 'Book a free consultation'),
+            h('a', { class: 'btn', href: '#/visitor' }, 'Braces options and prices')))),
+      h('section', {},
+        h('div', { class: 'section-title' }, h('h2', {}, 'Results'), h('a', { href: HOME.reviewsUrl, target: '_blank', rel: 'noopener' }, 'Read our Google reviews')),
+        casesGrid(cases, 'Before and after photos are being added. Ask at any branch to see real results from patients who agreed to share them.')),
       h('section', {},
         h('div', { class: 'section-title' }, h('h2', {}, "Dr. Ali's days at each branch"), h('span', { class: 'muted' }, 'Updated by the clinic every week')),
         weekCalendar(schedule)),
-      h('section', {},
-        h('div', { class: 'section-title' }, h('h2', {}, 'Branches')),
+      h('section', { id: 'branches' },
+        h('div', { class: 'section-title' }, h('h2', {}, 'Our clinics')),
         branchesList())),
-    h('footer', { class: 'site-footer' }, `© ${new Date().getFullYear()} ${CONFIG.CLINIC_NAME}`));
+    footer(),
+    waFloat());
 }
 
 export async function renderVisitor(root) {
@@ -115,9 +172,7 @@ export async function renderVisitor(root) {
         h('p', { class: 'muted', style: { marginTop: '12px' } }, VISITOR.bracesNote)),
       h('section', {},
         h('div', { class: 'section-title' }, h('h2', {}, 'Results')),
-        cases.length
-          ? h('div', { class: 'cases' }, cases.map((c) => h('img', { src: c.url, alt: 'Before and after braces result', loading: 'lazy' })))
-          : h('p', { class: 'muted' }, 'Before and after results will appear here once patients have given consent for their photos to be shared.')),
+        casesGrid(cases, 'Before and after results will appear here once patients have given consent for their photos to be shared.')),
       h('section', {},
         h('div', { class: 'section-title' }, h('h2', {}, 'Other treatments')),
         h('p', {}, VISITOR.otherTreatments.join(', ') + '.')),
@@ -126,7 +181,8 @@ export async function renderVisitor(root) {
           h('div', {}, h('h2', {}, 'Book a free consultation'), h('p', {}, 'Message us on WhatsApp and we will find a time at your nearest branch.')),
           h('a', { class: 'btn', href: whatsappLink('Hi, I would like to book a free braces consultation.'), target: '_blank', rel: 'noopener' }, 'Message on WhatsApp'))),
       h('section', {},
-        h('div', { class: 'section-title' }, h('h2', {}, 'Branches')),
+        h('div', { class: 'section-title' }, h('h2', {}, 'Our clinics')),
         branchesList())),
-    h('footer', { class: 'site-footer' }, `© ${new Date().getFullYear()} ${CONFIG.CLINIC_NAME}`));
+    footer(),
+    waFloat());
 }

@@ -35,6 +35,7 @@ async function route() {
 
   try {
     if (parts[0] === 'visitor') return await renderVisitor(root);
+    if (parts[0] === 'clinics') { await renderHome(root); document.getElementById('branches')?.scrollIntoView(); return; }
     if (parts[0] === 'login') {
       const who = parts[1] === 'patient' ? 'patient' : 'staff';
       if (s?.kind === 'staff' && who === 'staff') { location.hash = '#/staff/today'; return; }

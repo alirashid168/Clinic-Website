@@ -22,4 +22,26 @@ export const VISITOR = {
   otherTreatments: ['Smile makeovers', 'Veneers', 'Crowns', 'Root canal treatment', 'Scaling and polishing', 'Fillings', 'Extractions', 'Retainers'],
 };
 
+// Homepage wording carried over from the old dralirashid.com website.
+export const HOME = {
+  trust: [
+    { big: '5', small: 'clinics in Karachi, Lahore and Islamabad' },
+    { big: '140+', small: 'Google reviews' },
+    { big: 'BDS', small: 'Baqai University' },
+    { big: 'In-house', small: 'retainer lab' },
+  ],
+  aboutTitle: 'Meet Dr. Ali Rashid',
+  about: [
+    'Dr. Ali Rashid (BDS, Baqai University) leads a team of dentists across five clinics, focused on braces, smile makeovers, veneers and everyday dentistry.',
+    'Every braces patient follows the same month-by-month plan at every branch, with senior doctors at the key months and progress photos you can see in your own patient account.',
+  ],
+  reviewsUrl: 'https://www.google.com/maps/search/?api=1&query=Dr.+Ali+Rashid%27s+Dental+Clinic',
+  social: [
+    { name: 'Facebook', url: 'https://www.facebook.com/dr.alirashid168/' },
+    { name: 'YouTube', url: 'https://www.youtube.com/@dralirashid168' },
+  ],
+};
+
+export const DAY_KEYS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
+
 export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
