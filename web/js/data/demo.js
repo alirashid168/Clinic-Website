@@ -638,7 +638,9 @@ export function createDemoAdapter() {
       need('users.manage');
       if (!row.email?.endsWith('@dralirashid.com')) fail('Staff emails must end with @dralirashid.com');
       if (db.staff.some((s) => s.email === row.email)) fail('A staff account with this email already exists.');
-      const s = { id: uid(), active: true, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...row };
+      const { password, ...rest } = row;
+      if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
+      const s = { id: uid(), active: true, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...rest };
       db.staff.push(s); audit('staff', 'INSERT', s);
       return clone(s);
     },
@@ -646,6 +648,18 @@ export function createDemoAdapter() {
       need('users.manage');
       if (id === me().id) fail('You cannot switch off your own account.');
       const s = db.staff.find((x) => x.id === id); s.active = false; s.deactivated_at = new Date().toISOString(); audit('staff', 'UPDATE', s);
+    },
+    async updateStaffLogin(id, { email, password }) {
+      need('users.manage');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      const e = (email || '').trim().toLowerCase();
+      if (e && e !== s.email) {
+        if (!e.endsWith('@dralirashid.com')) fail('Staff emails must end with @dralirashid.com');
+        if (db.staff.some((x) => x.email === e && x.id !== id)) fail('That login email is already used. Pick another.');
+        s.email = e; audit('staff', 'UPDATE', s);
+      }
+      if (password != null && password !== '' && String(password).length < 8) fail('The password needs at least 8 characters.');
     },
     async reactivateStaff(id) { need('users.manage'); db.staff.find((x) => x.id === id).active = true; },
     async setSetting(key, value) { if (me()?.role !== 'admin') fail('Only admin can change settings'); db.settings[key] = value; },

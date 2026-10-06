@@ -426,6 +426,11 @@ export async function createSupabaseAdapter() {
       if (data?.error) throw new Error(data.error);
       return data.staff;
     },
+    async updateStaffLogin(id, { email, password }) {
+      const { data, error } = await sb.functions.invoke('admin-users', { body: { action: 'update_login', user_id: id, email, password } });
+      if (error) throw new Error(error.message);
+      if (data?.error) throw new Error(data.error);
+    },
     async deactivateStaff(id) {
       check(await sb.rpc('deactivate_staff', { p_staff: id }));
       await sb.functions.invoke('admin-users', { body: { action: 'ban_user', user_id: id } });
