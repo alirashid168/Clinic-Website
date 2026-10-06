@@ -65,23 +65,71 @@ async function staff(root, redraw) {
   const [list, gridData] = await Promise.all([d.staffList(), d.permissionGrid()]);
   const { permissions, grid, overrides } = gridData;
 
+  // Readable passwords to hand over at the desk: no look-alike letters (l/1, O/0).
+  const newPassword = () => {
+    const pick = (set, n) => Array.from(crypto.getRandomValues(new Uint32Array(n)), (x) => set[x % set.length]).join('');
+    return pick('ABCDEFGHJKMNPQRSTUVWXYZ', 1) + pick('abcdefghjkmnpqrstuvwxyz', 4) + '-' + pick('23456789', 4);
+  };
+  const passwordField = () => {
+    const input = h('input', { type: 'text', value: newPassword(), autocomplete: 'new-password', spellcheck: 'false', style: { fontFamily: 'monospace' } });
+    const again = h('button', { type: 'button', class: 'btn btn-small', onclick: () => { input.value = newPassword(); } }, 'New one');
+    const copy = h('button', { type: 'button', class: 'btn btn-small', onclick: async () => { try { await navigator.clipboard.writeText(input.value); toast('Password copied.', 'ok', 1500); } catch { input.select(); } } }, 'Copy');
+    return { input, row: h('div', { class: 'inline' }, input, again, copy) };
+  };
+
+  const loginDetails = (s) => {
+    const email = h('input', { type: 'email', value: s.email, autocomplete: 'off' });
+    const pw = passwordField();
+    const newPw = h('input', { type: 'checkbox' });
+    const pwWrap = field('New password', pw.row, 'At least 8 characters. Give it to them in person or on WhatsApp.');
+    pwWrap.style.display = 'none';
+    newPw.addEventListener('change', () => { pwWrap.style.display = newPw.checked ? '' : 'none'; });
+    modal(`Login details · ${s.full_name}`, h('div', {},
+      field('Login email', email, `Must end with @${CONFIG.STAFF_EMAIL_DOMAIN}. It does not need a real inbox.`),
+      h('label', { class: 'inline', style: { margin: '6px 0 10px' } }, newPw, 'Also give a new password'),
+      pwWrap,
+      h('p', { class: 'muted' }, s.role === 'admin' ? 'This is your own login. After a change, log in with the new details.' : 'Their old email or password stops working as soon as you save.')), [
+      { label: 'Cancel' },
+      { label: 'Save', primary: true, onClick: async () => {
+        const nextEmail = email.value.trim().toLowerCase();
+        const password = newPw.checked ? pw.input.value.trim() : '';
+        if (nextEmail === s.email && !password) { toast('Nothing changed.'); return false; }
+        try {
+          await d.updateStaffLogin(s.id, { email: nextEmail, password: password || null });
+          const parts = [nextEmail !== s.email ? `Login is now ${nextEmail}` : null, password ? `Password: ${password}` : null].filter(Boolean);
+          toast(`Saved. ${parts.join(' · ')}`, 'ok', password ? 15000 : 5000); redraw();
+        } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } },
+    ]);
+  };
+
   const add = () => {
     const name = h('input', { placeholder: 'Full name' });
     const email = h('input', { type: 'email', placeholder: `name@${CONFIG.STAFF_EMAIL_DOMAIN}` });
     const role = select(Object.entries(ROLE_LABELS).filter(([k]) => k !== 'admin').map(([value, label]) => ({ value, label })), 'front_desk');
     const branchBoxes = state.ref.branches.map((b) => ({ b, box: h('input', { type: 'checkbox' }) }));
+    const pw = passwordField();
+    const how = select([
+      { value: 'password', label: 'I set a password now (no email needed)' },
+      { value: 'invite', label: 'Email them an invitation (needs a real inbox)' },
+    ], 'password');
+    const pwWrap = field('Password', pw.row, 'Write this down for them. They log in with the email above and this password.');
+    how.addEventListener('change', () => { pwWrap.style.display = how.value === 'password' ? '' : 'none'; });
     const doctor = select([{ value: '', label: 'Not a doctor on visits' }, ...state.ref.clinicians.filter((c) => !c.staff_id).map((c) => ({ value: c.id, label: c.display_name }))], '');
     modal('New staff account', h('div', {},
-      h('div', { class: 'form-grid' }, field('Name', name), field('Login email', email), field('Role', role), field('Link to doctor/assistant name', doctor, 'So their visits count in their daily log')),
+      h('div', { class: 'form-grid' }, field('Name', name), field('Login email', email, 'Used only as their login name. It does not need a real inbox.'), field('Role', role), field('Link to doctor/assistant name', doctor, 'So their visits count in their daily log')),
+      h('div', { class: 'form-grid', style: { marginTop: '10px' } }, field('How will they log in?', how), pwWrap),
       h('p', { class: 'field-label' }, 'Limit to branches (leave empty for all branches)'),
       h('div', { class: 'inline' }, branchBoxes.map(({ b, box }) => h('label', { class: 'inline' }, box, b.name))),
-      h('p', { class: 'muted', style: { marginTop: '10px' } }, 'They get an email to set their own password.')), [
+      ), [
       { label: 'Cancel' },
       { label: 'Create account', primary: true, onClick: async () => {
         const branch_ids = branchBoxes.filter((x) => x.box.checked).map((x) => x.b.id);
         try {
-          await d.createStaff({ full_name: name.value.trim(), email: email.value.trim().toLowerCase(), role: role.value, branch_ids, restrict_to_branches: branch_ids.length > 0, home_branch_id: branch_ids[0] || null, clinician_id: doctor.value || null });
-          toast('Account created.', 'ok'); redraw();
+          const password = how.value === 'password' ? pw.input.value.trim() : null;
+          const login = email.value.trim().toLowerCase();
+          await d.createStaff({ full_name: name.value.trim(), email: login, role: role.value, branch_ids, restrict_to_branches: branch_ids.length > 0, home_branch_id: branch_ids[0] || null, clinician_id: doctor.value || null, ...(password ? { password } : {}) });
+          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000); redraw();
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
@@ -113,6 +161,7 @@ async function staff(root, redraw) {
         h('td', {}, s.role !== 'admin' && Object.keys(overrides[s.id] || {}).length ? h('span', { class: 'badge badge-warn' }, 'Personal changes') : null),
         h('td', { class: 'right nowrap' },
           s.role !== 'admin' ? h('button', { class: 'btn btn-small', onclick: () => personal(s) }, 'Personal access') : null, ' ',
+          s.active && (s.role !== 'admin' || isAdmin()) ? h('button', { class: 'btn btn-small', onclick: () => loginDetails(s) }, 'Login details') : null, ' ',
           s.role === 'admin' ? null : s.active
             ? h('button', { class: 'btn btn-small btn-danger', onclick: () => modal('Switch off account', h('p', {}, `${s.full_name} will be logged out and lose access to everything immediately.`), [
               { label: 'Cancel' }, { label: 'Switch off now', primary: true, onClick: async () => { try { await d.deactivateStaff(s.id); toast('Account switched off.', 'ok'); redraw(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } }]) }, 'Switch off')
