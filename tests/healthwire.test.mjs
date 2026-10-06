@@ -1,7 +1,7 @@
 // Rules for reading Healthwire's export files (made-up rows in the same shape as the real files).
 // Usage: node tests/healthwire.test.mjs
 import assert from 'node:assert/strict';
-import { parseCSV, readTransactions, buildFromTransactions, readPatients, readExpensesPdf, buildExpenses, cleanName, phoneOf, isoMinute, branchOfLogin, splitProcedures, treatmentFor } from '../web/js/lib/healthwire.js';
+import { parseCSV, readTransactions, buildFromTransactions, readPatients, readExpensesPdf, buildExpenses, cleanName, phoneOf, isoMinute, branchOfLogin, splitProcedures, treatmentFor, branchInText } from '../web/js/lib/healthwire.js';
 
 let passed = 0;
 const test = (name, fn) => { try { fn(); passed++; console.log('ok -', name); } catch (e) { console.log('FAIL -', name, '\n   ', e.message); process.exitCode = 1; } };
@@ -10,6 +10,10 @@ test('names lose their branch tag, phones get their leading zero back', () => {
   assert.deepEqual(cleanName('Sana lhr'), { name: 'Sana', tag: 'lhr' });
   assert.deepEqual(cleanName('AHMED KHAN N.N'), { name: 'Ahmed Khan', tag: 'nn' });
   assert.deepEqual(cleanName('Zara Isb.'), { name: 'Zara', tag: 'isb' });
+  assert.equal(branchInText('Snacks for N. N staff'), 'NN'); // pdf.js leaves a space after the dot
+  assert.equal(branchInText('Snacks for N.N staff'), 'NN');
+  assert.equal(branchInText('Nazimabad electrician'), 'NN');
+  assert.equal(branchInText('New assistant for Rj'), 'GUL');
   assert.equal(phoneOf(3001234567), '03001234567');
   assert.equal(phoneOf('92 300 1234567'), '03001234567');
   assert.equal(phoneOf(''), null);
