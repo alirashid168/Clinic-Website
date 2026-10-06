@@ -318,7 +318,20 @@ export function readPatients(rows) {
 }
 
 // ----------------------------------------------------------------- expenses PDF
-const PDF_COLS = [['sr', 0, 85], ['voucher', 85, 140], ['desc', 140, 200], ['date', 200, 255], ['category', 255, 345], ['amount', 345, 400], ['mode', 400, 455], ['createdAt', 455, 512], ['createdBy', 512, 700]];
+// Column edges are taken from the header row of each page (Healthwire sizes the columns to the content, so they move from file to file).
+const PDF_HEADERS = ['Sr#', 'Voucher#', 'Description', 'Date', 'Category', 'Amount', 'Mode', 'Created', 'Created'];
+const PDF_FIELDS = ['sr', 'voucher', 'desc', 'date', 'category', 'amount', 'mode', 'createdAt', 'createdBy'];
+const PDF_COLS_DEFAULT = [['sr', 0, 85], ['voucher', 85, 140], ['desc', 140, 200], ['date', 200, 255], ['category', 255, 345], ['amount', 345, 400], ['mode', 400, 455], ['createdAt', 455, 512], ['createdBy', 512, 700]];
+function pdfColumns(items, hdr) {
+  const line = items.filter((i) => Math.abs(i.y - hdr.y) < 3).sort((a, b) => a.x - b.x);
+  const xs = []; let from = 0;
+  for (const label of PDF_HEADERS) {
+    const k = line.findIndex((i, idx) => idx >= from && i.s === label);
+    if (k < 0) return PDF_COLS_DEFAULT;
+    xs.push(line[k].x); from = k + 1;
+  }
+  return PDF_FIELDS.map((name, i) => [name, i === 0 ? 0 : xs[i] - 3, i === PDF_FIELDS.length - 1 ? 10000 : xs[i + 1] - 3]);
+}
 
 /**
  * pages: [{ items: [{ s, x, y }] }] from pdf.js getTextContent (x, y in PDF points, y up).
@@ -333,11 +346,13 @@ export function readExpensesPdf(pages) {
     const totalItem = items.find((i) => i.s === 'Total' && i.x < 90);
     const body = items.filter((i) => i.y < hdr.y - 5 && i.y > 45 && (!totalItem || i.y > totalItem.y + 2));
     if (totalItem) { const t = items.filter((i) => Math.abs(i.y - totalItem.y) < 3).map((i) => i.s).join(' ').match(/([\d,]+\.?\d*)/g); if (t) printedTotal = num(t[t.length - 1]); }
-    const anchors = body.filter((i) => i.x < 85 && /^\d+$/.test(i.s)).map((i) => i.y).sort((a, b) => b - a);
+    const cols = pdfColumns(items, hdr);
+    const srEnd = cols[0][2];
+    const anchors = body.filter((i) => i.x < srEnd && /^\d+$/.test(i.s)).map((i) => i.y).sort((a, b) => b - a);
     anchors.forEach((y, k) => {
       const top = y + 6, bottom = k + 1 < anchors.length ? anchors[k + 1] + 6 : -1;
       const cells = {};
-      for (const [name, x0, x1] of PDF_COLS) {
+      for (const [name, x0, x1] of cols) {
         const parts = body.filter((i) => i.y <= top && i.y > bottom && i.x >= x0 && i.x < x1).sort((a, b) => (b.y - a.y) || (a.x - b.x));
         const joined = parts.map((i) => i.s).join(' ').replace(/\s+/g, ' ').trim();
         // Dates and amounts come split around "/" and "." ("31 / 08 / 2026"); in text only the space before a dot or comma is noise ("Dr . Ali").
