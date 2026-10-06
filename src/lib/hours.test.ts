@@ -87,3 +87,46 @@ test('missing or old-style settings give no per-branch hours', () => {
   assert.deepEqual(branchHoursFrom('not json'), {});
   assert.deepEqual(branchHoursFrom(null), {});
 });
+
+// ---------------------------------------------------------------- live status
+import { branchStatus, aliNow, aliNext, monthCells, whenLabel, toMin } from './hours.ts';
+const T = '2026-10-06'; // Tuesday
+const at = (hhmm: string) => toMin(hhmm);
+
+test('branch status reads like a receptionist would say it', () => {
+  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, T, at('17:10')), { open: true, text: 'Open now · until 9 PM' });
+  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, T, at('10:00')), { open: false, text: 'Opens today, 12 PM' });
+  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, '2026-10-10', at('22:00')), { open: false, text: 'Opens Monday, 12 PM' }, 'Sat night skips Sunday');
+  assert.deepEqual(branchStatus(H[NN], ROWS, NN, T, at('17:10')), { open: false, text: 'Opens Thursday, 4 PM' });
+  assert.deepEqual(branchStatus(H[DHA], ROWS, DHA, T, at('21:30')), { open: false, text: 'Opens Tue 13 Oct, 4 PM' });
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, T, at('17:10')), { open: false, text: 'Opens Thursday, 12 PM' });
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('13:00')), { open: true, text: 'Open now · until 9 PM' }, 'Lahore Friday: clinic open from 12');
+  assert.deepEqual(branchStatus(H[ISB], ROWS, ISB, '2026-10-14', at('12:00')), { open: false, text: 'Next open Mon 26 Oct' });
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-26', at('12:00')), { open: false, text: 'No dates scheduled yet' });
+});
+
+test("Dr. Ali's whereabouts: now and next per branch", () => {
+  assert.equal(aliNow(ROWS, T, at('17:10'))?.branch_id, DHA);
+  assert.equal(aliNow(ROWS, T, at('13:00'))?.branch_id, GUL);
+  assert.equal(aliNow(ROWS, T, at('22:00')), null);
+  assert.deepEqual(aliNext(ROWS, DHA, T, at('17:10')), { here: true, date: T, start: '16:00', end: '21:00' });
+  assert.deepEqual(aliNext(ROWS, GUL, T, at('17:10')), { here: false, date: '2026-10-07', start: '12:00', end: '21:00' });
+  assert.deepEqual(aliNext(ROWS, NN, T, at('17:10')), { here: false, date: '2026-10-15', start: '16:00', end: '21:00' }, 'skips Thu 8, he is in Lahore');
+  assert.equal(whenLabel('2026-10-07', T), 'tomorrow');
+  assert.equal(whenLabel('2026-10-08', T), 'Thursday');
+  assert.equal(whenLabel('2026-10-15', T), 'Thu 15 Oct');
+});
+
+test('month grid starts on Monday', () => {
+  const oct = monthCells(2026, 10);
+  assert.equal(oct.length, 35);
+  assert.deepEqual(oct.slice(0, 4).map((c) => c.day), [0, 0, 0, 1], 'Oct 1 2026 is a Thursday');
+  assert.equal(oct[33].iso, '2026-10-31');
+});
+
+test('visit runs carry per-day times when they differ', () => {
+  const r = visitRuns(ROWS, ISB, '2026-10-06');
+  assert.equal(r[0].label, 'Mon 12 Oct – Tue 13 Oct');
+  assert.equal(r[0].time, 'Mon 4 PM – 10 PM · Tue 2 PM – 8 PM');
+  assert.equal(visitRuns(ROWS, LHR, '2026-10-06', '12:00-21:00')[0].time, '12 PM – 9 PM');
+});

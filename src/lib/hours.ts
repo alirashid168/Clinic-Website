@@ -84,24 +84,25 @@ export function weeklyLines(days: Partial<Record<DayKey, string>>): string[] {
 }
 
 /** Upcoming visit dates of a branch, merged into runs of consecutive days. */
-export function visitRuns(rows: ScheduleRow[], branchId: number, today: string, hours?: string): { from: string; to: string; text: string }[] {
+export function visitRuns(rows: ScheduleRow[], branchId: number, today: string, hours?: string): { from: string; to: string; text: string; label: string; time: string }[] {
   const byDate = new Map<string, ScheduleRow[]>();
   for (const r of rows) {
     if (r.branch_id !== branchId || !r.on_date || r.unavailable || r.on_date < today) continue;
     byDate.set(r.on_date, [...(byDate.get(r.on_date) || []), r]);
   }
   const dates = [...byDate.keys()].sort();
-  const runs: { from: string; to: string; times: string[] }[] = [];
+  const runs: { from: string; to: string; times: string[]; dates: string[] }[] = [];
   for (const d of dates) {
     const own = byDate.get(d)!.sort((a, b) => a.start_time.localeCompare(b.start_time));
     const t = hours ? range(hours) : range(own[0].start_time.slice(0, 5), own[own.length - 1].end_time.slice(0, 5));
     const last = runs[runs.length - 1];
-    if (last && addDays(last.to, 1) === d) { last.to = d; last.times.push(t); } else runs.push({ from: d, to: d, times: [t] });
+    if (last && addDays(last.to, 1) === d) { last.to = d; last.times.push(t); last.dates.push(d); } else runs.push({ from: d, to: d, times: [t], dates: [d] });
   }
   return runs.map((r) => {
     const label = r.from === r.to ? dateLabel(r.from) : `${dateLabel(r.from)} – ${dateLabel(r.to)}`;
     const same = r.times.every((x) => x === r.times[0]);
-    return { from: r.from, to: r.to, text: same ? `${label}, ${r.times[0]}` : label };
+    const time = same ? r.times[0] : r.dates.map((d, i) => `${SHORT[dayKeyOf(d)]} ${r.times[i]}`).join(' · ');
+    return { from: r.from, to: r.to, text: same ? `${label}, ${r.times[0]}` : label, label, time };
   });
 }
 
@@ -124,4 +125,86 @@ export function slotsOn(rows: ScheduleRow[], date: string): { slots: Slot[]; dat
   const wd = weekdayOf(date);
   const weekly = rows.filter((r) => r.weekday === wd && !r.on_date && !r.unavailable && !off.has(r.branch_id));
   return { slots: sort(weekly.map(toSlot)), dated: false };
+}
+
+// ---------------------------------------------------------------- live status
+// Minutes since midnight: "16:30" -> 990.
+export function toMin(t: string): number {
+  const [h, m] = t.slice(0, 5).split(':').map(Number);
+  return h * 60 + (m || 0);
+}
+const LONG: Record<DayKey, string> = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+
+/** "today", "tomorrow", "Thursday", or "Thu 15 Oct" further out. */
+export function whenLabel(date: string, today: string): string {
+  if (date === today) return 'today';
+  if (date === addDays(today, 1)) return 'tomorrow';
+  for (let n = 2; n < 7; n++) if (date === addDays(today, n)) return LONG[dayKeyOf(date)];
+  return dateLabel(date);
+}
+
+/** The branch's opening span on a date, as [start, end] times, or null when closed. */
+export function openSpan(h: BranchHours | undefined, rows: ScheduleRow[], branchId: number, date: string): [string, string] | null {
+  if (!h) return null;
+  if (h.mode === 'weekly') {
+    const v = h.days[dayKeyOf(date)];
+    return v ? (v.split('-') as [string, string]) : null;
+  }
+  const own = rows.filter((r) => r.branch_id === branchId && r.on_date === date && !r.unavailable)
+    .sort((a, b) => a.start_time.localeCompare(b.start_time));
+  if (!own.length) return null;
+  if (h.hours) return h.hours.split('-') as [string, string];
+  return [own[0].start_time.slice(0, 5), own[own.length - 1].end_time.slice(0, 5)];
+}
+
+/** "Open now · until 9 PM", "Opens today, 4 PM", "Opens Thursday, 4 PM", "Next open Thu 22 Oct". */
+export function branchStatus(h: BranchHours | undefined, rows: ScheduleRow[], branchId: number, today: string, nowMin: number): { open: boolean; text: string } | null {
+  if (!h) return null;
+  const horizon = h.mode === 'weekly' ? 8 : 180;
+  for (let n = 0; n < horizon; n++) {
+    const date = addDays(today, n);
+    const span = openSpan(h, rows, branchId, date);
+    if (!span) continue;
+    const [s, e] = span.map(toMin);
+    if (n === 0 && nowMin >= e) continue;
+    if (n === 0 && nowMin >= s) return { open: true, text: `Open now · until ${clock(span[1])}` };
+    const w = whenLabel(date, today);
+    if (h.mode === 'visits' && n > 6) return { open: false, text: `Next open ${dateLabel(date)}` };
+    return { open: false, text: `Opens ${w}, ${clock(span[0])}` };
+  }
+  return { open: false, text: h.mode === 'visits' ? 'No dates scheduled yet' : 'Closed' };
+}
+
+/** Where Dr. Ali is at this moment, if at a clinic. */
+export function aliNow(rows: ScheduleRow[], today: string, nowMin: number): Slot | null {
+  return slotsOn(rows, today).slots.find((s) => toMin(s.start) <= nowMin && nowMin < toMin(s.end)) || null;
+}
+
+/** Dr. Ali's next time at a branch: here now, later today, or a later date. */
+export function aliNext(rows: ScheduleRow[], branchId: number, today: string, nowMin: number, horizon = 60):
+  { here: boolean; date: string; start: string; end: string } | null {
+  for (let n = 0; n < horizon; n++) {
+    const date = addDays(today, n);
+    for (const s of slotsOn(rows, date).slots) {
+      if (s.branch_id !== branchId) continue;
+      if (n === 0 && nowMin >= toMin(s.end)) continue;
+      return { here: n === 0 && nowMin >= toMin(s.start), date, start: s.start, end: s.end };
+    }
+  }
+  return null;
+}
+
+/** Calendar cells for a month (Monday first). Blank cells have day 0. */
+export function monthCells(year: number, month: number): { day: number; iso: string }[] {
+  const first = `${year}-${String(month).padStart(2, '0')}-01`;
+  const lead = (weekdayOf(first) + 6) % 7;
+  const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const cells: { day: number; iso: string }[] = [];
+  for (let i = 0; i < lead; i++) cells.push({ day: 0, iso: '' });
+  for (let d = 1; d <= days; d++) cells.push({ day: d, iso: `${first.slice(0, 8)}${String(d).padStart(2, '0')}` });
+  while (cells.length % 7) cells.push({ day: 0, iso: '' });
+  return cells;
+}
+export function monthTitle(year: number, month: number): string {
+  return ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][month - 1] + ' ' + year;
 }
