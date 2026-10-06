@@ -19,7 +19,14 @@ const fail = (msg) => { throw new Error(msg); };
 // ---------------------------------------------------------------- seed
 function seed() {
   const db = {};
-  db.settings = { dues_hold_mode: 'warn', dropoff_days: 42, low_rating_threshold: 3, whatsapp_number: '' };
+  db.settings = { dues_hold_mode: 'warn', dropoff_days: 42, low_rating_threshold: 3, whatsapp_number: '',
+    clinic_timings: { branches: {
+      1: { mode: 'weekly', days: { mon: '12:00-21:00', tue: '12:00-21:00', wed: '12:00-21:00', thu: '12:00-21:00', fri: '15:00-21:00', sat: '12:00-21:00' } },
+      2: { mode: 'weekly', days: { mon: '16:00-21:00', thu: '16:00-21:00' } },
+      3: { mode: 'weekly', days: { tue: '16:00-21:00' } },
+      4: { mode: 'visits', hours: '12:00-21:00' },
+      5: { mode: 'visits' },
+    } } };
   db.cities = [{ id: 1, name: 'Karachi' }, { id: 2, name: 'Lahore' }, { id: 3, name: 'Islamabad' }];
   db.branches = [
     { id: 1, code: 'GUL', name: 'Gulshan (RJ Mall)', city_id: 1, address: 'RJ Mall, 3rd Floor, Gulshan-e-Iqbal, Karachi', active: true },
@@ -169,14 +176,18 @@ function seed() {
   db.visit_ratings = [{ visit_id: db.visits[0].id, patient_id: db.patients[0].id, stars: 2, comment: 'Long wait', created_at: daysAgo(3) }];
   db.photos = [];
   db.schedule = [
-    { id: uid(), branch_id: 1, weekday: 1, start_time: '14:00', end_time: '17:00' },
-    { id: uid(), branch_id: 2, weekday: 1, start_time: '18:00', end_time: '21:00' },
-    { id: uid(), branch_id: 1, weekday: 2, start_time: '14:00', end_time: '17:00' },
-    { id: uid(), branch_id: 3, weekday: 2, start_time: '18:00', end_time: '21:00' },
-    { id: uid(), branch_id: 1, weekday: 3, start_time: '13:00', end_time: '21:00' },
-    { id: uid(), branch_id: 2, weekday: 4, start_time: '18:00', end_time: '21:00' },
-    { id: uid(), branch_id: 4, weekday: 5, start_time: '15:00', end_time: '21:00' },
-    { id: uid(), branch_id: 4, weekday: 6, start_time: '12:00', end_time: '21:00' },
+    { id: uid(), branch_id: 1, weekday: 1, start_time: '12:00', end_time: '16:00' },
+    { id: uid(), branch_id: 2, weekday: 1, start_time: '16:00', end_time: '21:00' },
+    { id: uid(), branch_id: 1, weekday: 2, start_time: '12:00', end_time: '16:00' },
+    { id: uid(), branch_id: 3, weekday: 2, start_time: '16:00', end_time: '21:00' },
+    { id: uid(), branch_id: 1, weekday: 3, start_time: '12:00', end_time: '21:00' },
+    { id: uid(), branch_id: 1, weekday: 4, start_time: '12:00', end_time: '16:00' },
+    { id: uid(), branch_id: 2, weekday: 4, start_time: '16:00', end_time: '21:00' },
+    { id: uid(), branch_id: 1, weekday: 5, start_time: '15:00', end_time: '21:00' },
+    { id: uid(), branch_id: 1, weekday: 6, start_time: '12:00', end_time: '21:00' },
+    { id: uid(), branch_id: 4, on_date: daysAgo(-2), start_time: '12:00', end_time: '21:00' },
+    { id: uid(), branch_id: 4, on_date: daysAgo(-3), start_time: '12:00', end_time: '21:00' },
+    { id: uid(), branch_id: 5, on_date: daysAgo(-9), start_time: '16:00', end_time: '22:00' },
   ];
   db.audit = [];
   return db;
