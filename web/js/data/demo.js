@@ -294,13 +294,13 @@ export function createDemoAdapter() {
     async searchPatients(q) {
       need('patients.view');
       const t = (q || '').trim().toLowerCase();
-      const rows = db.patients.filter((p) => !t || p.full_name.toLowerCase().includes(t) || p.mr_number.includes(t) || p.phone.replace(/\D/g, '').includes(t.replace(/\D/g, '') || '~'));
+      const rows = db.patients.filter((p) => !t || p.full_name.toLowerCase().includes(t) || p.mr_number.includes(t) || (p.phone || '').replace(/\D/g, '').includes(t.replace(/\D/g, '') || '~'));
       return rows.slice(0, 50).map((p) => ({ ...clone(p), dues: dues(p.id), see_dr_ali: !!activeFlag(p.id), braces_active: !!activeCase(p.id) }));
     },
     async findDuplicates(name, phone) {
       const n = (name || '').trim().toLowerCase().replace(/\s+/g, ' ');
       const ph = (phone || '').replace(/\D/g, '');
-      return clone(db.patients.filter((p) => (n && p.full_name.toLowerCase() === n) || (ph.length >= 7 && p.phone.replace(/\D/g, '') === ph)));
+      return clone(db.patients.filter((p) => (n && p.full_name.toLowerCase() === n) || (ph.length >= 7 && (p.phone || '').replace(/\D/g, '') === ph)));
     },
     async createPatient(row) {
       need('patients.create');
