@@ -1,11 +1,12 @@
 // Admin (Dr. Ali): access list with checkboxes, staff accounts, settings,
-// Dr. Ali's calendar, data export, audit log.
+// Dr. Ali's calendar, data export, import from Healthwire, audit log.
 import { h, mount, toast, friendlyError, modal, field, select, empty, downloadCSV, todayISO, shortDate } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { WEEKDAYS } from '../../content.js';
 import { tabs } from './accounts.js';
 import { CONFIG } from '../../config.js';
+import { renderImport } from './import.js';
 
 export async function renderAdmin(root, params) {
   const available = [
@@ -14,6 +15,7 @@ export async function renderAdmin(root, params) {
     isAdmin() && ['settings', 'Settings'],
     can('schedule.manage') && ['calendar', "Dr. Ali's calendar"],
     can('export.data') && ['export', 'Download data'],
+    isAdmin() && ['import', 'Import from Healthwire'],
     can('audit.view') && ['audit', 'Audit log'],
   ].filter(Boolean);
   let tab = params.get('tab') || available[0]?.[0];
@@ -28,6 +30,7 @@ export async function renderAdmin(root, params) {
       else if (tab === 'settings') await settings(body);
       else if (tab === 'calendar') await calendar(body, draw);
       else if (tab === 'export') await exportData(body);
+      else if (tab === 'import') await renderImport(body);
       else await audit(body);
     } catch (e) { mount(body, empty(friendlyError(e))); }
   }
