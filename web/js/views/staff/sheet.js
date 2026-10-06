@@ -218,7 +218,7 @@ export async function renderSheet(root, params) {
 
   function draw() {
     const shown = filter ? rows.filter((r) => r.status === filter) : rows;
-    mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 10 }, h('div', { class: 'empty' }, `No patients on the list for ${branchName(branchId)} on this day yet. Search for a patient below to add them.`))));
+    mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 10 }, h('div', { class: 'empty' }, `No patients on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.`))));
     drawCounts();
   }
 
@@ -265,6 +265,12 @@ export async function renderSheet(root, params) {
     h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel,
       h('button', { class: 'btn', onclick: () => { date = todayISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
       h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId}` }, 'Queue board')),
+    search ? h('div', { class: 'add-panel' },
+      h('div', { class: 'add-panel-text' },
+        h('strong', {}, 'Add a patient to this list'),
+        h('span', { class: 'muted' }, 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.')),
+      search,
+      can('patients.create') ? h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => { const p = await newPatientModal('', branchId); if (p) addPatient(p); } }, '+ New walk-in') : null) : null,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
     h('div', { class: 'sheet-wrap', onkeydown: onKey },
       h('table', { class: 'sheet' },
@@ -272,8 +278,7 @@ export async function renderSheet(root, params) {
           h('th', { class: 'frozen', style: { minWidth: '210px' } }, 'Token · Patient'), h('th', {}, 'Flags'), h('th', {}, 'Month'), h('th', {}, 'Treatment'),
           h('th', {}, 'Status'), h('th', {}, "Doctor's name"), h('th', {}, 'Treatment details'), h('th', { class: 'right' }, 'P.P'),
           h('th', {}, 'Notes'), h('th', {}, 'Contact'))),
-        tableBody),
-      search ? h('div', { class: 'add-row' }, search, h('span', { class: 'muted' }, 'Patients get the next token automatically.')) : null));
+        tableBody)));
 
   await load();
   q.setOnline(navigator.onLine);
