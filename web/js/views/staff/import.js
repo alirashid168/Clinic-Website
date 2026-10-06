@@ -17,6 +17,11 @@ async function fileToRows(file) {
   const XLSX = await import(/* @vite-ignore */ XLSX_URL);
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
   const ws = wb.Sheets[wb.SheetNames[0]];
+  // Healthwire's Excel writer declares the sheet narrower than it is (12 columns while rows hold 16),
+  // so take the real extent from the cells themselves or the last columns vanish.
+  let maxC = 0, maxR = 0;
+  for (const k of Object.keys(ws)) { if (k[0] === '!') continue; const a = XLSX.utils.decode_cell(k); if (a.c > maxC) maxC = a.c; if (a.r > maxR) maxR = a.r; }
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
   return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
 }
 
@@ -192,7 +197,7 @@ export async function renderImport(root) {
         h('li', {}, h('strong', {}, 'Expenses: '), 'Expenses → set the dates → Print. Save the "Expenses Report.pdf".'),
         h('li', {}, h('strong', {}, 'Patients (optional): '), 'Patients → Excel → emailed to you. Adds gender, date of birth and address; names, phones and branches already come with the payments file.')),
       h('p', { class: 'muted', style: { marginTop: '8px' } }, 'Any date range works — a month to test, or the whole history in one file. Dropping a file twice changes nothing.')),
-    h('section', { class: 'panel' }, h('h2', {}, '1. Payments and invoices'), field('Transactions Report (.xlsx)', txInput), txOut),
+    h('section', { class: 'panel' }, h('h2', {}, '1. Payments and invoices'), field('Transactions Report (.xlsx)', txInput, 'The Excel attachment from the "Email excel" message in your Gmail — not a PDF.'), txOut),
     h('section', { class: 'panel' }, h('h2', {}, '2. Expenses'), field('Expenses Report (.pdf)', exInput), exOut),
     h('section', { class: 'panel' }, h('h2', {}, '3. Patient details (optional)'), field('Patients list (.xlsx)', ptInput), ptOut),
     h('section', { class: 'panel' }, h('h2', {}, 'Check a month'), field('Month', monthInput), checkOut));
