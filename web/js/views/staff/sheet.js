@@ -252,10 +252,19 @@ export async function renderSheet(root, params) {
 
   const onReload = () => load();
   document.addEventListener('sheet-reload', onReload);
-  // Pick up other people's changes every 20 seconds while nobody is typing.
+  const busy = () => q.pendingCount || tableBody.contains(document.activeElement) || document.querySelector('.modal');
+  // Live: reload the moment anyone changes this branch's list (unless this
+  // person is typing; then the next check picks it up).
+  let liveTimer = null;
+  let stopLive = null;
+  const onLive = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!busy()) load(); }, 300); };
+  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId, onLive) : null; };
+  branchSel.addEventListener('change', listen);
+  listen();
+  // Safety net: also check every 20 seconds while nobody is typing.
   const poll = setInterval(() => {
-    if (!document.body.contains(tableBody)) { clearInterval(poll); document.removeEventListener('sheet-reload', onReload); return; }
-    if (!q.pendingCount && !tableBody.contains(document.activeElement) && !document.querySelector('.modal')) load();
+    if (!document.body.contains(tableBody)) { clearInterval(poll); stopLive?.(); document.removeEventListener('sheet-reload', onReload); return; }
+    if (!busy()) load();
   }, 20000);
 
   mount(root,
