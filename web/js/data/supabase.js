@@ -165,7 +165,7 @@ export async function createSupabaseAdapter() {
     },
     async getPatient(id) {
       const p = check(await sb.from('patients').select('*').eq('id', id).single());
-      const [visits, invoices, payments, photos, retainers, complaints, cases, dues, flags] = await Promise.all([
+      const [visits, invoices, payments, photos, retainers, complaints, cases, dues, flags, ...rest] = await Promise.all([
         sb.from('visits').select(VISIT_SELECT).eq('patient_id', id).order('visit_date', { ascending: false }).then(check).then(enrichVisits),
         sb.from('invoices').select('*, items:invoice_items(*)').eq('patient_id', id).order('issue_date', { ascending: false }).then(check),
         sb.from('payments').select('*').eq('patient_id', id).order('received_at', { ascending: false }).then(check),
@@ -174,17 +174,23 @@ export async function createSupabaseAdapter() {
         sb.from('complaints').select('*').eq('patient_id', id).then(check),
         sb.from('braces_cases').select('*').eq('patient_id', id).eq('status', 'active').then(check),
         duesFor([id]), flagsFor([id]),
+        sb.from('patient_documents').select('*').eq('patient_id', id).order('added_on', { ascending: false }).then(check),
       ]);
       for (const ph of photos) {
         const { data } = await sb.storage.from('clinic-photos').createSignedUrl(ph.storage_path, 3600);
         ph.url = data?.signedUrl || null;
+      }
+      const documents = rest[0] || [];
+      for (const doc of documents) {
+        const { data } = await sb.storage.from('patient-documents').createSignedUrl(doc.storage_path, 3600);
+        doc.url = data?.signedUrl || null;
       }
       let braces_case = cases[0] || null;
       if (braces_case) {
         const next = check(await sb.rpc('next_braces_month', { p_case: braces_case.id }));
         braces_case = { ...braces_case, next_month: next };
       }
-      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, retainers, complaints };
+      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents, retainers, complaints };
     },
 
     // ------------------------------------------------------------ braces
@@ -254,6 +260,16 @@ export async function createSupabaseAdapter() {
       return check(await sb.from('photos').insert({
         patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, view_label: viewLabel || null,
         storage_path: path, kind: 'raw', uploaded_by: await userId(),
+      }).select().single());
+    },
+    // Consent forms, ID copies, reports: private "patient-documents" bucket, one folder per patient.
+    async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
+      const ext = (file.name.split('.').pop() || 'pdf').toLowerCase();
+      const slug = (title || file.name.replace(/\.[^.]+$/, '')).replace(/\W+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'document';
+      const path = `${patientId}/${addedOn || todayISO()}_${slug}_${crypto.randomUUID().slice(0, 8)}.${ext}`;
+      check(await sb.storage.from('patient-documents').upload(path, file, { contentType: file.type || undefined, upsert: false }));
+      return check(await sb.from('patient_documents').insert({
+        patient_id: patientId, kind, title: title || file.name, storage_path: path, added_on: addedOn || todayISO(), uploaded_by: await userId(),
       }).select().single());
     },
 

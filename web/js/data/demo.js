@@ -175,6 +175,7 @@ function seed() {
   ];
   db.visit_ratings = [{ visit_id: db.visits[0].id, patient_id: db.patients[0].id, stars: 2, comment: 'Long wait', created_at: daysAgo(3) }];
   db.photos = [];
+  db.documents = [];
   db.schedule = [
     { id: uid(), branch_id: 1, weekday: 1, start_time: '12:00', end_time: '16:00' },
     { id: uid(), branch_id: 2, weekday: 1, start_time: '16:00', end_time: '21:00' },
@@ -344,6 +345,7 @@ export function createDemoAdapter() {
         invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind === 'staff' || i.status === 'issued'))),
         payments: clone(db.payments.filter((x) => x.patient_id === id)),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
+        documents: clone(db.documents.filter((x) => x.patient_id === id)),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
         complaints: clone(db.complaints.filter((c) => c.patient_id === id)),
       };
@@ -443,6 +445,13 @@ export function createDemoAdapter() {
       db.photos.push(ph);
       if (visitId) { const v = db.visits.find((x) => x.id === visitId); if (v) v.photos_uploaded = true; }
       return clone(ph);
+    },
+    async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
+      if (!can('patients.edit') && !can('photos.upload')) fail('row-level security policy (patients.edit)');
+      const url = URL.createObjectURL(file);
+      const doc = { id: uid(), patient_id: patientId, kind, title: title || file.name, storage_path: `demo/${uid()}`, added_on: addedOn || todayISO(), url, created_at: new Date().toISOString() };
+      db.documents.push(doc);
+      return clone(doc);
     },
 
     // ------------------------------------------------------------ billing
