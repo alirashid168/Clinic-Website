@@ -5,6 +5,7 @@ import { state } from '../state.js';
 import { VISITOR, HOME } from '../content.js';
 import { aliWeekSection, clinicsSection } from './schedule.js';
 import { CONFIG } from '../config.js';
+import { smileCard } from '../ui/smile-card.js';
 
 // ---------------------------------------------------------------- 3D smile
 // A dental arch built from CSS 3D teeth, turning slowly. No libraries, no images.
@@ -36,7 +37,9 @@ function arch(sizes, lower) {
 }
 
 export function smile3d() {
-  return h('div', { class: 'smile-stage', role: 'img', 'aria-label': 'A turning 3D model of a smile' }, arch(UPPER, false), arch(LOWER, true));
+  const stage = h('div', { class: 'smile-stage', role: 'img', 'aria-label': 'A smile makeover result by Dr. Ali Rashid' }, arch(UPPER, false), arch(LOWER, true));
+  smileCard(stage); // swaps the CSS arch for the real veneer result as a 3D photo card when WebGL is available
+  return stage;
 }
 
 function header(sub) {
