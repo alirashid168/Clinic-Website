@@ -66,6 +66,8 @@ Deno.serve(async (req) => {
 
       const password = body.password == null ? '' : String(body.password);
       if (password && password.length < 8) return json({ error: 'The password needs at least 8 characters.' });
+      const { data: existing } = await admin.from('staff').select('id').eq('email', email).maybeSingle();
+      if (existing) return json({ error: 'That login email is already used. Pick another.' });
 
       const { data: made, error: makeErr } = password
         ? await admin.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { full_name: fullName } })
@@ -73,7 +75,10 @@ Deno.serve(async (req) => {
           redirectTo: SITE_URL ? `${SITE_URL}/reset-password.html` : undefined,
           data: { full_name: fullName },
         });
-      if (makeErr) return json({ error: /already|registered|exists/i.test(makeErr.message) ? 'That login email is already used. Pick another.' : makeErr.message });
+      if (makeErr) {
+        if (/rate limit/i.test(makeErr.message)) return json({ error: 'Too many invitation emails this hour. Choose "I set a password now" instead: it sends no email.' });
+        return json({ error: /already|registered|exists/i.test(makeErr.message) ? 'That login email is already used. Pick another.' : makeErr.message });
+      }
       const id = made.user.id;
       const branchIds = Array.isArray(body.branch_ids) ? body.branch_ids.map(Number) : [];
       const { data: staff, error: staffErr } = await admin.from('staff').insert({
@@ -82,8 +87,10 @@ Deno.serve(async (req) => {
         home_branch_id: body.home_branch_id ? Number(body.home_branch_id) : (branchIds[0] ?? null),
       }).select().single();
       if (staffErr) {
-        await admin.auth.admin.deleteUser(id);
-        return json({ error: staffErr.message });
+        // Undo only a login made just now; never remove one that already belongs to a staff member.
+        const { data: owner } = await admin.from('staff').select('id').eq('id', id).maybeSingle();
+        if (!owner) await admin.auth.admin.deleteUser(id);
+        return json({ error: /duplicate|unique/i.test(staffErr.message) ? 'That login email is already used. Pick another.' : staffErr.message });
       }
       if (body.clinician_id) await admin.from('clinicians').update({ staff_id: id }).eq('id', String(body.clinician_id));
       await admin.from('audit_log').insert({ table_name: 'staff', row_id: id, action: 'CREATE_LOGIN', new_data: staff, actor: caller });
