@@ -39,9 +39,10 @@ async function loginAs(page, label) {
 
 // ------------------------------------------------------------- public
 const page = await newPage();
-await step('home shows 3D smile, three doors and calendar', async () => {
+await step('home shows the smile, three doors and calendar', async () => {
   await page.goto(BASE);
-  await page.waitForSelector('.smile-stage .tooth');
+  // With WebGL the hero is the photo card (canvas) and the CSS arch is hidden; without it the 24 CSS teeth show.
+  await page.waitForSelector('.smile-stage.has-card canvas, .smile-stage:not(.has-card) .tooth');
   assert.equal(await page.locator('.tooth').count(), 24);
   for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count());
   assert.equal(await page.locator('.sx-day').count(), 7);
