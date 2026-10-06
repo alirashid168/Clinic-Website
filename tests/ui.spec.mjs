@@ -184,6 +184,15 @@ await step('admin: patient profile with braces guidance', async () => {
   await p4.waitForSelector('h2:has-text("Braces")');
   await shot(p4, '08-patient-profile');
 });
+await step('admin: adds a consent form to the patient record', async () => {
+  await p4.waitForSelector('h2:has-text("Documents")');
+  await p4.click('button:has-text("Add document")');
+  await p4.setInputFiles('.modal input[type=file]', { name: 'consent.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 test') });
+  await p4.click('.modal button:has-text("Save")');
+  await p4.waitForSelector('.toast:has-text("Document saved")');
+  await p4.waitForSelector('table.list td:has-text("Consent form")');
+  assert.ok(await p4.locator('a:has-text("Open")').count());
+});
 
 // ------------------------------------------------------------- patient portal
 const p5 = await newPage({ width: 390, height: 844 });
