@@ -229,6 +229,26 @@ await step('Dr. Ali creates a staff login with a password, then changes its emai
   await shot(p7, '11-staff-accounts');
 });
 
+await step('Dr. Ali imports a Healthwire transactions export on the Import page', async () => {
+  await p7.goto(BASE + '#/staff/admin?tab=import');
+  await p7.waitForSelector('h2:text("1. Payments and invoices")');
+  const csv = [
+    "Dr. Ali Rashid's Dental Clinic,,,,,,,,,,,,,,,", ',,,,,,,,,,,,,,,', 'Financial Transaction Report,,,,,,,,,,,,,,,',
+    'Invoice#,MR#,Patient Name,Patient Phone#,Location,Description,Total,Cash,Discount,Dues,Advance,Mode Of Payment,Created By,Updated By,Discounted By,Payment Date',
+    '134006,9556,Import Test One,3355107605,-,Braces First Payment,150000,40000,110000,0,0,Cash ,RJ Mall Clinic,RJ Mall Clinic,,01/08/2026 - 12:36AM',
+    '134007,9557,Import Test Two lhr,3001112223,-,"Braces Monthly Payment,brackets",8000,4000,0,4000,0,Debit/Credit Card ,Lahore Gulberg Clinic,Lahore Gulberg Clinic,,05/08/2026 - 06:00PM',
+    'Totals:,,,,,,158000,44000,110000,4000,0,,,,,', ''].join('\n');
+  await p7.locator('input[type=file]').first().setInputFiles({ name: 'Transactions Report.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await p7.waitForSelector('.stat:has-text("Invoices")');
+  const text = await p7.locator('main').innerText();
+  assert.match(text, /Rs 44,000/);
+  assert.match(text, /Lahore/);
+  await p7.getByRole('button', { name: /Import this file: 2 patients, 2 invoices, 2 payments, 2 visits/ }).click();
+  await p7.waitForSelector('.alert:has-text("Invoices: 2 added")');
+  assert.match(await p7.locator('.alert').innerText(), /Patients: 2 added/);
+  await shot(p7, '12-import-healthwire');
+});
+
 const p6 = await newPage({ width: 390, height: 844 });
 await step('sheet works on a phone', async () => {
   await loginAs(p6, 'Front desk \\(Gulshan\\)').catch(async () => {
