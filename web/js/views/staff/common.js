@@ -56,7 +56,7 @@ export function newPatientModal(prefillName = '', branchId) {
     const checkDupes = async () => {
       const rows = await state.data.findDuplicates(name.value, phone.value).catch(() => []);
       mount(warn, rows.length ? h('div', { class: 'alert alert-warning' }, 'Possible existing patient: ',
-        rows.slice(0, 3).map((p, i) => [i ? ', ' : '', h('strong', {}, `${p.full_name} (Mr# ${p.mr_number}, ${p.phone})`)]),
+        rows.slice(0, 3).map((p, i) => [i ? ', ' : '', h('strong', {}, `${p.full_name} (Mr# ${p.mr_number}${p.phone ? ', ' + p.phone : ''})`)]),
         '. Check before creating a duplicate.') : null);
     };
     name.addEventListener('change', checkDupes);

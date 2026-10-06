@@ -103,7 +103,7 @@ export async function renderReview(root) {
   mount(root,
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, "Dr. Ali's list"), h('p', {}, 'Patients flagged by staff, and braces cases running past their end month.'))),
     h('section', { class: 'panel' }, rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r) => h('tr', {},
-      h('td', {}, h('a', { href: `#/staff/patient/${r.patient?.id || r.patient_id}` }, r.patient?.full_name || 'Patient'), h('div', { class: 'muted' }, r.patient ? `Mr# ${r.patient.mr_number} · ${r.patient.phone}` : '')),
+      h('td', {}, h('a', { href: `#/staff/patient/${r.patient?.id || r.patient_id}` }, r.patient?.full_name || 'Patient'), h('div', { class: 'muted' }, r.patient ? `Mr# ${r.patient.mr_number}${r.patient.phone ? ' · ' + r.patient.phone : ''}` : '')),
       h('td', {}, h('span', { class: ['badge', r.source === 'flag' ? 'badge-ali' : 'badge-warn'] }, r.source === 'flag' ? 'Flagged' : 'Overrun')),
       h('td', {}, r.reason),
       h('td', { class: 'nowrap muted' }, shortDate(String(r.since).slice(0, 10))),
@@ -119,7 +119,7 @@ export async function renderComplaints(root) {
     const reply = h('textarea', { placeholder: 'Reply to the patient, or write an internal note' });
     const internal = h('input', { type: 'checkbox' });
     modal(c.subject, h('div', {},
-      h('p', {}, h('strong', {}, c.patient?.full_name), ` · Mr# ${c.patient?.mr_number || ''} · ${c.patient?.phone || ''}`),
+      h('p', {}, h('strong', {}, c.patient?.full_name), ` · Mr# ${c.patient?.mr_number || ''}${c.patient?.phone ? ' · ' + c.patient.phone : ''}`),
       h('p', { class: 'muted' }, `${shortDate(c.created_at.slice(0, 10))} · ${branchName(c.branch_id)}`),
       h('div', { class: 'panel', style: { background: 'var(--porcelain)' } }, c.body),
       (c.messages || []).map((m) => h('div', { class: ['alert', m.internal_note ? 'alert-warning' : 'alert-info'], style: { marginTop: '8px' } },

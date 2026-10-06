@@ -71,7 +71,7 @@ export async function renderPatient(root, id) {
 
   const editPatient = () => {
     const name = h('input', { value: p.full_name });
-    const phone = h('input', { value: p.phone });
+    const phone = h('input', { type: 'tel', value: p.phone || '', placeholder: 'No number yet' });
     const email = h('input', { value: p.email || '' });
     const consent = h('input', { type: 'checkbox', checked: p.photo_consent_public });
     const notes = h('textarea', { value: p.notes || '' });
@@ -80,7 +80,7 @@ export async function renderPatient(root, id) {
       h('label', { class: 'inline', style: { marginBottom: '12px' } }, consent, 'Before/after photos may be shown publicly'), field('Notes', notes)), [
       { label: 'Cancel' },
       { label: 'Save', primary: true, onClick: async () => {
-        const changes = { full_name: name.value.trim(), phone: phone.value.trim(), email: email.value.trim() || null, photo_consent_public: consent.checked, notes: notes.value || null };
+        const changes = { full_name: name.value.trim(), phone: phone.value.trim() || null, email: email.value.trim() || null, photo_consent_public: consent.checked, notes: notes.value || null };
         if (consent.checked && !p.photo_consent_public) changes.photo_consent_at = new Date().toISOString();
         if (mr && mr.value.trim() !== p.mr_number) changes.mr_number = mr.value.trim();
         try { await d.updatePatient(id, changes); toast('Saved.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
@@ -93,7 +93,7 @@ export async function renderPatient(root, id) {
     h('div', { class: 'profile-head page-head' },
       h('div', {},
         h('h1', {}, p.full_name),
-        h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), ` · ${p.phone}`, p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : ''),
+        h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), p.phone ? ` · ${p.phone}` : ' · No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : ''),
         h('div', { class: 'inline', style: { marginTop: '6px' } }, duesBadge(p.dues), aliBadge(!!p.flag),
           p.photo_consent_public ? h('span', { class: 'badge badge-ok' }, 'Photo consent') : h('span', { class: 'badge badge-muted' }, 'No public photo consent'))),
       h('div', { class: 'inline' },
