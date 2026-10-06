@@ -122,6 +122,30 @@ export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
   ]);
 }
 
+export const DOCUMENT_KINDS = { consent: 'Consent form', id: 'ID copy', report: 'Report', other: 'Other' };
+
+// Consent forms, ID copies and reports (PDF or photo) for a patient's record.
+export function documentUploadModal(patient, { onDone } = {}) {
+  const file = h('input', { type: 'file', accept: 'application/pdf,image/*' });
+  const kind = select(Object.entries(DOCUMENT_KINDS).map(([value, label]) => ({ value, label })), 'consent');
+  const title = h('input', { placeholder: 'e.g. Consent and information form', value: 'Consent and information form' });
+  const date = h('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+  kind.addEventListener('change', () => { if (!title.value || Object.values(DOCUMENT_KINDS).includes(title.value) || title.value.startsWith('Consent')) title.value = kind.value === 'consent' ? 'Consent and information form' : DOCUMENT_KINDS[kind.value]; });
+  modal(`Add document · ${patient.full_name}`, h('div', {},
+    h('p', { class: 'muted' }, 'Scanned forms and ID copies stay private to staff; patients see only their own.'),
+    field('File', file, 'PDF or a photo of the signed form.'), field('Type', kind), field('Title', title), field('Date', date)), [
+    { label: 'Cancel' },
+    { label: 'Save', primary: true, onClick: async () => {
+      if (!file.files.length) { toast('Choose a file.'); return false; }
+      try {
+        await state.data.uploadDocument({ patientId: patient.id, file: file.files[0], kind: kind.value, title: title.value.trim() || DOCUMENT_KINDS[kind.value], addedOn: date.value });
+        toast('Document saved.', 'ok');
+        onDone?.();
+      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+    } },
+  ]);
+}
+
 export function guidancePanel(g) {
   if (!g?.has_active_case) return null;
   const groups = (g.treating_groups || []).map((x) => `Group ${x}`).join(' or ');

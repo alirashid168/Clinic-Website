@@ -1,7 +1,7 @@
 // Patients: search list and full patient profile.
 import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty } from '../../ui/dom.js';
 import { state, can, branchName, isAdmin } from '../../state.js';
-import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, STATUS_LABELS } from './common.js';
+import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { newInvoiceModal, paymentModal, printInvoice } from './invoice.js';
 
 export async function renderPatients(root) {
@@ -141,8 +141,16 @@ export async function renderPatient(root, id) {
     h('section', { class: 'panel' },
       h('h2', {}, 'Photos and X-rays'),
       p.photos.length ? h('div', { class: 'photo-grid' }, p.photos.map((ph) => h('figure', {},
-        h('img', { src: ph.url || '', alt: ph.view_label || 'Photo', loading: 'lazy' }),
+        h('a', { href: ph.url || '#', target: '_blank', rel: 'noopener' }, h('img', { src: ph.url || '', alt: ph.view_label || 'Photo', loading: 'lazy' })),
         h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label, ph.kind === 'raw' ? 'raw' : 'edited'].filter(Boolean).join(' · '))))) : empty('No photos yet.')),
+    h('section', { class: 'panel' },
+      h('div', { class: 'inline', style: { justifyContent: 'space-between', marginBottom: '8px' } }, h('h2', { style: { margin: 0 } }, 'Documents'),
+        can('patients.edit') || can('photos.upload') ? h('button', { class: 'btn btn-small', onclick: () => documentUploadModal(p, { onDone: reload }) }, 'Add document') : null),
+      (p.documents || []).length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Date'), h('th', {}, 'Type'), h('th', {}, 'Title'), h('th', {}))),
+        h('tbody', {}, p.documents.map((doc) => h('tr', {},
+          h('td', { class: 'nowrap' }, shortDate(doc.added_on)), h('td', {}, DOCUMENT_KINDS[doc.kind] || doc.kind), h('td', {}, doc.title),
+          h('td', { class: 'right' }, doc.url ? h('a', { class: 'btn btn-small', href: doc.url, target: '_blank', rel: 'noopener' }, 'Open') : h('span', { class: 'muted' }, 'Not available'))))))) : empty('No documents yet. Signed consent forms and ID copies go here.')),
     p.retainers.length ? h('section', { class: 'panel' }, h('h2', {}, 'Retainers'),
       h('table', { class: 'list' }, h('tbody', {}, p.retainers.map((r) => h('tr', {}, h('td', {}, r.arch), h('td', {}, r.stage.replace('_', ' ')), h('td', {}, shortDate(r.impression_date))))))) : null);
 }
