@@ -153,4 +153,20 @@ test('expenses PDF: rows per Sr#, wrapped descriptions joined, footer and total 
   assert.equal(built.summary.total, 8100);
 });
 
+test('expenses PDF: columns are read from the header row, so a file with wider columns still parses', () => {
+  // Same table, every column pushed to the right (as in the yearly files), header labels split like pdf.js does.
+  const y = 652, hy = 674;
+  const H = (s, x) => ({ s, x, y: hy });
+  const items = [H('Sr#', 33), H('Voucher#', 86), H('Description', 140), H('Date', 214), H('Category', 268), H('Amount', 356), { s: 'Payment', x: 409, y: hy + 12 }, H('Mode', 409), H('Created', 463), H('At', 493), H('Created', 517), H('By', 547),
+    { s: '1', x: 33, y }, { s: '109130', x: 86, y }, { s: 'DHA', x: 139.9, y }, { s: 'travelling', x: 156, y }, { s: 'expense', x: 140, y: y - 11 },
+    { s: '06', x: 214, y }, { s: '/', x: 221, y }, { s: '10', x: 223, y }, { s: '/', x: 231, y }, { s: '2026', x: 233, y },
+    { s: 'Traveling', x: 268, y }, { s: 'Staff', x: 298, y }, { s: '9,930.0', x: 356, y }, { s: 'Cash', x: 409, y },
+    { s: '10', x: 463, y }, { s: '/', x: 470, y }, { s: '06', x: 472, y }, { s: '/', x: 480, y }, { s: '2026', x: 482, y }, { s: '-', x: 498, y }, { s: '10:28', x: 463, y: y - 11 }, { s: 'PM', x: 479, y: y - 11 },
+    { s: 'Sadia', x: 517, y }, { s: 'Azam', x: 536, y }];
+  const read = readExpensesPdf([{ items }]);
+  assert.equal(read.rows.length, 1);
+  assert.deepEqual(read.rows[0], { voucher: '109130', desc: 'DHA travelling expense', date: '2026-10-06', category: 'Traveling Staff', amount: 9930, mode: 'Cash', createdAt: '2026-10-06 22:28', createdBy: 'Sadia Azam' });
+  assert.equal(buildExpenses(read.rows).expenses[0][1], 3); // DHA
+});
+
 console.log(`${passed} passed`);
