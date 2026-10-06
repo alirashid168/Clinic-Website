@@ -156,24 +156,47 @@ async function settings(root) {
 }
 
 // ---------------------------------------------------------------- calendar
+// Weekly times = Dr. Ali's normal Karachi week. Dated times = trips (Lahore,
+// Islamabad) or one-off changes; any date with its own times replaces the
+// normal week on the homepage. Lahore and Islamabad branch cards list only
+// these dates as open days.
 async function calendar(root, redraw) {
   const d = state.data;
-  const rows = (await d.schedule()).filter((r) => r.weekday !== null && r.weekday !== undefined).sort((a, b) => a.weekday - b.weekday || a.start_time.localeCompare(b.start_time));
+  const all = await d.schedule();
+  const rows = all.filter((r) => r.weekday !== null && r.weekday !== undefined && !r.on_date).sort((a, b) => a.weekday - b.weekday || a.start_time.localeCompare(b.start_time));
+  const dated = all.filter((r) => r.on_date && r.on_date >= todayISO()).sort((a, b) => a.on_date.localeCompare(b.on_date) || a.start_time.localeCompare(b.start_time));
+  const branchOpts = state.ref.branches.map((b) => ({ value: b.id, label: b.name }));
   const day = select(WEEKDAYS.map((w, i) => ({ value: i, label: w })), 1);
-  const branch = select(state.ref.branches.map((b) => ({ value: b.id, label: b.name })), state.ref.branches[0]?.id);
-  const start = h('input', { type: 'time', value: '14:00' });
-  const end = h('input', { type: 'time', value: '17:00' });
+  const branch = select(branchOpts, state.ref.branches[0]?.id);
+  const start = h('input', { type: 'time', value: '12:00' });
+  const end = h('input', { type: 'time', value: '21:00' });
+  const onDate = h('input', { type: 'date', value: todayISO() });
+  const dBranch = select(branchOpts, state.ref.branches.find((b) => b.code === 'LHR')?.id || state.ref.branches[0]?.id);
+  const dStart = h('input', { type: 'time', value: '12:00' });
+  const dEnd = h('input', { type: 'time', value: '21:00' });
+  const remove = (r) => h('td', { class: 'right' }, h('button', { class: 'btn btn-small btn-danger', onclick: async () => { await d.deleteScheduleRow(r.id); redraw(); } }, 'Remove'));
+  const time = (r) => `${r.start_time.slice(0, 5)} – ${r.end_time.slice(0, 5)}`;
   mount(root,
-    h('section', { class: 'panel' }, h('h2', {}, 'Add a time'),
+    h('section', { class: 'panel' }, h('h2', {}, 'Add a weekly time (normal Karachi week)'),
       h('div', { class: 'form-grid' }, field('Day', day), field('Branch', branch), field('From', start), field('To', end)),
       h('button', { class: 'btn btn-primary', onclick: async () => {
         if (end.value <= start.value) return toast('The end time must be after the start time.');
         try { await d.saveScheduleRow({ weekday: Number(day.value), branch_id: Number(branch.value), start_time: start.value, end_time: end.value }); toast('Added to the calendar.', 'ok'); redraw(); } catch (e) { toast(friendlyError(e), 'error'); }
       } }, 'Add to calendar')),
-    h('section', { class: 'panel' }, h('h2', {}, 'Weekly calendar shown on the homepage'),
+    h('section', { class: 'panel' }, h('h2', {}, 'Add a dated visit (Lahore, Islamabad or a one-off day)'),
+      h('p', { class: 'muted' }, 'On this date the homepage shows only the dated times, not the normal week. Lahore and Islamabad show as open only on these dates.'),
+      h('div', { class: 'form-grid' }, field('Date', onDate), field('Branch', dBranch), field('From', dStart), field('To', dEnd)),
+      h('button', { class: 'btn btn-primary', onclick: async () => {
+        if (!onDate.value) return toast('Choose a date.');
+        if (dEnd.value <= dStart.value) return toast('The end time must be after the start time.');
+        try { await d.saveScheduleRow({ on_date: onDate.value, branch_id: Number(dBranch.value), start_time: dStart.value, end_time: dEnd.value }); toast('Visit added.', 'ok'); redraw(); } catch (e) { toast(friendlyError(e), 'error'); }
+      } }, 'Add visit')),
+    h('section', { class: 'panel' }, h('h2', {}, 'Weekly calendar (normal Karachi week)'),
       rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r) => h('tr', {},
-        h('td', {}, WEEKDAYS[r.weekday]), h('td', {}, branchName(r.branch_id)), h('td', {}, `${r.start_time.slice(0, 5)} – ${r.end_time.slice(0, 5)}`),
-        h('td', { class: 'right' }, h('button', { class: 'btn btn-small btn-danger', onclick: async () => { await d.deleteScheduleRow(r.id); redraw(); } }, 'Remove')))))) : empty('No times yet.')));
+        h('td', {}, WEEKDAYS[r.weekday]), h('td', {}, branchName(r.branch_id)), h('td', {}, time(r)), remove(r))))) : empty('No times yet.')),
+    h('section', { class: 'panel' }, h('h2', {}, 'Upcoming dated visits'),
+      dated.length ? h('table', { class: 'list' }, h('tbody', {}, dated.map((r) => h('tr', {},
+        h('td', {}, shortDate(r.on_date)), h('td', {}, branchName(r.branch_id)), h('td', {}, r.unavailable ? 'Not available' : time(r)), remove(r))))) : empty('No dated visits.')));
 }
 
 // ---------------------------------------------------------------- export
