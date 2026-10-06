@@ -580,11 +580,17 @@ export function createDemoAdapter() {
     },
     async branchPnl(month) {
       need('finance.view');
-      return db.branches.map((b) => {
+      const rows = db.branches.map((b) => {
         const income = db.payments.filter((p) => p.branch_id === b.id && p.received_at.slice(0, 7) === month).reduce((s, p) => s + p.amount, 0);
         const expenses = db.expenses.filter((e) => e.branch_id === b.id && e.expense_date.slice(0, 7) === month).reduce((s, e) => s + e.amount, 0);
         return { branch_id: b.id, branch: b.name, city_id: b.city_id, income, expenses, profit: income - expenses };
       });
+      // Expenses recorded against a city only (no branch): one row per city.
+      for (const c of db.cities) {
+        const expenses = db.expenses.filter((e) => e.branch_id == null && e.city_id === c.id && e.expense_date.slice(0, 7) === month).reduce((s, e) => s + e.amount, 0);
+        if (expenses > 0) rows.push({ branch_id: null, branch: null, city_id: c.id, income: 0, expenses, profit: -expenses });
+      }
+      return rows;
     },
     async expectedCash(branchId, date) {
       if (!can('cash.close') && !can('finance.view')) fail('row-level security policy (cash.close)');

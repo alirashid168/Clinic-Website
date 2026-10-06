@@ -360,10 +360,16 @@ export async function createSupabaseAdapter() {
     async branchPnl(month) {
       const first = month + '-01';
       const [rows, branches] = await Promise.all([sb.from('branch_monthly_pnl').select('*').eq('month', first).then(check), this.branches()]);
-      return branches.map((b) => {
-        const r = rows.find((x) => x.branch_id === b.id) || {};
-        return { branch_id: b.id, branch: b.name, city_id: b.city_id, income: Number(r.income || 0), expenses: Number(r.expenses || 0), profit: Number(r.profit || 0) };
-      });
+      // One row per branch, then one row per city for expenses recorded without a branch (branch_id null).
+      return [
+        ...branches.map((b) => {
+          const r = rows.find((x) => x.branch_id === b.id) || {};
+          return { branch_id: b.id, branch: b.name, city_id: b.city_id, income: Number(r.income || 0), expenses: Number(r.expenses || 0), profit: Number(r.profit || 0) };
+        }),
+        ...rows.filter((x) => x.branch_id == null && Number(x.expenses) > 0).map((x) => ({
+          branch_id: null, branch: null, city_id: x.city_id, income: 0, expenses: Number(x.expenses), profit: -Number(x.expenses),
+        })),
+      ];
     },
     async expectedCash(branchId, date) {
       const start = new Date(date + 'T00:00:00+05:00').toISOString();
