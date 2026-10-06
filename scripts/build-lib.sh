@@ -3,7 +3,7 @@
 # copies to web/js/lib/. Run after editing anything in src/lib.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-tsc src/lib/protocol.ts src/lib/legacy.ts src/lib/permissions.ts src/lib/autosave.ts \
+tsc src/lib/protocol.ts src/lib/legacy.ts src/lib/permissions.ts src/lib/autosave.ts src/lib/hours.ts \
   --target es2022 --module esnext --moduleResolution bundler \
   --allowImportingTsExtensions --rewriteRelativeImportExtensions \
   --outDir web/js/lib --skipLibCheck --lib es2022,dom --strict
