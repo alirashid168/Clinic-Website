@@ -119,17 +119,25 @@ test('expenses PDF: rows per Sr#, wrapped descriptions joined, footer and total 
     page([{ voucher: '108590', desc: 'Electrician wages in lhr', date: '29/08/2026', cat: 'Renovation/Maintenance', amount: '3,000.0', mode: 'Online Payment' },
       { voucher: '108589', desc: 'Flat rent Lahore', date: '29/08/2026', cat: 'Home Rent', amount: '950.0', mode: 'Cash' }], true),
   ];
+  // pdf.js splits "Dr. Ali" into "Dr", ".", "Ali" — the category must still match the Healthwire name.
+  const extra = page([{ voucher: '108588', desc: 'Watch for', date: '28/08/2026', cat: 'Personal', amount: '500.0', mode: 'Cash' }]);
+  extra.items.push({ s: 'Dr', x: 144, y: 635 }, { s: '.', x: 153, y: 635 }, { s: 'Ali', x: 157, y: 635 },
+    { s: 'Dr', x: 290, y: 647 }, { s: '.', x: 299, y: 647 }, { s: 'Ali', x: 302, y: 647 }, { s: 'Rashid', x: 315, y: 647 });
+  pages.push(extra);
   const read = readExpensesPdf(pages);
-  assert.equal(read.rows.length, 4);
-  assert.equal(read.total, 7600);
+  assert.equal(read.rows.length, 5);
+  assert.equal(read.total, 8100);
   assert.equal(read.printedTotal, 7600);
+  assert.equal(read.rows[4].category, 'Personal Dr. Ali Rashid');
+  assert.equal(read.rows[4].desc, 'Watch for Dr. Ali');
   assert.equal(read.rows[0].desc, 'Carpenter supplies and wages in Rj branch');
   assert.equal(read.rows[0].date, '2026-08-31');
   assert.equal(read.rows[0].createdAt, '2026-08-31 22:52');
   assert.equal(read.rows[1].desc, 'Sugar pot & Spoon');
   assert.equal(read.rows[3].createdBy, 'Sadia Azam');
   const built = buildExpenses(read.rows);
-  assert.deepEqual(built.categories, ['Home rent (Dr. Ali)', 'Maintenance and repairs', 'Office supplies']);
+  assert.deepEqual(built.categories, ['Home rent (Dr. Ali)', 'Maintenance and repairs', 'Office supplies', 'Personal (Dr. Ali)']);
+  assert.equal(built.expenses.find((e) => e[7] === 108588)[1], null); // personal spending: no branch
   const byV = Object.fromEntries(built.expenses.map((e) => [e[7], e]));
   assert.equal(byV[108602][1], 1); // Rj -> Gulshan
   assert.equal(byV[108590][1], 4); // lhr -> Lahore
@@ -138,7 +146,7 @@ test('expenses PDF: rows per Sr#, wrapped descriptions joined, footer and total 
   assert.equal(byV[108589][2], 2); // but the city is Lahore
   assert.equal(byV[108601][1], null);
   assert.equal(byV[108601][2], 1);
-  assert.equal(built.summary.total, 7600);
+  assert.equal(built.summary.total, 8100);
 });
 
 console.log(`${passed} passed`);
