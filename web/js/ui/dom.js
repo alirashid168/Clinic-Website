@@ -112,7 +112,15 @@ export function modal(title, body, actions = []) {
     actions.length ? h('div', { class: 'modal-actions' }, actions.map((a) =>
       h('button', {
         class: a.primary ? 'btn btn-primary' : 'btn',
-        onclick: async () => { if ((await a.onClick?.()) !== false) close(); },
+        onclick: async (e) => {
+          // One click at a time: a double tap must not save (or create) the same thing twice.
+          const buttons = [...e.currentTarget.parentElement.querySelectorAll('button')];
+          if (buttons.some((b) => b.disabled)) return;
+          buttons.forEach((b) => { b.disabled = true; });
+          let keepOpen = false;
+          try { keepOpen = (await a.onClick?.()) === false; } finally { buttons.forEach((b) => { b.disabled = false; }); }
+          if (!keepOpen) close();
+        },
       }, a.label))) : null);
   const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } }, dialog);
   document.body.append(backdrop);
