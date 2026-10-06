@@ -14,6 +14,15 @@ let passed = 0;
 
 async function newPage(viewport = { width: 1366, height: 860 }) {
   const page = await browser.newPage({ viewport });
+  // Demo mode needs nothing from the internet; outside hosts (fonts, CDN) are cut off so a slow network cannot hang the test.
+  await page.route((url) => !/^(localhost|127\.0\.0\.1)$/.test(url.hostname) && url.protocol.startsWith('http'), (r) => r.abort());
+  // The live site has its Supabase keys filled in; the test always runs the made-up DEMO data instead.
+  await page.route('**/js/config.js', async (r) => {
+    const res = await r.fetch();
+    const body = (await res.text()).replace(/SUPABASE_URL: '[^']*'/, "SUPABASE_URL: ''").replace(/SUPABASE_ANON_KEY: '[^']*'/, "SUPABASE_ANON_KEY: ''");
+    await r.fulfill({ response: res, body });
+  });
+  page.setDefaultTimeout(15000);
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.(googleapis|gstatic)|ERR_|Failed to load resource/.test(m.text())) errors.push(`console: ${m.text()}`); });
   return page;
@@ -188,6 +197,28 @@ await step('patient portal on a phone: complaint goes to Dr. Ali', async () => {
   await p5.click('.modal button:has-text("Send to Dr. Ali")');
   await p5.waitForSelector('.toast:has-text("Sent")');
 });
+const p7 = await newPage();
+await step('Dr. Ali creates a staff login with a password, then changes its email and password', async () => {
+  await loginAs(p7, 'Dr. Ali Rashid');
+  await p7.goto(BASE + '#/staff/admin?tab=staff');
+  await p7.getByRole('button', { name: 'New staff account' }).click();
+  const m = p7.locator('.modal');
+  await m.getByPlaceholder('Full name').fill('Test Reception');
+  await m.locator('input[type=email]').fill('test.reception@dralirashid.com');
+  const pw = await m.locator('input[autocomplete=new-password]').inputValue();
+  assert.match(pw, /^[A-Z][a-z]{4}-\d{4}$/);
+  await m.getByRole('button', { name: 'Create account' }).click();
+  await p7.waitForSelector('td:text("test.reception@dralirashid.com")');
+  await p7.locator('tr', { hasText: 'test.reception@dralirashid.com' }).getByRole('button', { name: 'Login details' }).click();
+  const lm = p7.locator('.modal');
+  await lm.locator('input[type=email]').fill('dha.reception@dralirashid.com');
+  await lm.getByText('Also give a new password').click();
+  await lm.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('td:text("dha.reception@dralirashid.com")');
+  assert.equal(await p7.locator('td:text("test.reception@dralirashid.com")').count(), 0);
+  await shot(p7, '11-staff-accounts');
+});
+
 const p6 = await newPage({ width: 390, height: 844 });
 await step('sheet works on a phone', async () => {
   await loginAs(p6, 'Front desk \\(Gulshan\\)').catch(async () => {
