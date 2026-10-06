@@ -702,6 +702,15 @@ export function createDemoAdapter() {
     },
     async totalDues() { return db.patients.reduce((s, p) => s + Math.max(0, dues(p.id)), 0); },
 
+    // ------------------------------------------------------------ import from Healthwire (admin)
+    async importHealthwire(kind, rows) {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can import Healthwire data');
+      // Demo keeps nothing: it only reports what a real import would do.
+      const existing = kind === 'patients' ? rows.filter((r) => db.patients.some((p) => p.mr_number === r[0])).length : 0;
+      return { kind, given: rows.length, inserted: rows.length - existing, updated: existing, items: kind === 'invoices' ? rows.reduce((s, r) => s + r[7].length, 0) : 0, missing: 0 };
+    },
+    async patientsByMr(mrs) { return db.patients.filter((p) => mrs.includes(p.mr_number)).map((p) => ({ mr_number: p.mr_number })); },
+
     // ------------------------------------------------------------ export
     async exportTable(name) {
       need('export.data');

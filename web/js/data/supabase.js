@@ -500,6 +500,14 @@ export async function createSupabaseAdapter() {
       return rows.reduce((t, r) => t + Number(r.dues), 0);
     },
 
+    // ------------------------------------------------------------ import from Healthwire (admin)
+    async importHealthwire(kind, rows) { return check(await sb.rpc('import_healthwire', { p_kind: kind, p_rows: rows })); },
+    async patientsByMr(mrs) {
+      const out = [];
+      for (let i = 0; i < mrs.length; i += 200) out.push(...check(await sb.from('patients').select('mr_number').in('mr_number', mrs.slice(i, i + 200))));
+      return out;
+    },
+
     // ------------------------------------------------------------ export
     async exportTable(name) {
       const allowed = ['patients', 'visits', 'invoices', 'payments', 'expenses', 'cash_closings'];
