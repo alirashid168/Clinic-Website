@@ -339,7 +339,9 @@ export function readExpensesPdf(pages) {
       const cells = {};
       for (const [name, x0, x1] of PDF_COLS) {
         const parts = body.filter((i) => i.y <= top && i.y > bottom && i.x >= x0 && i.x < x1).sort((a, b) => (b.y - a.y) || (a.x - b.x));
-        cells[name] = parts.map((i) => i.s).join(' ').replace(/\s+([,.\/])\s*/g, '$1').replace(/\s+/g, ' ').trim();
+        const joined = parts.map((i) => i.s).join(' ').replace(/\s+/g, ' ').trim();
+        // Dates and amounts come split around "/" and "." ("31 / 08 / 2026"); in text only the space before a dot or comma is noise ("Dr . Ali").
+        cells[name] = ['date', 'amount', 'createdAt', 'voucher', 'sr'].includes(name) ? joined.replace(/\s*([,.\/])\s*/g, '$1') : joined.replace(/\s+([,.])/g, '$1');
       }
       rows.push({ voucher: cells.voucher, desc: cells.desc, date: isoDate(cells.date), category: cells.category, amount: num(cells.amount), mode: cells.mode, createdAt: isoMinute(cells.createdAt.replace(/^(\d{2})\/(\d{2})\/(\d{4})/, '$2/$1/$3')), createdBy: cells.createdBy });
     });
