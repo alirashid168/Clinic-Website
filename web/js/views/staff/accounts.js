@@ -35,26 +35,36 @@ async function pnl(root) {
   const monthInput = h('input', { type: 'month', value: todayISO().slice(0, 7) });
   const out = h('div', {});
   async function load() {
+    // Rows with a branch, plus one row per city for expenses recorded without a branch (branch null).
     const rows = await d.branchPnl(monthInput.value).catch((e) => { toast(friendlyError(e), 'error'); return []; });
     const cities = [...new Set(rows.map((r) => r.city_id))];
     const total = (list, k) => list.reduce((s, r) => s + r[k], 0);
+    const branchOnly = rows.filter((r) => r.branch_id != null);
+    const unassigned = total(rows, 'expenses') - total(branchOnly, 'expenses');
+    const net = total(rows, 'profit');
+    const money = (v) => h('td', { class: 'right', style: { color: v < 0 ? 'var(--stop)' : '' } }, rupees(v));
     mount(out,
       h('div', { class: 'stat-row', style: { marginBottom: '16px' } },
         h('div', { class: 'stat' }, h('strong', {}, rupees(total(rows, 'income'))), h('span', {}, 'Income (payments received)')),
-        h('div', { class: 'stat' }, h('strong', {}, rupees(total(rows, 'expenses'))), h('span', {}, 'Branch expenses')),
-        h('div', { class: 'stat' }, h('strong', { style: { color: total(rows, 'profit') < 0 ? 'var(--stop)' : 'var(--ok)' } }, rupees(total(rows, 'profit'))), h('span', {}, 'Difference'))),
+        h('div', { class: 'stat' }, h('strong', {}, rupees(total(rows, 'expenses'))), h('span', {}, 'All expenses')),
+        h('div', { class: 'stat' }, h('strong', { style: { color: net < 0 ? 'var(--stop)' : 'var(--ok)' } }, rupees(net)), h('span', {}, net < 0 ? 'Loss' : 'Profit')),
+        h('div', { class: 'stat' }, h('strong', {}, rupees(total(branchOnly, 'expenses'))), h('span', {}, 'Expenses tagged to a branch'))),
       h('section', { class: 'panel' }, h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', {}, 'Branch'), h('th', { class: 'right' }, 'Income'), h('th', { class: 'right' }, 'Expenses'), h('th', { class: 'right' }, 'Difference'))),
         h('tbody', {}, cities.map((cid) => {
           const list = rows.filter((r) => r.city_id === cid);
           return [
-            ...list.map((r) => h('tr', {}, h('td', {}, r.branch), h('td', { class: 'right' }, rupees(r.income)), h('td', { class: 'right' }, rupees(r.expenses)),
-              h('td', { class: 'right', style: { color: r.profit < 0 ? 'var(--stop)' : '' } }, rupees(r.profit)))),
+            ...list.map((r) => h('tr', { class: r.branch_id == null ? 'muted' : null },
+              h('td', {}, r.branch_id == null ? `${cityName(cid)} — not assigned to a branch` : r.branch), money(r.income), money(r.expenses), money(r.profit))),
             list.length > 1 ? h('tr', {}, h('td', {}, h('strong', {}, `${cityName(cid)} total`)), h('td', { class: 'right' }, h('strong', {}, rupees(total(list, 'income')))),
-              h('td', { class: 'right' }, h('strong', {}, rupees(total(list, 'expenses')))), h('td', { class: 'right' }, h('strong', {}, rupees(total(list, 'profit'))))) : null,
+              h('td', { class: 'right' }, h('strong', {}, rupees(total(list, 'expenses')))), h('td', { class: 'right' }, h('strong', { style: { color: total(list, 'profit') < 0 ? 'var(--stop)' : '' } }, rupees(total(list, 'profit'))))) : null,
           ];
-        }))))),
-      h('p', { class: 'muted', style: { marginTop: '8px', fontSize: '13px' } }, 'Income is counted at the branch where each payment was taken. City-level expenses with no branch are not included in branch rows.'));
+        }),
+        h('tr', {}, h('td', {}, h('strong', {}, 'All branches')), h('td', { class: 'right' }, h('strong', {}, rupees(total(rows, 'income')))),
+          h('td', { class: 'right' }, h('strong', {}, rupees(total(rows, 'expenses')))), h('td', { class: 'right' }, h('strong', { style: { color: net < 0 ? 'var(--stop)' : '' } }, rupees(net)))))))),
+      h('p', { class: 'muted', style: { marginTop: '8px', fontSize: '13px' } },
+        'Income is counted at the branch where each payment was taken. ',
+        unassigned > 0 ? `${rupees(unassigned)} of this month's expenses (salaries, ads, lab bills and the like) were recorded against a city only, so they appear in the "not assigned to a branch" rows and in the totals, not under any one branch.` : 'Every expense this month is tagged to a branch.'));
   }
   monthInput.addEventListener('change', load);
   mount(root, h('div', { class: 'inline', style: { marginBottom: '12px' } }, h('label', { class: 'inline' }, 'Month ', monthInput)), out);
