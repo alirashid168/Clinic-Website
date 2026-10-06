@@ -35,7 +35,7 @@ await step('home shows 3D smile, three doors and calendar', async () => {
   await page.waitForSelector('.smile-stage .tooth');
   assert.equal(await page.locator('.tooth').count(), 24);
   for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count());
-  assert.equal(await page.locator('.week .day').count(), 7);
+  assert.equal(await page.locator('.sx-day').count(), 7);
   await shot(page, '01-home');
 });
 await step('visitor page lists benefits, braces options and WhatsApp button', async () => {
