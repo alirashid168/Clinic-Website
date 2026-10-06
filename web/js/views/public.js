@@ -3,7 +3,7 @@
 import { h, mount, todayISO } from '../ui/dom.js';
 import { state } from '../state.js';
 import { VISITOR, HOME } from '../content.js';
-import { addDays, dateLabel, weekdayOf, range, slotsOn, branchHoursFrom, openOn, weeklyLines, visitRuns } from '../lib/hours.js';
+import { aliWeekSection, clinicsSection } from './schedule.js';
 import { CONFIG } from '../config.js';
 
 // ---------------------------------------------------------------- 3D smile
@@ -39,64 +39,12 @@ export function smile3d() {
   return h('div', { class: 'smile-stage', role: 'img', 'aria-label': 'A turning 3D model of a smile' }, arch(UPPER, false), arch(LOWER, true));
 }
 
-// ---------------------------------------------------------------- calendar
-// The next 7 days with real dates, so trip days (Lahore, Islamabad) show
-// where Dr. Ali actually is instead of his normal Karachi week.
-function weekCalendar(schedule) {
-  const branches = state.ref.branches;
-  const today = todayISO();
-  return h('div', { class: 'week' }, [0, 1, 2, 3, 4, 5, 6].map((n) => {
-    const date = addDays(today, n);
-    const { slots } = slotsOn(schedule, date);
-    return h('div', { class: ['day', n === 0 && 'today'] },
-      h('h3', {}, dateLabel(date) + (n === 0 ? ' (today)' : '')),
-      slots.length
-        ? slots.map((s) => {
-          const b = branches.find((x) => x.id === s.branch_id);
-          return h('div', { class: 'slot' }, h('b', {}, b?.name || 'Branch'), range(s.start, s.end));
-        })
-        : h('p', { class: 'closed' }, weekdayOf(date) === 0 ? 'Day off' : 'Not at the clinic'));
-  }));
-}
-
 function header(sub) {
   return h('header', { class: ['site-header', sub && 'subpage-header'] },
     h('a', { href: '#/', class: 'wordmark' }, "Dr. Ali Rashid's", h('small', {}, 'Dental Clinic')),
     h('nav', { class: 'inline' },
       h('a', { href: '#/visitor' }, 'Treatments'),
       h('a', { href: '#/login/patient' }, 'Patient login')));
-}
-
-// Each branch shows its own hours. Lahore and Islamabad open only on Dr. Ali's
-// visit dates, so they list dates and never weekdays. A branch with no hours
-// on file says "message us first" rather than guessing.
-function branchHoursBlock(b, schedule) {
-  const hrs = branchHoursFrom(state.ref.settings?.clinic_timings)[String(b.id)];
-  const today = todayISO();
-  const open = openOn(hrs, schedule, b.id, today);
-  const badge = open === null ? null : h('span', { class: ['open-badge', open ? 'is-open' : 'is-closed'] }, open ? 'Open today' : 'Closed today');
-  if (!hrs) return [h('p', { class: 'hours' }, h('span', {}, 'Please message us on WhatsApp for timings before visiting.'))];
-  if (hrs.mode === 'weekly') return [badge, h('p', { class: 'hours' }, weeklyLines(hrs.days).map((x) => h('span', {}, x)))];
-  const runs = visitRuns(schedule, b.id, today, hrs.hours);
-  return [badge, h('p', { class: 'hours' },
-    runs.length
-      ? [h('span', { class: 'hours-lead' }, 'Open only on these dates:'), ...runs.map((r) => h('span', {}, r.text)), h('span', {}, 'Closed on all other days.')]
-      : h('span', {}, 'No dates scheduled yet. Please message us on WhatsApp before visiting.'))];
-}
-
-function branchesList(schedule = []) {
-  return h('div', { class: 'branch-grid' }, state.ref.branches.map((b) => {
-    const city = state.ref.cities?.find((c) => c.id === b.city_id)?.name;
-    const q = encodeURIComponent(`Dr. Ali Rashid's Dental Clinic ${b.address || b.name}`);
-    return h('div', { class: 'branch-card' },
-      h('span', { class: 'city' }, city || ''),
-      h('h3', {}, b.name),
-      h('p', { class: 'muted' }, b.address || ''),
-      branchHoursBlock(b, schedule),
-      h('div', { class: 'branch-actions' },
-        h('a', { href: `https://www.google.com/maps/search/?api=1&query=${q}`, target: '_blank', rel: 'noopener' }, 'Directions'),
-        h('a', { href: whatsappLink(`Hi, I would like to book an appointment at the ${b.name} branch.`), target: '_blank', rel: 'noopener' }, 'Book on WhatsApp')));
-  }));
 }
 
 function trustStrip() {
@@ -151,14 +99,9 @@ export async function renderHome(root) {
             h('a', { class: 'btn', href: '#/visitor' }, 'Braces options and prices')))),
       h('section', {},
         h('div', { class: 'section-title' }, h('h2', {}, 'Results'), h('a', { href: HOME.reviewsUrl, target: '_blank', rel: 'noopener' }, 'Read our Google reviews')),
-        casesGrid(cases, 'Before and after photos are being added. Ask at any branch to see real results from patients who agreed to share them.')),
-      h('section', {},
-        h('div', { class: 'section-title' }, h('h2', {}, "Dr. Ali's days at each branch"), h('span', { class: 'muted' }, 'Next 7 days')),
-        weekCalendar(schedule),
-        h('p', { class: 'muted calendar-note' }, 'Our Karachi branches stay open with our senior doctors when Dr. Ali is in Lahore or Islamabad.')),
-      h('section', { id: 'branches' },
-        h('div', { class: 'section-title' }, h('h2', {}, 'Our clinics')),
-        branchesList(schedule))),
+        casesGrid(cases, 'Before and after photos are being added. Ask at any branch to see real results from patients who agreed to share them.'))),
+    aliWeekSection(schedule, whatsappLink),
+    clinicsSection(schedule, whatsappLink),
     footer(),
     waFloat());
 }
@@ -186,10 +129,8 @@ export async function renderVisitor(root) {
       h('section', {},
         h('div', { class: 'cta-band' },
           h('div', {}, h('h2', {}, 'Book a free consultation'), h('p', {}, 'Message us on WhatsApp and we will find a time at your nearest branch.')),
-          h('a', { class: 'btn', href: whatsappLink('Hi, I would like to book a free braces consultation.'), target: '_blank', rel: 'noopener' }, 'Message on WhatsApp'))),
-      h('section', {},
-        h('div', { class: 'section-title' }, h('h2', {}, 'Our clinics')),
-        branchesList(schedule))),
+          h('a', { class: 'btn', href: whatsappLink('Hi, I would like to book a free braces consultation.'), target: '_blank', rel: 'noopener' }, 'Message on WhatsApp')))),
+    clinicsSection(schedule, whatsappLink),
     footer(),
     waFloat());
 }
