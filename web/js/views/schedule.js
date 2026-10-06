@@ -82,7 +82,7 @@ export function aliWeekSection(schedule, whatsappLink) {
   // Trips after this 7-day window, as chips.
   const later = [];
   for (const b of c.branches.filter((x) => c.isVisit(x.id))) {
-    for (const r of visitRuns(schedule, b.id, addDays(c.today, 7))) later.push({ city: c.cityOf(b), r });
+    for (const r of visitRuns(schedule, b.id, c.today)) if (r.from > addDays(c.today, 6)) later.push({ city: c.cityOf(b), r });
   }
   later.sort((a, b) => a.r.from.localeCompare(b.r.from));
 
