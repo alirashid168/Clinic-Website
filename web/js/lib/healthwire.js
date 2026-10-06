@@ -78,7 +78,7 @@ export function branchInText(text) {
   if (/\b(lhr|lahore|gulberg)\b/.test(d)) return 'LHR';
   if (/\b(isb|islamabad)\b/.test(d)) return 'ISB';
   if (/\bdha\b/.test(d)) return 'DHA';
-  if (/\b(n\.?n|nn|nazimabad)\b/.test(d) || d.includes(' n.n ')) return 'NN';
+  if (/\b(n\s*\.?\s*n|nn|nazimabad)\b/.test(d)) return 'NN';
   if (/\b(rj|r\.j|gulshan)\b/.test(d)) return 'GUL';
   return null;
 }
