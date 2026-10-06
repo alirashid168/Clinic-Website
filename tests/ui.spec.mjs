@@ -58,12 +58,19 @@ await step('front desk sees only their branch and the Aaj ki List', async () => 
   await shot(page, '03-sheet-frontdesk');
 });
 await step('front desk registers a new patient and gets the next Mr#', async () => {
-  await page.fill('.add-row input[type=search]', 'Komal Test');
+  await page.fill('.add-panel input[type=search]', 'Komal Test');
   await page.click('.suggestions button:has-text("New patient")');
   await page.fill('.modal input[type=tel]', '0300 1234567');
   await page.click('.modal button:has-text("Create patient")');
   await page.waitForSelector('.toast:has-text("Mr# 9841")');
   await page.waitForSelector('table.sheet tbody tr:has-text("Komal Test")');
+});
+await step('front desk adds a walk-in with the "+ New walk-in" button', async () => {
+  await page.click('.add-panel button:has-text("New walk-in")');
+  await page.fill('.modal input[required]:not([type=tel])', 'Walkin Person');
+  await page.fill('.modal input[type=tel]', '0301 7654321');
+  await page.click('.modal button:has-text("Create patient")');
+  await page.waitForSelector('table.sheet tbody tr:has-text("Walkin Person")');
 });
 await step('front desk cannot see accounts or admin', async () => {
   const nav = await page.locator('.nav-link').allTextContents();
