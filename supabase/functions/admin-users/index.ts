@@ -3,7 +3,10 @@
 // the website calls this function and the function checks who is asking.
 //
 // Actions:
-//   create_staff   { full_name, email, role, branch_ids, restrict_to_branches, home_branch_id, clinician_id }  (needs users.manage)
+//   create_staff   { full_name, email, role, branch_ids, restrict_to_branches, home_branch_id, clinician_id, password? }  (needs users.manage)
+//                  With a password the login works straight away and no email is sent (the address
+//                  is only a login name). Without one, an invitation email is sent.
+//   update_login   { user_id, email?, password? }  changes a staff login email and/or password                  (needs users.manage)
 //   ban_user       { user_id }                                                                                  (needs users.manage)
 //   unban_user     { user_id }                                                                                  (needs users.manage)
 //   invite_patient { patient_id }  sends the patient an email to set a password for the portal              (needs portal.invite)
@@ -20,7 +23,9 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 
 const STAFF_DOMAIN = Deno.env.get('STAFF_EMAIL_DOMAIN') ?? 'dralirashid.com';
-const SITE_URL = Deno.env.get('SITE_URL') ?? '';
+// Where invitation links land. Change when the clinic moves to its own domain
+// (or set the SITE_URL secret, which takes priority).
+const SITE_URL = (Deno.env.get('SITE_URL') ?? 'https://www.dralirashid.com').replace(/\/$/, '');
 const ROLES = ['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant'];
 
 Deno.serve(async (req) => {
@@ -59,12 +64,17 @@ Deno.serve(async (req) => {
       if (fullName.length < 2) return json({ error: 'Write the staff member\'s name.' });
       if (!ROLES.includes(role)) return json({ error: 'Choose a role.' });
 
-      const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
-        redirectTo: SITE_URL ? `${SITE_URL}/reset-password.html` : undefined,
-        data: { full_name: fullName },
-      });
-      if (inviteErr) return json({ error: inviteErr.message });
-      const id = invited.user.id;
+      const password = body.password == null ? '' : String(body.password);
+      if (password && password.length < 8) return json({ error: 'The password needs at least 8 characters.' });
+
+      const { data: made, error: makeErr } = password
+        ? await admin.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { full_name: fullName } })
+        : await admin.auth.admin.inviteUserByEmail(email, {
+          redirectTo: SITE_URL ? `${SITE_URL}/reset-password.html` : undefined,
+          data: { full_name: fullName },
+        });
+      if (makeErr) return json({ error: /already|registered|exists/i.test(makeErr.message) ? 'That login email is already used. Pick another.' : makeErr.message });
+      const id = made.user.id;
       const branchIds = Array.isArray(body.branch_ids) ? body.branch_ids.map(Number) : [];
       const { data: staff, error: staffErr } = await admin.from('staff').insert({
         id, full_name: fullName, email, role,
@@ -94,6 +104,44 @@ Deno.serve(async (req) => {
       if (error) return json({ error: error.message });
       if (action === 'ban_user') await admin.auth.admin.signOut(userId).catch(() => {});
       return json({ ok: true });
+    }
+
+    if (action === 'update_login') {
+      if (!(await can('users.manage'))) return json({ error: 'Only Dr. Ali can change staff logins.' }, 403);
+      const userId = String(body.user_id ?? '');
+      const { data: target } = await admin.from('staff').select('role, email').eq('id', userId).maybeSingle();
+      if (!target) return json({ error: 'Staff account not found.' });
+      const callerIsAdmin = (await asCaller.rpc('is_admin')).data === true;
+      if (target.role === 'admin' && !callerIsAdmin) return json({ error: 'Only Dr. Ali can change an admin login.' }, 403);
+
+      const changes: { email?: string; email_confirm?: boolean; password?: string } = {};
+      const email = body.email == null ? '' : String(body.email).trim().toLowerCase();
+      if (email && email !== target.email) {
+        if (!/^[^@\s]+@[^@\s]+$/.test(email) || !email.endsWith('@' + STAFF_DOMAIN)) return json({ error: `Staff emails must end with @${STAFF_DOMAIN}` });
+        const { data: taken } = await admin.from('staff').select('id').eq('email', email).neq('id', userId).maybeSingle();
+        if (taken) return json({ error: 'That login email is already used. Pick another.' });
+        changes.email = email; changes.email_confirm = true;
+      }
+      const password = body.password == null ? '' : String(body.password);
+      if (password) {
+        if (password.length < 8) return json({ error: 'The password needs at least 8 characters.' });
+        changes.password = password;
+      }
+      if (!changes.email && !changes.password) return json({ ok: true, changed: [] });
+
+      const { error } = await admin.auth.admin.updateUserById(userId, changes);
+      if (error) return json({ error: /already|registered|exists/i.test(error.message) ? 'That login email is already used. Pick another.' : error.message });
+      if (changes.email) {
+        const { error: staffErr } = await admin.from('staff').update({ email: changes.email }).eq('id', userId);
+        if (staffErr) {
+          await admin.auth.admin.updateUserById(userId, { email: target.email, email_confirm: true });
+          return json({ error: staffErr.message });
+        }
+      }
+      await admin.from('audit_log').insert({ table_name: 'staff', row_id: userId, action: 'UPDATE_LOGIN', actor: caller,
+        old_data: changes.email ? { email: target.email } : null,
+        new_data: { email: changes.email ?? target.email, password_changed: Boolean(changes.password) } });
+      return json({ ok: true, changed: [changes.email ? 'email' : null, changes.password ? 'password' : null].filter(Boolean) });
     }
 
     if (action === 'invite_patient') {
