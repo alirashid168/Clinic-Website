@@ -209,6 +209,15 @@ export async function createSupabaseAdapter() {
       if (branchId) q = q.eq('branch_id', Number(branchId));
       return enrichVisits(check(await q));
     },
+    // Live updates: calls onChange the moment any visit at this branch (or a
+    // visit's doctor list) changes. Returns a function that stops listening.
+    subscribeVisits(branchId, onChange) {
+      const ch = sb.channel(`visits-${branchId}-${Math.random().toString(36).slice(2)}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'visits', filter: `branch_id=eq.${Number(branchId)}` }, onChange)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'visit_staff' }, onChange)
+        .subscribe();
+      return () => { sb.removeChannel(ch); };
+    },
     async addVisit(row) {
       const insert = { patient_id: row.patient_id, branch_id: Number(row.branch_id), visit_date: row.visit_date || todayISO(),
         status: row.status || 'waiting', treatment_label: row.treatment_label || null, details_text: row.details_text || null, notes: row.notes || null };

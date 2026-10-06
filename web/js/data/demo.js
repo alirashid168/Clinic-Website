@@ -381,6 +381,7 @@ export function createDemoAdapter() {
       return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && branchOk(v.branch_id))
         .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999)).map(enrichVisit);
     },
+    subscribeVisits() { return () => {}; },
     async addVisit(row) {
       need('sheet.edit');
       if (!branchOk(row.branch_id)) fail('new row violates row-level security policy (branch)');
