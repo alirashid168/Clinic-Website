@@ -327,6 +327,10 @@ select.cell-input { cursor: pointer; }
 .row-flags { display: flex; gap: 4px; flex-wrap: wrap; }
 .add-row { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); background: var(--porcelain); align-items: center; flex-wrap: wrap; position: sticky; left: 0; }
 .add-row input { max-width: 360px; }
+.add-panel { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; margin: 0 0 12px; padding: 14px 16px; border: 1px solid var(--line); border-left: 4px solid var(--aubergine); border-radius: var(--radius-m); background: var(--enamel); box-shadow: var(--shadow); }
+.add-panel-text { display: grid; gap: 2px; flex: 1 1 260px; min-width: 0; }
+.add-panel-text .muted { font-size: 13px; }
+.add-panel .btn-primary { white-space: nowrap; }
 .suggestions { position: absolute; background: #fff; border: 1px solid var(--line-strong); border-radius: var(--radius-s); box-shadow: var(--shadow); z-index: 20; max-height: 260px; overflow: auto; min-width: 300px; }
 .suggestions button { display: flex; justify-content: space-between; gap: 12px; width: 100%; text-align: left; border: 0; background: #fff; padding: 9px 12px; font: 14px var(--font); cursor: pointer; }
 .suggestions button:hover, .suggestions button:focus { background: var(--aubergine-soft); }
