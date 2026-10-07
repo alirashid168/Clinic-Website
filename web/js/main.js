@@ -23,7 +23,8 @@ function armIdleLogout() {
   const minutes = Number(state.ref.settings?.session_timeout_minutes) || 30;
   idleTimer = setTimeout(async () => { await signOut(); toast('Logged out after a period of no activity.'); }, minutes * 60 * 1000);
 }
-['click', 'keydown', 'touchstart'].forEach((ev) => document.addEventListener(ev, armIdleLogout, { passive: true }));
+// 'app:activity' is sent by long jobs (an import running for an hour) so they are not cut off mid-way.
+['click', 'keydown', 'touchstart', 'app:activity'].forEach((ev) => document.addEventListener(ev, armIdleLogout, { passive: true }));
 
 async function route() {
   const hash = location.hash.replace(/^#\/?/, '') || '';
