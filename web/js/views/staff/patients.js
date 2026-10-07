@@ -6,9 +6,9 @@ import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installme
 
 export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart condition', 'Bleeding disorder', 'Pregnancy', 'Asthma', 'Epilepsy', 'Thyroid', 'Hepatitis / HIV', 'Kidney disease'];
 
-export async function renderPatients(root) {
+export async function renderPatients(root, params) {
   const d = state.data;
-  const input = h('input', { type: 'search', placeholder: 'Search name, Mr# or phone', 'aria-label': 'Search patients' });
+  const input = h('input', { type: 'search', placeholder: 'Search name, Mr# or phone', 'aria-label': 'Search patients', value: params?.get('q') || '' });
   const results = h('div', {});
   let timer;
   const run = async () => {
@@ -31,6 +31,7 @@ export async function renderPatients(root) {
       can('patients.create') ? h('button', { class: 'btn btn-primary', onclick: async () => { const p = await newPatientModal(''); if (p) location.hash = `#/staff/patient/${p.id}`; } }, 'New patient') : null),
     h('div', { class: 'panel' }, input, h('div', { style: { marginTop: '12px' } }, results)));
   run();
+  if (params?.get('new') && can('patients.create')) { history.replaceState(null, '', '#/staff/patients'); const p = await newPatientModal(''); if (p) location.hash = `#/staff/patient/${p.id}`; }
 }
 
 export async function renderPatient(root, id) {

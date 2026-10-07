@@ -13,7 +13,7 @@ export async function renderAccounts(root, params) {
   const available = [
     can('finance.view') && ['pnl', 'Branch income vs expenses'],
     can('finance.view') && ['expenses', 'Expenses'],
-    can('finance.view') && ['reports', 'Reports'],
+    can('finance.view') && ['reports', 'Reports →'],
     (can('cash.close') || can('cash.verify')) && ['cash', 'Cash closing'],
   ].filter(Boolean);
   let tab = params.get('tab') || available[0]?.[0];
@@ -24,7 +24,7 @@ export async function renderAccounts(root, params) {
     mount(head, tabs(available, tab, pick));
     if (tab === 'pnl') await pnl(body);
     else if (tab === 'expenses') await expenses(body);
-    else if (tab === 'reports') await reports(body);
+    else if (tab === 'reports') { location.hash = '#/staff/reports?group=financial'; return; }
     else await cash(body);
   }
   mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Accounts')), head, body);

@@ -283,7 +283,7 @@ export async function renderImport(root) {
             un.length ? h('div', { style: { marginTop: '6px' } }, h('strong', {}, `${un.length} names could not be matched to a patient (${total.rows_unmatched} rows). `),
               'Add them from the Patients page or put the Mr# or phone on the sheet, then drop the file again. ',
               h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`aaj-ki-list-unmatched-${todayISO()}.csv`, un.map((u) => ({ name: u.name, mr: u.mr || '', phone: u.phone || '', rows: u.rows, first: u.first, last: u.last, tab: u.tab }))) }, 'Download the list')) : null,
-            h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/patients' }, 'Open Patients →'), ' · ', h('a', { href: '#/staff/accounts?tab=reports' }, 'Reports →'))),
+            h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/patients' }, 'Open Patients →'), ' · ', h('a', { href: '#/staff/reports?group=financial' }, 'Reports →'))),
             un.length ? h('div', { class: 'table-scroll', style: { marginTop: '8px' } }, h('table', { class: 'list' },
               h('thead', {}, h('tr', {}, h('th', {}, 'Name on the sheet'), h('th', {}, 'Mr#'), h('th', {}, 'Phone'), h('th', { class: 'right' }, 'Rows'), h('th', {}, 'First'), h('th', {}, 'Last'), h('th', {}, 'Tab'))),
               h('tbody', {}, un.slice(0, 50).map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.mr || ''), h('td', {}, u.phone || ''), h('td', { class: 'right' }, u.rows), h('td', { class: 'nowrap' }, shortDate(u.first)), h('td', { class: 'nowrap' }, shortDate(u.last)), h('td', {}, u.tab || '')))))) : null);
