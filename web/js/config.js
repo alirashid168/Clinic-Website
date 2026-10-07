@@ -9,6 +9,7 @@ export const CONFIG = {
   CLINIC_NAME: "Dr. Ali Rashid's Dental Clinic",
   STAFF_EMAIL_DOMAIN: 'dralirashid.com',
   TIMEZONE: 'Asia/Karachi',
+  IMAGE_TRANSFORMS: false, // set true on a Supabase plan with image transformations
 };
 
 export const DEMO_MODE = !CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_ANON_KEY;

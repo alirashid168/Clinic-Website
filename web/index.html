@@ -3,18 +3,104 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Dr. Ali Rashid's Dental Clinic</title>
+  <title>Dr. Ali Rashid's Dental Clinic | Braces in Karachi, Lahore and Islamabad</title>
   <meta name="description" content="Braces, smile makeovers and dental care in Karachi, Lahore and Islamabad.">
+  <link rel="canonical" href="https://www.dralirashid.com/">
+  <!-- Same colour as --aubergine-deep in css/app.css and theme_color in site.webmanifest: change all three together. -->
   <meta name="theme-color" content="#22113b">
+
+  <!-- Link previews on WhatsApp, Facebook and X. Their crawlers do not run JavaScript, so these describe the whole site. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Dr. Ali Rashid's Dental Clinic">
+  <meta property="og:title" content="Dr. Ali Rashid's Dental Clinic">
+  <meta property="og:description" content="Braces, smile makeovers and dental care in Karachi, Lahore and Islamabad.">
+  <meta property="og:url" content="https://www.dralirashid.com/">
+  <meta property="og:image" content="https://www.dralirashid.com/og-image.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Dr. Ali Rashid's Dental Clinic: braces and smile makeovers in Karachi, Lahore and Islamabad">
+  <meta property="og:locale" content="en_PK">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Dr. Ali Rashid's Dental Clinic">
+  <meta name="twitter:description" content="Braces, smile makeovers and dental care in Karachi, Lahore and Islamabad.">
+  <meta name="twitter:image" content="https://www.dralirashid.com/og-image.jpg">
+
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
+
+  <!-- Start the connections and downloads the first screen needs while this page is still arriving.
+       The Supabase address is CONFIG.SUPABASE_URL in js/config.js; the SDK comes from jsdelivr (js/data/supabase.js). -->
+  <link rel="preconnect" href="https://xbgcthpxwrjntfujejet.supabase.co" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="modulepreload" href="js/main.js">
+  <link rel="modulepreload" href="js/ui/dom.js">
+  <link rel="modulepreload" href="js/state.js">
+  <link rel="modulepreload" href="js/config.js">
+  <link rel="modulepreload" href="js/content.js">
+  <link rel="modulepreload" href="js/data/index.js">
+  <link rel="modulepreload" href="js/data/supabase.js">
+  <link rel="modulepreload" href="js/lib/permissions.js">
+  <link rel="modulepreload" href="js/views/public.js">
+  <link rel="modulepreload" href="js/views/schedule.js">
+  <link rel="modulepreload" href="js/lib/hours.js">
+  <link rel="modulepreload" href="js/ui/smile-card.js">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/app.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2322113b'/%3E%3Cpath d='M20 18c-6 0-9 5-8 12 1 6 3 9 4 16 1 5 5 5 6 0l2-8c1-3 5-3 6 0l2 8c1 5 5 5 6 0 1-7 3-10 4-16 1-7-2-12-8-12-4 0-6 2-8 2s-4-2-8-2z' fill='%23fff'/%3E%3C/svg%3E">
+  <script>
+    // Browsers fetch a web font only when text needs it, which here would be after the app has
+    // loaded. Ask for the headline font now so the hero does not repaint in a different font.
+    try { document.fonts && document.fonts.load('800 1em "Plus Jakarta Sans"'); } catch (e) {}
+  </script>
+
+  <!-- Clinic details for search engines. Only facts the site already states: add the branch
+       addresses, opening hours and geo position here once Dr. Ali confirms them. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Dentist",
+    "name": "Dr. Ali Rashid's Dental Clinic",
+    "url": "https://www.dralirashid.com/",
+    "logo": "https://www.dralirashid.com/icon-512.png",
+    "image": "https://www.dralirashid.com/og-image.jpg",
+    "description": "Braces, smile makeovers and dental care in Karachi, Lahore and Islamabad.",
+    "telephone": "+923100000464",
+    "foundingDate": "2017-09-17",
+    "founder": { "@type": "Person", "name": "Dr. Ali Rashid", "honorificSuffix": "BDS" },
+    "areaServed": [
+      { "@type": "City", "name": "Karachi" },
+      { "@type": "City", "name": "Lahore" },
+      { "@type": "City", "name": "Islamabad" }
+    ],
+    "sameAs": [
+      "https://www.facebook.com/dr.alirashid168/",
+      "https://www.youtube.com/@dralirashid168"
+    ]
+  }
+  </script>
 </head>
 <body>
-  <div id="app" aria-live="polite"></div>
-  <noscript>This website needs JavaScript turned on.</noscript>
+  <a class="skip-link" id="skip-link" href="#app">Skip to content</a>
+  <div id="app"></div>
+  <!-- Toasts and screen-reader announcements live outside #app and exist from the start,
+       so the first message is spoken too (js/ui/dom.js). -->
+  <div class="toasts" id="toasts"></div>
+  <div class="sr-only" id="live-regions">
+    <div id="live-polite" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div id="live-assertive" role="alert" aria-live="assertive" aria-atomic="true"></div>
+  </div>
+  <noscript>
+    <div style="max-width: 40rem; margin: 0 auto; padding: 24px 16px;">
+      <h1>Dr. Ali Rashid's Dental Clinic</h1>
+      <p>Braces, smile makeovers and dental care in Karachi, Lahore and Islamabad.</p>
+      <p>This website needs JavaScript turned on. To book or ask a question, call or message us on WhatsApp at
+        <a href="https://wa.me/923100000464">0310 0000464</a>, or visit our
+        <a href="https://www.facebook.com/dr.alirashid168/">Facebook page</a>.</p>
+    </div>
+  </noscript>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

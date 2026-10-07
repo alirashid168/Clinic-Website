@@ -13,9 +13,23 @@ export const BRANCH_ID = { GUL: 1, NN: 2, DHA: 3, LHR: 4, ISB: 5 };
 export const CITY_OF_BRANCH = { 1: 1, 2: 1, 3: 1, 4: 2, 5: 3 };
 export const BRANCH_LABEL = { GUL: 'Gulshan (RJ Mall)', NN: 'North Nazimabad', DHA: 'DHA', LHR: 'Lahore Gulberg', ISB: 'Islamabad' };
 
-// Healthwire logins are one per branch; "Sadia Azam" (accounts) and the doctors are not tied to a branch.
+// Healthwire logins are one per branch; the accounts login and the doctors are not tied to a branch.
 const LOGIN_BRANCH = { 'rj mall clinic': 'GUL', 'north nazimabad clinic': 'NN', 'dha clinic': 'DHA', 'lahore gulberg clinic': 'LHR', 'islamabad clinic': 'ISB' };
-const NN_OPEN_WEEKDAYS = new Set([1, 4]); // Monday, Thursday (JS getUTCDay: 0 = Sunday)
+// North Nazimabad's open weekdays come from the clinic_timings setting (the same
+// branch hours the website shows). Mon + Thu is only the fallback for when the
+// setting is missing or has no weekly days for that branch.
+const NN_FALLBACK_WEEKDAYS = new Set([1, 4]); // JS getUTCDay: 0 = Sunday
+const WEEKDAY_OF_KEY = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+/** Weekdays (0 = Sunday) a branch is open, read from the clinic_timings setting (object or JSON text); null if unknown. */
+export function openWeekdaysFrom(clinicTimings, branchId) {
+  let t = clinicTimings;
+  if (typeof t === 'string') { try { t = JSON.parse(t); } catch { t = null; } }
+  const days = t?.branches?.[branchId]?.days;
+  if (!days || typeof days !== 'object') return null;
+  const set = new Set(Object.keys(days).filter((k) => days[k] && k in WEEKDAY_OF_KEY).map((k) => WEEKDAY_OF_KEY[k]));
+  return set.size ? set : null;
+}
 
 export const num = (s) => { const n = parseFloat(String(s ?? '').replace(/,/g, '').trim()); return Number.isFinite(n) ? n : 0; };
 export const money = (n) => Math.round(n * 100) / 100;
@@ -48,9 +62,9 @@ export function isoMinute(v) {
 const weekday = (iso) => new Date(iso + 'T00:00:00Z').getUTCDay();
 
 /** Branch from the Healthwire login that recorded the row. The North Nazimabad login is also used at Gulshan on days NN is closed. */
-export function branchOfLogin(login, iso) {
+export function branchOfLogin(login, iso, nnOpenWeekdays = NN_FALLBACK_WEEKDAYS) {
   const b = LOGIN_BRANCH[String(login || '').trim().toLowerCase()];
-  if (b === 'NN' && iso && !NN_OPEN_WEEKDAYS.has(weekday(iso))) return { branch: 'GUL', swapped: true };
+  if (b === 'NN' && iso && !nnOpenWeekdays.has(weekday(iso))) return { branch: 'GUL', swapped: true };
   return { branch: b || null, swapped: false };
 }
 
@@ -192,11 +206,11 @@ export function readTransactions(rows) {
 export const splitProcedures = (desc) => String(desc || '').split(/\s,\s|,(?=\S)/).map((s) => s.trim()).filter(Boolean);
 
 /** Branch of one transaction row: Location column, else the login that created/updated it, else the patient-name tag. */
-export function txBranch(t) {
+export function txBranch(t, nnOpenWeekdays) {
   const loc = branchInText(t.location) || LOGIN_BRANCH[norm(t.location)];
   if (loc) return { branch: loc, how: 'location', swapped: false };
   for (const login of [t.updatedBy, t.createdBy]) {
-    const r = branchOfLogin(login, t.date);
+    const r = branchOfLogin(login, t.date, nnOpenWeekdays);
     if (r.branch) return { branch: r.branch, how: 'login', swapped: r.swapped };
   }
   const tag = tagBranch(cleanName(t.name).tag);
@@ -206,8 +220,10 @@ export function txBranch(t) {
 
 /**
  * Transactions -> rows for import_healthwire(): patients, invoices, payments_tx, visits, plus a summary.
+ * Pass { clinicTimings: state.ref.settings.clinic_timings } so North Nazimabad's open days come from the branch hours.
  */
-export function buildFromTransactions(tx) {
+export function buildFromTransactions(tx, { clinicTimings } = {}) {
+  const nnDays = openWeekdaysFrom(clinicTimings, BRANCH_ID.NN) || NN_FALLBACK_WEEKDAYS;
   const byInv = new Map();
   for (const t of tx) { if (!byInv.has(t.inv)) byInv.set(t.inv, []); byInv.get(t.inv).push(t); }
   const pidBranches = new Map(); // mr -> Map(branch -> votes)
@@ -221,7 +237,7 @@ export function buildFromTransactions(tx) {
   for (const [inv, rows] of byInv) {
     rows.sort((a, b) => a.at.localeCompare(b.at));
     const votes = new Map(); let swapped = false, how = 'none';
-    for (const t of rows) { const r = txBranch(t); if (r.branch) { votes.set(r.branch, (votes.get(r.branch) || 0) + 1); how = r.how; swapped ||= r.swapped; } }
+    for (const t of rows) { const r = txBranch(t, nnDays); if (r.branch) { votes.set(r.branch, (votes.get(r.branch) || 0) + 1); how = r.how; swapped ||= r.swapped; } }
     const b = top(votes);
     if (b) { invBranch.set(inv, b); invHow.set(inv, swapped ? 'swapped' : how); vote(rows[0].mr, b); }
   }
@@ -259,7 +275,7 @@ export function buildFromTransactions(tx) {
 
     for (const t of rows) {
       if (!t.paid) continue;
-      const tb = txBranch(t).branch || b;
+      const tb = txBranch(t, nnDays).branch || b;
       payments.push([inv, t.mr, BRANCH_ID[tb], money(t.paid), t.mode, t.at]);
     }
     const labels = []; let tid = null;
@@ -267,7 +283,7 @@ export function buildFromTransactions(tx) {
     for (const t of rows) {
       const key = `${t.mr}|${t.date}`;
       const cur = visitsByKey.get(key);
-      const tb = txBranch(t).branch || b;
+      const tb = txBranch(t, nnDays).branch || b;
       if (cur) { for (const l of labels) if (!cur.labels.includes(l)) cur.labels.push(l); if (!cur.refs.includes(inv)) cur.refs.push(inv); if (first.desc && !cur.details.includes(first.desc)) cur.details += ' · ' + first.desc; }
       else visitsByKey.set(key, { mr: t.mr, d: t.date, branch: BRANCH_ID[tb], tid, labels: [...labels], details: first.desc, refs: [inv] });
     }

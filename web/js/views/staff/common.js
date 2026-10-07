@@ -1,6 +1,6 @@
 // Pieces shared by several staff screens: patient search box, new patient
 // form, flag buttons, photo upload, braces guidance.
-import { h, mount, modal, field, select, toast, friendlyError, rupees, $ } from '../../ui/dom.js';
+import { h, mount, modal, field, select, toast, friendlyError, rupees, announce, showFormErrors, clearFieldErrors, localISO } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId } from '../../state.js';
 
 export const STATUS_LABELS = { scheduled: 'Scheduled', waiting: 'Waiting', in_treatment: 'In treatment', completed: 'Completed', cancelled: 'Cancelled', no_show: 'No show' };
@@ -12,40 +12,147 @@ export function aliBadge(on) {
   return on ? h('span', { class: 'badge badge-ali', title: 'Next appointment with Dr. Ali Rashid' }, 'See Dr. Ali') : null;
 }
 
-/** Search-as-you-type patient picker. */
-export function patientSearch({ placeholder = 'Search name, Mr# or phone', onPick, onNew }) {
-  const input = h('input', { type: 'search', placeholder, autocomplete: 'off', 'aria-label': placeholder });
-  const box = h('div', { class: 'suggestions', hidden: true });
-  const wrap = h('div', { style: { position: 'relative', flex: '1 1 280px', maxWidth: '420px' } }, input, box);
+let idSeq = 0;
+/** Unique element ids for widgets that can appear more than once on a page. */
+const nextId = (prefix) => `${prefix}-${++idSeq}`;
+
+/**
+ * ARIA 1.2 combobox. Focus stays in the input; Up/Down move through the options
+ * (aria-activedescendant), Enter picks, Escape closes, and the number of results
+ * is announced. search(q) resolves to items; option(item) builds one option's
+ * element (it is given role=option); note(q, items) is optional non-option text
+ * shown under the list; onEnter(text) runs on Enter when no option is active.
+ */
+export function combobox({ wrap, input, popup, listLabel, search, option, onPick, onEnter, note, count, reopenOnFocus = false }) {
+  const listbox = h('div', { role: 'listbox', id: nextId('listbox'), 'aria-label': listLabel });
+  const noteHost = h('div', {});
+  mount(popup, listbox, noteHost);
+  for (const [k, v] of Object.entries({ role: 'combobox', 'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': listbox.id })) input.setAttribute(k, v);
+  let items = [];
+  let active = -1;
   let timer;
-  input.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(async () => {
-      const q = input.value.trim();
-      if (q.length < 2) { box.hidden = true; return; }
-      try {
-        const rows = await state.data.searchPatients(q);
-        mount(box,
-          rows.slice(0, 12).map((p) => h('button', { type: 'button', onclick: () => { box.hidden = true; input.value = ''; onPick(p); } },
-            h('span', {}, h('strong', {}, p.full_name), ' ', h('span', { class: 'muted' }, `Mr# ${p.mr_number}`)),
-            h('span', { class: 'inline' }, duesBadge(p.dues), aliBadge(p.see_dr_ali), h('span', { class: 'muted' }, p.phone)))),
-          onNew && can('patients.create') ? h('button', { type: 'button', onclick: () => { box.hidden = true; onNew(q); } }, h('strong', {}, `+ New patient "${q}"`)) : null,
-          !rows.length && !onNew ? h('div', { class: 'muted', style: { padding: '10px' } }, 'No patient found.') : null);
-        box.hidden = false;
-      } catch (e) { toast(friendlyError(e), 'error'); }
-    }, 220);
+  let seq = 0;
+  const setActive = (i) => {
+    active = i;
+    const opts = [...listbox.children];
+    opts.forEach((o, j) => o.setAttribute('aria-selected', String(j === i)));
+    if (opts[i]) { input.setAttribute('aria-activedescendant', opts[i].id); opts[i].scrollIntoView?.({ block: 'nearest' }); } else input.removeAttribute('aria-activedescendant');
+  };
+  const close = () => { clearTimeout(timer); seq++; popup.hidden = true; input.setAttribute('aria-expanded', 'false'); setActive(-1); };
+  const pick = (i) => { if (i < 0 || i >= items.length) return; const item = items[i]; close(); onPick(item); };
+  const run = async () => {
+    const q = input.value.trim();
+    if (q.length < 2) { close(); return; }
+    const n = ++seq;
+    let found;
+    try { found = await search(q); } catch (e) { if (n === seq) toast(friendlyError(e), 'error'); return; }
+    if (n !== seq) return;
+    items = found;
+    mount(listbox, items.map((item, i) => {
+      const el = option(item);
+      el.id = `${listbox.id}-${i}`;
+      el.tabIndex = -1;
+      el.setAttribute('role', 'option');
+      el.setAttribute('aria-selected', 'false');
+      el.addEventListener('click', (e) => { if (e.ctrlKey || e.metaKey || e.shiftKey) return; e.preventDefault(); pick(i); });
+      return el;
+    }));
+    mount(noteHost, note?.(q, items) || null);
+    setActive(-1);
+    popup.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    announce(count(items, q));
+  };
+  // A click on an option must not take focus out of the input (that would close the list first).
+  popup.addEventListener('mousedown', (e) => { if (e.target.closest('[role=option]') || !e.target.closest('a, button, input')) e.preventDefault(); });
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 220); });
+  if (reopenOnFocus) input.addEventListener('focus', () => { if (input.value.trim().length >= 2) run(); });
+  input.addEventListener('keydown', (e) => {
+    const open = !popup.hidden;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { run(); return; }
+      if (items.length) setActive(e.key === 'ArrowDown' ? (active + 1) % items.length : active <= 0 ? items.length - 1 : active - 1);
+    } else if (e.key === 'Enter') {
+      if (open && active >= 0) { e.preventDefault(); pick(active); } else if (onEnter) { e.preventDefault(); close(); onEnter(input.value.trim()); }
+    } else if (e.key === 'Escape' && open) {
+      e.preventDefault(); e.stopPropagation(); close();
+    }
   });
-  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') box.hidden = true; if (e.key === 'ArrowDown') $('button', box)?.focus(); });
-  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) box.hidden = true; });
+  wrap.addEventListener('focusout', (e) => { if (!wrap.contains(e.relatedTarget)) close(); });
+  return { close };
+}
+
+/** Search-as-you-type patient picker (an ARIA combobox). */
+export function patientSearch({ placeholder = 'Search name, Mr# or phone', label = placeholder, onPick, onNew }) {
+  const input = h('input', { type: 'search', placeholder, autocomplete: 'off', 'aria-label': label });
+  const box = h('div', { class: 'suggestions', hidden: true });
+  // The .suggestions box is the positioned popup; the listbox sits inside it with the "no match" note.
+  const wrap = h('div', { style: { position: 'relative', flex: '1 1 280px', maxWidth: '420px' } }, input, box);
+  const allowNew = !!onNew && can('patients.create');
+  const isNew = (p) => p.newName !== undefined;
+  combobox({
+    wrap, input, popup: box, listLabel: 'Matching patients',
+    search: async (q) => [...(await state.data.searchPatients(q)).slice(0, 12), ...(allowNew ? [{ newName: q }] : [])],
+    option: (p) => (isNew(p)
+      ? h('button', { type: 'button' }, h('strong', {}, `+ New patient "${p.newName}"`))
+      : h('button', { type: 'button' },
+        h('span', {}, h('strong', {}, p.full_name), ' ', h('span', { class: 'muted' }, `Mr# ${p.mr_number}`)),
+        h('span', { class: 'inline' }, duesBadge(p.dues), aliBadge(p.see_dr_ali), h('span', { class: 'muted' }, p.phone)))),
+    onPick: (p) => {
+      input.value = '';
+      if (isNew(p)) { onNew(p.newName); return; }
+      announce(`Selected: ${p.full_name}, Mr# ${p.mr_number}`);
+      onPick(p);
+    },
+    note: (q, items) => (items.length ? null : h('div', { class: 'muted', style: { padding: '10px' } }, 'No patient found.')),
+    count: (items) => {
+      const n = items.filter((p) => !isNew(p)).length;
+      if (n) return `${n} patient${n === 1 ? '' : 's'} found. Use the up and down arrows to choose.`;
+      return allowNew ? 'No patient found. The list has an option to register a new patient.' : 'No patient found.';
+    },
+  });
   return wrap;
+}
+
+/**
+ * A native <select> (or date input) that saved on every `change` would save each
+ * step of an arrow-key walk on Windows. Keyboard changes stay provisional until
+ * Enter or leaving the control; a pick from the open list (mouse, touch) commits
+ * at once; Escape undoes a provisional change. onCommit(value, previous) runs
+ * once per real change; onPreview(value) runs whenever the shown value changes.
+ * Returns { set(value) } to move the committed value (e.g. revert after a failed save).
+ */
+export function commitOnFinish(el, onCommit, onPreview) {
+  let committed = el.value;
+  let fromKey = false;
+  const finish = () => {
+    fromKey = false;
+    if (el.value === committed) return;
+    const previous = committed;
+    committed = el.value;
+    onCommit(committed, previous);
+  };
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish();
+    else if (e.key === 'Escape' && el.value !== committed) { e.preventDefault(); e.stopPropagation(); el.value = committed; onPreview?.(committed); }
+    else if (e.key.length === 1 || /^(Arrow|Page|Home|End)/.test(e.key)) {
+      // On Windows these change a closed select at once, firing `change` within this same task.
+      fromKey = true;
+      setTimeout(() => { fromKey = false; }, 0);
+    }
+  });
+  el.addEventListener('change', () => { onPreview?.(el.value); if (!fromKey) finish(); });
+  el.addEventListener('blur', finish);
+  return { set: (value) => { committed = value; el.value = value; onPreview?.(value); } };
 }
 
 /** New patient form with branch dropdown and duplicate check. Resolves with the created patient. */
 export function newPatientModal(prefillName = '', branchId) {
   return new Promise((resolve) => {
     const looksLikePhone = /^[\d\s+-]{7,}$/.test(prefillName);
-    const name = h('input', { value: looksLikePhone ? '' : prefillName, required: true, autocomplete: 'off' });
-    const phone = h('input', { type: 'tel', value: looksLikePhone ? prefillName : '', required: true, placeholder: '03xx xxxxxxx' });
+    const name = h('input', { value: looksLikePhone ? '' : prefillName, autocomplete: 'off' });
+    const phone = h('input', { type: 'tel', value: looksLikePhone ? prefillName : '', placeholder: '03xx xxxxxxx' });
     const email = h('input', { type: 'email', placeholder: 'For photos and receipts (optional)' });
     const gender = select([{ value: '', label: 'Not set' }, { value: 'female', label: 'Female' }, { value: 'male', label: 'Male' }, { value: 'other', label: 'Other' }], '');
     const dob = h('input', { type: 'date' });
@@ -63,18 +170,22 @@ export function newPatientModal(prefillName = '', branchId) {
     };
     name.addEventListener('change', checkDupes);
     phone.addEventListener('change', checkDupes);
-    modal('New patient', h('div', {},
+    const body = h('div', {},
       h('p', { class: 'muted' }, 'Mr# is given automatically. Write the name only, without the branch (no "lhr" or "N.N").'),
       warn,
       h('div', { class: 'form-grid' },
-        field('Full name', name), field('Phone number', phone), field('Email', email),
+        field('Full name', name, null, { required: true }), field('Phone number', phone, null, { required: true }), field('Email', email),
         field('Branch', branch), field('Gender', gender), field('Date of birth', dob),
         field('How did they hear about us?', source), field('Brought in by doctor', ownDoctor, "Only when a doctor brings their own patient. Their percentage is counted on this patient's bills.")),
-      h('label', { class: 'inline' }, consent, 'Patient agrees their before/after photos can be shown on the website')), [
+      h('label', { class: 'inline' }, consent, 'Patient agrees their before/after photos can be shown on the website'));
+    modal('New patient', body, [
       { label: 'Cancel', onClick: () => resolve(null) },
       { label: 'Create patient', primary: true, onClick: async () => {
-        if (name.value.trim().length < 2) { toast('Write the patient name.'); return false; }
-        if (phone.value.replace(/\D/g, '').length < 10) { toast('Write a full phone number.'); return false; }
+        const errors = [];
+        if (name.value.trim().length < 2) errors.push({ input: name, message: 'Write the patient name.' });
+        if (phone.value.replace(/\D/g, '').length < 10) errors.push({ input: phone, message: 'Write a full phone number with at least 10 digits, e.g. 0300 1234567.' });
+        if (errors.length) { showFormErrors(body, errors); return false; }
+        clearFieldErrors(body);
         try {
           const p = await state.data.createPatient({ full_name: name.value, phone: phone.value, email: email.value || null, gender: gender.value || null,
             date_of_birth: dob.value || null, first_branch_id: Number(branch.value), referral_source: source.value || null, referred_by_clinician: ownDoctor.value || null,
@@ -89,12 +200,14 @@ export function newPatientModal(prefillName = '', branchId) {
 
 export function flagForAliModal(patient, onDone) {
   const reason = h('textarea', { placeholder: 'What seems wrong? Dr. Ali will see this.' });
-  modal('Next appointment with Dr. Ali Rashid', h('div', {},
+  const body = h('div', {},
     h('p', {}, `${patient.full_name} will see the message "Please get your next appointment done by Dr. Ali Rashid", and will appear on Dr. Ali's list.`),
-    field('Reason', reason)), [
+    field('Reason', reason, null, { required: true }));
+  modal('Next appointment with Dr. Ali Rashid', body, [
     { label: 'Cancel' },
     { label: 'Flag for Dr. Ali', primary: true, onClick: async () => {
-      if (!reason.value.trim()) { toast('Write the reason.'); return false; }
+      if (!reason.value.trim()) { showFormErrors(body, [{ input: reason, message: 'Write the reason, so Dr. Ali knows what to look at.' }]); return false; }
+      clearFieldErrors(body);
       try { await state.data.raiseFlag(patient.id, reason.value.trim()); toast('Flagged for Dr. Ali.', 'ok'); onDone?.(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
     } },
   ]);
@@ -102,29 +215,66 @@ export function flagForAliModal(patient, onDone) {
 
 export const PHOTO_VIEWS = ['Front', 'Smile', 'Left', 'Right', 'Upper occlusal', 'Lower occlusal', 'Profile', 'X-ray / OPG', 'Other'];
 
+// Edited before/after photos are what patients open in their account, mostly on
+// mobile data. Phone cameras give 4000px+ files of several MB, so these are
+// shrunk to this long edge before upload. Raw clinical photos and X-rays are
+// uploaded untouched (they are the clinical record).
+const PATIENT_PHOTO_MAX_EDGE = 2400;
+
+async function shrinkPhoto(file) {
+  if (!/^image\/(jpeg|webp)$/.test(file.type) || file.size < 1.5e6 || typeof createImageBitmap !== 'function') return file;
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const scale = Math.min(1, PATIENT_PHOTO_MAX_EDGE / Math.max(bmp.width, bmp.height));
+    if (scale === 1) { bmp.close?.(); return file; }
+    const canvas = h('canvas', { width: Math.round(bmp.width * scale), height: Math.round(bmp.height * scale) });
+    canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+    if (!blob || blob.size >= file.size) return file;
+    return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg', lastModified: file.lastModified });
+  } catch { return file; }
+}
+
+const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
 export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
   const files = h('input', { type: 'file', accept: 'image/*', multiple: true, capture: 'environment' });
   const view = select(PHOTO_VIEWS, 'Front');
   const edited = h('input', { type: 'checkbox' });
   const publicOk = h('input', { type: 'checkbox', disabled: !patient.photo_consent_public });
-  modal(`Upload photos · ${patient.full_name}`, h('div', {},
+  // A failed batch must not upload the photos that already went through again:
+  // remember which files are done, and give each file one idempotency key for all attempts.
+  const done = new Set();
+  const keys = new Map();
+  const body = h('div', {},
     h('p', { class: 'muted' }, 'Raw photos go to the clinic photos folder (staff only). Tick "edited" for the finished before/after versions: those are the ones the patient sees in their account.'),
-    field('Photos', files), field('View', view, 'For several photos, the view is numbered automatically. Choose "X-ray / OPG" for X-rays.'),
+    field('Photos', files, null, { required: true }), field('View', view, 'For several photos, the view is numbered automatically. Choose "X-ray / OPG" for X-rays.'),
     h('label', { class: 'inline' }, edited, 'Edited before/after version (shared with the patient)'),
-    h('label', { class: 'inline', style: { marginTop: '6px' } }, publicOk, patient.photo_consent_public ? 'May be shown on the website (patient has given consent)' : 'May be shown on the website — the patient has not given photo consent yet')), [
+    h('label', { class: 'inline', style: { marginTop: '6px' } }, publicOk, patient.photo_consent_public ? 'May be shown on the website (patient has given consent)' : 'May be shown on the website — the patient has not given photo consent yet'));
+  modal(`Upload photos · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Upload', primary: true, onClick: async () => {
-      if (!files.files.length) { toast('Choose at least one photo.'); return false; }
+      const list = [...files.files];
+      if (!list.length) { showFormErrors(body, [{ input: files, message: 'Choose at least one photo.' }]); return false; }
+      clearFieldErrors(body);
+      const isEdited = edited.checked;
       try {
-        let i = 0;
-        for (const file of files.files) {
-          i++;
-          await state.data.uploadPhoto({ patientId: patient.id, visitId, branchId, file, viewLabel: files.files.length > 1 ? `${view.value} ${i}` : view.value,
-            kind: edited.checked ? 'edited' : 'raw', publicOk: edited.checked && publicOk.checked && patient.photo_consent_public });
+        for (const [i, file] of list.entries()) {
+          if (done.has(file)) continue;
+          if (!keys.has(file)) keys.set(file, newKey());
+          const upload = isEdited && view.value !== 'X-ray / OPG' ? await shrinkPhoto(file) : file;
+          await state.data.uploadPhoto({ patientId: patient.id, visitId, branchId, file: upload, viewLabel: list.length > 1 ? `${view.value} ${i + 1}` : view.value,
+            kind: isEdited ? 'edited' : 'raw', publicOk: isEdited && publicOk.checked && patient.photo_consent_public, idempotencyKey: keys.get(file) });
+          done.add(file);
         }
-        toast(`${files.files.length} photo${files.files.length > 1 ? 's' : ''} uploaded.`, 'ok');
+        toast(`${list.length} photo${list.length > 1 ? 's' : ''} uploaded.`, 'ok');
         onDone?.();
-      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } catch (e) {
+        const partly = list.filter((f) => done.has(f)).length;
+        toast(`${friendlyError(e)}${partly ? ` ${partly} of ${list.length} photos were uploaded; pressing Upload again sends only the rest.` : ''}`, 'error');
+        return false;
+      }
     } },
   ]);
 }
@@ -136,14 +286,16 @@ export function documentUploadModal(patient, { onDone } = {}) {
   const file = h('input', { type: 'file', accept: 'application/pdf,image/*' });
   const kind = select(Object.entries(DOCUMENT_KINDS).map(([value, label]) => ({ value, label })), 'consent');
   const title = h('input', { placeholder: 'e.g. Consent and information form', value: 'Consent and information form' });
-  const date = h('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+  const date = h('input', { type: 'date', value: localISO() });
   kind.addEventListener('change', () => { if (!title.value || Object.values(DOCUMENT_KINDS).includes(title.value) || title.value.startsWith('Consent')) title.value = kind.value === 'consent' ? 'Consent and information form' : DOCUMENT_KINDS[kind.value]; });
-  modal(`Add document · ${patient.full_name}`, h('div', {},
+  const body = h('div', {},
     h('p', { class: 'muted' }, 'Scanned forms and ID copies stay private to staff; patients see only their own.'),
-    field('File', file, 'PDF or a photo of the signed form.'), field('Type', kind), field('Title', title), field('Date', date)), [
+    field('File', file, 'PDF or a photo of the signed form.', { required: true }), field('Type', kind), field('Title', title), field('Date', date));
+  modal(`Add document · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Save', primary: true, onClick: async () => {
-      if (!file.files.length) { toast('Choose a file.'); return false; }
+      if (!file.files.length) { showFormErrors(body, [{ input: file, message: 'Choose a file.' }]); return false; }
+      clearFieldErrors(body);
       try {
         await state.data.uploadDocument({ patientId: patient.id, file: file.files[0], kind: kind.value, title: title.value.trim() || DOCUMENT_KINDS[kind.value], addedOn: date.value });
         toast('Document saved.', 'ok');

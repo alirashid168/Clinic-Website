@@ -79,7 +79,7 @@ export function matchClinician(raw, clinicians) {
         && key.split(' ').length === 1);
     return first.length === 1 ? first[0] : null;
 }
-/** Sheet cells list several people: "Dr. Ali Rashid, Anousha Khan, Dr. Samrah Khan" */
+/** Sheet cells list several people: "Dr. Ali Rashid, Assistant A, Dr. B" */
 export function splitPeople(cell) {
     return cell.split(/,|\/|&|\band\b/i).map((s) => s.trim()).filter(Boolean);
 }

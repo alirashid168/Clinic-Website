@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page not found | Dr. Ali Rashid's Dental Clinic</title>
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#22113b">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <!-- Served for any address that does not exist (old pages of the previous website, typos),
+       so everything is inline and every link starts with "/". -->
+  <style>
+    html, body { margin: 0; }
+    body { min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: 24px 16px; box-sizing: border-box;
+      background: linear-gradient(180deg, #22113b, #3e2464); color: #1f1a2b;
+      font: 1rem/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+    main { background: #fff; border-radius: 18px; padding: 28px; width: min(480px, 100%); box-sizing: border-box; box-shadow: 0 30px 80px rgba(10, 4, 22, .35); }
+    h1 { font-size: 1.5rem; line-height: 1.2; margin: 0 0 .5em; }
+    p { margin: 0 0 1em; }
+    .muted { color: #6a6478; }
+    a { color: #3e2464; font-weight: 600; }
+    a:focus-visible { outline: 3px solid #3e2464; outline-offset: 2px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 18px; border-radius: 10px; background: #3e2464; color: #fff; text-decoration: none; }
+    .btn:focus-visible { outline-color: #b08d57; }
+    ul { padding-left: 1.2em; margin: 0 0 1em; }
+    li { margin: .35em 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/#/">Dr. Ali Rashid's Dental Clinic</a></p>
+    <h1>We could not find that page</h1>
+    <p>Our website has changed, so this address no longer leads anywhere. <span id="auto">You will be taken to the homepage in a few seconds.</span></p>
+    <p><a class="btn" id="go" href="/#/">Go to the homepage</a></p>
+    <p class="muted">Or go straight to:</p>
+    <ul>
+      <li><a href="/#/visitor">Braces and treatments</a></li>
+      <li><a href="/#/clinics">Our clinics and opening hours</a></li>
+      <li><a href="/#/login/patient">Patient login</a></li>
+    </ul>
+  </main>
+  <script>
+    // Send old addresses to the matching page of the new site, anything else to the homepage.
+    // The wait is cancelled as soon as someone presses a key or taps, so nobody is moved mid-read.
+    (function () {
+      var path = location.pathname.replace(/\/+$/, '').replace(/\.html?$/, '').toLowerCase();
+      var route = path.replace(/^\//, '');
+      var target = '/#/';
+      if (/^(visitor|clinics|dr-ali|login\/(staff|patient)|patient(\/demo)?)$/.test(route)) target = '/#/' + route;
+      else if (/contact|location|branch|clinic|address|timing/.test(path)) target = '/#/clinics';
+      else if (/service|treatment|brace|price|orthodont|veneer|smile/.test(path)) target = '/#/visitor';
+      var go = document.getElementById('go');
+      go.href = target;
+      if (target !== '/#/') go.textContent = 'Go to the new page';
+      var timer = setTimeout(function () { location.replace(target); }, 6000);
+      function stay() {
+        clearTimeout(timer);
+        document.getElementById('auto').textContent = '';
+        document.removeEventListener('keydown', stay);
+        document.removeEventListener('pointerdown', stay);
+      }
+      document.addEventListener('keydown', stay);
+      document.addEventListener('pointerdown', stay);
+    })();
+  </script>
+</body>
+</html>

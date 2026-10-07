@@ -1,17 +1,31 @@
 // GENERATED from src/lib by scripts/build-lib.sh. Edit the .ts file, not this one.
+// NOTE (2026-10-07 audit fixes): edited directly in this mirror because src/lib is not part of it.
+// Port these changes back to src/lib/hours.ts before the next build, or they will be overwritten.
+//
 // Branch opening hours and Dr. Ali's dated calendar.
 //
 // Two separate things, on purpose:
 //  - Branch hours: when a clinic is open. Karachi branches open on fixed
-//    weekdays whether or not Dr. Ali is there. Lahore and Islamabad open ONLY
-//    on Dr. Ali's visit dates, so their cards list dates, never weekdays.
+//    weekdays (clinic_timings, mode 'weekly') whether or not Dr. Ali is there.
+//    Lahore and Islamabad (mode 'visits') open ONLY on Dr. Ali's visit dates,
+//    so their cards list dates, never weekdays.
 //  - Dr. Ali's calendar: where he personally is. A normal week follows the
 //    recurring weekday rows; a date with its own (on_date) rows, such as a
 //    Lahore or Islamabad trip, replaces the normal week for that day.
+//
+// One rule for Dr. Ali's times: slotsOn(). The "This week" strip, the clinic
+// cards' bars, visit-branch opening times, trip lists and calendars all read
+// it, so they cannot disagree. The dated rows staff enter in the admin
+// calendar are the source for visit days; the old clinic_timings 'hours'
+// string of a visit branch is not used, because staff cannot edit it.
 export const DAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_BY_INDEX = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const SHORT = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LONG = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+/** Short weekday names by JS weekday index (0 = Sunday). */
+export const SHORT_DOW = DAY_BY_INDEX.map((k) => SHORT[k]);
+export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 // ---------------------------------------------------------------- dates
 export function addDays(iso, n) {
     const d = new Date(iso + 'T12:00:00Z');
@@ -24,6 +38,11 @@ export function dayKeyOf(iso) { return DAY_BY_INDEX[weekdayOf(iso)]; }
 export function dateLabel(iso) {
     const [, m, d] = iso.split('-').map(Number);
     return `${SHORT[dayKeyOf(iso)]} ${d} ${MONTHS[m - 1]}`;
+}
+/** "Thursday 8 October" */
+export function fullDateLabel(iso) {
+    const [, m, d] = iso.split('-').map(Number);
+    return `${LONG[dayKeyOf(iso)]} ${d} ${MONTH_NAMES[m - 1]}`;
 }
 // ---------------------------------------------------------------- times
 /** "16:00" -> "4 PM", "12:00" -> "12 PM", "14:30" -> "2:30 PM" */
@@ -51,60 +70,6 @@ export function branchHoursFrom(setting) {
     }
     return (t && typeof t === 'object' && t.branches && typeof t.branches === 'object') ? t.branches : {};
 }
-// ---------------------------------------------------------------- branch cards
-/** Weekday lines such as "Mon – Thu: 12 PM – 9 PM", "Sun: Closed". Consecutive equal days are merged. */
-export function weeklyLines(days) {
-    const groups = [];
-    for (const k of DAY_ORDER) {
-        const v = days[k] || '';
-        const last = groups[groups.length - 1];
-        if (last && last.v === v)
-            last.to = k;
-        else
-            groups.push({ from: k, to: k, v });
-    }
-    return groups.map((g) => {
-        const label = g.from === g.to ? SHORT[g.from] : `${SHORT[g.from]} – ${SHORT[g.to]}`;
-        return `${label}: ${g.v ? range(g.v) : 'Closed'}`;
-    });
-}
-/** Upcoming visit dates of a branch, merged into runs of consecutive days. */
-export function visitRuns(rows, branchId, today, hours) {
-    const byDate = new Map();
-    for (const r of rows) {
-        if (r.branch_id !== branchId || !r.on_date || r.unavailable || r.on_date < today)
-            continue;
-        byDate.set(r.on_date, [...(byDate.get(r.on_date) || []), r]);
-    }
-    const dates = [...byDate.keys()].sort();
-    const runs = [];
-    for (const d of dates) {
-        const own = byDate.get(d).sort((a, b) => a.start_time.localeCompare(b.start_time));
-        const t = hours ? range(hours) : range(own[0].start_time.slice(0, 5), own[own.length - 1].end_time.slice(0, 5));
-        const last = runs[runs.length - 1];
-        if (last && addDays(last.to, 1) === d) {
-            last.to = d;
-            last.times.push(t);
-            last.dates.push(d);
-        }
-        else
-            runs.push({ from: d, to: d, times: [t], dates: [d] });
-    }
-    return runs.map((r) => {
-        const label = r.from === r.to ? dateLabel(r.from) : `${dateLabel(r.from)} – ${dateLabel(r.to)}`;
-        const same = r.times.every((x) => x === r.times[0]);
-        const time = same ? r.times[0] : r.dates.map((d, i) => `${SHORT[dayKeyOf(d)]} ${r.times[i]}`).join(' · ');
-        return { from: r.from, to: r.to, text: same ? `${label}, ${r.times[0]}` : label, label, time };
-    });
-}
-/** Is the branch open on this date? null when hours are unknown. */
-export function openOn(h, rows, branchId, date) {
-    if (!h)
-        return null;
-    if (h.mode === 'weekly')
-        return !!h.days[dayKeyOf(date)];
-    return rows.some((r) => r.branch_id === branchId && r.on_date === date && !r.unavailable);
-}
 // ---------------------------------------------------------------- Dr. Ali's calendar
 /** Where Dr. Ali is on a date. Dated rows replace the normal week for that day. */
 export function slotsOn(rows, date) {
@@ -119,13 +84,42 @@ export function slotsOn(rows, date) {
     const weekly = rows.filter((r) => r.weekday === wd && !r.on_date && !r.unavailable && !off.has(r.branch_id));
     return { slots: sort(weekly.map(toSlot)), dated: false };
 }
+/** Dr. Ali's slots at one branch on a date (from slotsOn, so they match the strip). */
+export function aliSlotsAt(rows, branchId, date) {
+    return slotsOn(rows, date).slots.filter((s) => s.branch_id === branchId);
+}
+// ---------------------------------------------------------------- branch cards
+/** Upcoming visit dates of a branch (days Dr. Ali is there), merged into runs of consecutive days. */
+export function visitRuns(rows, branchId, today, horizon = 180) {
+    const runs = [];
+    for (let n = 0; n < horizon; n++) {
+        const d = addDays(today, n);
+        const own = aliSlotsAt(rows, branchId, d);
+        if (!own.length)
+            continue;
+        const t = own.map((s) => range(s.start, s.end)).join(', ');
+        const last = runs[runs.length - 1];
+        if (last && addDays(last.to, 1) === d) {
+            last.to = d;
+            last.times.push(t);
+            last.dates.push(d);
+        }
+        else
+            runs.push({ from: d, to: d, times: [t], dates: [d] });
+    }
+    return runs.map((r) => {
+        const label = r.from === r.to ? dateLabel(r.from) : `${dateLabel(r.from)} – ${dateLabel(r.to)}`;
+        const same = r.times.every((x) => x === r.times[0]);
+        const time = same ? r.times[0] : r.dates.map((d, i) => `${SHORT[dayKeyOf(d)]} ${r.times[i]}`).join(' · ');
+        return { from: r.from, to: r.to, text: `${label}, ${time}`, label, time };
+    });
+}
 // ---------------------------------------------------------------- live status
 // Minutes since midnight: "16:30" -> 990.
 export function toMin(t) {
     const [h, m] = t.slice(0, 5).split(':').map(Number);
     return h * 60 + (m || 0);
 }
-const LONG = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 /** "today", "tomorrow", "Thursday", or "Thu 15 Oct" further out. */
 export function whenLabel(date, today) {
     if (date === today)
@@ -137,21 +131,25 @@ export function whenLabel(date, today) {
             return LONG[dayKeyOf(date)];
     return dateLabel(date);
 }
-/** The branch's opening span on a date, as [start, end] times, or null when closed. */
+/**
+ * The branch's opening span on a date, as [start, end] times, or null when closed.
+ * Weekly branches: their fixed hours for that weekday (or, on a normally closed day,
+ * the hours Dr. Ali is booked there). Visit branches: Dr. Ali's slots there that day.
+ */
 export function openSpan(h, rows, branchId, date) {
     if (!h)
         return null;
+    const own = aliSlotsAt(rows, branchId, date);
+    const ali = own.length ? [own[0].start, own.reduce((e, s) => (s.end > e ? s.end : e), own[0].end)] : null;
     if (h.mode === 'weekly') {
-        const v = h.days[dayKeyOf(date)];
-        return v ? v.split('-') : null;
+        const v = h.days?.[dayKeyOf(date)];
+        return v ? v.split('-') : ali;
     }
-    const own = rows.filter((r) => r.branch_id === branchId && r.on_date === date && !r.unavailable)
-        .sort((a, b) => a.start_time.localeCompare(b.start_time));
-    if (!own.length)
-        return null;
-    if (h.hours)
-        return h.hours.split('-');
-    return [own[0].start_time.slice(0, 5), own[own.length - 1].end_time.slice(0, 5)];
+    return ali;
+}
+/** One branch on one date: its opening span and Dr. Ali's slots there. Cards and the strip share this rule. */
+export function branchDay(h, rows, branchId, date) {
+    return { date, open: openSpan(h, rows, branchId, date), ali: aliSlotsAt(rows, branchId, date).map((s) => [s.start, s.end]) };
 }
 /** "Open now · until 9 PM", "Opens today, 4 PM", "Opens Thursday, 4 PM", "Next open Thu 22 Oct". */
 export function branchStatus(h, rows, branchId, today, nowMin) {
@@ -183,9 +181,7 @@ export function aliNow(rows, today, nowMin) {
 export function aliNext(rows, branchId, today, nowMin, horizon = 60) {
     for (let n = 0; n < horizon; n++) {
         const date = addDays(today, n);
-        for (const s of slotsOn(rows, date).slots) {
-            if (s.branch_id !== branchId)
-                continue;
+        for (const s of aliSlotsAt(rows, branchId, date)) {
             if (n === 0 && nowMin >= toMin(s.end))
                 continue;
             return { here: n === 0 && nowMin >= toMin(s.start), date, start: s.start, end: s.end };
@@ -208,5 +204,5 @@ export function monthCells(year, month) {
     return cells;
 }
 export function monthTitle(year, month) {
-    return ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][month - 1] + ' ' + year;
+    return MONTH_NAMES[month - 1] + ' ' + year;
 }

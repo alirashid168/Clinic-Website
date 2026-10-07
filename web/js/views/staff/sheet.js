@@ -1,61 +1,178 @@
-// Aaj ki List: the daily sheet, Google Sheets style. Every change saves by
-// itself; if the internet drops, changes wait on this device and are sent
-// when it comes back.
-import { h, mount, toast, friendlyError, todayISO, rupees, modal, select, timeOf, downloadCSV, $$ } from '../../ui/dom.js';
+// Aaj ki List: the daily sheet, Google Sheets style. Typed cells (treatment,
+// details, notes) save by themselves; if the internet drops, those typed
+// changes wait on this device and are sent when it comes back. Status, doctor
+// and new-patient changes need the connection, and say so when they fail.
+import { h, mount, toast, friendlyError, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
-import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel } from './common.js';
+import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
 
 const NETWORK = /Failed to fetch|NetworkError|network|timeout|Load failed/i;
+const QUEUE_KEY = 'aaj-ki-list-pending-v1';
+const FIELD_NAMES = { treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes' };
+// The patient cell is each row's header (th scope=row). The table.sheet th rules are for the
+// sticky column headers, so undo the ones that would make every row header stick to the top.
+const ROW_HEAD_STYLE = { top: 'auto', zIndex: 1, background: 'var(--surface)', color: 'inherit', fontWeight: 'inherit', fontSize: 'inherit', padding: 0, whiteSpace: 'normal', textAlign: 'left', borderRight: '1px solid var(--border)', borderBottom: '1px solid var(--border)', boxShadow: '1px 0 0 var(--border-strong)' };
 
-let queue;
-let saveStateEl;
+const isNetworkError = (e) => NETWORK.test(e?.message || String(e)) || !navigator.onLine;
+// Status, doctor and new-patient changes are not queued offline: say plainly that nothing was saved.
+const notSaved = (e, still) => (isNetworkError(e) ? `Not saved: no internet connection. ${still} Try again once you are back online.` : friendlyError(e));
+
+// ---------------------------------------------------------------- offline queue
+// One queue per signed-in staff member: autosave.js stores their typed edits under a key that
+// includes their user id, so they are never sent under someone else's account on a shared
+// computer. Logout stops the queue (autosave.clearForUser); the next render starts a fresh one.
+let queue = null;
+let queueUser = null;
+let saveUI = null; // the save-status display of the Aaj ki List on screen, if any
+let hadProblem = false;
+
+const currentUser = () => state.session?.staff?.id || null;
+const failedEdits = () => (Array.isArray(queue?.failed) ? queue.failed : []);
+const errorText = (error) => { const msg = typeof error === 'string' ? error : error?.message; return msg ? friendlyError({ message: msg }) : ''; };
+
+function describeEdit(edit) {
+  if (!edit) return 'a change';
+  const name = saveUI?.nameOf(edit.rowId) || 'a patient';
+  const what = Object.entries(edit.changes || {}).map(([f, v]) => `${FIELD_NAMES[f] || f} "${String(v ?? '').slice(0, 60)}"`).join(', ');
+  return `${name}, ${what}`;
+}
+
+function showSaveState(s, pending) {
+  if (s === 'error' || s === 'offline') hadProblem = true;
+  else if (s === 'saved' && hadProblem) { hadProblem = false; announce('All changes on the Aaj ki List are saved.'); }
+  saveUI?.update(s, pending, failedEdits());
+}
 
 function getQueue() {
-  if (queue) return queue;
+  const uid = currentUser();
+  if (queue && queueUser === uid && !queue.disposed) return queue;
+  // Signed out (the queue was stopped) or someone else signed in: start this person's own queue.
+  // The previous person's unsent edits stay on the device under their own key.
+  if (queue && !queue.disposed) queue.dispose();
   let store;
-  try { store = window.localStorage; store.getItem('x'); } catch { store = { getItem: () => null, setItem: () => {} }; }
-  queue = new AutosaveQueue({
+  try { store = window.localStorage; store.getItem('x'); } catch { store = { getItem: () => null, setItem: () => {}, removeItem: () => {} }; }
+  const q = new AutosaveQueue({
     store,
-    storageKey: 'aaj-ki-list-pending-v1',
+    storageKey: QUEUE_KEY,
+    userId: uid,
     send: async (edit) => {
+      // Signed out, or someone else signed in: stop, keep the edit for its owner and send nothing.
+      if (currentUser() !== uid) { q.dispose(); throw new Error('Signed out: the change is kept on this device.'); }
       try {
         await state.data.updateVisit(edit.rowId, edit.changes);
       } catch (e) {
         const msg = e?.message || String(e);
         if (NETWORK.test(msg)) throw e;
-        toast(friendlyError(e), 'error', 7000);
         document.dispatchEvent(new CustomEvent('sheet-reload'));
         throw new PermanentSaveError(msg);
       }
     },
-    onState: (s, pending) => {
-      if (!saveStateEl) return;
-      saveStateEl.dataset.state = s;
-      saveStateEl.textContent = s === 'saved' ? 'All changes saved' : s === 'saving' ? `Saving ${pending || ''}…` : s === 'offline' ? `Offline: ${pending} change${pending === 1 ? '' : 's'} waiting` : 'Some changes could not be saved';
+    onState: (s, pending) => { if (queue === q) showSaveState(s, pending); },
+    // Say which patient and cell could not be saved; the list at the top has Try again and Discard.
+    onFailed: (detail) => {
+      if (queue !== q) return;
+      toast(`Not saved: ${describeEdit(detail.edit)}. ${errorText(detail.error)} Use "Try again" at the top of the Aaj ki List.`, 'error', 12000);
     },
   });
-  window.addEventListener('online', () => queue.setOnline(true));
-  window.addEventListener('offline', () => queue.setOnline(false));
-  if (!navigator.onLine) queue.setOnline(false);
-  window.addEventListener('beforeunload', (e) => { if (queue.pendingCount) { e.preventDefault(); e.returnValue = ''; } });
-  return queue;
+  queue = q;
+  queueUser = uid;
+  hadProblem = false;
+  return q;
 }
 
-export async function renderSheet(root, params) {
+window.addEventListener('online', () => { if (queue && queueUser === currentUser()) queue.setOnline(true); });
+window.addEventListener('offline', () => queue?.setOnline(false));
+window.addEventListener('beforeunload', (e) => { if (queue?.pendingCount && !queue.disposed && queueUser === currentUser()) { e.preventDefault(); e.returnValue = ''; } });
+
+let stopPrevious = null; // live updates of the previous Aaj ki List render
+
+export async function renderSheet(root, params, signal) {
+  stopPrevious?.();
+  if (signal?.aborted) return;
   const d = state.data;
   const q = getQueue();
+  const life = new AbortController();
   const branches = myBranches();
   let branchId = Number(params.get('branch')) || defaultBranchId();
-  let date = params.get('date') || todayISO();
+  let date = params.get('date') || localISO();
   let rows = [];
   let filter = '';
 
-  saveStateEl = h('span', { class: 'save-state', dataset: { state: 'saved' } }, 'All changes saved');
   const tableBody = h('tbody', {});
   const counts = h('span', { class: 'muted' });
+
+  // ---- save status, the list of changes that could not be saved, and undo for removals.
+  const saveStatus = h('span', { class: 'save-status save-state', tabindex: '-1', dataset: { state: 'saved' } }, 'All changes saved');
+  const failList = h('ul', {});
+  // (.btn sets display, which beats the hidden attribute, so the button is mounted only when needed.)
+  const retryAll = h('button', { type: 'button', class: 'btn btn-small', onclick: () => { q.retryFailed(); announce('Trying the unsaved changes again.'); } }, 'Try all again');
+  const retryAllHost = h('div', {});
+  const failBox = h('div', { class: 'alert alert-stop', id: 'sheet-save-failures', hidden: true },
+    h('strong', {}, 'These changes are not saved yet:'), failList, retryAllHost);
+  const discard = (f) => modal('Discard this change?', h('p', {}, `${describeEdit(f.edit)} will not be saved. This cannot be undone.`), [
+    { label: 'Keep it' },
+    { label: 'Discard', danger: true, onClick: () => { q.discardFailed(f.key); announce('Change discarded.'); } },
+  ], { destructive: true });
+  function markInvalid() {
+    const bad = new Set(failedEdits().flatMap((f) => Object.keys(f.edit?.changes || {}).map((k) => `${f.edit.rowId}|${k}`)));
+    for (const el of tableBody.querySelectorAll('[data-field]')) {
+      if (bad.has(`${el.closest('tr').dataset.id}|${el.dataset.field}`)) { el.setAttribute('aria-invalid', 'true'); el.setAttribute('aria-describedby', failBox.id); }
+      else if (el.hasAttribute('aria-invalid')) { el.removeAttribute('aria-invalid'); el.removeAttribute('aria-describedby'); }
+    }
+  }
+  const ui = {
+    nameOf: (id) => rows.find((r) => String(r.id) === String(id))?.patient.full_name,
+    update(s, pending, failed) {
+      saveStatus.dataset.state = s;
+      saveStatus.classList.toggle('is-error', s === 'error');
+      saveStatus.textContent = s === 'saved' ? 'All changes saved' : s === 'saving' ? `Saving ${pending || ''}…`
+        : s === 'offline' ? `Offline: ${pending} typed change${pending === 1 ? '' : 's'} kept on this device`
+          : `${failed.length || 'Some'} change${failed.length === 1 ? ' is' : 's are'} not saved`;
+      const hadFocus = failBox.contains(document.activeElement);
+      failBox.hidden = s !== 'error';
+      mount(retryAllHost, failed.length > 1 ? retryAll : null);
+      mount(failList, failed.map((f) => {
+        const what = describeEdit(f.edit);
+        return h('li', {}, what, f.error ? h('span', { class: 'muted' }, ` (${errorText(f.error)})`) : null, ' ',
+          h('button', { type: 'button', class: 'btn btn-small', 'aria-label': `Try again: ${what}`, onclick: () => { q.retryFailed(f.key); announce('Trying this change again.'); } }, 'Try again'), ' ',
+          h('button', { type: 'button', class: 'btn btn-small btn-danger', 'aria-label': `Discard: ${what}`, onclick: () => discard(f) }, 'Discard'));
+      }));
+      // The button that had focus was redrawn or hidden: keep focus in the box, or on the status.
+      if (hadFocus && !failBox.contains(document.activeElement)) (failBox.hidden ? saveStatus : failBox.querySelector('button:not([hidden])') || saveStatus).focus();
+      markInvalid();
+    },
+  };
+  saveUI = ui;
+
+  const undoText = h('span', {});
+  let undoFn = null;
+  let undoTimer = null;
+  const hideUndo = () => {
+    clearTimeout(undoTimer);
+    // Never pull the button away from someone who is on it.
+    if (undoBox.contains(document.activeElement)) { undoTimer = setTimeout(hideUndo, 3000); return; }
+    undoFn = null; undoBox.hidden = true;
+  };
+  const undoBox = h('div', { class: 'alert alert-info', hidden: true }, undoText, ' ',
+    h('button', { type: 'button', class: 'btn btn-small', onclick: async () => {
+      const fn = undoFn;
+      undoFn = null;
+      clearTimeout(undoTimer);
+      if (fn) await fn(); // the bar (and focus on Undo) stays until the undo has run
+      if (undoBox.contains(document.activeElement)) saveStatus.focus();
+      undoBox.hidden = true;
+    } }, 'Undo'));
+  function offerUndo(message, fn) {
+    clearTimeout(undoTimer);
+    undoFn = fn;
+    undoText.textContent = message;
+    undoBox.hidden = false;
+    announce(`${message} Undo is at the top of the list for 10 seconds.`);
+    undoTimer = setTimeout(hideUndo, 10000);
+  }
 
   // "All branches" (people who work across branches): read-only overview, add patients from a single branch.
   const allBranches = branches.length > 1;
@@ -65,16 +182,16 @@ export async function renderSheet(root, params) {
   });
   const dateInput = h('input', { type: 'date', value: date, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
   const filterSel = select([{ value: '', label: 'All statuses' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))], '', {
-    'aria-label': 'Filter', onchange: (e) => { filter = e.target.value; draw(); },
+    'aria-label': 'Filter by status', onchange: (e) => { filter = e.target.value; draw(); },
   });
   // More filters (blueprint 11.1): by doctor, dues, braces month and a quick name search.
   let doctorFilter = ''; let duesOnly = false; let bracesOnly = false; let textFilter = '';
   const doctorSel = select([{ value: '', label: 'Any doctor' }, ...state.ref.clinicians.filter((c) => c.is_doctor).map((c) => ({ value: c.id, label: c.display_name }))], '', {
-    'aria-label': 'Doctor', onchange: (e) => { doctorFilter = e.target.value; draw(); },
+    'aria-label': 'Filter by doctor', onchange: (e) => { doctorFilter = e.target.value; draw(); },
   });
   let groupFilter = '';
   const groupSel = select([{ value: '', label: 'Any group' }, { value: '1', label: 'Group 1' }, { value: '2', label: 'Group 2' }, { value: '3', label: 'Group 3' }], '', {
-    'aria-label': 'Doctor group', onchange: (e) => { groupFilter = e.target.value; draw(); },
+    'aria-label': 'Filter by doctor group', onchange: (e) => { groupFilter = e.target.value; draw(); },
   });
   const groupOf = (id) => state.ref.clinicians.find((c) => c.id === id)?.doctor_group_id;
   const duesBox = h('input', { type: 'checkbox', onchange: (e) => { duesOnly = e.target.checked; draw(); } });
@@ -110,43 +227,80 @@ export async function renderSheet(root, params) {
   const canEdit = can('sheet.edit');
   const canTreatment = can('treatment.enter') || canEdit;
 
-  function save(row, field, value) {
-    row[field] = value;
-    q.edit('visits', row.id, field, value);
+  function save(row, fieldName, value) {
+    row[fieldName] = value;
+    q.edit('visits', row.id, fieldName, value);
   }
 
-  async function changeStatus(row, value, el) {
+  async function changeStatus(row, value, ctl) {
     const before = row.status;
+    const who = row.patient.full_name;
     try {
       const updated = await d.updateVisit(row.id, { status: value });
       Object.assign(row, updated);
       redrawRow(row);
+      announce(`Saved: ${who} is ${STATUS_LABELS[row.status] || row.status}.`);
       if (value === 'in_treatment' && updated.dues > 0 && can('dues.view')) {
         toast(`Clear dues first: ${rupees(updated.dues)} pending.`, 'error', 6000);
       }
     } catch (e) {
-      el.value = before;
-      el.className = `status-chip status-${before}`;
+      ctl.set(before);
+      if (isNetworkError(e)) { toast(notSaved(e, `${who} is still "${STATUS_LABELS[before]}".`), 'error', 10000); return; }
       const msg = friendlyError(e);
       if (/dues/i.test(e.message) && can('dues.override')) {
         modal('Pending dues', h('p', {}, msg), [
           { label: 'Cancel' },
-          { label: 'Override and start treatment', primary: true, onClick: async () => {
-            try { Object.assign(row, await d.updateVisit(row.id, { status: value, dues_override_by: true, dues_override_reason: 'Override from Aaj ki List' })); redrawRow(row); } catch (err) { toast(friendlyError(err), 'error'); }
+          { label: 'Override and start treatment', danger: true, onClick: async () => {
+            try { Object.assign(row, await d.updateVisit(row.id, { status: value, dues_override_by: true, dues_override_reason: 'Override from Aaj ki List' })); redrawRow(row); } catch (err) { toast(notSaved(err, `${who} is still "${STATUS_LABELS[before]}".`), 'error', 8000); }
           } },
-        ]);
+        ], { destructive: true });
       } else toast(msg, 'error', 7000);
     }
   }
 
+  // One request per chip at a time (a double tap must not send two). The button is not disabled,
+  // so focus stays on it until the row is redrawn and focus moves to "+ add".
+  const inFlight = new Set();
+  async function removePerson(row, s) {
+    const who = row.patient.full_name;
+    const name = s.name || 'Unknown';
+    const key = `${row.id}|${s.clinician_id}|${s.role}`;
+    if (inFlight.has(key)) return;
+    inFlight.add(key);
+    try {
+      Object.assign(row, await d.setVisitStaff(row.id, s.clinician_id, s.role, false));
+      redrawRow(row);
+      offerUndo(`${name} removed from ${who}.`, async () => {
+        try {
+          Object.assign(row, await d.setVisitStaff(row.id, s.clinician_id, s.role, true));
+          redrawRow(row);
+          // Continue from the chip that came back, rather than from the Undo bar that is closing.
+          if (!document.activeElement || document.activeElement === document.body || undoBox.contains(document.activeElement)) {
+            [...tableBody.querySelectorAll(`tr[data-id="${row.id}"] [data-focus]`)].find((el) => el.dataset.focus === `remove-${s.clinician_id}-${s.role}`)?.focus();
+          }
+          announce(`${name} is back on ${who}.`);
+        } catch (e) { toast(notSaved(e, `${name} is still removed from ${who}.`), 'error', 8000); }
+      });
+    } catch (e) { toast(notSaved(e, `${name} is still on ${who}.`), 'error', 8000); }
+    finally { inFlight.delete(key); }
+  }
+
   function peopleCell(row) {
+    const who = row.patient.full_name;
     const rule = row.braces_month ? protocolFor(row.braces_month) : null;
-    const chips = row.staff.map((s) => h('span', { class: ['person', s.role] }, s.role === 'checker' ? '✓ ' : '', s.name || 'Unknown',
-      canTreatment ? h('button', { 'aria-label': `Remove ${s.name}`, onclick: async () => {
-        try { Object.assign(row, await d.setVisitStaff(row.id, s.clinician_id, s.role, false)); redrawRow(row); } catch (e) { toast(friendlyError(e), 'error'); }
-      } }, '×') : null));
-    const add = canTreatment ? h('button', { class: 'add-person', onclick: () => pickPeople(row) }, '+ add') : null;
-    const hint = rule ? h('span', { class: 'muted', style: { fontSize: '11.5px' } }, `G${rule.treatingGroups.join('/')}${rule.checkerGroup ? ` · check G${rule.checkerGroup}` : ''}`) : null;
+    // Doctor, assistant and checker chips differ in text too, not only colour.
+    const chips = row.staff.map((s) => h('span', { class: ['person', s.role] },
+      s.role === 'checker' ? [h('span', { 'aria-hidden': 'true' }, '✓ '), srOnly('Checked by ')] : null,
+      s.name || 'Unknown',
+      s.role === 'assistant' ? h('span', {}, ' (assistant)') : null,
+      canTreatment ? h('button', {
+        type: 'button', class: 'chip-remove', dataset: { focus: `remove-${s.clinician_id}-${s.role}` },
+        'aria-label': `Remove ${s.name || 'Unknown'}${s.role === 'doctor' ? '' : ` (${s.role})`} from ${who}`, onclick: () => removePerson(row, s),
+      }, h('span', { 'aria-hidden': 'true' }, '×')) : null));
+    const add = canTreatment ? h('button', { type: 'button', class: 'add-person chip-add', dataset: { focus: 'add-person' }, 'aria-label': `Add doctor or assistant for ${who}`, onclick: () => pickPeople(row) }, '+ add') : null;
+    const hint = rule ? h('span', { class: 'field-hint' },
+      h('span', { 'aria-hidden': 'true' }, `G${rule.treatingGroups.join('/')}${rule.checkerGroup ? ` · check G${rule.checkerGroup}` : ''}`),
+      srOnly(`Treated by group ${rule.treatingGroups.join(' or ')}${rule.checkerGroup ? `, checked by group ${rule.checkerGroup}` : ''}`)) : null;
     return h('div', { class: 'people' }, chips, add, hint);
   }
 
@@ -161,18 +315,24 @@ export async function renderSheet(root, params) {
       mount(listHost, h('div', { class: 'inline' }, people.map((c) => {
         const allowed = !month || !c.is_doctor || (r === 'doctor' ? canTreat(month, c.doctor_group_id, isAli(c)) : r === 'checker' ? canCheck(month, c.doctor_group_id, isAli(c)) : true);
         return h('button', {
-          class: ['btn btn-small', !allowed && 'btn-danger'], title: allowed ? '' : 'Not in the group for this braces month',
-          onclick: async () => {
-            try { Object.assign(row, await d.setVisitStaff(row.id, c.id, r, true)); redrawRow(row); toast(`${c.display_name} added.`, 'ok'); } catch (e) { toast(friendlyError(e), 'error', 7000); }
-          },
-        }, c.display_name, c.doctor_group_id ? h('span', { class: 'muted' }, ` G${c.doctor_group_id}`) : '');
+          type: 'button', class: ['btn btn-small', !allowed && 'btn-danger'], title: allowed ? null : 'Not in the group for this braces month',
+          onclick: busy(async () => {
+            try { Object.assign(row, await d.setVisitStaff(row.id, c.id, r, true)); redrawRow(row); toast(`${c.display_name} added to ${row.patient.full_name}.`, 'ok'); } catch (e) { toast(notSaved(e, `${c.display_name} was not added.`), 'error', 8000); }
+          }),
+        }, c.display_name, c.doctor_group_id ? h('span', { class: 'muted' }, ` G${c.doctor_group_id}`) : '', allowed ? '' : h('span', {}, ' · not allowed this month'));
       })));
     };
     role.addEventListener('change', drawList);
     drawList();
     modal(`Who treated ${row.patient.full_name}?`, h('div', {},
-      month ? h('p', { class: 'muted' }, `Braces month ${month}: treated by Group ${protocolFor(month).treatingGroups.join(' or ')}${protocolFor(month).checkerGroup ? `, checked by Group ${protocolFor(month).checkerGroup}` : ''}. Names in red are not allowed this month.`) : null,
-      role, listHost), [{ label: 'Done', primary: true }]);
+      month ? h('p', { class: 'muted' }, `Braces month ${month}: treated by Group ${protocolFor(month).treatingGroups.join(' or ')}${protocolFor(month).checkerGroup ? `, checked by Group ${protocolFor(month).checkerGroup}` : ''}. Names marked "not allowed this month" are outside the protocol for this month.`) : null,
+      field('Role', role), listHost), [{ label: 'Done', primary: true }], {
+      // The "+ add" that opened this was redrawn with the row: continue from the new one.
+      onClose: () => {
+        const again = tableBody.querySelector(`tr[data-id="${row.id}"] [data-focus="add-person"]`);
+        if (again?.isConnected && !document.querySelector('.modal') && (!document.activeElement || document.activeElement === document.body || document.activeElement.matches('h1'))) again.focus();
+      },
+    });
   }
 
   async function openRow(row) {
@@ -185,16 +345,18 @@ export async function renderSheet(root, params) {
         planned_wire: local.rule.plannedWire, photo_required: local.rule.photoRequired && !local.beyondProtocol,
         rule_confirmed: local.rule.confirmed && !local.beyondProtocol, alerts: local.alerts };
     }
+    let dialog = null;
     const actions = [
       can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(row.patient, { visitId: row.id, branchId: row.branch_id, onDone: load }) }, 'Upload photos') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone: load }) }, 'New invoice') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => paymentModal(row.patient, { branchId: row.branch_id, dues: row.dues, onDone: load }) }, 'Take payment') : null,
       can('flags.raise') && !row.see_dr_ali ? h('button', { class: 'btn', onclick: () => flagForAliModal(row.patient, load) }, 'Next appointment with Dr. Ali') : null,
-      h('a', { class: 'btn', href: `#/staff/patient/${row.patient_id}` }, 'Open profile'),
+      // Close this dialog first, so the profile is not left underneath it.
+      h('button', { type: 'button', class: 'btn', onclick: () => { dialog?.close(); location.hash = `#/staff/patient/${row.patient_id}`; } }, 'Open profile'),
     ];
     const mh = row.patient.medical_history || {};
     const medical = [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
-    modal(`${row.patient.full_name} · Mr# ${row.patient.mr_number}`, h('div', {},
+    dialog = modal(`${row.patient.full_name} · Mr# ${row.patient.mr_number}`, h('div', {},
       medical ? h('div', { class: 'alert alert-warning' }, h('strong', {}, 'Medical history: '), medical) : null,
       row.dues > 0 && can('dues.view') ? h('div', { class: 'alert alert-stop' }, `Pending dues ${rupees(row.dues)}. Clear dues before treatment.`) : null,
       row.see_dr_ali ? h('div', { class: 'alert alert-warning' }, 'Flagged: next appointment should be with Dr. Ali Rashid.') : null,
@@ -203,62 +365,93 @@ export async function renderSheet(root, params) {
   }
 
   function rowEl(row) {
+    const who = row.patient.full_name;
+    // Status saves once the person has finished choosing (Enter, leaving the select, or a pick
+    // from the open list), not on every arrow key.
     const status = h('select', {
-      class: `status-chip status-${row.status}`, 'aria-label': 'Status', disabled: !canEdit,
-      onchange: (e) => { e.target.className = `status-chip status-${e.target.value}`; changeStatus(row, e.target.value, e.target); },
+      class: `status-chip status-${row.status}`, 'aria-label': `Status for ${who}`, 'aria-describedby': canEdit ? 'sheet-status-hint' : null,
+      disabled: !canEdit, dataset: { focus: 'status' },
     }, Object.entries(STATUS_LABELS).map(([value, label]) => h('option', { value, selected: value === row.status }, label)));
+    const ctl = commitOnFinish(status, (value) => changeStatus(row, value, ctl), (value) => { status.className = `status-chip status-${value}`; });
 
     const treatment = h('input', {
-      class: 'cell-input', value: row.treatment_label || '', list: 'sheet-treatments', disabled: !canEdit, 'aria-label': 'Treatment',
-      onchange: (e) => save(row, 'treatment_label', e.target.value),
+      class: 'cell-input', value: row.treatment_label || '', list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
+      dataset: { focus: 'treatment', field: 'treatment_label' }, onchange: (e) => save(row, 'treatment_label', e.target.value),
     });
     const details = h('input', {
-      class: 'cell-input', value: row.details_text || '', disabled: !canTreatment, placeholder: 'e.g. U L 018 PC refresh', 'aria-label': 'Treatment details',
-      oninput: (e) => save(row, 'details_text', e.target.value),
+      class: 'cell-input', value: row.details_text || '', disabled: !canTreatment, placeholder: 'e.g. U L 018 PC refresh', 'aria-label': `Treatment details for ${who}`,
+      dataset: { focus: 'details', field: 'details_text' }, oninput: (e) => save(row, 'details_text', e.target.value),
     });
     // Quick-tap chips (blueprint 11.2): arch, wire size, power chain, o-rings, rebond, extraction, elastics.
-    const quickTap = canTreatment ? h('button', { class: 'quick-tap', type: 'button', title: 'Quick-tap treatment details', 'aria-label': 'Quick-tap treatment details', onclick: () => {
+    const quickTap = canTreatment ? h('button', { class: 'quick-tap', type: 'button', title: 'Quick-tap treatment details', 'aria-label': `Add treatment details for ${who}`, dataset: { focus: 'quick' }, onclick: () => {
       const groups = [
         ['Arch', ['U', 'L', 'U L']],
         ['Wire', ['012', '014', '016', '018', '020', '17x25', '19x25']],
         ['Done', ['PC', 'O-rings', 'Refresh', 'Rebond', 'Ligature', 'Elastics', 'Cross arch', 'Ext', 'IPR', 'Bite blocks']],
       ];
       const add = (t) => { details.value = (details.value ? details.value.replace(/\s+$/, '') + ' ' : '') + t; save(row, 'details_text', details.value); };
-      modal(`Treatment details · ${row.patient.full_name}`, h('div', {},
+      modal(`Treatment details · ${who}`, h('div', {},
         groups.map(([name, items]) => h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'field-label' }, name),
           h('div', { class: 'inline' }, items.map((t) => h('button', { type: 'button', class: 'btn btn-small', onclick: () => add(t) }, t))))),
         h('p', { class: 'muted' }, 'Tap to add to the details; type anything else in the cell itself.')), [{ label: 'Done', primary: true }]);
-    } }, '+') : null;
+    } }, h('span', { 'aria-hidden': 'true' }, '+')) : null;
     const notes = h('input', {
-      class: 'cell-input', value: row.notes || '', disabled: !canEdit, 'aria-label': 'Notes',
-      oninput: (e) => save(row, 'notes', e.target.value),
+      class: 'cell-input', value: row.notes || '', disabled: !canEdit, 'aria-label': `Notes for ${who}`,
+      dataset: { focus: 'notes', field: 'notes' }, oninput: (e) => save(row, 'notes', e.target.value),
     });
+    const monthNo = String(row.braces_month || '').padStart(2, '0');
+    const photoText = row.photo_required ? (row.photos_uploaded ? ', photos uploaded' : ', photos needed') : '';
     const month = row.braces_month
-      ? h('button', { class: 'link-btn month-pill', onclick: () => openRow(row), title: 'Braces guidance for this month' },
-        String(row.braces_month).padStart(2, '0'), row.photo_required ? h('span', { class: ['badge', row.photos_uploaded ? 'badge-ok' : 'badge-photo'], style: { marginLeft: '4px' } }, row.photos_uploaded ? 'Photo ✓' : '📸 Photo') : null)
-      : h('span', { class: 'muted' }, '–');
+      ? h('button', { type: 'button', class: 'link-btn month-pill', 'aria-haspopup': 'dialog', 'aria-label': `Braces month ${monthNo} guidance for ${who}${photoText}`, title: 'Braces guidance for this month', dataset: { focus: 'month' }, onclick: () => openRow(row) },
+        monthNo, row.photo_required ? h('span', { class: ['badge', row.photos_uploaded ? 'badge-ok' : 'badge-photo'], style: { marginLeft: '4px' } }, row.photos_uploaded ? 'Photo ✓' : '📸 Photo') : null)
+      : h('span', { class: 'muted' }, h('span', { 'aria-hidden': 'true' }, '–'), srOnly('Not braces'));
+    const arrived = row.checked_in_at ? timeOf(row.checked_in_at) : '';
 
     return h('tr', { dataset: { id: row.id } },
       !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(row.branch_id))) : null,
-      h('td', { class: 'frozen' }, h('div', { class: 'cell' },
-        h('span', { class: 'token', title: row.checked_in_at ? `Arrived ${timeOf(row.checked_in_at)}` : '' }, row.token_no ?? '–'),
-        h('button', { class: 'link-btn', style: { textDecoration: 'none', textAlign: 'left' }, onclick: () => openRow(row) },
-          h('div', {}, row.patient.full_name), h('div', { class: 'muted', style: { fontSize: '12px', fontWeight: 500 } }, `Mr# ${row.patient.mr_number}`)))),
+      h('th', { scope: 'row', class: 'frozen row-head', style: ROW_HEAD_STYLE }, h('div', { class: 'cell' },
+        h('span', { class: 'token', title: arrived ? `Arrived ${arrived}` : null }, srOnly('Token '), row.token_no ?? '–', arrived ? srOnly(`, arrived ${arrived}`) : null),
+        h('button', { type: 'button', class: 'link-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, style: { textDecoration: 'none', textAlign: 'left' }, onclick: () => openRow(row) },
+          h('div', {}, who), h('div', { class: 'muted field-hint', style: { fontWeight: 500 } }, `Mr# ${row.patient.mr_number}`)))),
       h('td', {}, h('div', { class: 'cell row-flags' }, duesBadge(row.dues), aliBadge(row.see_dr_ali))),
       h('td', {}, h('div', { class: 'cell' }, month)),
       h('td', { style: { minWidth: '150px' } }, treatment),
       h('td', {}, h('div', { class: 'cell' }, status)),
       h('td', { style: { minWidth: '250px' } }, peopleCell(row)),
       h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, details, quickTap)),
-      h('td', { class: 'right' }, h('div', { class: 'cell', style: { justifyContent: 'flex-end', fontWeight: 700, color: row.dues > 0 ? 'var(--stop)' : 'var(--muted)' } }, can('dues.view') ? (row.dues > 0 ? rupees(row.dues) : '0') : '')),
+      h('td', { class: 'right' }, h('div', { class: ['cell', row.dues > 0 ? 'status-bad' : 'muted'], style: { justifyContent: 'flex-end', fontWeight: 700 } }, can('dues.view') ? (row.dues > 0 ? rupees(row.dues) : '0') : '')),
       h('td', { style: { minWidth: '160px' } }, notes),
       h('td', {}, h('div', { class: 'cell muted nowrap' }, row.patient.phone)));
   }
 
+  // Redraws replace rows, so remember the focused control (row id + data-focus key + caret) and
+  // put focus back on the same control in the new row, or on "+ add" when a removed chip had it.
+  function rememberFocus() {
+    const el = document.activeElement;
+    if (!el || !tableBody.contains(el)) return null;
+    let caret = null;
+    try { if (typeof el.selectionStart === 'number') caret = [el.selectionStart, el.selectionEnd]; } catch { /* not a text field */ }
+    return { rowId: el.closest('tr')?.dataset.id, key: el.dataset.focus, caret };
+  }
+  function restoreFocus(saved) {
+    const tr = saved && [...tableBody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === saved.rowId);
+    if (!tr) return;
+    const target = (saved.key && [...tr.querySelectorAll('[data-focus]')].find((el) => el.dataset.focus === saved.key))
+      || tr.querySelector('[data-focus="add-person"]') || tr.querySelector('[data-focus="patient"]');
+    target?.focus({ preventScroll: true });
+    if (saved.caret && target?.setSelectionRange) { try { target.setSelectionRange(saved.caret[0], saved.caret[1]); } catch { /* not a text field */ } }
+  }
+
+  // Replace one row after a save.
   function redrawRow(row) {
     const old = tableBody.querySelector(`tr[data-id="${row.id}"]`);
-    if (old) old.replaceWith(rowEl(row));
+    if (old) {
+      const saved = old.contains(document.activeElement) ? rememberFocus() : null;
+      old.replaceWith(rowEl(row));
+      restoreFocus(saved);
+    }
     drawCounts();
+    markInvalid();
   }
 
   function drawCounts() {
@@ -270,8 +463,11 @@ export async function renderSheet(root, params) {
     const shown = rows.filter(matches);
     branchHead.hidden = !!branchId;
     addPanel.hidden = !branchId || !search;
+    const saved = rememberFocus();
     mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 11 }, h('div', { class: 'empty' }, branchId ? `No patients on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients on any list for this day.'))));
+    restoreFocus(saved);
     drawCounts();
+    markInvalid();
   }
 
   // Arrow keys / Enter move between cells like a spreadsheet.
@@ -288,51 +484,69 @@ export async function renderSheet(root, params) {
   async function addPatient(p) {
     try {
       const braces = !!p.braces_active;
-      const row = await d.addVisit({ patient_id: p.id, branch_id: branchId, visit_date: date, treatment_label: braces ? 'Monthly' : 'Checkup', braces, status: date === todayISO() ? 'waiting' : 'scheduled' });
+      const row = await d.addVisit({ patient_id: p.id, branch_id: branchId, visit_date: date, treatment_label: braces ? 'Monthly' : 'Checkup', braces, status: date === localISO() ? 'waiting' : 'scheduled' });
       rows.push(row);
       draw();
       toast(`${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
       if (row.braces_month) openRow(row);
-    } catch (e) { toast(friendlyError(e), 'error'); }
+    } catch (e) { toast(notSaved(e, `${p.full_name} was not added to the list.`), 'error', 8000); }
   }
 
   const search = canEdit ? patientSearch({
     placeholder: 'Add patient: search name, Mr# or phone',
+    label: 'Add a patient to this list: search name, Mr# or phone',
     onPick: addPatient,
     onNew: async (text) => { const p = await newPatientModal(text, branchId); if (p) addPatient(p); },
   }) : null;
 
-  const branchHead = h('th', { hidden: true }, 'Branch');
+  const branchHead = h('th', { scope: 'col', hidden: true }, 'Branch');
   const addPanel = search ? h('div', { class: 'add-panel' },
     h('div', { class: 'add-panel-text' },
       h('strong', {}, 'Add a patient to this list'),
       h('span', { class: 'muted' }, 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.')),
     search,
     can('patients.create') ? h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => { const p = await newPatientModal('', branchId); if (p) addPatient(p); } }, '+ New walk-in') : null) : h('div', { hidden: true });
-  const onReload = () => load();
-  document.addEventListener('sheet-reload', onReload);
-  const busy = () => q.pendingCount || tableBody.contains(document.activeElement) || document.querySelector('.modal');
-  // Live: reload the moment anyone changes this branch's list (unless this
-  // person is typing; then the next check picks it up).
+  document.addEventListener('sheet-reload', () => load(), { signal: life.signal });
+  const userIsBusy = () => q.pendingCount || tableBody.contains(document.activeElement) || document.querySelector('.modal');
+  // Live: reload the moment anyone changes this branch's list (unless this person is typing,
+  // or the tab is hidden; then the next check, or coming back to the tab, picks it up).
   let liveTimer = null;
   let stopLive = null;
-  const onLive = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!busy()) load(); }, 300); };
+  const onLive = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!document.hidden && !userIsBusy()) load(); }, 300); };
   const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId || null, onLive) : null; };
   branchSel.addEventListener('change', listen);
   listen();
-  // Safety net: also check every 20 seconds while nobody is typing.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !userIsBusy()) load(); }, { signal: life.signal });
+  // Safety net: also check every 20 seconds while the tab is visible and nobody is typing.
   const poll = setInterval(() => {
-    if (!document.body.contains(tableBody)) { clearInterval(poll); stopLive?.(); document.removeEventListener('sheet-reload', onReload); return; }
-    if (!busy()) load();
+    if (!document.body.contains(tableBody)) { stop(); return; }
+    if (!document.hidden && !userIsBusy()) load();
   }, 20000);
+  function stop() {
+    life.abort();
+    clearInterval(poll);
+    clearTimeout(liveTimer);
+    clearTimeout(undoTimer);
+    stopLive?.();
+    stopLive = null;
+    if (saveUI === ui) saveUI = null;
+    if (stopPrevious === stop) stopPrevious = null;
+  }
+  stopPrevious = stop;
+  signal?.addEventListener('abort', stop, { once: true });
 
+  const statusHint = srOnly('Choose a status with the arrow keys, then press Enter or move to the next cell to save it. Escape undoes a status that is not saved yet.');
+  statusHint.id = 'sheet-status-hint';
   mount(root,
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Aaj ki List'), h('p', {}, counts)),
-      saveStateEl),
+      saveStatus),
+    failBox,
+    undoBox,
+    statusHint,
     h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel, doctorSel, groupSel, findBox,
       h('label', { class: 'inline', style: { gap: '4px' } }, duesBox, 'With dues'), h('label', { class: 'inline', style: { gap: '4px' } }, bracesBox, 'Braces only'),
-      h('button', { class: 'btn', onclick: () => { date = todayISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
+      h('button', { class: 'btn', onclick: () => { date = localISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
       h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
       can('export.data') || can('finance.view') ? h('button', { class: 'btn', onclick: download }, 'Download') : null),
     addPanel,
@@ -341,9 +555,9 @@ export async function renderSheet(root, params) {
       h('table', { class: 'sheet' },
         h('thead', {}, h('tr', {},
           branchHead,
-          h('th', { class: 'frozen', style: { minWidth: '210px' } }, 'Token · Patient'), h('th', {}, 'Flags'), h('th', {}, 'Month'), h('th', {}, 'Treatment'),
-          h('th', {}, 'Status'), h('th', {}, "Doctor's name"), h('th', {}, 'Treatment details'), h('th', { class: 'right' }, 'P.P'),
-          h('th', {}, 'Notes'), h('th', {}, 'Contact'))),
+          h('th', { scope: 'col', class: 'frozen', style: { minWidth: '210px' } }, 'Token · Patient'), h('th', { scope: 'col' }, 'Flags'), h('th', { scope: 'col' }, 'Month'), h('th', { scope: 'col' }, 'Treatment'),
+          h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, "Doctor's name"), h('th', { scope: 'col' }, 'Treatment details'), h('th', { scope: 'col', class: 'right' }, 'Dues'),
+          h('th', { scope: 'col' }, 'Notes'), h('th', { scope: 'col' }, 'Contact'))),
         tableBody)));
 
   await load();

@@ -1,33 +1,33 @@
 // Staff area: a top menu bar (Today · Aaj ki List ▾ · Patients · Billing · Reports ▾ · Coordinator ▾ · More ▾),
 // a patient search box that finds by name, Mr# or phone from any screen, the signed-in person's menu,
 // and page routing. On phones the same menu opens as a side drawer.
-import { h, mount, toast, friendlyError, empty, rupees } from '../../ui/dom.js';
+// Each page's module is loaded the first time it is opened, so the heavy ones (reports, admin with
+// its importers) are only downloaded by the people who use them.
+import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from '../../ui/dom.js';
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
-import { renderSheet } from './sheet.js';
-import { renderPatients, renderPatient } from './patients.js';
-import { renderDashboard, renderQueue, renderBilling, renderReview, renderComplaints, renderDoctorLog } from './pages.js';
-import { renderAccounts } from './accounts.js';
-import { renderReports } from './reports.js';
-import { renderCoordinator } from './coordinator.js';
-import { renderAdmin } from './admin.js';
-import { renderInventory } from './inventory.js';
-import { renderPortalPreview } from '../portal.js';
+import { combobox } from './common.js';
+
+const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
+const pagesModule = () => import('./pages.js');
+const patientsModule = () => import('./patients.js');
+const renderPatient = lazy(patientsModule, 'renderPatient');
+const renderPortalPreview = lazy(() => import('../portal.js'), 'renderPortalPreview');
 
 const PAGES = {
-  today: { render: renderDashboard, show: () => true },
-  sheet: { render: renderSheet, show: () => can('sheet.view') },
-  queue: { render: renderQueue, show: () => can('sheet.view') },
-  patients: { render: renderPatients, show: () => can('patients.view') },
-  billing: { render: renderBilling, show: () => can('billing.view') || can('discount.approve') },
-  accounts: { render: renderAccounts, show: () => can('finance.view') || can('cash.close') || can('cash.verify') },
-  reports: { render: renderReports, show: () => can('finance.view') || can('billing.view') || can('patients.view') || can('sheet.view') },
-  coordinator: { render: renderCoordinator, show: () => can('reminders.manage') || can('lab.manage') || can('retainers.manage') },
-  stock: { render: renderInventory, show: () => can('inventory.manage') },
-  complaints: { render: renderComplaints, show: () => can('complaints.view') },
-  review: { render: renderReview, show: () => isAdmin() || can('complaints.view') || can('flags.clear') },
-  log: { render: renderDoctorLog, show: () => state.session.staff.role === 'doctor' || can('doctor_log.view_all') },
-  admin: { render: renderAdmin, show: () => can('users.manage') || can('export.data') || can('audit.view') || can('schedule.manage') || isAdmin() },
+  today: { render: lazy(pagesModule, 'renderDashboard'), show: () => true },
+  sheet: { render: lazy(() => import('./sheet.js'), 'renderSheet'), show: () => can('sheet.view') },
+  queue: { render: lazy(pagesModule, 'renderQueue'), show: () => can('sheet.view') },
+  patients: { render: lazy(patientsModule, 'renderPatients'), show: () => can('patients.view') },
+  billing: { render: lazy(pagesModule, 'renderBilling'), show: () => can('billing.view') || can('discount.approve') },
+  accounts: { render: lazy(() => import('./accounts.js'), 'renderAccounts'), show: () => can('finance.view') || can('cash.close') || can('cash.verify') },
+  reports: { render: lazy(() => import('./reports.js'), 'renderReports'), show: () => can('finance.view') || can('billing.view') || can('patients.view') || can('sheet.view') },
+  coordinator: { render: lazy(() => import('./coordinator.js'), 'renderCoordinator'), show: () => can('reminders.manage') || can('lab.manage') || can('retainers.manage') },
+  stock: { render: lazy(() => import('./inventory.js'), 'renderInventory'), show: () => can('inventory.manage') },
+  complaints: { render: lazy(pagesModule, 'renderComplaints'), show: () => can('complaints.view') },
+  review: { render: lazy(pagesModule, 'renderReview'), show: () => isAdmin() || can('complaints.view') || can('flags.clear') },
+  log: { render: lazy(pagesModule, 'renderDoctorLog'), show: () => state.session.staff.role === 'doctor' || can('doctor_log.view_all') },
+  admin: { render: lazy(() => import('./admin.js'), 'renderAdmin'), show: () => can('users.manage') || can('export.data') || can('audit.view') || can('schedule.manage') || isAdmin() },
 };
 
 // Menu bar. An entry is a link ({ label, href }) or a dropdown ({ label, items }); items may carry their own show().
@@ -82,94 +82,130 @@ function menu() {
   }).filter(Boolean);
 }
 
+// Mark the link for the page on screen with aria-current="page". Pages switch tabs with
+// history.replaceState, so this reads the live URL each time a menu opens.
+const parseHref = (href) => { const [path, query = ''] = String(href).replace(/^#\/?/, '').split('?'); return { path, params: new URLSearchParams(query) }; };
+function markCurrent(container) {
+  const here = parseHref(location.hash);
+  const links = [...container.querySelectorAll('a[href]')];
+  const target = (a) => parseHref(a.getAttribute('href'));
+  let hits = links.filter((a) => { const t = target(a); return t.path === here.path && [...t.params].every(([k, v]) => here.params.get(k) === v); });
+  // A section opened without its ?tab= (or ?group=) shows its first tab.
+  if (!hits.length) hits = links.filter((a) => { const t = target(a); return t.path === here.path && [...t.params.keys()].every((k) => !here.params.has(k)); }).slice(0, 1);
+  for (const a of links) {
+    const on = hits.includes(a);
+    a.classList.toggle('current', on);
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+}
+
+const hoverMenus = matchMedia('(hover: hover) and (min-width: 901px)');
+const narrowScreen = matchMedia('(max-width: 900px)');
 let refLoaded = false;
-let globalHandlers = false;
+let renderCtl = null;
 
 export async function renderStaff(root, path, params, signOut) {
+  // Listeners and page polling set up by a render stop at the next navigation.
+  renderCtl?.abort();
+  const ctl = new AbortController();
+  renderCtl = ctl;
+  const { signal } = ctl;
+  const on = (target, type, fn) => target.addEventListener(type, fn, { signal });
+  document.body.classList.remove('drawer-open');
   if (!refLoaded) { await loadStaffRef(); refLoaded = true; }
+  if (signal.aborted) return;
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
   const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports');
   const items = menu();
 
-  // ---- dropdowns: click to open (works for touch and keyboard); hover handled by CSS on desktop.
-  const closeAll = () => document.querySelectorAll('.menu.open').forEach((m) => m.classList.remove('open'));
-  if (!globalHandlers) {
-    globalHandlers = true;
-    document.addEventListener('click', (e) => { if (!e.target.closest('.menu')) closeAll(); if (!e.target.closest('.topsearch')) document.querySelectorAll('.search-results').forEach((r) => { r.hidden = true; }); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(); });
-  }
-  const dropdown = (m, inDrawer = false) => {
-    const btn = h('button', { class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-haspopup': 'true', 'aria-expanded': 'false', onclick: (e) => {
-      const wrap = e.currentTarget.parentElement; const open = !wrap.classList.contains('open'); closeAll(); wrap.classList.toggle('open', open); btn.setAttribute('aria-expanded', String(open));
-    } }, m.label, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
-    return h('div', { class: ['menu', inDrawer ? 'in-drawer' : ''] }, btn,
-      h('div', { class: 'menu-list', role: 'menu' }, m.items.map((i) => i.divider ? h('hr', {}) : h('a', { href: i.href, role: 'menuitem', onclick: () => { closeAll(); drawer.classList.remove('open'); } }, i.label))));
+  // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
+  // Click or Enter opens them (touch and keyboard); desktop CSS also opens them on hover.
+  const setOpen = (wrap, open) => { wrap.classList.toggle('open', open); wrap.querySelector(':scope > button')?.setAttribute('aria-expanded', String(open)); };
+  const closeAll = () => document.querySelectorAll('.menu.open').forEach((m) => setOpen(m, false));
+  const disclosure = (wrap, btn, list) => {
+    btn.addEventListener('click', () => { const open = !wrap.classList.contains('open'); closeAll(); if (open) markCurrent(list); setOpen(wrap, open); });
+    wrap.addEventListener('mouseenter', () => { if (hoverMenus.matches) { markCurrent(list); btn.setAttribute('aria-expanded', 'true'); } });
+    wrap.addEventListener('mouseleave', () => { if (hoverMenus.matches) btn.setAttribute('aria-expanded', String(wrap.classList.contains('open'))); });
+    // Close once focus moves on to something outside the menu.
+    wrap.addEventListener('focusout', (e) => { if (!wrap.contains(e.relatedTarget) && !(e.relatedTarget === null && wrap.matches(':hover'))) setOpen(wrap, false); });
+    return wrap;
   };
-  const navLinks = (inDrawer) => items.map((m) => m.items ? dropdown(m, inDrawer)
-    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null, onclick: () => drawer.classList.remove('open') }, m.label));
+  on(document, 'click', (e) => { if (!e.target.closest('.menu')) closeAll(); });
+  on(document, 'keydown', (e) => {
+    if (e.key !== 'Escape' || document.querySelector('.modal')) return;
+    const open = document.querySelector('.menu.open');
+    if (open) {
+      const inside = open.contains(document.activeElement);
+      setOpen(open, false);
+      if (inside) open.querySelector(':scope > button')?.focus();
+      return;
+    }
+    if (drawer.classList.contains('open')) closeDrawer(true);
+  });
+  const dropdown = (m) => {
+    const listId = `menu-list-${m.key}`;
+    const btn = h('button', { type: 'button', class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-expanded': 'false', 'aria-controls': listId },
+      m.label, current(m.key) ? srOnly(' (current section)') : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
+    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: closeAll }, i.label))));
+    markCurrent(list);
+    return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
+  };
+  const navLinks = items.map((m) => (m.items ? dropdown(m)
+    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label)));
 
-  // ---- patient search from any screen: name, Mr# or phone.
+  // ---- patient search from any screen: name, Mr# or phone (an ARIA combobox).
   const searchBox = can('patients.view') ? (() => {
     const input = h('input', { type: 'search', placeholder: 'Search by name, Mr# or phone', 'aria-label': 'Search patients', autocomplete: 'off' });
-    const results = h('div', { class: 'search-results', role: 'listbox', hidden: true });
-    let timer, seq = 0;
-    const close = () => { results.hidden = true; };
-    const run = async () => {
-      const t = input.value.trim();
-      if (t.length < 2) { close(); return; }
-      const n = ++seq;
-      try {
-        const rows = (await state.data.searchPatients(t)).slice(0, 8);
-        if (n !== seq) return;
-        mount(results, rows.length ? rows.map((p) => h('a', { href: `#/staff/patient/${p.id}`, role: 'option', onclick: () => { close(); input.value = ''; } },
-          h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), h('strong', {}, p.full_name),
-          h('span', { class: 'muted' }, [p.phone, branchName(p.first_branch_id)].filter(Boolean).join(' · ')),
-          can('dues.view') && Number(p.dues) > 0 ? h('span', { class: 'badge badge-dues' }, `$$ ${rupees(p.dues)}`) : null))
-          : h('div', { class: 'muted', style: { padding: '10px 12px' } }, 'No patient matches.',
-            can('patients.create') ? h('a', { href: '#/staff/patients?new=1', style: { marginLeft: '8px' } }, 'Register a new patient') : null));
-        results.hidden = false;
-      } catch (e) { toast(friendlyError(e), 'error'); }
-    };
-    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 220); });
-    input.addEventListener('focus', () => { if (input.value.trim().length >= 2) run(); });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); close(); location.hash = `#/staff/patients?q=${encodeURIComponent(input.value.trim())}`; }
-      if (e.key === 'Escape') close();
-      if (e.key === 'ArrowDown') { results.querySelector('a')?.focus(); e.preventDefault(); }
+    const results = h('div', { class: 'search-results', hidden: true });
+    const wrap = h('div', { class: 'topsearch', role: 'search' },h('span', { class: 'search-icon', 'aria-hidden': 'true' }, '🔍'), input, results);
+    combobox({
+      wrap, input, popup: results, listLabel: 'Patients found', reopenOnFocus: true,
+      search: async (t) => (await state.data.searchPatients(t)).slice(0, 8),
+      option: (p) => h('a', { href: `#/staff/patient/${p.id}` },
+        h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), h('strong', {}, p.full_name),
+        h('span', { class: 'muted' }, [p.phone, branchName(p.first_branch_id)].filter(Boolean).join(' · ')),
+        can('dues.view') && Number(p.dues) > 0 ? h('span', { class: 'badge badge-dues' }, h('span', { 'aria-hidden': 'true' }, '$$ '), srOnly('Dues '), rupees(p.dues)) : null),
+      onPick: (p) => { input.value = ''; location.hash = `#/staff/patient/${p.id}`; },
+      onEnter: (t) => { location.hash = `#/staff/patients?q=${encodeURIComponent(t)}`; },
+      note: (t, rows) => (rows.length ? null : h('div', { class: 'muted', style: { padding: '10px 12px' } }, 'No patient matches.',
+        can('patients.create') ? h('a', { href: '#/staff/patients?new=1', style: { marginLeft: '8px' } }, 'Register a new patient') : null)),
+      count: (rows) => (rows.length ? `${rows.length} patient${rows.length === 1 ? '' : 's'} found. Use the up and down arrows to choose, then Enter to open.` : 'No patient matches.'),
     });
-    results.addEventListener('keydown', (e) => {
-      const links = [...results.querySelectorAll('a')]; const i = links.indexOf(document.activeElement);
-      if (e.key === 'ArrowDown') { (links[i + 1] || links[0])?.focus(); e.preventDefault(); }
-      if (e.key === 'ArrowUp') { (links[i - 1] || input).focus(); e.preventDefault(); }
-      if (e.key === 'Escape') { close(); input.focus(); }
-    });
-    return h('div', { class: 'topsearch', role: 'search' }, h('span', { class: 'search-icon', 'aria-hidden': 'true' }, '🔍'), input, results);
+    return wrap;
   })() : null;
 
-  const userMenu = h('div', { class: 'menu user-menu' },
-    h('button', { class: 'nav-link', 'aria-haspopup': 'true', 'aria-expanded': 'false', onclick: (e) => { const w = e.currentTarget.parentElement; const open = !w.classList.contains('open'); closeAll(); w.classList.toggle('open', open); } },
-      h('span', { class: 'user-name' }, s.full_name), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')),
-    h('div', { class: 'menu-list', role: 'menu' },
-      h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
-      h('hr', {}),
-      h('button', { class: 'menu-btn', role: 'menuitem', onclick: signOut }, 'Log out')));
+  const userBtn = h('button', { type: 'button', class: 'nav-link', 'aria-expanded': 'false', 'aria-controls': 'user-menu-list', 'aria-label': `Account menu, ${s.full_name}` },
+    h('span', { class: 'user-name' }, s.full_name), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
+  const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },
+    h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
+    h('hr', {}),
+    h('button', { type: 'button', class: 'menu-btn', onclick: signOut }, 'Log out'));
+  const userMenu = disclosure(h('div', { class: 'menu user-menu' }, userBtn, userList), userBtn, userList);
 
-  // Phone: the menu as a drawer (same items, dropdowns expanded as groups).
-  const drawer = h('nav', { class: 'sidebar', 'aria-label': 'Staff navigation' },
-    h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' } }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
-    items.map((m) => m.items
-      ? h('div', { class: 'drawer-group' }, h('div', { class: 'nav-group' }, m.label), m.items.filter((i) => !i.divider).map((i) => h('a', { class: 'nav-link', href: i.href, onclick: () => drawer.classList.remove('open') }, i.label)))
-      : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null, onclick: () => drawer.classList.remove('open') }, m.label)),
+  // ---- phone: the menu as a drawer (same items, dropdowns expanded as groups). It closes on the
+  // scrim, on Escape, on its close button and on navigation, gives focus back to ☰, and is inert
+  // (out of the tab order) while closed.
+  const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
+  const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
+  const drawer = h('nav', { class: 'sidebar', id: 'staff-drawer', 'aria-label': 'Staff navigation' },
+    h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', style: { color: 'inherit', alignSelf: 'flex-end' }, onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
+    h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' }, onclick: () => closeDrawer(location.hash === '#/staff/today') }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
+    items.map((m) => (m.items
+      ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => drawerLink(i)))
+      : drawerLink(m, current(m.key)))),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
-      h('button', { class: 'link-btn', onclick: signOut, style: { marginTop: '8px' } }, 'Log out')));
+      h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); }, style: { marginTop: '8px' } }, 'Log out')));
+  drawer.querySelectorAll('.drawer-group').forEach(markCurrent);
+  drawer.inert = true;
+  const scrim = h('div', { class: 'drawer-scrim', hidden: true, 'aria-hidden': 'true', onclick: () => closeDrawer(true) });
 
   const topbar = h('header', { class: 'topbar' },
-    h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'Menu', onclick: () => drawer.classList.toggle('open') }, '☰'),
+    toggle,
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' } }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
-    h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }, navLinks(false)),
+    h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }, navLinks),
     searchBox,
     userMenu);
 
@@ -178,22 +214,49 @@ export async function renderStaff(root, path, params, signOut) {
     ? h('div', { class: 'demo-banner' }, h('span', {}, 'Demo mode with made-up patients. Nothing here is real or saved permanently.'),
       h('button', { class: 'link-btn', onclick: signOut }, 'Try another role'))
     : null;
+  const content = h('div', {}, h('div', { class: 'main', style: { paddingBottom: 0 } }, demoBanner), main);
 
-  // Load-shedding: say so at the top. The Aaj ki List keeps working offline (its changes queue on the device); other screens need the connection.
-  const offlineBanner = h('div', { class: 'offline-banner', role: 'status', hidden: navigator.onLine },
-    h('strong', {}, 'No internet connection. '), 'The Aaj ki List keeps working and sends its changes when the connection is back; payments, invoices and other entries need the connection.');
-  window.addEventListener('online', () => { offlineBanner.hidden = true; });
-  window.addEventListener('offline', () => { offlineBanner.hidden = false; });
+  function openDrawer() {
+    drawer.querySelectorAll('.drawer-group').forEach(markCurrent); // tabs may have changed the URL since render
+    drawer.inert = false;
+    drawer.classList.add('open');
+    scrim.hidden = false;
+    content.inert = true; // the page behind the drawer cannot be tapped or tabbed into
+    document.body.classList.add('drawer-open');
+    toggle.setAttribute('aria-expanded', 'true');
+    (drawer.querySelector('a[aria-current="page"]') || drawer.querySelector('.drawer-close')).focus();
+  }
+  function closeDrawer(returnFocus) {
+    const wasOpen = drawer.classList.contains('open');
+    drawer.classList.remove('open');
+    drawer.inert = true;
+    scrim.hidden = true;
+    content.inert = false;
+    document.body.classList.remove('drawer-open');
+    toggle.setAttribute('aria-expanded', 'false');
+    if (wasOpen && returnFocus) toggle.focus();
+  }
+  toggle.addEventListener('click', () => (drawer.classList.contains('open') ? closeDrawer(true) : openDrawer()));
+  on(window, 'hashchange', () => { closeDrawer(false); ctl.abort(); });
+  on(narrowScreen, 'change', () => { if (!narrowScreen.matches) closeDrawer(false); });
+
+  // Load-shedding: say so at the top, and say exactly what keeps working. Only typed cells on the
+  // Aaj ki List (treatment, details, notes) are kept on the device; everything else needs the connection.
+  const offlineBanner = h('div', { class: 'offline-banner', hidden: navigator.onLine },
+    h('strong', {}, 'No internet connection. '), 'Typing in the Treatment, Treatment details and Notes cells of the Aaj ki List is kept on this device and sent when the connection is back. Status and doctor changes, new patients, payments, invoices and all other entries are not saved until you are online again.');
+  on(window, 'online', () => { offlineBanner.hidden = true; announce('Back online.'); });
+  on(window, 'offline', () => { offlineBanner.hidden = false; announce('No internet connection. Only typing in the Aaj ki List cells is kept on this device; other changes are not saved until you are online again.', { assertive: true }); });
 
   mount(root,
     offlineBanner,
     topbar,
-    h('div', { class: 'app topnav-layout' }, drawer, h('div', {}, h('div', { class: 'main', style: { paddingBottom: 0 } }, demoBanner), main)));
+    h('div', { class: 'app topnav-layout' }, drawer, content),
+    scrim);
 
   try {
     if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);
     else if (section === 'patient' && id && can('patients.view')) await renderPatient(main, id);
-    else if (page && page.show()) await page.render(main, params);
+    else if (page && page.show()) await page.render(main, params, signal);
     else mount(main, empty('This page is not available for your account.', h('a', { class: 'btn', href: '#/staff/today' }, 'Go to Today')));
   } catch (e) {
     toast(friendlyError(e), 'error');

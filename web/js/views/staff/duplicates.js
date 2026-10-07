@@ -1,7 +1,7 @@
 // Admin → Duplicates: patients sharing a phone number, with a merge that moves
 // everything (visits, invoices, payments, photos, documents, cases) onto one
 // record and keeps the old Mr# in the notes.
-import { h, mount, toast, friendlyError, modal, rupees, shortDate, empty } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, modal, rupees, shortDate, empty, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
 import { state, branchName } from '../../state.js';
 
 export async function renderDuplicates(root) {
@@ -13,12 +13,19 @@ export async function renderDuplicates(root) {
 
   const mergeGroup = (g, keep) => {
     const others = g.patients.filter((p) => p.id !== keep.id);
-    modal('Merge these records?', h('div', {},
+    // An irreversible merge: focus starts on Cancel, the confirm is styled as dangerous,
+    // and it only runs once the person confirms they compared the records.
+    const compared = h('input', { type: 'checkbox' });
+    const body = h('div', {},
       h('p', {}, h('strong', {}, `Keep Mr# ${keep.mr_number} · ${keep.full_name}`), '. The following will be moved onto it and then removed:'),
       h('ul', {}, others.map((p) => h('li', {}, `Mr# ${p.mr_number} · ${p.full_name} — ${p.visits} visits, ${p.invoices} invoices${p.dues > 0 ? `, dues ${rupees(p.dues)}` : ''}`))),
-      h('p', { class: 'muted' }, 'Visits, invoices, payments, photos, documents, braces and retainer cases, plans, reminders and complaints all move across; dues add up. Blank details (email, gender, date of birth, address) are filled from the removed record. The removed Mr# stays in the notes. This cannot be undone.')), [
+      h('p', { class: 'muted' }, 'Visits, invoices, payments, photos, documents, braces and retainer cases, plans, reminders and complaints all move across; dues add up. Blank details (email, gender, date of birth, address) are filled from the removed record. The removed Mr# stays in the notes. This cannot be undone.'),
+      h('label', { class: 'inline' }, compared, 'I have compared these records and they are the same person'));
+    modal('Merge these records?', body, [
       { label: 'Cancel' },
-      { label: `Merge ${others.length} into Mr# ${keep.mr_number}`, primary: true, onClick: async () => {
+      { label: `Merge ${others.length} into Mr# ${keep.mr_number}`, danger: true, onClick: async () => {
+        if (!compared.checked) { showFormErrors(body, [{ input: compared, message: 'Tick this box once you have compared the records. Merging cannot be undone.' }]); return false; }
+        clearFieldErrors(body);
         try {
           let visits = 0, invoices = 0, payments = 0;
           for (const p of others) { const r = await d.mergePatients(keep.id, p.id); visits += Number(r.visits || 0); invoices += Number(r.invoices || 0); payments += Number(r.payments || 0); }
@@ -26,7 +33,7 @@ export async function renderDuplicates(root) {
           renderDuplicates(root);
         } catch (e) { toast(friendlyError(e), 'error', 8000); return false; }
       } },
-    ]);
+    ], { destructive: true });
   };
 
   const card = (g) => {

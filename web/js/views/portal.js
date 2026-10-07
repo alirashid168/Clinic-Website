@@ -1,28 +1,38 @@
 // Patient portal: invoices, dues, X-rays and photos, visit history, the
 // "see Dr. Ali" message, ratings and the complaint button.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty } from '../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors } from '../ui/dom.js';
 import { state, branchName } from '../state.js';
-import { printInvoice, planTable } from './staff/invoice.js';
+
+// Invoice printing and installment tables live with the staff invoice screens;
+// they load only when a patient has a plan or opens an invoice.
+const invoiceModule = () => import('./staff/invoice.js');
+
+function loading(root, text) {
+  mount(root, h('main', { class: 'public-main', 'aria-busy': 'true' }, h('p', { class: 'empty', role: 'status' }, text)));
+}
 
 export async function renderPortal(root, signOut) {
+  loading(root, 'Loading your account…');
   const d = state.data;
   const me = state.session.patient;
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
-  return portalPage(root, { d, p, ratings, signOut, preview: false, reload: () => renderPortal(root, signOut) });
+  return portalPage(root, { d, p, ratings, signOut, preview: false });
 }
 
 /** Public demo: a made-up sample patient, so anyone can see what the portal looks like before logging in. */
 let demoAdapter;
 export async function renderPortalDemo(root) {
+  loading(root, 'Loading the sample account…');
   if (!demoAdapter) {
     const { createDemoAdapter } = await import('../data/demo.js');
-    demoAdapter = createDemoAdapter();
-    await demoAdapter.signInDemo('p-demo');
+    const adapter = createDemoAdapter();
+    await adapter.signInDemo('p-demo');
+    demoAdapter = adapter; // only once it works, so a failed load is tried again next time
   }
   const d = demoAdapter;
   const me = (await d.getSession()).patient;
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
-  return portalPage(root, { d, p, ratings, signOut: null, preview: 'demo', reload: () => renderPortalDemo(root) });
+  return portalPage(root, { d, p, ratings, signOut: null, preview: 'demo' });
 }
 
 /** Staff preview: exactly what this patient sees in their account (buttons switched off). */
@@ -33,64 +43,161 @@ export async function renderPortalPreview(root, patientId) {
   p.photos = (p.photos || []).filter((ph) => ph.kind === 'edited');
   p.complaints = (p.complaints || []).map((c) => ({ ...c, messages: (c.messages || []).filter((m) => !m.internal_note) }));
   p.invoices = (p.invoices || []).filter((i) => i.status === 'issued');
-  return portalPage(root, { d, p, ratings: [], signOut: null, preview: true, reload: () => renderPortalPreview(root, patientId) });
+  return portalPage(root, { d, p, ratings: [], signOut: null, preview: true });
 }
 
-function portalPage(root, { d, p, ratings, signOut, preview, reload }) {
+/**
+ * Small thumbnails for the photo grid. The data layer normally signs them with the record (thumb_url, one batch);
+ * if it did not, sign the missing ones here in one batched signedUrls() call. Without signedUrls, the full-size url stays.
+ */
+async function addThumbnails(d, photos) {
+  const need = photos.filter((ph) => !ph.thumb_url && ph.storage_path);
+  if (!need.length || typeof d.signedUrls !== 'function') return;
+  try {
+    const thumbs = await d.signedUrls(need.map((ph) => ph.storage_path), { width: 240 });
+    for (const ph of need) ph.thumb_url = thumbs?.get(ph.storage_path) || null;
+  } catch { /* keep the full-size links that came with the record */ }
+}
+
+/** Signed links expire after an hour: a thumbnail that fails, or a full-size link that has expired, is signed again. */
+function photoImg(d, ph) {
+  const canSign = ph.storage_path && typeof d.signedUrls === 'function';
+  let retried = false;
+  const img = h('img', {
+    src: ph.thumb_url || ph.url || '', alt: ph.view_label || 'Treatment photo', loading: 'lazy', decoding: 'async',
+    onerror: async () => {
+      if (retried || !canSign) return;
+      retried = true;
+      try { const url = (await d.signedUrls([ph.storage_path], { width: 240 })).get(ph.storage_path); if (url) img.src = url; } catch { /* leave the broken image */ }
+    },
+  });
+  if (!ph.url) return img;
+  const link = h('a', {
+    href: ph.url, target: '_blank', rel: 'noopener',
+    onclick: async (e) => {
+      if (!canSign || !ph.url_expires_at || Date.now() < ph.url_expires_at - 60000) return; // still valid
+      e.preventDefault();
+      const tab = window.open('', '_blank'); // opened now, while the click still counts, then pointed at the fresh link
+      if (tab) tab.opener = null;
+      try {
+        const url = (await d.signedUrls([ph.storage_path])).get(ph.storage_path);
+        if (!url) throw new Error('No link');
+        ph.url = link.href = url;
+        ph.url_expires_at = Date.now() + 3600 * 1000;
+        if (tab) tab.location = url;
+      } catch (err) { tab?.close(); toast(friendlyError(err), 'error'); }
+    },
+  }, img, srOnly(' (full size, opens in a new tab)'));
+  return link;
+}
+
+async function portalPage(root, { d, p, ratings, signOut, preview }) {
   const rated = new Set(ratings.map((r) => r.visit_id));
   const completed = p.visits.filter((v) => v.status === 'completed');
+  const complaints = p.complaints || [];
   const off = preview === true ? { disabled: true, title: 'Switched off in the preview' } : {};
+  const [inv] = await Promise.all([(p.plans || []).length ? invoiceModule().catch(() => null) : null, addThumbnails(d, p.photos || [])]);
 
-  const rate = (visit) => {
+  // Rated visits swap their button for a badge in place: the page is not rebuilt, so focus and reading position stay.
+  const markRated = (button) => {
+    const badge = h('span', { class: 'badge badge-ok', tabindex: '-1' }, 'Rated');
+    button.replaceWith(badge);
+    setTimeout(() => badge.focus(), 0); // after the dialog has closed
+  };
+
+  const rate = (visit, button) => {
     let stars = 0;
     const comment = h('textarea', { placeholder: 'Anything we should know? (optional)' });
-    const starRow = h('div', { class: 'stars', role: 'radiogroup', 'aria-label': 'Rating' });
-    const draw = () => mount(starRow, [1, 2, 3, 4, 5].map((n) => h('button', {
-      type: 'button', class: n <= stars ? 'on' : '', 'aria-label': `${n} star${n > 1 ? 's' : ''}`, onclick: () => { stars = n; draw(); },
-    }, '★')));
-    draw();
-    modal(`Rate your visit on ${shortDate(visit.visit_date)}`, h('div', {}, starRow, field('Comment', comment)), [
+    const labelId = 'rate-' + Math.random().toString(36).slice(2, 8);
+    const starRow = h('div', { class: 'stars', role: 'radiogroup', 'aria-labelledby': labelId, tabindex: '-1' });
+    const form = h('div', {}, h('span', { class: 'field-label', id: labelId }, 'Your rating (required)'), starRow, field('Comment', comment));
+    // A radio group: one tab stop, arrow keys move the choice, and the buttons are updated in place (never rebuilt).
+    const buttons = [1, 2, 3, 4, 5].map((n) => h('button', {
+      type: 'button', role: 'radio', 'aria-label': `${n} of 5 stars`,
+      onclick: () => choose(n),
+      onkeydown: (e) => {
+        const to = { ArrowRight: n + 1, ArrowDown: n + 1, ArrowLeft: n - 1, ArrowUp: n - 1, Home: 1, End: 5 }[e.key];
+        if (!to) return;
+        e.preventDefault();
+        choose(Math.min(5, Math.max(1, to)));
+        buttons[stars - 1].focus();
+      },
+    }));
+    const paint = () => buttons.forEach((b, i) => {
+      b.className = i < stars ? 'on' : '';
+      b.textContent = i < stars ? '★' : '☆'; // filled or outlined, not colour alone
+      b.setAttribute('aria-checked', String(i + 1 === stars));
+      b.tabIndex = i === (stars ? stars - 1 : 0) ? 0 : -1;
+    });
+    const choose = (n) => { stars = n; paint(); clearFieldErrors(form); };
+    starRow.append(...buttons);
+    paint();
+    modal(`Rate your visit on ${shortDate(visit.visit_date)}`, form, [
       { label: 'Cancel' },
       { label: 'Send rating', primary: true, onClick: async () => {
-        if (!stars) { toast('Tap a star first.'); return false; }
-        try { await d.rateVisit(visit.id, stars, comment.value); toast('Thank you for your rating.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        if (!stars) { showFormErrors(form, [{ input: starRow, message: 'Choose from 1 to 5 stars.' }]); return false; }
+        try { await d.rateVisit(visit.id, stars, comment.value); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        toast('Thank you for your rating.', 'ok');
+        markRated(button);
       } },
-    ]);
+    ], { initialFocus: buttons[0] });
   };
+
+  const messagesHost = h('div', {});
+  const drawMessages = () => mount(messagesHost, complaints.length ? h('section', { class: 'panel' },
+    h('h2', {}, 'Your messages to Dr. Ali'),
+    h('table', { class: 'list' }, h('tbody', {}, complaints.map((c) => h('tr', {},
+      h('td', {}, h('strong', {}, c.subject), h('div', { class: 'muted' }, c.body),
+        (c.messages || []).filter((m) => !m.internal_note).map((m) => h('div', { class: 'alert alert-info', style: { marginTop: '6px' } }, h('strong', {}, 'Reply from the clinic: '), m.body))),
+      h('td', { class: 'right nowrap' }, h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : 'badge-warn'] }, String(c.status || 'new').replace('_', ' ')))))))) : null);
 
   const complain = () => {
     const subject = h('input', { placeholder: 'For example: waiting time, treatment, billing' });
     const body = h('textarea', { placeholder: 'Tell Dr. Ali what happened' });
-    modal('Report or complain to Dr. Ali Rashid', h('div', {},
+    const form = h('div', {},
       h('p', { class: 'muted' }, 'Your message goes directly to Dr. Ali and the clinic coordinator.'),
-      field('Subject', subject), field('Message', body)), [
+      field('Subject', subject, null, { required: true }), field('Message', body, null, { required: true }));
+    modal('Report or complain to Dr. Ali Rashid', form, [
       { label: 'Cancel' },
       { label: 'Send to Dr. Ali', primary: true, onClick: async () => {
-        if (!subject.value.trim() || !body.value.trim()) { toast('Add a subject and a message.'); return false; }
-        try { await d.fileComplaint({ subject: subject.value.trim(), body: body.value.trim() }); toast(preview === 'demo' ? 'Sent (sample account: nothing is really sent).' : 'Sent to Dr. Ali.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        clearFieldErrors(form);
+        const errors = [];
+        if (!subject.value.trim()) errors.push({ input: subject, message: 'Add a subject.' });
+        if (!body.value.trim()) errors.push({ input: body, message: 'Write your message to Dr. Ali.' });
+        if (errors.length) { showFormErrors(form, errors); return false; }
+        const item = { subject: subject.value.trim(), body: body.value.trim() };
+        let saved;
+        try { saved = await d.fileComplaint(item); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        toast(preview === 'demo' ? 'Sent (sample account: nothing is really sent).' : 'Sent to Dr. Ali.', 'ok');
+        complaints.unshift({ status: 'new', messages: [], ...(saved && typeof saved === 'object' ? saved : {}), ...item });
+        drawMessages();
       } },
     ]);
   };
+  drawMessages();
 
   const issued = p.invoices.filter((i) => i.status === 'issued');
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localISO();
   const next = p.visits.filter((v) => v.status === 'scheduled' && v.visit_date >= today).sort((a, b) => a.visit_date.localeCompare(b.visit_date))[0];
+  const viewInvoice = async (i) => {
+    try { (await invoiceModule()).printInvoice(i, p, { patientView: true }); } catch (e) { toast(friendlyError(e), 'error'); }
+  };
   mount(root,
     preview === true ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
       h('span', {}, h('strong', {}, 'Patient view. '), `This is what ${p.full_name} sees after logging in to their account. Buttons are switched off here.`),
       h('a', { class: 'btn btn-small', href: `#/staff/patient/${p.id}` }, 'Back to the record')) : null,
     preview === 'demo' ? h('div', { class: 'alert alert-warning inline sample-banner', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
-      h('span', {}, h('strong', {}, 'Sample patient account. '), 'Made-up data showing what you see after logging in. Tap around; nothing here is real.'),
+      h('span', {}, h('strong', {}, 'Sample account'), ' with made-up data.'),
       h('span', { class: 'nowrap' }, h('a', { class: 'btn btn-small btn-primary', href: '#/login/patient' }, 'Patient login'), ' ', h('a', { class: 'btn btn-small', href: '#/' }, 'Home'))) : null,
-    preview ? null : h('div', { class: 'mobile-bar', style: { display: 'flex' } },
+    preview ? null : h('header', { class: 'mobile-bar' },
       h('strong', {}, "Dr. Ali Rashid's Dental Clinic"),
-      h('button', { class: 'link-btn', onclick: signOut }, 'Log out')),
+      h('button', { type: 'button', class: 'link-btn', onclick: signOut }, 'Log out')),
     h('main', { class: 'public-main stack', style: { paddingTop: '24px' } },
       h('div', { class: 'page-head' },
         h('div', {}, h('h1', {}, `Hello, ${p.full_name.split(' ')[0]}`), h('p', {}, `Mr# ${p.mr_number}`)),
         h('button', { class: 'btn btn-primary', onclick: complain, ...off }, 'Report / complain to Dr. Ali Rashid')),
       p.flag ? h('div', { class: 'alert alert-warning' }, h('strong', {}, 'Please get your next appointment done by Dr. Ali Rashid. '),
-        'Check ', h('a', { href: '#/' }, "Dr. Ali's days at each branch"), ' and come on one of those days.') : null,
+        'Check ', h('a', { href: '#/clinics' }, "Dr. Ali's days at each branch"), ' and come on one of those days.') : null,
       next ? h('div', { class: 'alert alert-info' }, h('strong', {}, 'Your next appointment: '), `${shortDate(next.visit_date)} at ${branchName(next.branch_id)}`, next.treatment_label ? ` · ${next.treatment_label}` : '') : null,
       h('div', { class: 'stat-row' },
         h('div', { class: 'stat' }, h('strong', {}, rupees(Math.max(0, p.dues))), h('span', {}, p.dues > 0 ? 'Pending dues' : 'No pending dues')),
@@ -104,25 +211,21 @@ function portalPage(root, { d, p, ratings, signOut, preview, reload }) {
             h('strong', {}, shortDate(v.visit_date)), ' · ', branchName(v.branch_id),
             h('div', {}, [v.treatment_label, v.braces_month ? `braces month ${v.braces_month}` : null].filter(Boolean).join(', ')),
             h('div', { class: 'muted' }, v.staff.filter((s) => s.role === 'doctor').map((s) => s.name).join(', ')),
-            rated.has(v.id) ? h('span', { class: 'badge badge-ok' }, 'Rated') : h('button', { class: 'btn btn-small', onclick: () => rate(v), ...off }, 'Rate this visit')))) : empty('Your visits will appear here.')),
+            rated.has(v.id) ? h('span', { class: 'badge badge-ok' }, 'Rated')
+              : h('button', { class: 'btn btn-small', onclick: (e) => rate(v, e.currentTarget), ...off }, 'Rate this visit', srOnly(` on ${shortDate(v.visit_date)}`))))) : empty('Your visits will appear here.')),
         h('section', { class: 'panel' },
           h('h2', {}, 'Invoices and payments'),
           issued.length ? h('table', { class: 'list' },
             h('thead', {}, h('tr', {}, h('th', {}, 'Invoice'), h('th', {}, 'Date'), h('th', { class: 'right' }, 'Amount'), h('th', {}))),
             h('tbody', {}, issued.map((i) => h('tr', {},
               h('td', {}, i.invoice_no), h('td', {}, shortDate(i.issue_date)), h('td', { class: 'right' }, rupees(i.total)),
-              h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => printInvoice(i, p) }, 'View')))))) : empty('No invoices yet.'),
+              h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => viewInvoice(i) }, 'View', srOnly(` invoice ${i.invoice_no}`))))))) : empty('No invoices yet.'),
           p.payments.length ? h('p', { class: 'muted', style: { marginTop: '10px' } }, `Paid so far: ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))}`) : null,
-          (p.plans || []).length ? h('div', { style: { marginTop: '12px' } }, h('h3', {}, 'Your installment plan'), (p.plans || []).map((plan) => planTable(plan, p.payments))) : null)),
+          inv ? h('div', { style: { marginTop: '12px' } }, h('h3', {}, 'Your installment plan'), p.plans.map((plan) => inv.planTable(plan, p.payments))) : null)),
       h('section', { class: 'panel' },
         h('h2', {}, 'Photos and X-rays'),
         p.photos.length ? h('div', { class: 'photo-grid' }, p.photos.map((ph) => h('figure', {},
-          h('img', { src: ph.url || '', alt: ph.view_label || 'Treatment photo', loading: 'lazy' }),
+          photoImg(d, ph),
           h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label].filter(Boolean).join(' · '))))) : empty('Your before, progress and after photos will appear here after the clinic uploads them.')),
-      p.complaints.length ? h('section', { class: 'panel' },
-        h('h2', {}, 'Your messages to Dr. Ali'),
-        h('table', { class: 'list' }, h('tbody', {}, p.complaints.map((c) => h('tr', {},
-          h('td', {}, h('strong', {}, c.subject), h('div', { class: 'muted' }, c.body),
-            (c.messages || []).filter((m) => !m.internal_note).map((m) => h('div', { class: 'alert alert-info', style: { marginTop: '6px' } }, h('strong', {}, 'Reply from the clinic: '), m.body))),
-          h('td', { class: 'right nowrap' }, h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : 'badge-warn'] }, c.status.replace('_', ' ')))))))) : null));
+      messagesHost));
 }

@@ -1,23 +1,47 @@
 // Shared app state: the data layer, who is logged in, and cached reference
 // lists (branches, doctors, treatments) used across screens.
+//
+// Loading starts as soon as this file runs. `state.ready` resolves when it is
+// done and never rejects: if the data layer or the public lists fail to load,
+// `state.dataError` holds the error and the lists stay empty, so the public
+// pages can still show their own wording and a way to contact the clinic.
 import { getData } from './data/index.js';
 
 export const state = {
   data: null,
   session: null,
+  ready: null,
+  dataError: null,
   ref: { branches: [], cities: [], clinicians: [], treatments: [], categories: [], settings: {} },
 };
 
-export async function init() {
-  state.data = await getData();
-  try { state.session = await state.data.getSession(); } catch { state.session = null; }
-  await loadPublicRef();
+let readyPromise;
+
+/** Starts loading (once) and returns state.ready. */
+export function init() {
+  if (!readyPromise) readyPromise = start();
+  return readyPromise;
+}
+
+async function start() {
+  try {
+    state.data = await getData();
+    // Who is logged in and the public lists load side by side.
+    const [session, ref] = await Promise.allSettled([state.data.getSession(), loadPublicRef()]);
+    state.session = session.status === 'fulfilled' ? session.value : null;
+    if (ref.status === 'rejected') throw ref.reason;
+  } catch (e) {
+    console.error(e);
+    state.dataError = e instanceof Error ? e : new Error(String(e));
+  }
 }
 
 export async function loadPublicRef() {
   const d = state.data;
-  const [branches, cities, settings] = await Promise.all([d.branches(), d.cities(), d.settings().catch(() => ({}))]);
-  Object.assign(state.ref, { branches, cities, settings });
+  // Settings hold the clinic timings and the WhatsApp number: without them the
+  // public pages would show confident but wrong text, so a failure counts as a failure.
+  const [branches, cities, settings] = await Promise.all([d.branches(), d.cities(), d.settings()]);
+  Object.assign(state.ref, { branches, cities, settings: settings || {} });
 }
 
 export async function loadStaffRef() {
@@ -47,3 +71,5 @@ export function defaultBranchId() {
   const mine = myBranches();
   return Number(s?.home_branch_id) || mine[0]?.id || null;
 }
+
+state.ready = init();

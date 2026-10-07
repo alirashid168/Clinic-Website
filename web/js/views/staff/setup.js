@@ -1,10 +1,12 @@
 // Admin → Clinic setup: branches, doctors and assistants, doctor groups,
 // treatment list and expense categories, editable without touching the database.
-import { h, mount, toast, friendlyError, modal, field, select, empty, rupees } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, modal, field, select, empty, rupees, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
 import { state, loadPublicRef, loadStaffRef } from '../../state.js';
 
 const REGIONS = [{ value: '', label: 'Any city' }, { value: 'KHI', label: 'Karachi' }, { value: 'LHR', label: 'Lahore' }, { value: 'ISB', label: 'Islamabad' }];
 const TREATMENT_CATEGORIES = ['braces', 'retainer', 'general', 'cosmetic', 'surgery', 'diagnostic'];
+/** A switched-off record says so in words (rows are no longer dimmed, which made them hard to read). */
+const off = (text) => h('span', { class: 'badge badge-inactive' }, text);
 
 /**
  * A small table editor: one row per record, an "Edit" button per row and an
@@ -20,34 +22,40 @@ function editor({ title, help, rows, columns, onSave, addLabel = 'Add', fixedId 
       else if (c.type === 'list') inputs[c.key] = h('input', { value: (v || []).join(', '), placeholder: c.placeholder || '' });
       else inputs[c.key] = h('input', { type: c.type || 'text', value: v ?? c.default ?? '', placeholder: c.placeholder || '', step: c.step, min: c.min, disabled: !!(row && c.lockOnEdit) });
     }
-    modal(row ? `Edit · ${title}` : `${addLabel} · ${title}`, h('div', { class: 'form-grid' },
-      columns.map((c) => c.type === 'check' ? h('label', { class: 'inline', style: { alignSelf: 'end', paddingBottom: '8px' } }, inputs[c.key], c.label) : field(c.label, inputs[c.key], c.help))), [
+    const body = h('div', { class: 'form-grid' },
+      columns.map((c) => c.type === 'check' ? h('label', { class: 'inline', style: { alignSelf: 'end', paddingBottom: '8px' } }, inputs[c.key], c.label) : field(c.label, inputs[c.key], c.help, { required: !!c.required })));
+    modal(row ? `Edit · ${title}` : `${addLabel} · ${title}`, body, [
       { label: 'Cancel' },
       { label: 'Save', primary: true, onClick: async () => {
+        clearFieldErrors(body);
         const out = row ? { id: row.id } : {};
+        const errors = [];
         for (const c of columns) {
           const el = inputs[c.key];
           let v = c.type === 'check' ? el.checked : c.type === 'list' ? el.value.split(',').map((s) => s.trim()).filter(Boolean) : el.value;
           if (c.type === 'number') v = el.value === '' ? null : Number(el.value);
           if (c.type === 'select' && v === '') v = null;
           if (typeof v === 'string') v = v.trim() || null;
-          if (c.required && (v === null || v === '' || v === undefined)) { toast(`${c.label} is needed.`); return false; }
+          if (c.required && (v === null || v === '' || v === undefined)) { errors.push({ input: el, message: `${c.label} is needed.` }); continue; }
           if (row && c.lockOnEdit) continue;
           out[c.key] = v;
         }
+        if (errors.length) { showFormErrors(body, errors); return false; }
         if (fixedId && !row) out.id = Number(out.id);
         try { await onSave(out); toast('Saved.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
   };
+  const cell = (c, r) => (c.show ? c.show(r) : c.type === 'check' ? (r[c.key] ? 'Yes' : 'No') : c.type === 'list' ? (r[c.key] || []).join(', ') : (r[c.key] ?? ''));
+  const text = (v) => (v instanceof Node ? v.textContent : String(v ?? ''));
   return h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, title), h('button', { class: 'btn btn-primary btn-small', onclick: () => form(null) }, addLabel)),
     help ? h('p', { class: 'muted' }, help) : null,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, columns.filter((c) => !c.hideInTable).map((c) => h('th', { class: c.type === 'number' ? 'right' : '' }, c.label)), h('th', {}))),
-      h('tbody', {}, rows.map((r) => h('tr', { style: { opacity: r.active === false ? .55 : 1 } },
-        columns.filter((c) => !c.hideInTable).map((c) => h('td', { class: c.type === 'number' ? 'right' : '' }, c.show ? c.show(r) : c.type === 'check' ? (r[c.key] ? 'Yes' : 'No') : c.type === 'list' ? (r[c.key] || []).join(', ') : (r[c.key] ?? ''))),
-        h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => form(r) }, 'Edit'))))))) : empty(`Nothing here yet. Use "${addLabel}".`));
+      h('tbody', {}, rows.map((r) => h('tr', { class: r.active === false ? 'is-inactive' : null },
+        columns.filter((c) => !c.hideInTable).map((c) => h('td', { class: c.type === 'number' ? 'right' : '' }, cell(c, r))),
+        h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Edit ${text(cell(columns.find((c) => !c.hideInTable), r))}`, onclick: () => form(r) }, 'Edit'))))))) : empty(`Nothing here yet. Use "${addLabel}".`));
 }
 
 export async function renderSetup(root) {
@@ -71,10 +79,10 @@ export async function renderSetup(root) {
         { key: 'code', label: 'Short code', required: true, placeholder: 'GUL', help: 'Used in file names and reports.' },
         { key: 'city_id', label: 'City', type: 'select', required: true, options: () => lists.cities.map((c) => ({ value: c.id, label: c.name })), show: (r) => cityName(r.city_id) },
         { key: 'address', label: 'Address', hideInTable: true },
-        { key: 'phone', label: 'Phone', hideInTable: true },
+        { key: 'phone', label: 'Phone', type: 'tel', placeholder: '021 xxxxxxx', help: 'Shown on the branch card on the website as a call link, so patients can still reach the branch if WhatsApp is not working.' },
         { key: 'opened_on', label: 'Opened on', type: 'date', help: 'Used in reports. Expenses before this day count as the branch\'s setup costs; patients and payments before it are flagged for checking.' },
         { key: 'sort_order', label: 'Order', type: 'number', default: 10, hideInTable: true },
-        { key: 'active', label: 'Open (shown on the website)', type: 'check', show: (r) => (r.active ? 'Open' : 'Switched off') },
+        { key: 'active', label: 'Open (shown on the website)', type: 'check', show: (r) => (r.active ? 'Open' : off('Switched off')) },
       ],
     }),
     editor({
@@ -87,8 +95,8 @@ export async function renderSetup(root) {
         { key: 'doctor_group_id', label: 'Braces group', type: 'select', options: () => [{ value: '', label: 'No group (general / Dr. Ali)' }, ...lists.groups.map((g) => ({ value: g.id, label: g.name }))], show: (r) => groupName(r.doctor_group_id) },
         { key: 'region', label: 'City', type: 'select', options: () => REGIONS, show: (r) => REGIONS.find((x) => x.value === (r.region || ''))?.label || r.region },
         { key: 'staff_id', label: 'Login', type: 'select', options: doctorStaff, show: (r) => staffName(r.staff_id) || h('span', { class: 'muted' }, 'No login') },
-        { key: 'aliases', label: 'Other spellings', type: 'list', hideInTable: true, placeholder: 'Samrah, Dr Samra', help: 'Names used on old sheets, separated by commas.' },
-        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : 'Left') },
+        { key: 'aliases', label: 'Other spellings', type: 'list', hideInTable: true, placeholder: 'Dr A. Khan, A Khan', help: 'Names used on old sheets, separated by commas.' },
+        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : off('Left')) },
       ],
     }),
     editor({
@@ -111,7 +119,7 @@ export async function renderSetup(root) {
         { key: 'default_price', label: 'Default price (Rs)', type: 'number', min: 0, show: (r) => (r.default_price ? rupees(r.default_price) : '') },
         { key: 'is_braces_monthly', label: 'Counts as a braces monthly visit', type: 'check', show: (r) => (r.is_braces_monthly ? 'Monthly' : '') },
         { key: 'sort_order', label: 'Order', type: 'number', default: 50, hideInTable: true },
-        { key: 'active', label: 'In the dropdown', type: 'check', show: (r) => (r.active ? 'Yes' : 'Hidden') },
+        { key: 'active', label: 'In the dropdown', type: 'check', show: (r) => (r.active ? 'Yes' : off('Hidden')) },
       ],
     }),
     editor({
@@ -124,7 +132,7 @@ export async function renderSetup(root) {
         { key: 'percent', label: 'Percent', type: 'number', required: true, min: 0, step: 0.5, show: (r) => `${Number(r.percent)}%` },
         { key: 'treatment_category', label: 'Treatment category', type: 'select', options: () => [{ value: '', label: 'All treatments' }, ...['braces', 'retainer', 'general', 'cosmetic', 'surgery', 'diagnostic'].map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) }))], show: (r) => r.treatment_category || 'All' },
         { key: 'notes', label: 'Notes', hideInTable: true },
-        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : 'Off') },
+        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : off('Off')) },
       ],
     }),
     editor({
@@ -134,7 +142,7 @@ export async function renderSetup(root) {
       columns: [
         { key: 'name', label: 'Name', required: true },
         { key: 'sort_order', label: 'Order', type: 'number', default: 50 },
-        { key: 'active', label: 'In the dropdown', type: 'check', show: (r) => (r.active ? 'Yes' : 'Hidden') },
+        { key: 'active', label: 'In the dropdown', type: 'check', show: (r) => (r.active ? 'Yes' : off('Hidden')) },
       ],
     }));
 }

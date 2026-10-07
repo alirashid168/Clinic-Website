@@ -5,8 +5,13 @@
 // nothing. Nothing from the files leaves the browser except these batches.
 import { h, mount, toast, friendlyError, rupees, field, todayISO, select, downloadCSV, shortDate } from '../../ui/dom.js';
 import { state, branchName } from '../../state.js';
-import { parseCSV, readTransactions, buildFromTransactions, readPatients, readExpensesPdf, buildExpenses, chunk, BRANCH_LABEL, BRANCH_ID } from '../../lib/healthwire.js';
-import { readTab, buildImport, tabBranch, FIELD_LABELS } from '../../lib/aaj.js';
+
+// The Healthwire and Aaj ki List readers (with the old-sheet helpers they use) are large and only
+// needed once a file is dropped, so they load then, not when the page opens.
+let hwLib = null;
+let aajLib = null;
+const healthwire = async () => (hwLib ||= await import('../../lib/healthwire.js'));
+const aaj = async () => (aajLib ||= await import('../../lib/aaj.js'));
 
 const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
 const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs';
@@ -14,7 +19,7 @@ const PDF_WORKER_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pd
 const BATCH = 150;
 
 async function fileToRows(file) {
-  if (/\.csv$/i.test(file.name)) return parseCSV(await file.text());
+  if (/\.csv$/i.test(file.name)) return (await healthwire()).parseCSV(await file.text());
   const XLSX = await import(/* @vite-ignore */ XLSX_URL);
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -28,7 +33,7 @@ async function fileToRows(file) {
 
 /** Every tab of a workbook (or a CSV as one tab) -> [{ name, rows }]. */
 async function fileToTabs(file) {
-  if (/\.csv$/i.test(file.name)) return [{ name: file.name.replace(/\.csv$/i, ''), rows: parseCSV(await file.text()) }];
+  if (/\.csv$/i.test(file.name)) return [{ name: file.name.replace(/\.csv$/i, ''), rows: (await healthwire()).parseCSV(await file.text()) }];
   const XLSX = await import(/* @vite-ignore */ XLSX_URL);
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
   return wb.SheetNames.map((name) => {
@@ -52,17 +57,21 @@ async function fileToPdfPages(file) {
   return pages;
 }
 
-const codeOf = Object.fromEntries(Object.entries(BRANCH_ID).map(([k, v]) => [v, k]));
 const stat = (value, label) => h('div', { class: 'stat' }, h('strong', {}, value), h('span', {}, label));
-const branchTable = (perBranch, label = 'Received') => h('table', { class: 'list', style: { maxWidth: '420px' } },
-  h('thead', {}, h('tr', {}, h('th', {}, 'Branch'), h('th', { class: 'right' }, label))),
-  h('tbody', {}, Object.entries(perBranch).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
-    h('tr', {}, h('td', {}, k === 'none' ? h('span', { class: 'muted' }, 'No branch (personal / home / not stated)') : branchName(k) || BRANCH_LABEL[codeOf[k]] || k), h('td', { class: 'right' }, rupees(v))))));
+/** Per-branch totals; only drawn after a file was read, so the Healthwire module is loaded by then. */
+const branchTable = (perBranch, label = 'Received') => {
+  const { BRANCH_ID, BRANCH_LABEL } = hwLib;
+  const codeOf = Object.fromEntries(Object.entries(BRANCH_ID).map(([k, v]) => [v, k]));
+  return h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '420px' } },
+    h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col', class: 'right' }, label))),
+    h('tbody', {}, Object.entries(perBranch).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
+      h('tr', {}, h('td', {}, k === 'none' ? h('span', { class: 'muted' }, 'No branch (personal / home / not stated)') : branchName(k) || BRANCH_LABEL[codeOf[k]] || k), h('td', { class: 'right' }, rupees(v)))))));
+};
 
 /** Writes rows in batches, reporting progress; returns the summed result. */
 async function runImport(kind, rows, progress, label) {
   const total = { given: 0, inserted: 0, updated: 0, items: 0, missing: 0 };
-  const parts = chunk(rows, BATCH);
+  const parts = (await healthwire()).chunk(rows, BATCH);
   for (let i = 0; i < parts.length; i++) {
     progress(`${label}: ${Math.min((i + 1) * BATCH, rows.length)} of ${rows.length}…`);
     document.dispatchEvent(new Event('app:activity')); // a long import counts as activity (no idle logout half-way)
@@ -85,9 +94,10 @@ export async function renderImport(root) {
   const txInput = filePicker('.xlsx,.xls,.csv', async (file) => {
     mount(txOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
     try {
+      const { readTransactions, buildFromTransactions } = await healthwire();
       const rows = await fileToRows(file);
       const { tx, columns } = readTransactions(rows);
-      const built = buildFromTransactions(tx);
+      const built = buildFromTransactions(tx, { clinicTimings: state.ref.settings?.clinic_timings });
       const s = built.summary;
       const mrs = built.patients.map((p) => p[0]);
       const known = new Set((await d.patientsByMr(mrs)).map((p) => p.mr_number));
@@ -131,6 +141,7 @@ export async function renderImport(root) {
   const exInput = filePicker('.pdf', async (file) => {
     mount(exOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
     try {
+      const { readExpensesPdf, buildExpenses } = await healthwire();
       const pages = await fileToPdfPages(file);
       const read = readExpensesPdf(pages);
       if (!read.rows.length) throw new Error('No expense rows found. Use Healthwire → Expenses → Print (the "Expenses Report.pdf" file).');
@@ -156,8 +167,8 @@ export async function renderImport(root) {
         mismatch ? h('div', { class: 'alert alert-warning' }, `The PDF's own total is ${rupees(read.printedTotal)} but the rows read add up to ${rupees(s.total)} — ${read.dropped} rows could not be read. Check the PDF before importing.`) : null,
         h('div', { class: 'inline', style: { alignItems: 'flex-start', gap: '24px' } },
           branchTable(s.perBranch, 'Expenses'),
-          h('table', { class: 'list', style: { maxWidth: '420px' } }, h('thead', {}, h('tr', {}, h('th', {}, 'Category (website name)'), h('th', { class: 'right' }, 'Amount'))),
-            h('tbody', {}, Object.entries(s.perCategory).sort((a, b) => b[1] - a[1]).map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'right' }, rupees(v))))))),
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '420px' } }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Category (website name)'), h('th', { scope: 'col', class: 'right' }, 'Amount'))),
+            h('tbody', {}, Object.entries(s.perCategory).sort((a, b) => b[1] - a[1]).map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', { class: 'right' }, rupees(v)))))))),
         h('p', { class: 'muted' }, 'Branch is read from the description (e.g. "lhr", "N.N", "Rj"). Home, personal, loan and tax entries are never given a branch.'),
         h('div', { style: { marginTop: '12px' } }, btn), progress, result);
     } catch (e) { mount(exOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
@@ -168,6 +179,7 @@ export async function renderImport(root) {
   const ptInput = filePicker('.xlsx,.xls,.csv', async (file) => {
     mount(ptOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
     try {
+      const { readPatients } = await healthwire();
       const rows = await fileToRows(file);
       const { patients, columns } = readPatients(rows);
       const known = new Set((await d.patientsByMr(patients.map((p) => p[0]))).map((p) => p.mr_number));
@@ -197,6 +209,7 @@ export async function renderImport(root) {
   const aajInput = filePicker('.xlsx,.xls,.csv', async (file) => {
     mount(aajOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
     try {
+      const [{ BRANCH_ID, chunk }, { readTab, buildImport, tabBranch, FIELD_LABELS }] = await Promise.all([healthwire(), aaj()]);
       const sheets = await fileToTabs(file);
       const tabs = sheets.map((t) => ({ name: t.name, rows: t.rows, branchId: BRANCH_ID[tabBranch(t.name)] || null, fixedDate: null, columns: null, read: readTab(t.rows) }))
         .filter((t) => t.read.headerAt >= 0 || t.rows.length > 3);

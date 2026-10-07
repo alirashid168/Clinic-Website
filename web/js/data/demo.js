@@ -2,16 +2,24 @@
 // can be tried before the real database is connected. It follows the same
 // rules as the database (Mr#, tokens, braces groups, photo months, checker
 // sign-off, dues hold, discount caps, permissions). Nothing here is real.
+//
+// This file is public (the sample patient account on the homepage loads it), so
+// every person, login, amount and rule in the seed is a clearly fictional
+// placeholder: "(sample)" clinicians, @example.com demo logins and round
+// illustrative numbers. Do not copy real staff, prices or policies into it.
 
 import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '../lib/protocol.js';
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
 import { todayISO } from '../ui/dom.js';
+import { CONFIG } from '../config.js';
+import { summarizePayments, summarizeVisits } from './supabase.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
+// Calendar maths on the Karachi date in UTC (noon), so the result never slips a day.
 const daysAgo = (n) => {
-  const d = new Date(todayISO() + 'T00:00:00');
-  d.setDate(d.getDate() - n);
+  const d = new Date(todayISO() + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() - n);
   return d.toISOString().slice(0, 10);
 };
 const fail = (msg) => { throw new Error(msg); };
@@ -44,14 +52,14 @@ function seed() {
     { id: 5, code: 'ISB', name: 'Islamabad', city_id: 3, address: 'Giga Downtown, DHA Phase II, Islamabad', active: true, opened_on: '2025-11-25' },
   ];
   const doc = (name, group, region, is_doctor = true) => ({ id: uid(), display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
+  // Fictional clinicians: one or two per braces group and region, enough to try every rule.
   db.clinicians = [
     doc('Dr. Ali Rashid', null, null),
-    doc('Dr. Komal Rubab', 1, 'KHI'), doc('Dr. Samrah Khan', 1, 'KHI'), doc('Dr. Warda Javed', 1, null),
-    doc('Dr. Urooj Jawed', 2, 'KHI'), doc('Dr. Mehwish Saleem', 2, 'KHI'), doc('Dr. Maheen Fatima', 2, null), doc('Dr. Kainat Waheed', 2, null),
-    doc('Dr. Hameeda Sharaf', 3, 'KHI'), doc('Dr. Haniya Siddiqui', 3, 'KHI'), doc('Dr. Mirha Siddiq', 3, 'KHI'), doc('Dr. Laiba Khan', 3, 'KHI'),
-    doc('Dr. Vaneeza Khan', 3, 'LHR'), doc('Dr. Duaa Nusrat', 3, 'LHR'), doc('Dr. Zunash Suhail', 3, 'LHR'), doc('Dr. Rida Jameel', 3, 'LHR'),
-    doc('Dr. Aimon Aslam', null, null), doc('Dr. Maham Waheed', null, 'ISB'), doc('Dr. Aqsa Nadeem', null, 'ISB'),
-    doc('Hira Anis', null, 'KHI', false), doc('Anousha Khan', null, 'KHI', false),
+    doc('Dr. Amna (sample)', 1, 'KHI'), doc('Dr. Bushra (sample)', 1, 'KHI'),
+    doc('Dr. Hina (sample)', 2, 'KHI'), doc('Dr. Iqra (sample)', 2, null),
+    doc('Dr. Nida (sample)', 3, 'KHI'), doc('Dr. Rabia (sample)', 3, 'KHI'), doc('Dr. Saba (sample)', 3, 'LHR'),
+    doc('Dr. Tania (sample)', null, 'ISB'),
+    doc('Assistant Uzma (sample)', null, 'KHI', false), doc('Assistant Zara (sample)', null, 'KHI', false),
   ];
   const cl = (name) => db.clinicians.find((c) => c.display_name === name).id;
 
@@ -64,20 +72,22 @@ function seed() {
     'Internet and phone', 'Maintenance and repairs', 'Marketing and ads', 'Taxes', 'Travel', 'Staff food and refreshments', 'Miscellaneous']
     .map((name, i) => ({ id: i + 1, name, active: true }));
 
-  db.discount_caps = { front_desk: { maxPercent: 10, maxAmount: 5000 }, accountant: { maxPercent: null, maxAmount: null } };
+  // Illustrative caps only (not the clinic's real limits): enough to show the approval flow.
+  db.discount_caps = { front_desk: { maxPercent: 5, maxAmount: 1000 }, accountant: { maxPercent: null, maxAmount: null } };
   db.grid = defaultGrid();
   db.overrides = {};
 
+  // One demo login per role. Placeholder @example.com addresses, never real staff logins.
   db.staff = [
-    { id: 's-admin', full_name: 'Dr. Ali Rashid', email: 'ali@dralirashid.com', role: 'admin', active: true, branch_ids: [], restrict_to_branches: false },
-    { id: 's-fd-nn', full_name: 'Front desk (North Nazimabad)', email: 'frontdesk.nn@dralirashid.com', role: 'front_desk', active: true, branch_ids: [2], restrict_to_branches: true, home_branch_id: 2 },
-    { id: 's-fd-gul', full_name: 'Front desk (Gulshan)', email: 'frontdesk.gulshan@dralirashid.com', role: 'front_desk', active: true, branch_ids: [1], restrict_to_branches: true, home_branch_id: 1 },
-    { id: 's-asst', full_name: 'Assistant', email: 'assistant@dralirashid.com', role: 'assistant', active: true, branch_ids: [], restrict_to_branches: false },
-    { id: 's-doc', full_name: 'Dr. Samrah Khan', email: 'samrah@dralirashid.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false, clinician_id: cl('Dr. Samrah Khan') },
-    { id: 's-coord', full_name: 'Clinic coordinator', email: 'coordinator@dralirashid.com', role: 'coordinator', active: true, branch_ids: [], restrict_to_branches: false },
-    { id: 's-acct', full_name: 'Accountant', email: 'accounts@dralirashid.com', role: 'accountant', active: true, branch_ids: [], restrict_to_branches: false },
+    { id: 's-admin', full_name: 'Dr. Ali Rashid', email: 'demo.admin@example.com', role: 'admin', active: true, branch_ids: [], restrict_to_branches: false },
+    { id: 's-fd-nn', full_name: 'Front desk (North Nazimabad)', email: 'demo.frontdesk1@example.com', role: 'front_desk', active: true, branch_ids: [2], restrict_to_branches: true, home_branch_id: 2 },
+    { id: 's-fd-gul', full_name: 'Front desk (Gulshan)', email: 'demo.frontdesk2@example.com', role: 'front_desk', active: true, branch_ids: [1], restrict_to_branches: true, home_branch_id: 1 },
+    { id: 's-asst', full_name: 'Assistant (sample)', email: 'demo.assistant@example.com', role: 'assistant', active: true, branch_ids: [], restrict_to_branches: false },
+    { id: 's-doc', full_name: 'Dr. Bushra (sample)', email: 'demo.doctor@example.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false, clinician_id: cl('Dr. Bushra (sample)') },
+    { id: 's-coord', full_name: 'Clinic coordinator (sample)', email: 'demo.coordinator@example.com', role: 'coordinator', active: true, branch_ids: [], restrict_to_branches: false },
+    { id: 's-acct', full_name: 'Accountant (sample)', email: 'demo.accounts@example.com', role: 'accountant', active: true, branch_ids: [], restrict_to_branches: false },
   ];
-  db.clinicians.find((c) => c.display_name === 'Dr. Samrah Khan').staff_id = 's-doc';
+  db.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').staff_id = 's-doc';
   db.clinicians.find((c) => c.display_name === 'Dr. Ali Rashid').staff_id = 's-admin';
 
   // Made-up patients
@@ -107,14 +117,14 @@ function seed() {
   for (const [pi, monthsDone, plan] of braces) {
     const p = db.patients[pi];
     const bc = { id: uid(), patient_id: p.id, start_date: daysAgo(monthsDone * 30 + 10), extraction_plan: plan,
-      extractions_done: plan === 'extraction' && monthsDone >= 6, kit_name: ['55k kit', '70k kit', '80k kit'][pi % 3],
-      total_fee: [55000, 70000, 80000][pi % 3], status: 'active', treatment_plan_by_dr_ali: monthsDone >= 1 ? 'Standard plan' : null };
+      extractions_done: plan === 'extraction' && monthsDone >= 6, kit_name: ['Sample kit A', 'Sample kit B', 'Sample kit C'][pi % 3],
+      total_fee: [50000, 60000, 75000][pi % 3], status: 'active', treatment_plan_by_dr_ali: monthsDone >= 1 ? 'Standard plan' : null };
     db.braces_cases.push(bc);
     for (let m = 1; m <= monthsDone; m++) {
       db.visits.push({ id: uid(), patient_id: p.id, branch_id: p.first_branch_id, visit_date: daysAgo((monthsDone - m) * 30 + 5),
         token_no: 1 + (m % 9), status: 'completed', treatment_label: m === 1 ? 'Bonding' : 'Monthly', braces_case_id: bc.id, braces_month: m,
         details_text: m === 1 ? 'Bonding' : `U L 0${m < 3 ? 12 : m < 4 ? 14 : m < 8 ? 16 : 18} PC refresh`, photo_required: protocolFor(m).photoRequired,
-        photos_uploaded: true, checker_required: protocolFor(m).checkerGroup !== null, checked_by: cl('Dr. Komal Rubab'), created_at: daysAgo(1), notes: null });
+        photos_uploaded: true, checker_required: protocolFor(m).checkerGroup !== null, checked_by: cl('Dr. Amna (sample)'), created_at: daysAgo(1), notes: null });
     }
     // fee invoice + partial payments
     db.invoices = db.invoices || [];
@@ -131,13 +141,13 @@ function seed() {
   // Today's Aaj ki List at North Nazimabad and Gulshan
   const today = todayISO();
   const todayRows = [
-    [0, 2, 'Monthly', 'completed', ['Dr. Urooj Jawed', 'Hira Anis'], 'U L 016 Pc refresh'],
-    [1, 2, 'Monthly', 'in_treatment', ['Dr. Hameeda Sharaf'], ''],
-    [13, 2, 'Checkup', 'completed', ['Dr. Haniya Siddiqui'], 'Scaling advised'],
+    [0, 2, 'Monthly', 'completed', ['Dr. Hina (sample)', 'Assistant Uzma (sample)'], 'U L 016 Pc refresh'],
+    [1, 2, 'Monthly', 'in_treatment', ['Dr. Nida (sample)'], ''],
+    [13, 2, 'Checkup', 'completed', ['Dr. Rabia (sample)'], 'Scaling advised'],
     [6, 2, 'Monthly', 'waiting', [], ''],
     [14, 2, 'Crown Insertion', 'waiting', [], ''],
     [10, 2, 'Monthly', 'waiting', [], ''],
-    [3, 1, 'Monthly', 'completed', ['Dr. Komal Rubab'], 'U L 012'],
+    [3, 1, 'Monthly', 'completed', ['Dr. Amna (sample)'], 'U L 012'],
     [4, 1, 'Monthly', 'waiting', [], ''],
     [15, 1, 'Retainer Impression', 'waiting', [], ''],
     [16, 1, 'Pain / Emergency', 'scheduled', [], ''],
@@ -152,33 +162,33 @@ function seed() {
     const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: today, token_no: status === 'scheduled' ? null : tokenCount[branch],
       status, treatment_label: label, braces_case_id: month ? bc.id : null, braces_month: month, details_text: details,
       photo_required: month ? protocolFor(month).photoRequired : false, photos_uploaded: status === 'completed',
-      checker_required: month ? protocolFor(month).checkerGroup !== null : false, checked_by: status === 'completed' ? cl('Dr. Samrah Khan') : null,
+      checker_required: month ? protocolFor(month).checkerGroup !== null : false, checked_by: status === 'completed' ? cl('Dr. Bushra (sample)') : null,
       checked_in_at: today + 'T13:' + String(10 + db.visits.length % 40).padStart(2, '0') + ':00', created_at: new Date().toISOString(), notes: null };
     db.visits.push(v);
     for (const d of docs) db.visit_staff.push({ visit_id: v.id, clinician_id: cl(d), role: d.startsWith('Dr') ? 'doctor' : 'assistant' });
   }
 
   db.patient_flags = [{ id: uid(), patient_id: db.patients[4].id, kind: 'see_dr_ali', reason: 'Wire poking, relapse in lower anterior', raised_by: 's-asst', raised_at: daysAgo(2) + 'T16:00:00', cleared_at: null }];
-  db.complaints = [{ id: uid(), patient_id: db.patients[7].id, branch_id: 1, clinician_id: cl('Dr. Samrah Khan'), subject: 'Waiting time', body: 'I waited almost two hours on Saturday even with a token.', status: 'new', created_at: daysAgo(1) + 'T20:15:00' }];
-  // Doctor percentage: 60/40 on the patients a doctor brings in (Dr. Samrah brought two of the sample patients).
-  db.doctor_commission_rules = [{ id: uid(), clinician_id: null, basis: 'referred', percent: 40, treatment_category: null, active: true, notes: '60% clinic, 40% doctor — only on patients the doctor brings in' }];
-  db.patients[3].referred_by_clinician = cl('Dr. Samrah Khan');
-  db.patients[9].referred_by_clinician = cl('Dr. Samrah Khan');
+  db.complaints = [{ id: uid(), patient_id: db.patients[7].id, branch_id: 1, clinician_id: cl('Dr. Bushra (sample)'), subject: 'Waiting time', body: 'I waited almost two hours on Saturday even with a token.', status: 'new', created_at: daysAgo(1) + 'T20:15:00' }];
+  // A sample doctor-percentage rule with an illustrative number (not the clinic's real rule). Dr. Bushra brought in two sample patients.
+  db.doctor_commission_rules = [{ id: uid(), clinician_id: null, basis: 'referred', percent: 30, treatment_category: null, active: true, notes: 'Sample rule for the demo: a share of what their own patients pay' }];
+  db.patients[3].referred_by_clinician = cl('Dr. Bushra (sample)');
+  db.patients[9].referred_by_clinician = cl('Dr. Bushra (sample)');
   db.complaint_messages = [];
   db.discount_requests = [];
   db.expenses = [
-    { id: uid(), expense_date: daysAgo(3), branch_id: 2, city_id: 1, category_id: 1, amount: 180000, paid_to: 'Landlord', method: 'bank_transfer', notes: 'Monthly rent' },
-    { id: uid(), expense_date: daysAgo(2), branch_id: 1, city_id: 1, category_id: 4, amount: 46500, paid_to: 'Supplier', method: 'cash', notes: 'Brackets and wires' },
-    { id: uid(), expense_date: daysAgo(1), branch_id: 4, city_id: 2, category_id: 6, amount: 38200, paid_to: 'LESCO', method: 'bank_transfer', notes: '' },
-    { id: uid(), expense_date: daysAgo(1), branch_id: 2, city_id: 1, category_id: 12, amount: 3500, paid_to: 'Staff lunch', method: 'cash', notes: '' },
+    { id: uid(), expense_date: daysAgo(3), branch_id: 2, city_id: 1, category_id: 1, amount: 100000, paid_to: 'Sample landlord', method: 'bank_transfer', notes: 'Rent (sample figure)' },
+    { id: uid(), expense_date: daysAgo(2), branch_id: 1, city_id: 1, category_id: 4, amount: 20000, paid_to: 'Sample supplier', method: 'cash', notes: 'Brackets and wires (sample figure)' },
+    { id: uid(), expense_date: daysAgo(1), branch_id: 4, city_id: 2, category_id: 6, amount: 10000, paid_to: 'Electricity company', method: 'bank_transfer', notes: 'Sample figure' },
+    { id: uid(), expense_date: daysAgo(1), branch_id: 2, city_id: 1, category_id: 12, amount: 2000, paid_to: 'Staff lunch', method: 'cash', notes: 'Sample figure' },
   ];
   db.cash_closings = [];
   db.lab_cases = [
-    { id: uid(), patient_id: db.patients[14].id, branch_id: 2, lab_name: 'In-house lab', work_type: 'Crown', sent_date: daysAgo(6), due_date: daysAgo(-1), status: 'received', cost: 6000 },
-    { id: uid(), patient_id: db.patients[17].id, branch_id: 1, lab_name: 'City Dental Lab', work_type: 'Veneers (6 units)', sent_date: daysAgo(10), due_date: daysAgo(2), status: 'sent', cost: 42000 },
+    { id: uid(), patient_id: db.patients[14].id, branch_id: 2, lab_name: 'In-house lab', work_type: 'Crown', sent_date: daysAgo(6), due_date: daysAgo(-1), status: 'received', cost: 5000 },
+    { id: uid(), patient_id: db.patients[17].id, branch_id: 1, lab_name: 'Sample lab', work_type: 'Veneers (6 units)', sent_date: daysAgo(10), due_date: daysAgo(2), status: 'sent', cost: 30000 },
   ];
   db.retainer_cases = [
-    { id: uid(), patient_id: db.patients[7].id, arch: 'both', stage: 'fabrication', impression_date: daysAgo(4), lab_cost: 2500, price: 15000 },
+    { id: uid(), patient_id: db.patients[7].id, arch: 'both', stage: 'fabrication', impression_date: daysAgo(4), lab_cost: 2000, price: 10000 },
   ];
   db.reminders = [
     { id: uid(), patient_id: db.patients[5].id, kind: 'dues', due_date: daysAgo(0), note: 'Month 8 dues checkpoint', status: 'open' },
@@ -221,6 +231,7 @@ function seed() {
 export function createDemoAdapter() {
   let db = seed();
   let session = null; // { staff } | { patient }
+  const saved = new Map(); // idempotency key -> what that save produced (a retried save returns it instead of saving twice)
 
   const me = () => session?.staff || null;
   const can = (key) => {
@@ -302,6 +313,7 @@ export function createDemoAdapter() {
           sign_ins_30d: (db.login_events || []).filter((e) => e.name === s.full_name).length })), events: clone(db.login_events || []) };
     },
     async signIn() { fail('In demo mode, pick an account from the list.'); },
+    async sendPasswordReset() { fail('Password reset emails are not sent in the demo.'); },
     async signOut() { session = null; },
     async getSession() {
       if (!session) return null;
@@ -320,14 +332,25 @@ export function createDemoAdapter() {
     async expenseCategories() { return clone(db.expense_categories); },
     async settings() { return clone(db.settings); },
     async schedule() { return clone(db.schedule); },
-    async publicCases() { return clone(db.photos.filter((p) => p.public_ok && p.kind === 'edited')); },
+    async publicCases({ limit = 60 } = {}) { return clone(db.photos.filter((p) => p.public_ok && p.kind === 'edited').slice(0, limit).map((p) => ({ ...p, full_url: p.url, srcset: null }))); },
+    // Same shape as the live adapter: Map(storage path -> url). Demo files carry their url already.
+    async signedUrls(paths) {
+      const out = new Map();
+      for (const path of paths || []) {
+        const row = db.photos.find((x) => x.storage_path === path) || db.documents.find((x) => x.storage_path === path);
+        if (row?.url) out.set(path, row.url);
+      }
+      return out;
+    },
 
     // ------------------------------------------------------------ patients
     async searchPatients(q) {
       need('patients.view');
       const t = (q || '').trim().toLowerCase();
       const rows = db.patients.filter((p) => !t || p.full_name.toLowerCase().includes(t) || p.mr_number.includes(t) || (p.phone || '').replace(/\D/g, '').includes(t.replace(/\D/g, '') || '~'));
-      return rows.slice(0, 50).map((p) => ({ ...clone(p), dues: dues(p.id), see_dr_ali: !!activeFlag(p.id), braces_active: !!activeCase(p.id) }));
+      const out = rows.slice(0, 50).map((p) => ({ ...clone(p), dues: dues(p.id), see_dr_ali: !!activeFlag(p.id), braces_active: !!activeCase(p.id) }));
+      if (rows.length > 50) { out.truncated = true; out.cap = 50; }
+      return out;
     },
     async findDuplicates(name, phone) {
       const n = (name || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -469,12 +492,16 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ photos
-    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false }) {
+    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false, idempotencyKey = null }, opts = {}) {
       need('photos.upload');
+      const key = opts.idempotencyKey || idempotencyKey;
+      const prior = key && db.photos.find((x) => x.id === saved.get('photo:' + key));
+      if (prior) return clone(prior);
       const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
       const ph = { id: uid(), patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, taken_on: todayISO(), kind,
         view_label: viewLabel || null, url: dataUrl, storage_path: `demo/${uid()}`, public_ok: kind === 'edited' && !!publicOk, created_at: new Date().toISOString() };
       db.photos.push(ph);
+      if (key) saved.set('photo:' + key, ph.id);
       if (visitId) { const v = db.visits.find((x) => x.id === visitId); if (v) v.photos_uploaded = true; }
       return clone(ph);
     },
@@ -488,8 +515,11 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ billing
-    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null }) {
+    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
+      const key = opts.idempotencyKey || idempotencyKey;
+      const prior = key && db.invoices.find((i) => i.id === saved.get('invoice:' + key));
+      if (prior) return clone(prior);
       if (!branchOk(branch_id)) fail('new row violates row-level security policy (branch)');
       const subtotal = items.reduce((s, it) => s + Number(it.quantity || 1) * Number(it.unit_price || 0), 0);
       const role = me().role;
@@ -500,6 +530,7 @@ export function createDemoAdapter() {
         items: items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) })),
         created_by: me().id };
       db.invoices.push(inv); audit('invoices', 'INSERT', inv);
+      if (key) saved.set('invoice:' + key, inv.id);
       if (pending) db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: inv.discount_amount, reason: discount_reason, status: 'pending', created_at: new Date().toISOString() });
       return clone(inv);
     },
@@ -517,12 +548,16 @@ export function createDemoAdapter() {
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) { return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId)); },
-    async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments }) {
+    async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
       need('billing.create');
       db.payment_plans ||= [];
+      const key = opts.idempotencyKey || idempotencyKey;
+      const again = key && db.payment_plans.find((p) => p.id === saved.get('plan:' + key));
+      if (again) return clone(again);
       const plan = { id: uid(), patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_at: new Date().toISOString(),
         installments: installments.map((i) => ({ id: uid(), due_date: i.due_date, amount: Number(i.amount), note: i.note || null })) };
       db.payment_plans.push(plan);
+      if (key) saved.set('plan:' + key, plan.id);
       return clone(plan);
     },
     async deletePaymentPlan(id) { need('billing.create'); db.payment_plans = (db.payment_plans || []).filter((p) => p.id !== id); },
@@ -665,7 +700,7 @@ export function createDemoAdapter() {
 
     // ------------------------------------------------------------ stock
     async inventory(branchId) {
-      db.inventory_items ||= [{ id: 1, name: '022 MBT brackets (upper)', category: 'brackets', unit: 'set', supplier: 'Feroze Dental', active: true }, { id: 2, name: '014 NiTi wire', category: 'wires', unit: 'pcs', supplier: null, active: true }, { id: 3, name: 'Elastic ligatures', category: 'elastics', unit: 'pack', supplier: null, active: true }];
+      db.inventory_items ||= [{ id: 1, name: '022 MBT brackets (upper)', category: 'brackets', unit: 'set', supplier: 'Sample supplier', active: true }, { id: 2, name: '014 NiTi wire', category: 'wires', unit: 'pcs', supplier: null, active: true }, { id: 3, name: 'Elastic ligatures', category: 'elastics', unit: 'pack', supplier: null, active: true }];
       db.inventory_stock ||= [{ branch_id: 1, item_id: 1, quantity: 12, reorder_level: 5 }, { branch_id: 1, item_id: 2, quantity: 3, reorder_level: 10 }];
       db.inventory_moves ||= [];
       return clone({ items: db.inventory_items, stock: db.inventory_stock.filter((s) => s.branch_id === Number(branchId)), moves: db.inventory_moves.filter((m) => m.branch_id === Number(branchId)).slice(-50).reverse() });
@@ -761,6 +796,9 @@ export function createDemoAdapter() {
       need('sheet.view');
       return db.visits.filter((v) => v.visit_date >= from && v.visit_date <= to && (!branchId || v.branch_id === Number(branchId))).map((v) => ({ visit_date: v.visit_date, branch_id: v.branch_id, status: v.status, checked_in_at: v.checked_in_at || null, started_at: v.started_at || null, patient_id: v.patient_id }));
     },
+    // Report totals: same shapes as the live adapter (which gets them from SQL), computed here from the sample rows.
+    async paymentsSummary(args = {}) { return { ...summarizePayments(await this.paymentsReport(args)), source: 'rows', truncated: false }; },
+    async opdSummary(args = {}) { return { ...summarizeVisits(await this.visitsDaily(args)), source: 'rows', truncated: false }; },
     async todaysPayments(branchId) {
       need('billing.view');
       return db.payments.filter((p) => (!branchId || p.branch_id === Number(branchId)) && p.received_at.slice(0, 10) === todayISO() && branchOk(p.branch_id))
@@ -796,7 +834,7 @@ export function createDemoAdapter() {
     async staffList() { if (!can('users.manage') && !me()) return []; return clone(db.staff); },
     async createStaff(row) {
       need('users.manage');
-      if (!row.email?.endsWith('@dralirashid.com')) fail('Staff emails must end with @dralirashid.com');
+      if (!row.email?.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Staff emails must end with @' + CONFIG.STAFF_EMAIL_DOMAIN);
       if (db.staff.some((s) => s.email === row.email)) fail('A staff account with this email already exists.');
       const { password, ...rest } = row;
       if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
@@ -815,7 +853,7 @@ export function createDemoAdapter() {
       if (!s) fail('Staff account not found.');
       const e = (email || '').trim().toLowerCase();
       if (e && e !== s.email) {
-        if (!e.endsWith('@dralirashid.com')) fail('Staff emails must end with @dralirashid.com');
+        if (!e.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Staff emails must end with @' + CONFIG.STAFF_EMAIL_DOMAIN);
         if (db.staff.some((x) => x.email === e && x.id !== id)) fail('That login email is already used. Pick another.');
         s.email = e; audit('staff', 'UPDATE', s);
       }
@@ -946,7 +984,7 @@ export function createDemoAdapter() {
         if (!p) { const k = `${r[3]}|${r[2] || ''}|${r[5] || ''}`; if (!seenUnmatched[k]) { seenUnmatched[k] = { name: r[3], mr: r[2], phone: r[5], rows: 0, first: r[0], last: r[0], tab: r[16] }; out.unmatched.push(seenUnmatched[k]); } seenUnmatched[k].rows++; seenUnmatched[k].last = r[0]; out.rows_unmatched++; continue; }
         let bc = r[6] ? (activeCase(p.id) || db.braces_cases.find((b) => b.patient_id === p.id)) : null;
         if (r[6] && !bc) {
-          const start = new Date(r[0] + 'T00:00:00'); start.setDate(start.getDate() - (r[6] - 1) * 30);
+          const start = new Date(r[0] + 'T12:00:00Z'); start.setUTCDate(start.getUTCDate() - (r[6] - 1) * 30);
           bc = { id: uid(), patient_id: p.id, start_date: start.toISOString().slice(0, 10), extraction_plan: 'undecided', extractions_done: false, kit_name: null, total_fee: null,
             status: 'active', treatment_plan_by_dr_ali: null, notes: `From the Aaj ki List history: month rows from ${r[0]}` };
           db.braces_cases.push(bc); out.cases_created++; out.cases.active = (out.cases.active || 0) + 1;

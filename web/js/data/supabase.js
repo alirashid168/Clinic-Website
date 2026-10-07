@@ -1,28 +1,259 @@
 // LIVE data layer: talks to the clinic's Supabase database. Every request runs
 // as the logged-in person, so the database's row-level security decides what
 // they can see and change. Same methods (and same return shapes) as demo.js.
+//
+// Capped lists keep returning arrays; when a cap is reached the array carries
+// `truncated = true` and `cap = N` so the screen can say "showing the first N".
+// Report totals come from SQL functions (supabase/migrations/20261007_audit_fixes.sql)
+// and fall back to adding up rows in the browser while that file is not applied.
 
 import { CONFIG } from '../config.js';
 import { todayISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
 
-const SUPABASE_JS = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+// supabase-js pinned to one exact release (bump on purpose, after testing), with a
+// second CDN in case the first is blocked or down.
+const SDK_VERSION = '2.117.2';
+const SDK_URLS = [
+  `https://cdn.jsdelivr.net/npm/@supabase/supabase-js@${SDK_VERSION}/+esm`,
+  `https://esm.sh/@supabase/supabase-js@${SDK_VERSION}`,
+];
+const SDK_TIMEOUT_MS = 8000; // per CDN attempt
+const READ_TIMEOUT_MS = 20000; // any read (GET) from the database or storage
+// Supabase image transformations need a paid plan. Until CONFIG.IMAGE_TRANSFORMS is
+// set to true, thumbnails and gallery images are the original files.
+const IMAGE_TRANSFORMS = !!CONFIG.IMAGE_TRANSFORMS;
+const SIGNED_URL_TTL = 3600; // seconds
+const PAGE = 1000; // Supabase's default "max rows" per request
+const ID_CHUNK = 100; // ids per ".in()" request, so URLs stay short
+const CACHE_MS = 5 * 60 * 1000; // public schedule and gallery
 
-function check({ data, error }) {
-  if (error) throw new Error(error.message || String(error));
+const plainError = (message, code) => Object.assign(new Error(message), code ? { code } : {});
+
+function check(res) {
+  const { data, error } = res;
+  if (error) {
+    const e = new Error(error.message || String(error));
+    if (error.code) e.code = error.code;
+    if (res.status) e.status = res.status;
+    throw e;
+  }
   return data;
+}
+
+/** Keeps a capped list's notice when the list is copied with map(). */
+function keepFlags(from, to) {
+  if (from?.truncated) { to.truncated = true; to.cap = from.cap; }
+  return to;
+}
+/** Rows fetched with one row more than the cap: trim to the cap and say so. */
+function capped(rows, cap) {
+  if (rows.length > cap) { rows.length = cap; rows.truncated = true; rows.cap = cap; }
+  return rows;
+}
+
+// ------------------------------------------------------------ loading the SDK
+function withTimeout(promise, ms) {
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(plainError('Timed out', 'TIMEOUT')), ms); });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+async function loadSdk() {
+  const first = import(SDK_URLS[0]);
+  first.catch(() => {});
+  try {
+    return await withTimeout(first, SDK_TIMEOUT_MS);
+  } catch {
+    // First CDN failed or is slow: try the second, and still take the first if it finishes before.
+    const second = import(SDK_URLS[1]);
+    second.catch(() => {});
+    try {
+      return await withTimeout(Promise.any([first, second]), SDK_TIMEOUT_MS);
+    } catch {
+      // "did not respond" lets friendlyError() treat it as a connection problem for visitors and staff alike.
+      throw plainError("The clinic's online services did not respond. Check the internet connection and try again.", 'SDK_LOAD_FAILED');
+    }
+  }
+}
+let sdkPromise = null;
+function getSdk() {
+  if (!sdkPromise) sdkPromise = loadSdk().catch((e) => { sdkPromise = null; throw e; });
+  return sdkPromise;
+}
+
+/** Reads give up after READ_TIMEOUT_MS instead of hanging; uploads and saves are left alone. */
+function timedFetch(input, init = {}) {
+  const method = String(init.method || 'GET').toUpperCase();
+  if ((method !== 'GET' && method !== 'HEAD') || init.signal || typeof AbortController === 'undefined') return fetch(input, init);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => {
+    // "TIMEOUT:" prefix: friendlyError() shows only the sentence, and the sheet's retry treats it as a network problem.
+    const err = new Error('The clinic server took too long to answer. Check the internet connection and try again.');
+    err.name = 'TIMEOUT';
+    ctrl.abort(err);
+  }, READ_TIMEOUT_MS);
+  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+// ------------------------------------------------------------ report totals (pure; also used by demo.js)
+const KARACHI_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE || 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit' });
+function karachiDay(ts) {
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? String(ts || '').slice(0, 10) : KARACHI_DAY.format(d);
+}
+const byDayThenBranch = (a, b) => b.day.localeCompare(a.day) || (a.branch_id ?? 0) - (b.branch_id ?? 0);
+
+/**
+ * Payment rows -> { totals, byDay, byMethod }. Same shape as the payments_summary() SQL function.
+ * totals/byDay[i]: { received, cash, card, bank, refunds, net, count } (byDay adds day, branch_id; bank = everything not cash or card).
+ * byMethod[i]: { method, amount, refunds, count }.
+ */
+export function summarizePayments(rows) {
+  const blank = () => ({ received: 0, cash: 0, card: 0, bank: 0, refunds: 0, net: 0, count: 0 });
+  const totals = blank();
+  const days = new Map();
+  const methods = new Map();
+  for (const r of rows) {
+    const amount = Number(r.amount) || 0;
+    const method = r.method || 'other';
+    const day = karachiDay(r.received_at);
+    const k = `${day}|${r.branch_id ?? ''}`;
+    if (!days.has(k)) days.set(k, { day, branch_id: r.branch_id ?? null, ...blank() });
+    if (!methods.has(method)) methods.set(method, { method, amount: 0, refunds: 0, count: 0 });
+    for (const o of [totals, days.get(k)]) {
+      o.count += 1;
+      o.net += amount;
+      if (amount > 0) {
+        o.received += amount;
+        if (method === 'cash') o.cash += amount; else if (method === 'card') o.card += amount; else o.bank += amount;
+      } else if (amount < 0) o.refunds -= amount;
+    }
+    const m = methods.get(method);
+    m.count += 1;
+    if (amount > 0) m.amount += amount; else if (amount < 0) m.refunds -= amount;
+  }
+  return { totals, byDay: [...days.values()].sort(byDayThenBranch), byMethod: [...methods.values()].sort((a, b) => b.amount - a.amount) };
+}
+
+/**
+ * Visit rows (visit_date, branch_id, status, checked_in_at, started_at, patient_id) -> { totals, byDay, waitByBranch }.
+ * Same shape as the opd_summary() SQL function. Waits are check-in to treatment start, in minutes.
+ * totals: { visits, completed, no_shows, cancelled, waited, wait_min_total, avg_wait_min, patients }.
+ * byDay[i]: totals without patients, plus day and branch_id. waitByBranch[i]: { branch_id, waited, wait_min_total, avg_wait_min, long } (long = over 45 min).
+ */
+export function summarizeVisits(rows) {
+  const blank = () => ({ visits: 0, completed: 0, no_shows: 0, cancelled: 0, waited: 0, wait_min_total: 0, avg_wait_min: null });
+  const totals = { ...blank(), patients: 0 };
+  const days = new Map();
+  const waits = new Map();
+  const patients = new Set();
+  for (const v of rows) {
+    const k = `${v.visit_date}|${v.branch_id ?? ''}`;
+    if (!days.has(k)) days.set(k, { day: v.visit_date, branch_id: v.branch_id ?? null, ...blank() });
+    const wait = v.checked_in_at && v.started_at ? (new Date(v.started_at) - new Date(v.checked_in_at)) / 60000 : null;
+    for (const o of [totals, days.get(k)]) {
+      o.visits += 1;
+      if (v.status === 'completed') o.completed += 1;
+      if (v.status === 'no_show') o.no_shows += 1;
+      if (v.status === 'cancelled') o.cancelled += 1;
+      if (wait !== null) { o.waited += 1; o.wait_min_total += wait; }
+    }
+    if (wait !== null) {
+      const b = v.branch_id ?? null;
+      if (!waits.has(b)) waits.set(b, { branch_id: b, waited: 0, wait_min_total: 0, avg_wait_min: null, long: 0 });
+      const w = waits.get(b);
+      w.waited += 1; w.wait_min_total += wait; if (wait > 45) w.long += 1;
+    }
+    if (v.patient_id) patients.add(v.patient_id);
+  }
+  totals.patients = patients.size;
+  const avg = (o) => { o.avg_wait_min = o.waited ? Math.round(o.wait_min_total / o.waited) : null; return o; };
+  return { totals: avg(totals), byDay: [...days.values()].map(avg).sort(byDayThenBranch), waitByBranch: [...waits.values()].map(avg).sort((a, b) => b.waited - a.waited) };
 }
 
 const STOP_WORDS = ['PHOTO MONTH', 'Overrun', 'Dues checkpoint', 'past Month 7'];
 const alertLevel = (text) => (STOP_WORDS.some((w) => text.includes(w)) ? 'stop' : text.startsWith('Remind') || text.startsWith('Target') ? 'info' : 'warning');
 
 export async function createSupabaseAdapter() {
-  const { createClient } = await import(SUPABASE_JS);
+  const { createClient } = await getSdk();
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true },
+    global: { fetch: timedFetch },
   });
 
   let cachedSession = null;
+  // Saves made with an idempotency key while the database functions are not installed:
+  // key -> what the earlier attempt already wrote, so pressing Save again finishes that record instead of starting a new one.
+  const partial = new Map();
+  const missingRpcs = new Set();
+  const cache = new Map();
+
+  /** Calls a database function; { missing: true } when it is not installed yet (PostgREST PGRST202 / 404). */
+  async function rpc(name, args) {
+    if (missingRpcs.has(name)) return { missing: true };
+    const res = await sb.rpc(name, args);
+    if (res.error && (res.error.code === 'PGRST202' || res.status === 404)) { missingRpcs.add(name); return { missing: true }; }
+    return { missing: false, data: check(res) };
+  }
+
+  /** Pages through a query (build() must return it with a stable order) until a short page or one row past the cap. */
+  async function fetchPaged(build, cap) {
+    const out = [];
+    for (let from = 0; from <= cap; from += PAGE) {
+      const to = Math.min(from + PAGE, cap + 1) - 1;
+      const rows = check(await build().range(from, to));
+      out.push(...rows);
+      if (rows.length < to - from + 1) break;
+    }
+    return capped(out, cap);
+  }
+
+  /** Runs one request per ID_CHUNK ids (four at a time) and joins the rows. */
+  async function byIdChunks(ids, fetchChunk) {
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += ID_CHUNK) chunks.push(ids.slice(i, i + ID_CHUNK));
+    const out = [];
+    for (let i = 0; i < chunks.length; i += 4) {
+      for (const rows of await Promise.all(chunks.slice(i, i + 4).map(fetchChunk))) out.push(...rows);
+    }
+    return out;
+  }
+
+  /** In-memory cache with a short life; a stale value is answered at once while a fresh one loads. */
+  function cached(name, load, fresh = false) {
+    const hit = cache.get(name);
+    if (hit && !fresh && Date.now() - hit.at < CACHE_MS) return hit.promise;
+    const next = { at: Date.now(), promise: load() };
+    next.promise.then((value) => { next.value = value; }, () => {
+      if (cache.get(name) !== next) return;
+      if (hit?.value !== undefined) cache.set(name, hit); else cache.delete(name);
+    });
+    cache.set(name, next);
+    return hit && !fresh && hit.value !== undefined ? Promise.resolve(hit.value) : next.promise;
+  }
+  const forget = (prefix) => { for (const k of [...cache.keys()]) if (k.startsWith(prefix)) cache.delete(k); };
+
+  /** Map(path -> signed url) for private files, signed in one request (thumbnails: see IMAGE_TRANSFORMS). */
+  async function signedUrls(paths, { width, bucket = 'clinic-photos', expiresIn = SIGNED_URL_TTL } = {}) {
+    let list = [...new Set((paths || []).filter(Boolean))];
+    const out = new Map();
+    if (!list.length) return out;
+    const store = sb.storage.from(bucket);
+    if (width && IMAGE_TRANSFORMS) {
+      // A batch signature cannot carry an image transform, so thumbnails are signed in parallel, six at a time.
+      for (let i = 0; i < list.length; i += 6) {
+        await Promise.all(list.slice(i, i + 6).map(async (path) => {
+          const { data } = await store.createSignedUrl(path, expiresIn, { transform: { width, quality: 70 } });
+          if (data?.signedUrl) out.set(path, data.signedUrl);
+        }));
+      }
+      list = list.filter((p) => !out.has(p));
+      if (!list.length) return out;
+    }
+    const rows = check(await store.createSignedUrls(list, expiresIn));
+    for (const r of rows || []) if (r?.signedUrl && !r.error) out.set(r.path, r.signedUrl);
+    return out;
+  }
 
   async function userId() {
     const { data } = await sb.auth.getUser();
@@ -36,7 +267,7 @@ export async function createSupabaseAdapter() {
   }
   async function flagsFor(ids) {
     if (!ids.length) return {};
-    const rows = check(await sb.from('patient_flags').select('*').in('patient_id', ids).is('cleared_at', null));
+    const rows = await byIdChunks(ids, (part) => sb.from('patient_flags').select('*').in('patient_id', part).is('cleared_at', null).then(check));
     return Object.fromEntries(rows.map((r) => [r.patient_id, r]));
   }
 
@@ -59,12 +290,29 @@ export async function createSupabaseAdapter() {
     const rows = check(await sb.from('staff').select('id,full_name'));
     return Object.fromEntries(rows.map((r) => [r.id, r.full_name]));
   }
+  // Patients for a list of rows, fetched in short chunks (a long id list in one URL fails with 414).
   async function attachPatients(rows, key = 'patient_id') {
     const ids = [...new Set(rows.map((r) => r[key]).filter(Boolean))];
     if (!ids.length) return rows;
-    const pats = check(await sb.from('patients').select('id,mr_number,full_name,phone,email').in('id', ids));
+    const pats = await byIdChunks(ids, (part) => sb.from('patients').select('id,mr_number,full_name,phone,email').in('id', part).then(check));
     const byId = Object.fromEntries(pats.map((p) => [p.id, p]));
-    return rows.map((r) => ({ ...r, patient: byId[r[key]] || null }));
+    return keepFlags(rows, rows.map((r) => ({ ...r, patient: byId[r[key]] || null })));
+  }
+
+  // Report queries share their filters; ordered newest first with the id as tie-break so pages never overlap.
+  function paymentsQuery(columns, { from, to, branchId, method } = {}) {
+    let q = sb.from('payments').select(columns).order('received_at', { ascending: false }).order('id', { ascending: false });
+    if (from) q = q.gte('received_at', new Date(from + 'T00:00:00+05:00').toISOString());
+    if (to) q = q.lt('received_at', new Date(new Date(to + 'T00:00:00+05:00').getTime() + 86400000).toISOString());
+    if (branchId) q = q.eq('branch_id', Number(branchId));
+    if (method) q = q.eq('method', method);
+    return q;
+  }
+  function visitsQuery({ from, to, branchId } = {}) {
+    let q = sb.from('visits').select('visit_date, branch_id, status, checked_in_at, started_at, patient_id').gte('visit_date', from).lte('visit_date', to)
+      .order('visit_date', { ascending: false }).order('id', { ascending: true });
+    if (branchId) q = q.eq('branch_id', Number(branchId));
+    return q;
   }
 
   return {
@@ -81,11 +329,25 @@ export async function createSupabaseAdapter() {
       try { if (session) await sb.from('login_events').insert({ user_id: await userId(), kind: session.kind, user_agent: navigator.userAgent.slice(0, 300) }); } catch { /* the log never blocks a login */ }
       return session;
     },
+    /** True for staff login names (@STAFF_EMAIL_DOMAIN). They need no real inbox, so they get no reset emails. */
+    isStaffEmail(email) {
+      const domain = String(CONFIG.STAFF_EMAIL_DOMAIN || '').toLowerCase();
+      return !!domain && String(email || '').trim().toLowerCase().endsWith('@' + domain);
+    },
     async sendPasswordReset(email) {
+      // Staff login emails do not need a real inbox: sending would bounce, and the person would wait for nothing.
+      if (this.isStaffEmail(email)) throw plainError('Staff passwords are not reset by email. Ask Dr. Ali to set a new one under Admin → Staff accounts.', 'STAFF_RESET');
       check(await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo: location.origin + '/reset-password.html' }));
     },
     async updatePassword(password) { check(await sb.auth.updateUser({ password })); },
-    async signOut() { cachedSession = null; await sb.auth.signOut(); },
+    // Always ends the session on this computer: if the server call fails (offline), the local session is still removed.
+    async signOut() {
+      cachedSession = null;
+      partial.clear();
+      let failed = false;
+      try { failed = !!(await sb.auth.signOut())?.error; } catch { failed = true; }
+      if (failed) { try { await sb.auth.signOut({ scope: 'local' }); } catch { /* nothing more to clear */ } }
+    },
     async getSession() {
       const uid = await userId();
       if (!uid) return null;
@@ -125,30 +387,44 @@ export async function createSupabaseAdapter() {
       const rows = check(await sb.from('app_settings').select('key,value'));
       return Object.fromEntries(rows.map((r) => [r.key, r.value]));
     },
-    async schedule() { return check(await sb.from('dr_ali_schedule').select('*')); },
-    async publicCases() {
-      const files = check(await sb.storage.from('public-cases').list('', { limit: 60, sortBy: { column: 'created_at', order: 'desc' } }));
-      return files.filter((f) => f.name && !f.name.startsWith('.')).map((f) => ({
-        id: f.id, url: sb.storage.from('public-cases').getPublicUrl(f.name).data.publicUrl, view_label: f.name,
-      }));
+    // Public schedule and gallery are cached for a few minutes (route changes reuse them); { fresh: true } skips the cache.
+    async schedule({ fresh = false } = {}) {
+      return (await cached('schedule', async () => check(await sb.from('dr_ali_schedule').select('*')), fresh)).slice();
     },
+    /** Gallery images: url (640px wide when IMAGE_TRANSFORMS is on, else the original), full_url, srcset (or null), view_label. */
+    async publicCases({ limit = 60, fresh = false } = {}) {
+      const rows = await cached(`publicCases:${limit}`, async () => {
+        const bucket = sb.storage.from('public-cases');
+        const files = check(await bucket.list('', { limit, sortBy: { column: 'created_at', order: 'desc' } }));
+        const url = (name, width) => bucket.getPublicUrl(name, width ? { transform: { width, quality: 70 } } : undefined).data.publicUrl;
+        return files.filter((f) => f.name && !f.name.startsWith('.')).map((f) => ({
+          id: f.id,
+          url: IMAGE_TRANSFORMS ? url(f.name, 640) : url(f.name),
+          full_url: url(f.name),
+          srcset: IMAGE_TRANSFORMS ? [320, 640, 960].map((w) => `${url(f.name, w)} ${w}w`).join(', ') : null,
+          view_label: f.name,
+        }));
+      }, fresh);
+      return rows.slice();
+    },
+    signedUrls,
 
     // ------------------------------------------------------------ patients
     async searchPatients(q) {
       const t = (q || '').trim();
-      let query = sb.from('patients').select('*').order('created_at', { ascending: false }).limit(50);
+      let query = sb.from('patients').select('*').order('created_at', { ascending: false }).limit(51);
       if (t) {
         const digits = t.replace(/\D/g, '');
         const ors = [`full_name.ilike.%${t.replace(/[%,()]/g, '')}%`, `mr_number.eq.${t.replace(/[,()]/g, '')}`];
         if (digits.length >= 4) ors.push(`phone.ilike.%${digits}%`);
         query = query.or(ors.join(','));
       }
-      const rows = check(await query);
+      const rows = capped(check(await query), 50);
       const ids = rows.map((r) => r.id);
       const [dues, flags, cases] = await Promise.all([duesFor(ids), flagsFor(ids),
         ids.length ? sb.from('braces_cases').select('patient_id').in('patient_id', ids).eq('status', 'active').then(check) : []]);
       const active = new Set(cases.map((c) => c.patient_id));
-      return rows.map((p) => ({ ...p, dues: dues[p.id] ?? 0, see_dr_ali: !!flags[p.id], braces_active: active.has(p.id) }));
+      return keepFlags(rows, rows.map((p) => ({ ...p, dues: dues[p.id] ?? 0, see_dr_ali: !!flags[p.id], braces_active: active.has(p.id) })));
     },
     async findDuplicates(name, phone) {
       return check(await sb.rpc('find_possible_duplicates', { p_name: name || '', p_phone: phone || '' }));
@@ -166,36 +442,44 @@ export async function createSupabaseAdapter() {
       if (error) throw new Error(error.message);
       if (data?.error) throw new Error(data.error);
     },
+    /**
+     * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (240px when
+     * IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); documents carry url. Signed in one batch per bucket.
+     * Re-sign an expired link with signedUrls([storage_path]) (documents: { bucket: 'patient-documents' }).
+     */
     async getPatient(id) {
-      const p = check(await sb.from('patients').select('*').eq('id', id).single());
-      const [visits, invoices, payments, photos, retainers, complaints, cases, dues, flags, ...rest] = await Promise.all([
+      const signed = (rows, opts) => signedUrls(rows.map((r) => r.storage_path), opts).catch(() => new Map());
+      const [p, visits, invoices, payments, photos, retainers, complaints, braces_case, dues, flags, documents, plans] = await Promise.all([
+        sb.from('patients').select('*').eq('id', id).single().then(check),
         sb.from('visits').select(VISIT_SELECT).eq('patient_id', id).order('visit_date', { ascending: false }).then(check).then(enrichVisits),
         sb.from('invoices').select('*, items:invoice_items(*)').eq('patient_id', id).order('issue_date', { ascending: false }).then(check),
         sb.from('payments').select('*').eq('patient_id', id).order('received_at', { ascending: false }).then(check),
-        sb.from('photos').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).then(check),
+        sb.from('photos').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).then(check).then(async (rows) => {
+          const [full, thumbs] = await Promise.all([signed(rows), IMAGE_TRANSFORMS ? signed(rows, { width: 240 }) : null]);
+          const expires = Date.now() + SIGNED_URL_TTL * 1000;
+          for (const ph of rows) {
+            ph.url = full.get(ph.storage_path) || null;
+            ph.thumb_url = thumbs?.get(ph.storage_path) || ph.url;
+            ph.url_expires_at = expires;
+          }
+          return rows;
+        }),
         sb.from('retainer_cases').select('*').eq('patient_id', id).then(check),
         sb.from('complaints').select('*, messages:complaint_messages(*)').eq('patient_id', id).order('created_at', { ascending: false }).then(check),
-        sb.from('braces_cases').select('*').eq('patient_id', id).eq('status', 'active').then(check),
+        sb.from('braces_cases').select('*').eq('patient_id', id).eq('status', 'active').then(check).then(async (cases) => {
+          if (!cases[0]) return null;
+          const next = check(await sb.rpc('next_braces_month', { p_case: cases[0].id }));
+          return { ...cases[0], next_month: next };
+        }),
         duesFor([id]), flagsFor([id]),
-        sb.from('patient_documents').select('*').eq('patient_id', id).order('added_on', { ascending: false }).then(check),
+        sb.from('patient_documents').select('*').eq('patient_id', id).order('added_on', { ascending: false }).then(check).then(async (rows) => {
+          const urls = await signed(rows, { bucket: 'patient-documents' });
+          for (const doc of rows) doc.url = urls.get(doc.storage_path) || null;
+          return rows;
+        }),
         this.paymentPlans(id).catch(() => []),
       ]);
-      for (const ph of photos) {
-        const { data } = await sb.storage.from('clinic-photos').createSignedUrl(ph.storage_path, 3600);
-        ph.url = data?.signedUrl || null;
-      }
-      const documents = rest[0] || [];
-      const plans = rest[1] || [];
-      for (const doc of documents) {
-        const { data } = await sb.storage.from('patient-documents').createSignedUrl(doc.storage_path, 3600);
-        doc.url = data?.signedUrl || null;
-      }
-      let braces_case = cases[0] || null;
-      if (braces_case) {
-        const next = check(await sb.rpc('next_braces_month', { p_case: braces_case.id }));
-        braces_case = { ...braces_case, next_month: next };
-      }
-      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents, plans, retainers, complaints };
+      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents: documents || [], plans: plans || [], retainers, complaints };
     },
 
     // ------------------------------------------------------------ braces
@@ -258,21 +542,41 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ photos
-    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false }) {
+    /**
+     * Pass { idempotencyKey } (one crypto.randomUUID() per file, kept across retries): the file then has a fixed
+     * storage path, so pressing Save again after a failure neither uploads it twice nor records it twice.
+     */
+    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false, idempotencyKey = null }, opts = {}) {
+      const key = opts.idempotencyKey || idempotencyKey || null;
+      const prior = key ? partial.get('photo:' + key) : null;
+      if (prior?.row) return prior.row;
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
       const folder = kind === 'edited' ? 'edited' : 'raw';
-      const path = `${patientId}/${folder}/${todayISO()}_${(viewLabel || 'photo').replace(/\W+/g, '-')}_${crypto.randomUUID().slice(0, 8)}.${ext}`;
-      check(await sb.storage.from('clinic-photos').upload(path, file, { contentType: file.type, upsert: false }));
-      return check(await sb.from('photos').insert({
+      const path = prior?.path || `${patientId}/${folder}/${todayISO()}_${(viewLabel || 'photo').replace(/\W+/g, '-')}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
+      if (!prior?.uploaded) {
+        const { error } = await sb.storage.from('clinic-photos').upload(path, file, { contentType: file.type, upsert: false });
+        // Same key, same path: "already exists" means an earlier attempt uploaded it.
+        const duplicate = error && key && (String(error.statusCode || error.status) === '409' || /already exists|duplicate/i.test(error.message || ''));
+        if (error && !duplicate) check({ error });
+        if (key) partial.set('photo:' + key, { path, uploaded: true });
+        if (duplicate) {
+          const existing = check(await sb.from('photos').select('*').eq('storage_path', path).maybeSingle());
+          if (existing) { partial.set('photo:' + key, { path, uploaded: true, row: existing }); return existing; }
+        }
+      }
+      const row = check(await sb.from('photos').insert({
         patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, view_label: viewLabel || null,
         storage_path: path, kind, public_ok: kind === 'edited' && !!publicOk, uploaded_by: await userId(),
       }).select().single());
+      if (key) partial.set('photo:' + key, { path, uploaded: true, row });
+      return row;
     },
     // Admin puts a consented, edited before/after photo on the public website gallery.
     async publishPhoto(photo) {
       if (!photo.public_ok) throw new Error('This photo is not marked as allowed on the website.');
       const name = `${photo.taken_on}_${(photo.view_label || 'case').replace(/\W+/g, '-')}_${photo.id.slice(0, 8)}.${photo.storage_path.split('.').pop()}`;
       check(await sb.storage.from('clinic-photos').copy(photo.storage_path, name, { destinationBucket: 'public-cases' }));
+      forget('publicCases');
       return sb.storage.from('public-cases').getPublicUrl(name).data.publicUrl;
     },
     // Consent forms, ID copies, reports: private "patient-documents" bucket, one folder per patient.
@@ -287,17 +591,33 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ billing
-    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null }) {
+    /**
+     * One database call (save_invoice: invoice + lines + issue, all or nothing). Pass { idempotencyKey } (a
+     * crypto.randomUUID() made when the form opens) so a retried Save returns the same invoice instead of a second one.
+     * Without the migration it falls back to the old three steps, finishing the same draft on a retry.
+     */
+    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
+      const key = opts.idempotencyKey || idempotencyKey || null;
+      const lines = items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) }));
+      const header = { patient_id, branch_id: Number(branch_id), visit_id, discount_amount: Number(discount_amount) || 0, discount_reason };
+      const viaRpc = await rpc('save_invoice', { p_idempotency_key: key, p_invoice: header, p_items: lines });
+      if (!viaRpc.missing) return viaRpc.data;
+
       const subtotal = items.reduce((s, it) => s + Number(it.quantity || 1) * Number(it.unit_price || 0), 0);
       // Saved as a draft first so its lines can be added, then issued. Discounts above
       // the person's limit stay "pending approval" (the database decides).
-      const inv = check(await sb.from('invoices').insert({
-        patient_id, branch_id: Number(branch_id), visit_id, subtotal, discount_amount: Number(discount_amount) || 0,
-        discount_reason, status: 'draft',
-      }).select().single());
-      check(await sb.from('invoice_items').insert(items.map((it) => ({
-        invoice_id: inv.id, description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price),
-      }))));
+      let inv = null;
+      const earlierId = key ? partial.get('invoice:' + key) : null;
+      if (earlierId) inv = check(await sb.from('invoices').select('*, items:invoice_items(id)').eq('id', earlierId).maybeSingle());
+      if (!inv) {
+        inv = check(await sb.from('invoices').insert({
+          patient_id, branch_id: Number(branch_id), visit_id, subtotal, discount_amount: Number(discount_amount) || 0,
+          discount_reason, status: 'draft',
+        }).select().single());
+        inv.items = [];
+        if (key) partial.set('invoice:' + key, inv.id);
+      }
+      if (!inv.items?.length) check(await sb.from('invoice_items').insert(lines.map((it) => ({ invoice_id: inv.id, ...it }))));
       if (inv.status === 'draft') check(await sb.from('invoices').update({ status: 'issued' }).eq('id', inv.id));
       return check(await sb.from('invoices').select('*, items:invoice_items(*)').eq('id', inv.id).single());
     },
@@ -319,10 +639,25 @@ export async function createSupabaseAdapter() {
     async paymentPlans(patientId) {
       return check(await sb.from('payment_plans').select('*, installments:plan_installments(*)').eq('patient_id', patientId).order('created_at', { ascending: false }));
     },
-    async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments }) {
-      const plan = check(await sb.from('payment_plans').insert({ patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_by: await userId() }).select().single());
-      check(await sb.from('plan_installments').insert(installments.map((i) => ({ plan_id: plan.id, due_date: i.due_date, amount: Number(i.amount), note: i.note || null }))));
-      return plan;
+    /** One database call (save_installment_plan: plan + installments together). { idempotencyKey } as for createInvoice. */
+    async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
+      const key = opts.idempotencyKey || idempotencyKey || null;
+      const head = { patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes };
+      const rows = installments.map((i) => ({ due_date: i.due_date, amount: Number(i.amount), note: i.note || null }));
+      const viaRpc = await rpc('save_installment_plan', { p_idempotency_key: key, p_plan: head, p_installments: rows });
+      if (!viaRpc.missing) return viaRpc.data;
+
+      let plan = null;
+      const earlierId = key ? partial.get('plan:' + key) : null;
+      if (earlierId) plan = check(await sb.from('payment_plans').select('*, installments:plan_installments(id)').eq('id', earlierId).maybeSingle());
+      if (!plan) {
+        plan = check(await sb.from('payment_plans').insert({ ...head, created_by: await userId() }).select().single());
+        plan.installments = [];
+        if (key) partial.set('plan:' + key, plan.id);
+      }
+      if (!plan.installments?.length) check(await sb.from('plan_installments').insert(rows.map((i) => ({ plan_id: plan.id, ...i }))));
+      const { installments: _done, ...row } = plan;
+      return row;
     },
     async deletePaymentPlan(id) { check(await sb.from('payment_plans').delete().eq('id', id)); },
     // Installments that are overdue or due within a week, for the coordinator's call list.
@@ -369,20 +704,20 @@ export async function createSupabaseAdapter() {
     },
     async linkComplaintDoctor(id, clinicianId) { check(await sb.from('complaints').update({ clinician_id: clinicianId || null }).eq('id', id)); },
 
-    // ------------------------------------------------------------ coordinator
-    async labCases() { return attachPatients(check(await sb.from('lab_cases').select('*').order('sent_date', { ascending: false }).limit(300))); },
+    // ------------------------------------------------------------ coordinator (capped lists: .truncated / .cap)
+    async labCases() { return attachPatients(capped(check(await sb.from('lab_cases').select('*').order('sent_date', { ascending: false }).limit(301)), 300)); },
     async saveLabCase(row) {
       const { patient, ...data } = row;
       if (data.id) check(await sb.from('lab_cases').update(data).eq('id', data.id));
       else check(await sb.from('lab_cases').insert({ ...data, created_by: await userId() }));
     },
-    async retainerCases() { return attachPatients(check(await sb.from('retainer_cases').select('*').order('created_at', { ascending: false }).limit(300))); },
+    async retainerCases() { return attachPatients(capped(check(await sb.from('retainer_cases').select('*').order('created_at', { ascending: false }).limit(301)), 300)); },
     async saveRetainerCase(row) {
       const { patient, ...data } = row;
       if (data.id) check(await sb.from('retainer_cases').update(data).eq('id', data.id));
       else check(await sb.from('retainer_cases').insert({ ...data, created_by: await userId() }));
     },
-    async reminders() { return attachPatients(check(await sb.from('reminders').select('*').neq('status', 'done').order('due_date').limit(500))); },
+    async reminders() { return attachPatients(capped(check(await sb.from('reminders').select('*').neq('status', 'done').order('due_date').limit(501)), 500)); },
     async saveReminder(row) {
       const { patient, ...data } = row;
       if (data.id) check(await sb.from('reminders').update(data).eq('id', data.id));
@@ -419,10 +754,12 @@ export async function createSupabaseAdapter() {
 
     // ------------------------------------------------------------ accounts
     async expenses({ from, to } = {}) {
-      let q = sb.from('expenses').select('*').order('expense_date', { ascending: false }).limit(1000);
-      if (from) q = q.gte('expense_date', from);
-      if (to) q = q.lte('expense_date', to);
-      return check(await q);
+      return fetchPaged(() => {
+        let q = sb.from('expenses').select('*').order('expense_date', { ascending: false }).order('id', { ascending: false });
+        if (from) q = q.gte('expense_date', from);
+        if (to) q = q.lte('expense_date', to);
+        return q;
+      }, 5000);
     },
     async addExpense(row) {
       const branches = await this.branches();
@@ -469,36 +806,51 @@ export async function createSupabaseAdapter() {
     async closeCash(branchId, date, counted, notes) {
       return check(await sb.rpc('close_cash', { p_branch: Number(branchId), p_date: date, p_counted: Number(counted), p_notes: notes || null }));
     },
-    async cashClosings() { return check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(200)); },
+    async cashClosings() { return capped(check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(201)), 200); },
     async verifyClosing(id) { check(await sb.from('cash_closings').update({ verified_by: await userId(), verified_at: new Date().toISOString() }).eq('id', id)); },
     // ---- report queries (Reports page): payments, invoices, advances, daily visits in a date range.
+    // Lists page through every row up to the cap (then .truncated); totals should come from paymentsSummary / opdSummary.
     async paymentsReport({ from, to, branchId, method } = {}) {
-      let q = sb.from('payments').select('*, invoice:invoices(invoice_no)').order('received_at', { ascending: false }).limit(5000);
-      if (from) q = q.gte('received_at', new Date(from + 'T00:00:00+05:00').toISOString());
-      if (to) q = q.lt('received_at', new Date(new Date(to + 'T00:00:00+05:00').getTime() + 86400000).toISOString());
-      if (branchId) q = q.eq('branch_id', Number(branchId));
-      if (method) q = q.eq('method', method);
-      const [rows, names] = await Promise.all([q.then(check), staffNames()]);
-      return attachPatients(rows.map((r) => ({ ...r, invoice_no: r.invoice?.invoice_no || null, received_by_name: names[r.received_by] || null })));
+      const [rows, names] = await Promise.all([fetchPaged(() => paymentsQuery('*, invoice:invoices(invoice_no)', { from, to, branchId, method }), 5000), staffNames()]);
+      return attachPatients(keepFlags(rows, rows.map((r) => ({ ...r, invoice_no: r.invoice?.invoice_no || null, received_by_name: names[r.received_by] || null }))));
     },
     async invoicesReport({ from, to, branchId, status, discounted } = {}) {
-      let q = sb.from('invoices').select('*').order('issue_date', { ascending: false }).limit(5000);
-      if (from) q = q.gte('issue_date', from);
-      if (to) q = q.lte('issue_date', to);
-      if (branchId) q = q.eq('branch_id', Number(branchId));
-      if (status) q = q.eq('status', status);
-      if (discounted) q = q.gt('discount_amount', 0);
-      const [rows, names] = await Promise.all([q.then(check), staffNames()]);
-      return attachPatients(rows.map((r) => ({ ...r, created_by_name: names[r.created_by] || null })));
+      const build = () => {
+        let q = sb.from('invoices').select('*').order('issue_date', { ascending: false }).order('id', { ascending: false });
+        if (from) q = q.gte('issue_date', from);
+        if (to) q = q.lte('issue_date', to);
+        if (branchId) q = q.eq('branch_id', Number(branchId));
+        if (status) q = q.eq('status', status);
+        if (discounted) q = q.gt('discount_amount', 0);
+        return q;
+      };
+      const [rows, names] = await Promise.all([fetchPaged(build, 5000), staffNames()]);
+      return attachPatients(keepFlags(rows, rows.map((r) => ({ ...r, created_by_name: names[r.created_by] || null }))));
     },
     async advances() {
-      const rows = check(await sb.from('patient_balances').select('patient_id, billed, paid, dues').lt('dues', 0).order('dues', { ascending: true }).limit(500));
-      return attachPatients(rows.map((r) => ({ ...r, advance: -Number(r.dues) })));
+      const rows = capped(check(await sb.from('patient_balances').select('patient_id, billed, paid, dues').lt('dues', 0).order('dues', { ascending: true }).order('patient_id').limit(501)), 500);
+      return attachPatients(keepFlags(rows, rows.map((r) => ({ ...r, advance: -Number(r.dues) }))));
     },
     async visitsDaily({ from, to, branchId } = {}) {
-      let q = sb.from('visits').select('visit_date, branch_id, status, checked_in_at, started_at, patient_id').gte('visit_date', from).lte('visit_date', to).limit(20000);
-      if (branchId) q = q.eq('branch_id', Number(branchId));
-      return check(await q);
+      return fetchPaged(() => visitsQuery({ from, to, branchId }), 20000);
+    },
+    /**
+     * Payment totals for a period, added up in the database (payments_summary). Returns
+     * { totals, byDay, byMethod, source: 'server' | 'rows', truncated } — see summarizePayments() for the fields.
+     * Before the migration it adds up the rows here (up to 20,000; truncated = true beyond that).
+     */
+    async paymentsSummary({ from, to, branchId, method } = {}) {
+      const r = await rpc('payments_summary', { p_from: from || null, p_to: to || null, p_branch: branchId ? Number(branchId) : null, p_method: method || null });
+      if (!r.missing) return { totals: r.data?.totals || summarizePayments([]).totals, byDay: r.data?.byDay || [], byMethod: r.data?.byMethod || [], source: 'server', truncated: false };
+      const rows = await fetchPaged(() => paymentsQuery('id, amount, method, branch_id, received_at', { from, to, branchId, method }), 20000);
+      return { ...summarizePayments(rows), source: 'rows', truncated: !!rows.truncated };
+    },
+    /** OPD totals for a period (opd_summary): { totals, byDay, waitByBranch, source, truncated } — see summarizeVisits(). */
+    async opdSummary({ from, to, branchId } = {}) {
+      const r = await rpc('opd_summary', { p_from: from || null, p_to: to || null, p_branch: branchId ? Number(branchId) : null });
+      if (!r.missing) return { totals: r.data?.totals || summarizeVisits([]).totals, byDay: r.data?.byDay || [], waitByBranch: r.data?.waitByBranch || [], source: 'server', truncated: false };
+      const rows = await fetchPaged(() => visitsQuery({ from, to, branchId }), 20000);
+      return { ...summarizeVisits(rows), source: 'rows', truncated: !!rows.truncated };
     },
     async todaysPayments(branchId) {
       const d = todayISO();
@@ -579,12 +931,14 @@ export async function createSupabaseAdapter() {
     async saveScheduleRow(row) {
       if (row.id) check(await sb.from('dr_ali_schedule').update(row).eq('id', row.id));
       else check(await sb.from('dr_ali_schedule').insert(row));
+      forget('schedule');
     },
-    async deleteScheduleRow(id) { check(await sb.from('dr_ali_schedule').delete().eq('id', id)); },
+    async deleteScheduleRow(id) { check(await sb.from('dr_ali_schedule').delete().eq('id', id)); forget('schedule'); },
     async staffLogins() { return check(await sb.rpc('staff_logins', { p_limit: 200 })); },
     async auditLog() {
-      const [rows, names] = await Promise.all([sb.from('audit_log').select('*').order('at', { ascending: false }).limit(200).then(check), staffNames()]);
-      return rows.map((r) => ({ ...r, actor_name: names[r.actor] || null }));
+      const [rows, names] = await Promise.all([sb.from('audit_log').select('*').order('at', { ascending: false }).limit(201).then(check), staffNames()]);
+      const list = capped(rows, 200);
+      return keepFlags(list, list.map((r) => ({ ...r, actor_name: names[r.actor] || null })));
     },
     async dashboard(date) {
       const day = date || todayISO();
@@ -608,9 +962,12 @@ export async function createSupabaseAdapter() {
           closing: closings.find((c) => c.branch_id === b.id) || null };
       });
     },
+    /** All pending dues: summed in the database (total_dues); before the migration, every balance row is paged and added here. */
     async totalDues() {
-      const rows = check(await sb.from('patient_balances').select('dues').gt('dues', 0));
-      return rows.reduce((t, r) => t + Number(r.dues), 0);
+      const r = await rpc('total_dues', {});
+      if (!r.missing) return Number(r.data) || 0;
+      const rows = await fetchPaged(() => sb.from('patient_balances').select('patient_id, dues').gt('dues', 0).order('patient_id'), 500000);
+      return rows.reduce((t, x) => t + Number(x.dues), 0);
     },
     async commissionRules() { return check(await sb.from('doctor_commission_rules').select('*').eq('active', true)); },
     async report(kind, from, to) { return check(await sb.rpc('clinic_report', { p_kind: kind, p_from: from, p_to: to })) || []; },
@@ -652,14 +1009,15 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ export
+    // Ordered by primary key, so pages neither repeat nor skip rows while the clinic keeps working.
     async exportTable(name) {
       const allowed = ['patients', 'visits', 'invoices', 'payments', 'expenses', 'cash_closings'];
       if (!allowed.includes(name)) return [];
       const out = [];
-      for (let from = 0; ; from += 1000) {
-        const rows = check(await sb.from(name).select('*').range(from, from + 999));
+      for (let from = 0; ; from += PAGE) {
+        const rows = check(await sb.from(name).select('*').order('id', { ascending: true }).range(from, from + PAGE - 1));
         out.push(...rows);
-        if (rows.length < 1000) break;
+        if (rows.length < PAGE) break;
       }
       return out;
     },

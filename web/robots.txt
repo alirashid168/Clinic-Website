@@ -1,0 +1,6 @@
+# The whole site may be crawled. Staff and patient screens sit behind a login
+# (and behind #/ addresses, which search engines do not crawl separately).
+User-agent: *
+Allow: /
+
+Sitemap: https://www.dralirashid.com/sitemap.xml

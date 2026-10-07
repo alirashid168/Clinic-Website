@@ -2,9 +2,11 @@
 // each with a strip of report tabs, a filter bar (dates, branch, payment mode,
 // search) and a Download / Print on every table — the layout the team knows
 // from Healthwire's Financial Report screen.
-import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, select, empty, todayISO, downloadCSV } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, select, empty, todayISO, downloadCSV, localISO, addDaysISO } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName, myBranches } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
+import { tabbed } from './accounts.js';
+import { printSheet } from './invoice.js';
 
 const GROUPS = [
   ['financial', 'Financial', () => can('finance.view')],
@@ -26,7 +28,22 @@ const TABS = {
 const METHOD_LABEL = { cash: 'Cash', card: 'Card', bank_transfer: 'Bank transfer', cheque: 'Cheque', other: 'Other' };
 const monthLabel = (m) => (m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '');
 const num = (v) => Number(v || 0).toLocaleString('en-PK');
-const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+/** The Karachi calendar day of a date or timestamp (a timestamp's UTC day is a day behind before 5 AM PKT). */
+const dayOf = (v) => { const s = String(v); return s.length > 10 ? localISO(new Date(s)) : s; };
+/**
+ * A capped fetch says so on the report, so a partial total is never shown as complete.
+ * totalsComplete: the figures above the table were added up by the database for the whole period.
+ */
+const capNote = (rows, totalsComplete = false) => {
+  if (!rows?.truncated) return null;
+  const n = num(rows.cap ?? rows.length);
+  return totalsComplete
+    ? h('div', { class: 'alert alert-info', role: 'status' }, `The table shows the first ${n} rows; the totals above cover the whole period.`)
+    : h('div', { class: 'alert alert-warning', role: 'status' }, h('strong', {}, 'Incomplete report. '), `Showing the first ${n} rows; totals may be incomplete. Pick a shorter date range or one branch to see everything.`);
+};
+/** A period summary whose totals were added up from a capped set of rows. */
+const summaryNote = (sum) => (sum?.truncated ? capNote({ truncated: true, cap: 20000 }) : null);
+const avgWait = (min) => (min === null || min === undefined ? '' : `${Math.round(Number(min))} min`);
 const sumBy = (rows, keys, fields) => {
   const out = {};
   for (const r of rows) {
@@ -44,26 +61,24 @@ export async function renderReports(root, params) {
   let group = groups.some((g) => g[0] === params.get('group')) ? params.get('group') : groups[0][0];
   let tab = (TABS[group].find((t) => t[0] === params.get('tab')) || TABS[group][0])[0];
   const today = todayISO();
-  const defaults = { financial: today.slice(0, 8) + '01', accounts: today.slice(0, 8) + '01', patients: `${Number(today.slice(0, 4)) - 1}${today.slice(4, 8)}01`, opd: addDays(today, -29), hr: today.slice(0, 8) + '01', inventory: today };
+  const defaults = { financial: today.slice(0, 8) + '01', accounts: today.slice(0, 8) + '01', patients: `${Number(today.slice(0, 4)) - 1}${today.slice(4, 8)}01`, opd: addDaysISO(today, -29), hr: today.slice(0, 8) + '01', inventory: today };
 
   const from = h('input', { type: 'date', value: params.get('from') || defaults[group], 'aria-label': 'From' });
   const to = h('input', { type: 'date', value: params.get('to') || today, 'aria-label': 'To' });
   const branch = select([{ value: '', label: 'All branches' }, ...myBranches().map((b) => ({ value: b.id, label: b.name }))], params.get('branch') || '', { 'aria-label': 'Branch' });
   const method = select([{ value: '', label: 'All payment modes' }, ...Object.entries(METHOD_LABEL).map(([value, label]) => ({ value, label }))], '', { 'aria-label': 'Payment mode' });
   const search = h('input', { type: 'search', placeholder: 'Invoice#, Mr# or name', 'aria-label': 'Search in this report', style: { maxWidth: '220px' } });
-  const groupStrip = h('div', { class: 'tabs report-groups', role: 'tablist' });
-  const tabStrip = h('div', { class: 'tabs report-tabs', role: 'tablist' });
   const filters = h('div', { class: 'report-filters inline' });
   const body = h('div', { class: 'report-body' });
 
-  const money = (v) => h('td', { class: 'right', style: { color: Number(v) < 0 ? 'var(--stop)' : '' } }, rupees(v));
+  const money = (v) => h('td', { class: ['right', Number(v) < 0 && 'status-bad'] }, rupees(v));
   const cell = (r, key, kind) => {
     if (kind === 'money') return money(r[key]);
     if (kind === 'num') return h('td', { class: 'right' }, num(r[key]));
     if (kind === 'branch') return h('td', {}, r[key] === null || r[key] === undefined || r[key] === '' ? h('span', { class: 'muted' }, 'No branch') : branchName(r[key]) || `Branch ${r[key]}`);
     if (kind === 'month') return h('td', { class: 'nowrap' }, monthLabel(r[key]));
-    if (kind === 'date') return h('td', { class: 'nowrap' }, r[key] ? shortDate(String(r[key]).slice(0, 10)) : '');
-    if (kind === 'datetime') return h('td', { class: 'nowrap' }, r[key] ? `${shortDate(String(r[key]).slice(0, 10))} ${timeOf(r[key])}` : '');
+    if (kind === 'date') return h('td', { class: 'nowrap' }, r[key] ? shortDate(dayOf(r[key])) : '');
+    if (kind === 'datetime') return h('td', { class: 'nowrap' }, r[key] ? `${shortDate(dayOf(r[key]))} ${timeOf(r[key])}` : '');
     if (kind === 'patient') return h('td', {}, r.patient_id ? h('a', { href: `#/staff/patient/${r.patient_id}` }, r[key]) : (r[key] ?? ''));
     if (kind === 'method') return h('td', {}, METHOD_LABEL[r[key]] || r[key] || '');
     return h('td', {}, r[key] ?? '');
@@ -72,13 +87,14 @@ export async function renderReports(root, params) {
   const table = (title, help, rows, columns, csvName, totals) => h('section', { class: 'panel report-table' },
     h('div', { class: 'panel-head' }, h('h2', {}, title), h('div', { class: 'inline' },
       rows.length ? h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`${csvName}_${from.value}_${to.value}.csv`, rows.map((r) => Object.fromEntries(columns.map(([label, key, kind]) => [label, kind === 'branch' ? (branchName(r[key]) || '') : kind === 'method' ? (METHOD_LABEL[r[key]] || r[key]) : r[key]])))) }, 'Download') : null,
-      h('button', { class: 'btn btn-small', onclick: () => { body.classList.add('print-area'); window.print(); setTimeout(() => body.classList.remove('print-area'), 800); } }, 'Print'))),
+      h('button', { class: 'btn btn-small', onclick: () => printSheet(body) }, 'Print'))),
     help ? h('p', { class: 'muted' }, help) : null,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, columns.map(([label, , kind]) => h('th', { class: kind === 'money' || kind === 'num' ? 'right' : '' }, label)))),
       h('tbody', {}, rows.map((r) => h('tr', {}, columns.map(([, key, kind]) => cell(r, key, kind))))),
       totals ? h('tfoot', {}, h('tr', {}, columns.map(([, key, kind], i) => i === 0 ? h('td', {}, h('strong', {}, 'Total')) : (kind === 'money' || kind === 'num') && totals[key] !== undefined ? h('td', { class: 'right' }, h('strong', {}, kind === 'money' ? rupees(totals[key]) : num(totals[key]))) : h('td', {})))) : null)) : empty('Nothing in this period.'));
-  const stat = (value, label, color) => h('div', { class: 'stat' }, h('strong', { style: color ? { color } : {} }, value), h('span', {}, label));
+  /** tone 'bad' | 'ok' colours the figure through the status classes; the label always says what it is. */
+  const stat = (value, label, tone) => h('div', { class: 'stat' }, h('strong', { class: tone ? `status-${tone}` : null }, value), h('span', {}, label));
   const stats = (...items) => h('div', { class: 'stat-row', style: { marginBottom: '16px' } }, items);
   const total = (rows, k) => rows.reduce((s, r) => s + Number(r[k] || 0), 0);
   const q = () => search.value.trim().toLowerCase();
@@ -91,29 +107,55 @@ export async function renderReports(root, params) {
 
   // ------------------------------------------------------------ loaders (one per tab)
   const loaders = {
+    // Payment totals come from the database for the whole period (paymentsSummary). Only a search,
+    // which matches patient names in the browser, makes them add up the rows that were fetched.
     'financial/transactions': async () => {
-      const rows = withPatient((await d.paymentsReport({ ...range(), method: method.value || null })).filter(matches));
+      const args = { ...range(), method: method.value || null };
+      const [raw, sum] = await Promise.all([d.paymentsReport(args), q() ? null : d.paymentsSummary(args)]);
+      const rows = withPatient(raw.filter(matches));
       const received = rows.filter((r) => Number(r.amount) > 0), refunds = rows.filter((r) => Number(r.amount) < 0);
-      return [stats(stat(rupees(total(received, 'amount')), 'Received'), stat(rupees(total(received.filter((r) => r.method === 'cash'), 'amount')), 'Cash'),
-          stat(rupees(total(received.filter((r) => r.method !== 'cash'), 'amount')), 'Card / bank / cheque'), stat(rupees(-total(refunds, 'amount')), 'Refunded', refunds.length ? 'var(--stop)' : ''),
-          stat(rupees(total(rows, 'amount')), 'Net'), stat(num(rows.length), 'Payments')),
+      const t = sum?.totals || { received: total(received, 'amount'), cash: total(received.filter((r) => r.method === 'cash'), 'amount'), card: total(received.filter((r) => r.method !== 'cash'), 'amount'), bank: 0,
+        refunds: -total(refunds, 'amount'), net: total(rows, 'amount'), count: rows.length };
+      return [summaryNote(sum) || capNote(raw, !!sum), stats(stat(rupees(t.received), 'Received'), stat(rupees(t.cash), 'Cash'),
+          stat(rupees(Number(t.card) + Number(t.bank)), 'Card / bank / cheque'), stat(rupees(t.refunds), 'Refunded', Number(t.refunds) ? 'bad' : ''),
+          stat(rupees(t.net), 'Net'), stat(num(t.count), 'Payments')),
         table('Transactions', 'Every payment in the period, newest first. Refunds are negative.', rows,
-          [['Date', 'received_at', 'datetime'], ['Invoice', 'invoice_no', 'text'], ['Patient', 'patient_name', 'patient'], ['Branch', 'branch_id', 'branch'], ['Mode', 'method', 'method'], ['Received by', 'received_by_name', 'text'], ['Reference', 'reference', 'text'], ['Amount', 'amount', 'money']], 'transactions', { amount: total(rows, 'amount') })];
+          [['Date', 'received_at', 'datetime'], ['Invoice', 'invoice_no', 'text'], ['Patient', 'patient_name', 'patient'], ['Branch', 'branch_id', 'branch'], ['Mode', 'method', 'method'], ['Received by', 'received_by_name', 'text'], ['Reference', 'reference', 'text'], ['Amount', 'amount', 'money']], 'transactions', raw.truncated ? null : { amount: total(rows, 'amount') })];
     },
     'financial/summary': async () => {
-      const rows = (await d.paymentsReport({ ...range(), method: method.value || null })).filter(matches).map((r) => ({ day: String(r.received_at).slice(0, 10), branch_id: r.branch_id,
-        received: Math.max(0, Number(r.amount)), cash: r.method === 'cash' && Number(r.amount) > 0 ? Number(r.amount) : 0, card: r.method === 'card' && Number(r.amount) > 0 ? Number(r.amount) : 0,
-        bank: ['bank_transfer', 'cheque', 'other'].includes(r.method) && Number(r.amount) > 0 ? Number(r.amount) : 0, refunds: Math.max(0, -Number(r.amount)), net: Number(r.amount), count: 1 }));
-      const days = sumBy(rows, branch.value ? ['day'] : ['day', 'branch_id'], ['received', 'cash', 'card', 'bank', 'refunds', 'net', 'count']).sort((a, b) => b.day.localeCompare(a.day) || (a.branch_id || 0) - (b.branch_id || 0));
+      const args = { ...range(), method: method.value || null };
+      const fields = ['received', 'cash', 'card', 'bank', 'refunds', 'net', 'count'];
+      let days; let note;
+      if (!q()) {
+        const sum = await d.paymentsSummary(args);
+        days = sum.byDay;
+        note = summaryNote(sum);
+      } else {
+        const raw = await d.paymentsReport(args);
+        const rows = raw.filter(matches).map((r) => ({ day: dayOf(r.received_at), branch_id: r.branch_id,
+          received: Math.max(0, Number(r.amount)), cash: r.method === 'cash' && Number(r.amount) > 0 ? Number(r.amount) : 0, card: r.method === 'card' && Number(r.amount) > 0 ? Number(r.amount) : 0,
+          bank: !['cash', 'card'].includes(r.method) && Number(r.amount) > 0 ? Number(r.amount) : 0, refunds: Math.max(0, -Number(r.amount)), net: Number(r.amount), count: 1 }));
+        days = sumBy(rows, branch.value ? ['day'] : ['day', 'branch_id'], fields).sort((a, b) => b.day.localeCompare(a.day) || (a.branch_id || 0) - (b.branch_id || 0));
+        note = capNote(raw);
+      }
       const cols = [['Day', 'day', 'date'], ...(branch.value ? [] : [['Branch', 'branch_id', 'branch']]), ['Received', 'received', 'money'], ['Cash', 'cash', 'money'], ['Card', 'card', 'money'], ['Bank / cheque / other', 'bank', 'money'], ['Refunds', 'refunds', 'money'], ['Net', 'net', 'money'], ['Payments', 'count', 'num']];
-      return [stats(stat(rupees(total(days, 'received')), 'Received'), stat(rupees(total(days, 'refunds')), 'Refunded'), stat(rupees(total(days, 'net')), 'Net'), stat(num(days.length), branch.value ? 'Days' : 'Branch-days')),
-        table('Summary by day', 'Totals per day' + (branch.value ? '' : ' and branch') + ' for the period.', days, cols, 'summary', Object.fromEntries(['received', 'cash', 'card', 'bank', 'refunds', 'net', 'count'].map((k) => [k, total(days, k)])))];
+      return [note, stats(stat(rupees(total(days, 'received')), 'Received'), stat(rupees(total(days, 'refunds')), 'Refunded'), stat(rupees(total(days, 'net')), 'Net'), stat(num(days.length), branch.value ? 'Days' : 'Branch-days')),
+        table('Summary by day', 'Totals per day' + (branch.value ? '' : ' and branch') + ' for the period.', days, cols, 'summary', Object.fromEntries(fields.map((k) => [k, total(days, k)])))];
     },
     'financial/methods': async () => {
-      const rows = (await d.paymentsReport(range())).filter(matches).map((r) => ({ method: r.method, amount: Number(r.amount) > 0 ? Number(r.amount) : 0, refunds: Number(r.amount) < 0 ? -Number(r.amount) : 0, count: 1 }));
+      let rows; let note;
+      if (!q()) {
+        const sum = await d.paymentsSummary(range());
+        rows = sum.byMethod;
+        note = summaryNote(sum);
+      } else {
+        const raw = await d.paymentsReport(range());
+        rows = raw.filter(matches).map((r) => ({ method: r.method, amount: Number(r.amount) > 0 ? Number(r.amount) : 0, refunds: Number(r.amount) < 0 ? -Number(r.amount) : 0, count: 1 }));
+        note = capNote(raw);
+      }
       const grand = total(rows, 'amount');
       const by = sumBy(rows, ['method'], ['amount', 'refunds', 'count']).map((r) => ({ ...r, share: grand ? Math.round((100 * r.amount) / grand) + '%' : '' })).sort((a, b) => b.amount - a.amount);
-      return [table('Payment mode', 'How money came in during the period.', by, [['Mode', 'method', 'method'], ['Received', 'amount', 'money'], ['Share', 'share', 'text'], ['Refunds', 'refunds', 'money'], ['Payments', 'count', 'num']], 'payment_mode', { amount: grand, refunds: total(by, 'refunds'), count: total(by, 'count') })];
+      return [note, table('Payment mode', 'How money came in during the period.', by, [['Mode', 'method', 'method'], ['Received', 'amount', 'money'], ['Share', 'share', 'text'], ['Refunds', 'refunds', 'money'], ['Payments', 'count', 'num']], 'payment_mode', { amount: grand, refunds: total(by, 'refunds'), count: total(by, 'count') })];
     },
     'financial/procedures': async () => {
       const rows = (await report('treatments')).filter((r) => !q() || String(r.treatment || '').toLowerCase().includes(q()));
@@ -125,7 +167,7 @@ export async function renderReports(root, params) {
       const pnlBranch = sumBy(got.filter((r) => r.branch_id !== null), ['branch_id'], ['income', 'expenses']).map((r) => ({ ...r, profit: r.income - r.expenses })).sort((x, y) => y.income - x.income);
       const unassigned = got.filter((r) => r.branch_id === null).reduce((s, r) => s + Number(r.expenses), 0);
       const net = total(pnl, 'profit');
-      return [stats(stat(rupees(total(pnl, 'income')), 'Income (received)'), stat(rupees(total(pnl, 'expenses')), 'Expenses'), stat(rupees(net), net < 0 ? 'Loss' : 'Profit', net < 0 ? 'var(--stop)' : 'var(--ok)')),
+      return [stats(stat(rupees(total(pnl, 'income')), 'Income (received)'), stat(rupees(total(pnl, 'expenses')), 'Expenses'), stat(rupees(net), net < 0 ? 'Loss' : 'Profit', net < 0 ? 'bad' : 'ok')),
         table('Income statement by month', branch.value ? 'Income at this branch and expenses tagged to it.' : `All branches.${unassigned > 0 ? ` ${rupees(unassigned)} of expenses were recorded against a city only (rent, salaries, ads) and are included.` : ''}`,
           pnl, [['Month', 'month', 'month'], ['Income', 'income', 'money'], ['Expenses', 'expenses', 'money'], ['Profit', 'profit', 'money']], 'income_statement', { income: total(pnl, 'income'), expenses: total(pnl, 'expenses'), profit: net }),
         branch.value ? null : table('By branch (whole period)', 'Expenses with no branch are not in this table.', pnlBranch, [['Branch', 'branch_id', 'branch'], ['Income', 'income', 'money'], ['Expenses', 'expenses', 'money'], ['Profit', 'profit', 'money']], 'income_by_branch')];
@@ -145,28 +187,32 @@ export async function renderReports(root, params) {
     'financial/pending': async () => {
       const [byB, top] = await Promise.all([report('dues_by_branch'), report('top_dues')]);
       const rows = top.map((r) => ({ ...r, name: `${r.full_name} (Mr# ${r.mr_number})` })).filter(matches).filter((r) => !branch.value || String(r.branch_id) === branch.value);
-      return [stats(stat(rupees(total(byB, 'dues')), 'Pending dues today (all time)', 'var(--stop)'), stat(num(total(byB, 'patients')), 'Patients with dues')),
+      return [stats(stat(rupees(total(byB, 'dues')), 'Pending dues today (all time)', 'bad'), stat(num(total(byB, 'patients')), 'Patients with dues')),
         table('Pending payments by branch', 'Dues today, by the branch each patient first came to.', byBranch(byB), [['Branch', 'branch_id', 'branch'], ['Patients with dues', 'patients', 'num'], ['Dues', 'dues', 'money']], 'pending_by_branch', { patients: total(byBranch(byB), 'patients'), dues: total(byBranch(byB), 'dues') }),
         table('Patients with the highest dues', 'Top 100.', rows, [['Patient', 'name', 'patient'], ['Phone', 'phone', 'text'], ['Branch', 'branch_id', 'branch'], ['Dues', 'dues', 'money'], ['Last payment', 'last_payment', 'text']], 'pending_patients')];
     },
     'financial/advance': async () => {
-      const rows = withPatient(await d.advances()).filter(matches);
-      return [stats(stat(rupees(total(rows, 'advance')), 'Advance held'), stat(num(rows.length), 'Patients in credit')),
+      const raw = await d.advances();
+      const rows = withPatient(raw).filter(matches);
+      return [capNote(raw), stats(stat(rupees(total(rows, 'advance')), 'Advance held'), stat(num(rows.length), 'Patients in credit')),
         table('Advance payments', 'Patients who have paid more than they have been invoiced (money held against future treatment).', rows, [['Patient', 'patient_name', 'patient'], ['Phone', 'phone', 'text'], ['Invoiced', 'billed', 'money'], ['Paid', 'paid', 'money'], ['Advance', 'advance', 'money']], 'advances', { advance: total(rows, 'advance') })];
     },
     'financial/void': async () => {
-      const rows = withPatient(await d.invoicesReport({ ...range(), status: 'void' })).filter(matches);
-      return [stats(stat(num(rows.length), 'Void invoices'), stat(rupees(total(rows, 'total')), 'Amount voided')),
+      const raw = await d.invoicesReport({ ...range(), status: 'void' });
+      const rows = withPatient(raw).filter(matches);
+      return [capNote(raw), stats(stat(num(rows.length), 'Void invoices'), stat(rupees(total(rows, 'total')), 'Amount voided')),
         table('Void invoices', 'Invoices cancelled in the period, with the reason. Every void is in the audit log.', rows, [['Invoice', 'invoice_no', 'text'], ['Date', 'issue_date', 'date'], ['Patient', 'patient_name', 'patient'], ['Branch', 'branch_id', 'branch'], ['Amount', 'total', 'money'], ['Reason', 'void_reason', 'text'], ['Made by', 'created_by_name', 'text']], 'void_invoices', { total: total(rows, 'total') })];
     },
     'financial/refunds': async () => {
-      const rows = withPatient((await d.paymentsReport(range())).filter((r) => Number(r.amount) < 0).filter(matches)).map((r) => ({ ...r, refund: -Number(r.amount) }));
-      return [stats(stat(rupees(total(rows, 'refund')), 'Refunded', rows.length ? 'var(--stop)' : ''), stat(num(rows.length), 'Refunds')),
+      const raw = await d.paymentsReport(range());
+      const rows = withPatient(raw.filter((r) => Number(r.amount) < 0).filter(matches)).map((r) => ({ ...r, refund: -Number(r.amount) }));
+      return [capNote(raw), stats(stat(rupees(total(rows, 'refund')), 'Refunded', rows.length ? 'bad' : ''), stat(num(rows.length), 'Refunds')),
         table('Refunds', 'Money given back in the period.', rows, [['Date', 'received_at', 'datetime'], ['Invoice', 'invoice_no', 'text'], ['Patient', 'patient_name', 'patient'], ['Branch', 'branch_id', 'branch'], ['Mode', 'method', 'method'], ['By', 'received_by_name', 'text'], ['Notes', 'notes', 'text'], ['Refund', 'refund', 'money']], 'refunds', { refund: total(rows, 'refund') })];
     },
     'financial/discounts': async () => {
-      const rows = withPatient(await d.invoicesReport({ ...range(), discounted: true })).filter(matches).map((r) => ({ ...r, pct: Number(r.subtotal) ? Math.round((100 * Number(r.discount_amount)) / Number(r.subtotal)) + '%' : '' }));
-      return [stats(stat(rupees(total(rows, 'discount_amount')), 'Discount given'), stat(rupees(total(rows, 'subtotal')), 'Before discount'), stat(num(rows.length), 'Discounted invoices')),
+      const raw = await d.invoicesReport({ ...range(), discounted: true });
+      const rows = withPatient(raw).filter(matches).map((r) => ({ ...r, pct: Number(r.subtotal) ? Math.round((100 * Number(r.discount_amount)) / Number(r.subtotal)) + '%' : '' }));
+      return [capNote(raw), stats(stat(rupees(total(rows, 'discount_amount')), 'Discount given'), stat(rupees(total(rows, 'subtotal')), 'Before discount'), stat(num(rows.length), 'Discounted invoices')),
         table('Discounts', 'Invoices with a discount in the period. Discounts above the front-desk cap needed approval (Billing → Approvals).', rows, [['Invoice', 'invoice_no', 'text'], ['Date', 'issue_date', 'date'], ['Patient', 'patient_name', 'patient'], ['Branch', 'branch_id', 'branch'], ['Before', 'subtotal', 'money'], ['Discount', 'discount_amount', 'money'], ['%', 'pct', 'text'], ['After', 'total', 'money'], ['Reason', 'discount_reason', 'text'], ['Status', 'status', 'text']], 'discounts', { subtotal: total(rows, 'subtotal'), discount_amount: total(rows, 'discount_amount'), total: total(rows, 'total') })];
     },
     'financial/statistics': async () => {
@@ -210,28 +256,27 @@ export async function renderReports(root, params) {
     },
     'patients/dues': loadersAlias('financial/pending'),
 
+    // OPD counts come from the database for the whole period (opdSummary), not from a capped list of visits.
     'opd/daily': async () => {
-      const visits = await d.visitsDaily(range());
-      const rows = sumBy(visits.map((v) => ({ day: v.visit_date, branch_id: v.branch_id, visits: 1, completed: v.status === 'completed' ? 1 : 0, no_shows: v.status === 'no_show' ? 1 : 0, cancelled: v.status === 'cancelled' ? 1 : 0,
-          wait: v.checked_in_at && v.started_at ? (new Date(v.started_at) - new Date(v.checked_in_at)) / 60000 : 0, waited: v.checked_in_at && v.started_at ? 1 : 0 })),
-        branch.value ? ['day'] : ['day', 'branch_id'], ['visits', 'completed', 'no_shows', 'cancelled', 'wait', 'waited'])
-        .map((r) => ({ ...r, avg_wait: r.waited ? Math.round(r.wait / r.waited) + ' min' : '' })).sort((a, b) => b.day.localeCompare(a.day) || (a.branch_id || 0) - (b.branch_id || 0));
-      return [stats(stat(num(total(rows, 'visits')), 'Visits'), stat(num(total(rows, 'completed')), 'Completed'), stat(num(total(rows, 'no_shows')), 'No-shows'), stat(num(new Set(visits.map((v) => v.patient_id)).size), 'Different patients')),
-        table('OPD by day', 'Every row on the Aaj ki List in the period (visits in all states).', rows, [['Day', 'day', 'date'], ...(branch.value ? [] : [['Branch', 'branch_id', 'branch']]), ['Visits', 'visits', 'num'], ['Completed', 'completed', 'num'], ['No-shows', 'no_shows', 'num'], ['Cancelled', 'cancelled', 'num'], ['Avg wait', 'avg_wait', 'text']], 'opd_daily', { visits: total(rows, 'visits'), completed: total(rows, 'completed'), no_shows: total(rows, 'no_shows'), cancelled: total(rows, 'cancelled') })];
+      const sum = await d.opdSummary(range());
+      const rows = sum.byDay.map((r) => ({ ...r, avg_wait: avgWait(r.avg_wait_min) }));
+      const t = sum.totals;
+      return [summaryNote(sum), stats(stat(num(t.visits), 'Visits'), stat(num(t.completed), 'Completed'), stat(num(t.no_shows), 'No-shows'), stat(num(t.patients), 'Different patients')),
+        table('OPD by day', 'Every row on the Aaj ki List in the period (visits in all states).', rows, [['Day', 'day', 'date'], ...(branch.value ? [] : [['Branch', 'branch_id', 'branch']]), ['Visits', 'visits', 'num'], ['Completed', 'completed', 'num'], ['No-shows', 'no_shows', 'num'], ['Cancelled', 'cancelled', 'num'], ['Avg wait', 'avg_wait', 'text']], 'opd_daily', { visits: t.visits, completed: t.completed, no_shows: t.no_shows, cancelled: t.cancelled })];
     },
     'opd/monthly': loadersAlias('financial/statistics'),
     'opd/wait': async () => {
-      const visits = (await d.visitsDaily(range())).filter((v) => v.checked_in_at && v.started_at);
-      const rows = sumBy(visits.map((v) => ({ branch_id: v.branch_id, waited: 1, wait: (new Date(v.started_at) - new Date(v.checked_in_at)) / 60000, long: (new Date(v.started_at) - new Date(v.checked_in_at)) / 60000 > 45 ? 1 : 0 })), ['branch_id'], ['waited', 'wait', 'long'])
-        .map((r) => ({ ...r, avg_wait: Math.round(r.wait / r.waited) + ' min', long_pct: Math.round((100 * r.long) / r.waited) + '%' })).sort((a, b) => b.waited - a.waited);
-      return [table('Waiting time by branch', 'Check-in to treatment start, for visits run on the website in the period (imported history has no times).', rows, [['Branch', 'branch_id', 'branch'], ['Visits timed', 'waited', 'num'], ['Average wait', 'avg_wait', 'text'], ['Waited over 45 min', 'long', 'num'], ['Share over 45 min', 'long_pct', 'text']], 'waiting_time')];
+      const sum = await d.opdSummary(range());
+      const rows = sum.waitByBranch.filter((r) => Number(r.waited) > 0)
+        .map((r) => ({ ...r, avg_wait: avgWait(r.avg_wait_min), long_pct: Math.round((100 * Number(r.long)) / Number(r.waited)) + '%' })).sort((a, b) => b.waited - a.waited);
+      return [summaryNote(sum), table('Waiting time by branch', 'Check-in to treatment start, for visits run on the website in the period (imported history has no times).', rows, [['Branch', 'branch_id', 'branch'], ['Visits timed', 'waited', 'num'], ['Average wait', 'avg_wait', 'text'], ['Waited over 45 min', 'long', 'num'], ['Share over 45 min', 'long_pct', 'text']], 'waiting_time')];
     },
 
     'inventory/stock': async () => {
       const branches = branch.value ? myBranches().filter((b) => String(b.id) === branch.value) : myBranches();
       const rows = [];
       for (const b of branches) { const inv = await d.inventory(b.id).catch(() => null); if (!inv) continue; for (const it of inv.items) { const s = inv.stock.find((x) => x.item_id === it.id); rows.push({ branch_id: b.id, item: it.name, category: it.category, supplier: it.supplier || '', quantity: Number(s?.quantity || 0), unit: it.unit, reorder_level: Number(s?.reorder_level || 0), low: s && Number(s.reorder_level) > 0 && Number(s.quantity) <= Number(s.reorder_level) ? 'Low' : '' }); } }
-      return [table('Stock levels', 'Current quantity per item and branch.', rows, [['Branch', 'branch_id', 'branch'], ['Item', 'item', 'text'], ['Category', 'category', 'text'], ['Supplier', 'supplier', 'text'], ['In stock', 'quantity', 'num'], ['Unit', 'unit', 'text'], ['Reorder at', 'reorder_level', 'num'], ['', 'low', 'text']], 'stock_levels')];
+      return [table('Stock levels', 'Current quantity per item and branch.', rows, [['Branch', 'branch_id', 'branch'], ['Item', 'item', 'text'], ['Category', 'category', 'text'], ['Supplier', 'supplier', 'text'], ['In stock', 'quantity', 'num'], ['Unit', 'unit', 'text'], ['Reorder at', 'reorder_level', 'num'], ['Stock alert', 'low', 'text']], 'stock_levels')];
     },
     'inventory/low': async () => {
       const branches = branch.value ? myBranches().filter((b) => String(b.id) === branch.value) : myBranches();
@@ -242,17 +287,19 @@ export async function renderReports(root, params) {
 
     'accounts/expenses': async () => {
       const cats = state.ref.categories || [];
-      const rows = byBranch((await d.expenses({ from: from.value, to: to.value })).map((e) => ({ ...e, category: cats.find((c) => c.id === e.category_id)?.name || `Category ${e.category_id}` })));
+      const raw = await d.expenses({ from: from.value, to: to.value });
+      const rows = byBranch(raw.map((e) => ({ ...e, category: cats.find((c) => c.id === e.category_id)?.name || `Category ${e.category_id}` })));
       const byCat = sumBy(rows.map((r) => ({ category: r.category, amount: Number(r.amount), count: 1 })), ['category'], ['amount', 'count']).sort((a, b) => b.amount - a.amount);
       const byCatBranch = sumBy(rows.map((r) => ({ category: r.category, branch_id: r.branch_id, amount: Number(r.amount), count: 1 })), ['category', 'branch_id'], ['amount', 'count']).sort((a, b) => a.category.localeCompare(b.category) || b.amount - a.amount);
-      return [stats(stat(rupees(total(byCat, 'amount')), 'Expenses in the period'), stat(num(rows.length), 'Entries')),
+      return [capNote(raw), stats(stat(rupees(total(byCat, 'amount')), 'Expenses in the period'), stat(num(rows.length), 'Entries')),
         table('Expenses by category', null, byCat, [['Category', 'category', 'text'], ['Amount', 'amount', 'money'], ['Entries', 'count', 'num']], 'expenses_by_category', { amount: total(byCat, 'amount'), count: total(byCat, 'count') }),
         branch.value ? null : table('By category and branch', 'Expenses recorded without a branch show as "No branch" (city-level: rent, salaries, ads).', byCatBranch, [['Category', 'category', 'text'], ['Branch', 'branch_id', 'branch'], ['Amount', 'amount', 'money'], ['Entries', 'count', 'num']], 'expenses_by_category_branch')];
     },
     'accounts/cash': async () => {
-      const rows = byBranch((await d.cashClosings()).filter((c) => c.closing_date >= from.value && c.closing_date <= to.value)).map((c) => ({ ...c, status: c.verified_at || c.verified_by ? 'Verified' : 'Waiting', diff: Number(c.difference) }));
+      const raw = await d.cashClosings();
+      const rows = byBranch(raw.filter((c) => c.closing_date >= from.value && c.closing_date <= to.value)).map((c) => ({ ...c, status: c.verified_at || c.verified_by ? 'Verified' : 'Waiting', diff: Number(c.difference) }));
       const off = rows.filter((r) => r.diff !== 0);
-      return [stats(stat(num(rows.length), 'Closings'), stat(num(off.length), 'Did not match', off.length ? 'var(--stop)' : ''), stat(rupees(total(off, 'diff')), 'Net difference'), stat(num(rows.filter((r) => r.status !== 'Verified').length), 'Waiting for the accountant')),
+      return [capNote(raw), stats(stat(num(rows.length), 'Closings'), stat(num(off.length), 'Did not match', off.length ? 'bad' : ''), stat(rupees(total(off, 'diff')), 'Net difference'), stat(num(rows.filter((r) => r.status !== 'Verified').length), 'Waiting for the accountant')),
         table('Cash closings', 'Front desk closes the day; the accountant verifies. Differences are flagged on Dr. Ali\'s Today page.', rows, [['Date', 'closing_date', 'date'], ['Branch', 'branch_id', 'branch'], ['Expected', 'expected_cash', 'money'], ['Counted', 'counted_cash', 'money'], ['Difference', 'diff', 'money'], ['Notes', 'notes', 'text'], ['Status', 'status', 'text']], 'cash_closings', { expected_cash: total(rows, 'expected_cash'), counted_cash: total(rows, 'counted_cash'), diff: total(rows, 'diff') })];
     },
     'accounts/lab': async () => {
@@ -268,7 +315,7 @@ export async function renderReports(root, params) {
       if (!isAdmin()) return [empty('Only Dr. Ali can see the login log.')];
       const got = await d.staffLogins().catch((e) => { toast(friendlyError(e), 'error'); return { staff: [], events: [] }; });
       const staff = got.staff.map((s) => ({ ...s, role_label: ROLE_LABELS[s.role] || s.role, status: s.active ? 'On' : 'Off' }));
-      const events = got.events.filter((e) => String(e.at).slice(0, 10) >= from.value && String(e.at).slice(0, 10) <= to.value).map((e) => ({ ...e, who: e.name || '', role_label: e.role ? ROLE_LABELS[e.role] || e.role : e.kind === 'patient' ? 'Patient' : '' }));
+      const events = got.events.filter((e) => dayOf(e.at) >= from.value && dayOf(e.at) <= to.value).map((e) => ({ ...e, who: e.name || '', role_label: e.role ? ROLE_LABELS[e.role] || e.role : e.kind === 'patient' ? 'Patient' : '' }));
       return [table('Staff accounts', 'Last sign-in comes from the login system itself.', staff, [['Name', 'full_name', 'text'], ['Login', 'email', 'text'], ['Role', 'role_label', 'text'], ['Account', 'status', 'text'], ['Last sign-in', 'last_sign_in_at', 'datetime'], ['Sign-ins (30 days)', 'sign_ins_30d', 'num']], 'staff_logins'),
         table('Sign-ins in the period', null, events, [['When', 'at', 'datetime'], ['Who', 'who', 'text'], ['Role', 'role_label', 'text'], ['Device', 'user_agent', 'text']], 'sign_ins')];
     },
@@ -287,9 +334,20 @@ export async function renderReports(root, params) {
       if (n === loading) mount(body, parts.filter(Boolean));
     } catch (e) { if (n === loading) mount(body, empty(friendlyError(e))); }
   }
-  function drawStrips() {
-    mount(groupStrip, groups.map(([key, label]) => h('button', { class: 'tab', role: 'tab', 'aria-selected': String(key === group), onclick: () => { group = key; tab = TABS[group][0][0]; from.value = defaults[group]; to.value = today; drawStrips(); load(); } }, label)));
-    mount(tabStrip, TABS[group].map(([key, label]) => h('button', { class: 'tab', role: 'tab', 'aria-selected': String(key === tab), onclick: () => { tab = key; drawStrips(); load(); } }, label)));
+  // Two tab strips: the report family, then the report. A strip updates in place when a tab is
+  // picked, so keyboard focus stays on it; only the report strip is rebuilt, when the family changes.
+  const groupTabs = tabbed('Report family', groups.map(([key, label]) => [key, label]), group, (key) => {
+    group = key; tab = TABS[group][0][0]; from.value = defaults[group]; to.value = today;
+    drawReportTabs(); drawFilters(); load();
+  });
+  groupTabs.el.classList.add('report-groups');
+  function drawReportTabs() {
+    const reportTabs = tabbed('Report', TABS[group], tab, (key) => { tab = key; drawFilters(); load(); });
+    reportTabs.el.classList.add('report-tabs');
+    reportTabs.panel.append(filters, body);
+    mount(groupTabs.panel, reportTabs.el, reportTabs.panel);
+  }
+  function drawFilters() {
     const financial = group === 'financial';
     const noDates = group === 'inventory';
     mount(filters,
@@ -305,7 +363,8 @@ export async function renderReports(root, params) {
 
   mount(root,
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Reports'), h('p', {}, 'Pick a report family, then a report. Every table can be downloaded or printed.'))),
-    groupStrip, tabStrip, filters, body);
-  drawStrips();
+    groupTabs.el, groupTabs.panel);
+  drawReportTabs();
+  drawFilters();
   await load();
 }
