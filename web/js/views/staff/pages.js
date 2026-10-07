@@ -128,13 +128,16 @@ export async function renderComplaints(root) {
   const open = (c) => {
     const reply = h('textarea', { placeholder: 'Reply to the patient, or write an internal note' });
     const internal = h('input', { type: 'checkbox' });
+    const doctorSel = select([{ value: '', label: 'Not about a doctor' }, ...state.ref.clinicians.filter((x) => x.is_doctor).map((x) => ({ value: x.id, label: x.display_name }))], c.clinician_id || '', { 'aria-label': 'About which doctor' });
+    doctorSel.onchange = async () => { try { await d.linkComplaintDoctor(c.id, doctorSel.value || null); c.clinician_id = doctorSel.value || null; toast('Saved.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); } };
     modal(c.subject, h('div', {},
       h('p', {}, h('strong', {}, c.patient?.full_name), ` · Mr# ${c.patient?.mr_number || ''}${c.patient?.phone ? ' · ' + c.patient.phone : ''}`),
       h('p', { class: 'muted' }, `${shortDate(c.created_at.slice(0, 10))} · ${branchName(c.branch_id)}`),
       h('div', { class: 'panel', style: { background: 'var(--porcelain)' } }, c.body),
       (c.messages || []).map((m) => h('div', { class: ['alert', m.internal_note ? 'alert-warning' : 'alert-info'], style: { marginTop: '8px' } },
         h('strong', {}, m.internal_note ? 'Internal note' : 'Reply'), m.author ? ` · ${m.author}` : '', h('div', {}, m.body))),
-      h('div', { style: { marginTop: '12px' } }, field('Reply', reply), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)'))), [
+      h('div', { style: { marginTop: '12px' } }, field('Reply', reply), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)')),
+      h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.'))), [
       { label: 'Mark resolved', onClick: async () => { await d.setComplaintStatus(c.id, 'resolved'); toast('Marked resolved.', 'ok'); renderComplaints(root); } },
       { label: 'Send', primary: true, onClick: async () => {
         if (!reply.value.trim()) { toast('Write a reply first.'); return false; }
@@ -147,7 +150,7 @@ export async function renderComplaints(root) {
     h('section', { class: 'panel' }, rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((c) => h('tr', {},
       h('td', {}, h('button', { class: 'link-btn', onclick: () => open(c) }, c.subject), h('div', { class: 'muted' }, c.body.slice(0, 120))),
       h('td', {}, c.patient?.full_name || ''),
-      h('td', {}, branchName(c.branch_id)),
+      h('td', {}, branchName(c.branch_id), c.clinician_id ? h('div', { class: 'muted' }, clinicianName(c.clinician_id)) : null),
       h('td', { class: 'nowrap' }, shortDate(c.created_at.slice(0, 10))),
       h('td', {}, h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : c.status === 'new' ? 'badge-dues' : 'badge-warn'] }, c.status.replace('_', ' '))))))) : empty('No complaints.')));
 }
@@ -165,13 +168,24 @@ export async function renderDoctorLog(root, params) {
   async function load() {
     if (!clinicianId) { mount(out, empty('Your login is not linked to a doctor yet. Ask Dr. Ali to link it.')); return; }
     try {
-      const rows = await d.doctorLog({ clinicianId, from: from.value, to: to.value });
+      const [rows, sum] = await Promise.all([d.doctorLog({ clinicianId, from: from.value, to: to.value }), d.doctorSummary(clinicianId, from.value, to.value).catch(() => null)]);
       const days = [...new Set(rows.map((r) => r.visit_date))];
+      const complaints = sum?.complaints || [];
       mount(out,
         h('div', { class: 'stat-row', style: { marginBottom: '16px' } },
           h('div', { class: 'stat' }, h('strong', {}, rows.filter((r) => r.role === 'doctor').length), h('span', {}, 'Patients treated')),
           h('div', { class: 'stat' }, h('strong', {}, rows.filter((r) => r.role === 'checker').length), h('span', {}, 'Visits checked')),
-          h('div', { class: 'stat' }, h('strong', {}, days.length), h('span', {}, 'Working days'))),
+          h('div', { class: 'stat' }, h('strong', {}, days.length), h('span', {}, 'Working days')),
+          sum ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.billed || 0)), h('span', {}, 'Billed from treated visits')) : null,
+          sum ? h('div', { class: 'stat' }, h('strong', {}, sum.referred_patients || 0), h('span', {}, 'Own patients (brought in)')) : null,
+          sum ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.referred_paid || 0)), h('span', {}, 'Own patients paid')) : null,
+          sum?.rule ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.share || 0)), h('span', {}, `Your share (${Number(sum.rule.percent)}% of ${sum.rule.basis === 'referred' ? 'own patients paid' : sum.rule.basis === 'treated' ? 'billed' : 'both'})`)) : null,
+          sum ? h('div', { class: 'stat', style: { color: complaints.length ? 'var(--stop)' : '' } }, h('strong', {}, complaints.length), h('span', {}, 'Complaints about your work')) : null),
+        complaints.length ? h('section', { class: 'panel' }, h('h2', {}, 'Complaints linked to you'),
+          h('table', { class: 'list' }, h('tbody', {}, complaints.map((c) => h('tr', {},
+            h('td', { class: 'nowrap' }, shortDate(String(c.created_at).slice(0, 10))), h('td', {}, c.subject), h('td', {}, c.patient_name ? `${c.patient_name} · Mr# ${c.mr_number || ''}` : ''),
+            h('td', {}, branchName(c.branch_id)),
+            h('td', {}, h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : c.status === 'new' ? 'badge-dues' : 'badge-warn'] }, String(c.status).replace('_', ' ')))))))) : null,
         rows.length ? h('section', { class: 'panel' }, h('table', { class: 'list' },
           h('thead', {}, h('tr', {}, h('th', {}, 'Date'), h('th', {}, 'Patient'), h('th', {}, 'Branch'), h('th', {}, 'Treatment'), h('th', {}, 'Role'), h('th', {}, 'Details'))),
           h('tbody', {}, rows.map((r) => h('tr', {},

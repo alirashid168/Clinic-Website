@@ -3,9 +3,10 @@
 // them in the browser, shows what it found, and writes through the
 // import_healthwire() function in batches. Running the same file twice adds
 // nothing. Nothing from the files leaves the browser except these batches.
-import { h, mount, toast, friendlyError, rupees, field, todayISO } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, rupees, field, todayISO, select, downloadCSV, shortDate } from '../../ui/dom.js';
 import { state, branchName } from '../../state.js';
 import { parseCSV, readTransactions, buildFromTransactions, readPatients, readExpensesPdf, buildExpenses, chunk, BRANCH_LABEL, BRANCH_ID } from '../../lib/healthwire.js';
+import { readTab, buildImport, tabBranch, FIELD_LABELS } from '../../lib/aaj.js';
 
 const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
 const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs';
@@ -23,6 +24,20 @@ async function fileToRows(file) {
   for (const k of Object.keys(ws)) { if (k[0] === '!') continue; const a = XLSX.utils.decode_cell(k); if (a.c > maxC) maxC = a.c; if (a.r > maxR) maxR = a.r; }
   ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
   return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+}
+
+/** Every tab of a workbook (or a CSV as one tab) -> [{ name, rows }]. */
+async function fileToTabs(file) {
+  if (/\.csv$/i.test(file.name)) return [{ name: file.name.replace(/\.csv$/i, ''), rows: parseCSV(await file.text()) }];
+  const XLSX = await import(/* @vite-ignore */ XLSX_URL);
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
+  return wb.SheetNames.map((name) => {
+    const ws = wb.Sheets[name];
+    let maxC = 0, maxR = 0;
+    for (const k of Object.keys(ws)) { if (k[0] === '!') continue; const a = XLSX.utils.decode_cell(k); if (a.c > maxC) maxC = a.c; if (a.r > maxR) maxR = a.r; }
+    ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
+    return { name, rows: XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' }) };
+  });
 }
 
 async function fileToPdfPages(file) {
@@ -177,7 +192,113 @@ export async function renderImport(root) {
     } catch (e) { mount(ptOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
   });
 
-  // ------------------------------------------------------------ 4. check a month
+  // ------------------------------------------------------------ 4. Aaj ki List history
+  const aajOut = h('div', {});
+  const aajInput = filePicker('.xlsx,.xls,.csv', async (file) => {
+    mount(aajOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
+    try {
+      const sheets = await fileToTabs(file);
+      const tabs = sheets.map((t) => ({ name: t.name, rows: t.rows, branchId: BRANCH_ID[tabBranch(t.name)] || null, fixedDate: null, columns: null, read: readTab(t.rows) }))
+        .filter((t) => t.read.headerAt >= 0 || t.rows.length > 3);
+      if (!tabs.length) throw new Error('No tabs with patient rows found in this file.');
+      const cards = h('div', {});
+      const summaryBox = h('div', {});
+      const progress = h('p', { class: 'muted', 'aria-live': 'polite' });
+      const result = h('div', {});
+      const createBox = h('input', { type: 'checkbox', checked: true });
+      const btn = h('button', { class: 'btn btn-primary' }, 'Import');
+      let built = null;
+
+      const rebuild = () => {
+        for (const t of tabs) t.read = readTab(t.rows, { fixedDate: t.fixedDate, columns: t.columns });
+        built = buildImport(tabs, state.ref.clinicians, state.ref.treatments, todayISO());
+        const s = built.summary;
+        const people = Object.entries(s.unmatchedPeople).sort((a, b) => b[1] - a[1]);
+        btn.textContent = `Import ${s.rows} visits`;
+        btn.disabled = !s.rows;
+        mount(summaryBox,
+          h('div', { class: 'stat-row', style: { margin: '12px 0' } },
+            stat(s.rows, s.from ? `Visits ${shortDate(s.from)} → ${shortDate(s.to)}` : 'Visits'), stat(s.days, 'Days'), stat(tabs.filter((t) => t.branchId).length, 'Branch tabs'),
+            stat(s.withMr, 'Rows with an Mr#'), stat(s.noId, 'Rows with no Mr# and no phone')),
+          s.future ? h('p', { class: 'muted' }, `${s.future} rows are dated today or later: they belong to the live Aaj ki List and are not imported.`) : null,
+          s.undated ? h('p', { class: 'muted' }, `${s.undated} rows have no date and are skipped.`) : null,
+          people.length ? h('div', { class: 'alert alert-warning' },
+            h('div', {}, h('strong', {}, `${people.length} names in the Doctor's Name column are not on the doctor list: `),
+              people.slice(0, 30).map(([n, c]) => `${n} (${c})`).join(', '), people.length > 30 ? ', …' : ''),
+            h('div', { class: 'muted', style: { marginTop: '4px' } }, 'They are kept in the visit notes. To link them properly, add the spelling as an alias on ', h('a', { href: '#/staff/admin?tab=setup' }, 'Clinic setup → Doctors and assistants'), ' and drop the file again.')) : null,
+          h('p', { class: 'muted' }, 'Rows are matched to patients by Mr#, then phone, then a name only one patient has. A visit already on the website for that day (from Healthwire) is completed with the sheet\'s doctors, details, token and braces month; otherwise the visit is added. Patients with braces months but no braces case get one from the history. Dropping the file again adds nothing.'));
+      };
+
+      const tabCard = (t) => {
+        const r = t.read;
+        const branchSel = select([{ value: '', label: 'Skip this tab' }, ...state.ref.branches.map((b) => ({ value: b.id, label: b.name }))], t.branchId || '', { 'aria-label': `Branch for ${t.name}` });
+        branchSel.onchange = () => { t.branchId = Number(branchSel.value) || null; rebuild(); };
+        const dateIn = h('input', { type: 'date', value: t.fixedDate || '', 'aria-label': `Date for ${t.name}` });
+        dateIn.onchange = () => { t.fixedDate = dateIn.value || null; rebuild(); draw(); };
+        const cols = r.columns || {};
+        const colSelects = r.headers.map((hd, i) => {
+          const current = Object.entries(cols).find(([, idx]) => idx === i)?.[0] || 'ignore';
+          const sel = select(Object.entries(FIELD_LABELS).map(([value, label]) => ({ value, label })), current, { 'aria-label': `Column ${hd || i + 1}` });
+          sel.onchange = () => {
+            const next = { ...(t.columns || cols) };
+            for (const [f, idx] of Object.entries(next)) if (idx === i) delete next[f];
+            if (sel.value !== 'ignore') next[sel.value] = i;
+            t.columns = next; rebuild(); draw();
+          };
+          return h('label', { class: 'inline', style: { gap: '6px' } }, h('span', { class: 'muted', style: { minWidth: '120px' } }, hd || `Column ${i + 1}`), sel);
+        });
+        const preview = r.rows.slice(0, 5);
+        return h('section', { class: 'panel', 'data-tab': t.name },
+          h('div', { class: 'panel-head' }, h('h3', {}, t.name), h('div', { class: 'inline' }, h('span', { class: 'muted' }, 'Branch'), branchSel)),
+          h('p', { class: 'muted' }, r.headerAt < 0 ? 'No header row found.' : `${r.rows.length} patient rows` + (r.days.length ? ` on ${r.days.length} days (${shortDate(r.days[0])} → ${shortDate(r.days[r.days.length - 1])})` : '') + '.'),
+          r.issues.map((i) => h('div', { class: 'alert alert-warning inline' }, i)),
+          r.dateMode === 'none' || r.dateMode === 'fixed' ? field('These rows are for', dateIn, 'The tab carries no dates: it is today\'s list, so tell the import which day it is for.') : null,
+          r.headers.length ? h('details', { style: { marginTop: '8px' } }, h('summary', {}, 'Columns read'), h('div', { class: 'stack', style: { gap: '4px', marginTop: '6px' } }, colSelects)) : null,
+          preview.length ? h('div', { class: 'table-scroll', style: { marginTop: '8px' } }, h('table', { class: 'list' },
+            h('thead', {}, h('tr', {}, ['Date', 'Mr#', 'Name', 'Month', 'Treatment', 'Token', "Doctor's name", 'Details'].map((x) => h('th', {}, x)))),
+            h('tbody', {}, preview.map((row) => h('tr', {}, h('td', { class: 'nowrap' }, row.date ? shortDate(row.date) : '—'), h('td', {}, row.mr || ''), h('td', {}, row.name), h('td', {}, row.month || ''),
+              h('td', {}, row.treatment || ''), h('td', {}, row.token || ''), h('td', {}, row.people.join(', ')), h('td', {}, row.details || '')))))) : null);
+      };
+      const draw = () => mount(cards, tabs.map(tabCard));
+
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          const parts = chunk(built.rows, 200);
+          const total = { future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, cases: {}, unmatched: {} };
+          for (let i = 0; i < parts.length; i++) {
+            progress.textContent = `Importing: ${Math.min((i + 1) * 200, built.rows.length)} of ${built.rows.length} visits…`;
+            document.dispatchEvent(new Event('app:activity'));
+            const r = await d.importAajSheet(parts[i], createBox.checked);
+            for (const k of ['future', 'patients_created', 'visits_inserted', 'visits_updated', 'staff_added', 'cases_created', 'tokens', 'rows_unmatched']) total[k] += Number(r?.[k] || 0);
+            for (const [k, v] of Object.entries(r?.cases || {})) total.cases[k] = (total.cases[k] || 0) + Number(v);
+            for (const u of r?.unmatched || []) { const k = `${u.name}|${u.mr || ''}|${u.phone || ''}`; const cur = total.unmatched[k] || { ...u, rows: 0 }; cur.rows += Number(u.rows || 0); cur.last = u.last > (cur.last || '') ? u.last : cur.last; total.unmatched[k] = cur; }
+          }
+          progress.textContent = '';
+          const un = Object.values(total.unmatched).sort((a, b) => b.rows - a.rows);
+          const caseNote = Object.entries(total.cases).map(([k, v]) => `${v} ${k}`).join(', ');
+          mount(result, h('div', { class: 'alert alert-info' },
+            h('div', {}, `Visits: ${total.visits_inserted} added, ${total.visits_updated} already there and completed from the sheet. Doctors and assistants added to ${total.staff_added} visit slots; ${total.tokens} token numbers.`),
+            h('div', {}, `Patients: ${total.patients_created} added from the sheet. Braces cases created from the history: ${total.cases_created}${caseNote ? ` (${caseNote})` : ''}.`),
+            un.length ? h('div', { style: { marginTop: '6px' } }, h('strong', {}, `${un.length} names could not be matched to a patient (${total.rows_unmatched} rows). `),
+              'Add them from the Patients page or put the Mr# or phone on the sheet, then drop the file again. ',
+              h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`aaj-ki-list-unmatched-${todayISO()}.csv`, un.map((u) => ({ name: u.name, mr: u.mr || '', phone: u.phone || '', rows: u.rows, first: u.first, last: u.last, tab: u.tab }))) }, 'Download the list')) : null,
+            h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/patients' }, 'Open Patients →'), ' · ', h('a', { href: '#/staff/accounts?tab=reports' }, 'Reports →'))),
+            un.length ? h('div', { class: 'table-scroll', style: { marginTop: '8px' } }, h('table', { class: 'list' },
+              h('thead', {}, h('tr', {}, h('th', {}, 'Name on the sheet'), h('th', {}, 'Mr#'), h('th', {}, 'Phone'), h('th', { class: 'right' }, 'Rows'), h('th', {}, 'First'), h('th', {}, 'Last'), h('th', {}, 'Tab'))),
+              h('tbody', {}, un.slice(0, 50).map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.mr || ''), h('td', {}, u.phone || ''), h('td', { class: 'right' }, u.rows), h('td', { class: 'nowrap' }, shortDate(u.first)), h('td', { class: 'nowrap' }, shortDate(u.last)), h('td', {}, u.tab || '')))))) : null);
+          toast('Aaj ki List imported.', 'ok');
+        } catch (e) { btn.disabled = false; progress.textContent = ''; toast(friendlyError(e), 'error', 8000); }
+      };
+
+      mount(aajOut, cards, summaryBox,
+        h('label', { class: 'inline', style: { margin: '8px 0' } }, createBox, ' Add patient records for names not on the website yet (only rows that carry an Mr# or a phone number)'),
+        h('div', { style: { marginTop: '8px' } }, btn), progress, result);
+      draw(); rebuild();
+    } catch (e) { mount(aajOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
+  });
+
+  // ------------------------------------------------------------ 5. check a month
   const monthInput = h('input', { type: 'month', value: todayISO().slice(0, 7) });
   const checkOut = h('div', {});
   const check = async () => {
@@ -196,11 +317,13 @@ export async function renderImport(root) {
       h('ol', { style: { margin: '8px 0 0 18px', lineHeight: 1.6 } },
         h('li', {}, h('strong', {}, 'Payments: '), 'Reports → Financial → set the dates → Email → Excel. The file "Transactions Report.xlsx" arrives in your Gmail.'),
         h('li', {}, h('strong', {}, 'Expenses: '), 'Expenses → set the dates → Print. Save the "Expenses Report.pdf".'),
-        h('li', {}, h('strong', {}, 'Patients (optional): '), 'Patients → Excel → emailed to you. Adds gender, date of birth and address; names, phones and branches already come with the payments file.')),
+        h('li', {}, h('strong', {}, 'Patients (optional): '), 'Patients → Excel → emailed to you. Adds gender, date of birth and address; names, phones and branches already come with the payments file.'),
+        h('li', {}, h('strong', {}, 'Aaj ki List: '), 'open the Google Sheet → File → Download → Microsoft Excel (.xlsx). Every branch tab comes in the one file.')),
       h('p', { class: 'muted', style: { marginTop: '8px' } }, 'Any date range works — a month to test, or the whole history in one file. Dropping a file twice changes nothing.')),
     h('section', { class: 'panel' }, h('h2', {}, '1. Payments and invoices'), field('Transactions Report (.xlsx)', txInput, 'The Excel attachment from the "Email excel" message in your Gmail — not a PDF.'), txOut),
     h('section', { class: 'panel' }, h('h2', {}, '2. Expenses'), field('Expenses Report (.pdf)', exInput), exOut),
     h('section', { class: 'panel' }, h('h2', {}, '3. Patient details (optional)'), field('Patients list (.xlsx)', ptInput), ptOut),
+    h('section', { class: 'panel' }, h('h2', {}, '4. Aaj ki List history'), field('Aaj ki List (.xlsx, all tabs)', aajInput, 'Doctors, assistants, wires and details, tokens and braces months for every day on the sheet. Payments come from Healthwire, so nothing here changes the money.'), aajOut),
     h('section', { class: 'panel' }, h('h2', {}, 'Check a month'), field('Month', monthInput), checkOut));
   await check();
 }

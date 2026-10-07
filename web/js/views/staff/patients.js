@@ -208,7 +208,7 @@ export async function renderPatient(root, id) {
         h('tbody', {}, p.visits.map((v) => h('tr', {},
           h('td', { class: 'nowrap' }, shortDate(v.visit_date)), h('td', {}, branchName(v.branch_id)), h('td', {}, v.treatment_label || ''),
           h('td', {}, v.braces_month || ''), h('td', {}, v.staff.map((s) => s.role === 'checker' ? `✓ ${s.name}` : s.name).join(', ')),
-          h('td', {}, v.details_text || ''), h('td', {}, STATUS_LABELS[v.status])))))) : empty('No visits yet.')),
+          h('td', {}, v.details_text || '', v.notes ? h('div', { class: 'muted', style: { fontSize: '12px' } }, v.notes) : null), h('td', {}, STATUS_LABELS[v.status])))))) : empty('No visits yet.')),
     h('section', { class: 'panel' },
       h('h2', {}, 'Photos and X-rays'),
       p.photos.length ? h('div', { class: 'photo-grid' }, p.photos.map((ph) => h('figure', {},
