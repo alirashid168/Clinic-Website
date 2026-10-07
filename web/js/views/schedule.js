@@ -118,7 +118,8 @@ function cardHead(b, city, st, extra) {
     h('div', { class: 'cx-names' },
       extra ? h('span', { class: 'cx-city' }, city) : null,
       h('h3', { class: 'display' }, b.name),
-      h('p', {}, icon('pin'), b.address || '')));
+      h('p', {}, icon('pin'), b.address || ''),
+      b.opened_on ? h('p', { class: 'cx-since' }, `Open since ${new Date(b.opened_on + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`) : null));
 }
 
 function timeline(c, b, hrs) {
