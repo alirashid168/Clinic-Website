@@ -8,8 +8,25 @@ export async function renderPortal(root, signOut) {
   const d = state.data;
   const me = state.session.patient;
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
+  return portalPage(root, { p, ratings, signOut, preview: false });
+}
+
+/** Staff preview: exactly what this patient sees in their account (buttons switched off). */
+export async function renderPortalPreview(root, patientId) {
+  const d = state.data;
+  const p = await d.getPatient(patientId);
+  // Patients only ever see edited photos and non-internal replies; the staff view carries more.
+  p.photos = (p.photos || []).filter((ph) => ph.kind === 'edited');
+  p.complaints = (p.complaints || []).map((c) => ({ ...c, messages: (c.messages || []).filter((m) => !m.internal_note) }));
+  p.invoices = (p.invoices || []).filter((i) => i.status === 'issued');
+  return portalPage(root, { p, ratings: [], signOut: null, preview: true });
+}
+
+function portalPage(root, { p, ratings, signOut, preview }) {
+  const d = state.data;
   const rated = new Set(ratings.map((r) => r.visit_id));
   const completed = p.visits.filter((v) => v.status === 'completed');
+  const off = preview ? { disabled: true, title: 'Switched off in the preview' } : {};
 
   const rate = (visit) => {
     let stars = 0;
@@ -46,13 +63,16 @@ export async function renderPortal(root, signOut) {
   const today = new Date().toISOString().slice(0, 10);
   const next = p.visits.filter((v) => v.status === 'scheduled' && v.visit_date >= today).sort((a, b) => a.visit_date.localeCompare(b.visit_date))[0];
   mount(root,
-    h('div', { class: 'mobile-bar', style: { display: 'flex' } },
+    preview ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
+      h('span', {}, h('strong', {}, 'Patient view. '), `This is what ${p.full_name} sees after logging in to their account. Buttons are switched off here.`),
+      h('a', { class: 'btn btn-small', href: `#/staff/patient/${p.id}` }, 'Back to the record')) : null,
+    preview ? null : h('div', { class: 'mobile-bar', style: { display: 'flex' } },
       h('strong', {}, "Dr. Ali Rashid's Dental Clinic"),
       h('button', { class: 'link-btn', onclick: signOut }, 'Log out')),
     h('main', { class: 'public-main stack', style: { paddingTop: '24px' } },
       h('div', { class: 'page-head' },
         h('div', {}, h('h1', {}, `Hello, ${p.full_name.split(' ')[0]}`), h('p', {}, `Mr# ${p.mr_number}`)),
-        h('button', { class: 'btn btn-primary', onclick: complain }, 'Report / complain to Dr. Ali Rashid')),
+        h('button', { class: 'btn btn-primary', onclick: complain, ...off }, 'Report / complain to Dr. Ali Rashid')),
       p.flag ? h('div', { class: 'alert alert-warning' }, h('strong', {}, 'Please get your next appointment done by Dr. Ali Rashid. '),
         'Check ', h('a', { href: '#/' }, "Dr. Ali's days at each branch"), ' and come on one of those days.') : null,
       next ? h('div', { class: 'alert alert-info' }, h('strong', {}, 'Your next appointment: '), `${shortDate(next.visit_date)} at ${branchName(next.branch_id)}`, next.treatment_label ? ` · ${next.treatment_label}` : '') : null,
@@ -67,7 +87,7 @@ export async function renderPortal(root, signOut) {
             h('strong', {}, shortDate(v.visit_date)), ' · ', branchName(v.branch_id),
             h('div', {}, [v.treatment_label, v.braces_month ? `braces month ${v.braces_month}` : null].filter(Boolean).join(', ')),
             h('div', { class: 'muted' }, v.staff.filter((s) => s.role === 'doctor').map((s) => s.name).join(', ')),
-            rated.has(v.id) ? h('span', { class: 'badge badge-ok' }, 'Rated') : h('button', { class: 'btn btn-small', onclick: () => rate(v) }, 'Rate this visit')))) : empty('Your visits will appear here.')),
+            rated.has(v.id) ? h('span', { class: 'badge badge-ok' }, 'Rated') : h('button', { class: 'btn btn-small', onclick: () => rate(v), ...off }, 'Rate this visit')))) : empty('Your visits will appear here.')),
         h('section', { class: 'panel' },
           h('h2', {}, 'Invoices and payments'),
           issued.length ? h('table', { class: 'list' },
