@@ -1,6 +1,6 @@
 // Clinic coordinator: follow-up reminders, drop-off list, lab work,
 // retainers (made in-house), low ratings.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, todayISO } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, todayISO, phoneLink } from '../../ui/dom.js';
 import { state, can, branchName, myBranches, defaultBranchId } from '../../state.js';
 import { patientSearch } from './common.js';
 import { tabs } from './accounts.js';
@@ -54,7 +54,7 @@ async function reminders(root, redraw) {
       h('thead', {}, h('tr', {}, h('th', {}, 'Due'), h('th', {}, 'Patient'), h('th', {}, 'Installment'), h('th', { class: 'right' }, 'Amount'), h('th', { class: 'right' }, 'Behind by'), h('th', {}))),
       h('tbody', {}, due.map((r) => h('tr', {},
         h('td', { class: 'nowrap', style: { color: r.status === 'overdue' ? 'var(--stop)' : '' } }, shortDate(r.due_date)),
-        h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, r.patient?.phone)),
+        h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, phoneLink(r.patient?.phone, `Assalam o Alaikum ${(r.patient?.full_name || '').split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `))),
         h('td', {}, r.note || ''), h('td', { class: 'right' }, rupees(r.amount)), h('td', { class: 'right' }, rupees(r.remaining)),
         h('td', {}, h('span', { class: ['badge', r.status === 'overdue' ? 'badge-dues' : 'badge-warn'] }, r.status === 'overdue' ? 'Overdue' : 'Due soon')))))))) : null;
   const add = () => {
@@ -76,7 +76,7 @@ async function reminders(root, redraw) {
       h('thead', {}, h('tr', {}, h('th', {}, 'Due'), h('th', {}, 'Patient'), h('th', {}, 'Type'), h('th', {}, 'Note'), h('th', {}, 'Status'))),
       h('tbody', {}, rows.map((r) => h('tr', {},
         h('td', { class: 'nowrap', style: { color: r.due_date < today && r.status === 'open' ? 'var(--stop)' : '' } }, shortDate(r.due_date)),
-        h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, r.patient?.phone)),
+        h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, phoneLink(r.patient?.phone, `Assalam o Alaikum ${(r.patient?.full_name || '').split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `))),
         h('td', {}, REMINDER_KINDS[r.kind]), h('td', {}, r.note || ''),
         h('td', {}, select(Object.entries(REMINDER_STATUS).map(([value, label]) => ({ value, label })), r.status, {
           'aria-label': 'Reminder status', style: { minWidth: '130px' },
@@ -90,7 +90,7 @@ async function dropoffs(root) {
     h('h2', {}, 'Braces patients who have not come back'),
     h('p', { class: 'muted' }, `Active braces patients with no completed visit in the last ${state.ref.settings?.dropoff_days || 42} days.`),
     rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r) => h('tr', {},
-      h('td', {}, h('a', { href: `#/staff/patient/${r.patient?.id || r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, r.patient?.phone)),
+      h('td', {}, h('a', { href: `#/staff/patient/${r.patient?.id || r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, phoneLink(r.patient?.phone, `Assalam o Alaikum ${(r.patient?.full_name || '').split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `))),
       h('td', {}, r.last_visit ? `Last visit ${shortDate(r.last_visit)}` : 'No visit yet'),
       h('td', { class: 'right' }, r.days_since !== null && r.days_since !== undefined ? `${r.days_since} days` : ''))))) : empty('Every braces patient has been seen recently.')));
 }
@@ -191,7 +191,7 @@ async function ratings(root) {
     h('h2', {}, 'Low ratings to follow up'),
     h('p', { class: 'muted' }, 'Call the patient, then mark the rating as followed up so it leaves this list.'),
     rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r) => h('tr', {},
-      h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, r.patient?.phone)),
+      h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, phoneLink(r.patient?.phone, `Assalam o Alaikum ${(r.patient?.full_name || '').split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `))),
       h('td', {}, '★'.repeat(r.stars) + '☆'.repeat(5 - r.stars)),
       h('td', {}, r.comment || ''),
       h('td', { class: 'nowrap muted' }, shortDate(String(r.created_at).slice(0, 10))),

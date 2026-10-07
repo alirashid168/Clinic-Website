@@ -139,6 +139,33 @@ export async function paymentModal(patient, { branchId, dues, invoices, payments
   ]);
 }
 
+/** A payment receipt (the money received, which invoice it was for, what is still unpaid). */
+export function receiptSheet(payment, patient, invoice, remainingDues) {
+  const branch = state.ref.branches.find((b) => b.id === payment.branch_id);
+  const method = { cash: 'Cash', bank_transfer: 'Bank transfer', card: 'Card', cheque: 'Cheque', other: 'Other' }[payment.method] || payment.method;
+  return h('div', { class: 'invoice-sheet print-area', style: { '--inv-accent': TEMPLATES.classic.accent } },
+    h('header', {},
+      h('div', {}, h('strong', { style: { fontSize: '20px', color: TEMPLATES.classic.accent } }, CONFIG.CLINIC_NAME),
+        h('div', { class: 'muted' }, branch?.name || ''), h('div', { class: 'muted' }, branch?.address || '')),
+      h('div', { class: 'right' }, h('strong', {}, Number(payment.amount) < 0 ? 'Refund' : 'Payment receipt'), h('div', {}, shortDate(String(payment.received_at).slice(0, 10))),
+        h('div', { class: 'muted' }, `No. ${String(payment.id || '').slice(0, 8).toUpperCase()}`))),
+    h('p', {}, h('strong', {}, patient?.full_name || ''), patient ? ` · Mr# ${patient.mr_number}` : ''),
+    h('table', { class: 'list' }, h('tbody', {},
+      h('tr', {}, h('td', {}, Number(payment.amount) < 0 ? 'Refunded' : 'Received'), h('td', { class: 'right' }, h('strong', {}, rupees(Math.abs(Number(payment.amount)))))),
+      h('tr', {}, h('td', {}, 'By'), h('td', { class: 'right' }, method)),
+      invoice ? h('tr', {}, h('td', {}, 'For invoice'), h('td', { class: 'right' }, `${invoice.invoice_no} · ${shortDate(invoice.issue_date)} · ${rupees(invoice.total ?? invoice.subtotal - invoice.discount_amount)}`)) : null,
+      remainingDues !== undefined && remainingDues !== null ? h('tr', {}, h('td', {}, 'Still to pay'), h('td', { class: 'right' }, rupees(Math.max(0, remainingDues)))) : null,
+      payment.notes ? h('tr', {}, h('td', {}, 'Notes'), h('td', { class: 'right' }, payment.notes)) : null)),
+    h('p', { class: 'muted', style: { marginTop: '16px', fontSize: '12px' } }, 'Thank you. Keep this receipt for your records.'));
+}
+
+export function printReceipt(payment, patient, invoice, remainingDues) {
+  modal('Payment receipt', receiptSheet(payment, patient, invoice, remainingDues), [
+    { label: 'Close' },
+    { label: 'Print', primary: true, onClick: () => { window.print(); return false; } },
+  ]);
+}
+
 const PLAN_STATUS = { paid: ['badge-ok', 'Paid'], overdue: ['badge-dues', 'Overdue'], due_soon: ['badge-warn', 'Due soon'], upcoming: ['badge-muted', 'Upcoming'] };
 
 /** Where each installment of a plan stands: payments since the plan started are applied to installments in order. */

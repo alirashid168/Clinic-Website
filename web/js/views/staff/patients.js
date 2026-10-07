@@ -1,8 +1,8 @@
 // Patients: search list and full patient profile.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink } from '../../ui/dom.js';
 import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
-import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress } from './invoice.js';
+import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt } from './invoice.js';
 
 export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart condition', 'Bleeding disorder', 'Pregnancy', 'Asthma', 'Epilepsy', 'Thyroid', 'Hepatitis / HIV', 'Kidney disease'];
 
@@ -143,7 +143,7 @@ export async function renderPatient(root, id) {
     h('div', { class: 'profile-head page-head' },
       h('div', {},
         h('h1', {}, p.full_name),
-        h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), p.phone ? ` · ${p.phone}` : ' · No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : '',
+        h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), ' · ', p.phone ? phoneLink(p.phone, `Assalam o Alaikum ${p.full_name.split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `) : 'No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : '',
           p.referred_by_clinician ? ` · brought in by ${clinicianName(p.referred_by_clinician) || 'a doctor'}` : ''),
         (() => { const seen = [...new Set(p.visits.filter((v) => v.status === 'completed').map((v) => v.branch_id))].map(branchName).filter(Boolean); return seen.length > 1 ? h('p', { class: 'muted' }, `Visited: ${seen.join(', ')}`) : null; })(),
         h('div', { class: 'inline', style: { marginTop: '6px' } }, duesBadge(p.dues), aliBadge(!!p.flag),
@@ -188,7 +188,13 @@ export async function renderPatient(root, id) {
             } }]);
           } }, 'Void')) : h('td', {}));
         }))) : h('p', { class: 'muted' }, 'No invoices.'),
-        p.payments.length ? h('p', { class: 'muted', style: { marginTop: '10px' } }, `${p.payments.length} payments · ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))} received`) : null,
+        p.payments.length ? h('details', { style: { marginTop: '10px' } },
+          h('summary', { class: 'muted', style: { cursor: 'pointer' } }, `${p.payments.length} payments · ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))} received`),
+          h('table', { class: 'list', style: { marginTop: '6px' } }, h('tbody', {}, [...p.payments].sort((a, b) => String(b.received_at).localeCompare(String(a.received_at))).slice(0, 30).map((pay) => h('tr', {},
+            h('td', { class: 'nowrap' }, shortDate(String(pay.received_at).slice(0, 10))),
+            h('td', {}, pay.method.replace('_', ' '), pay.invoice_id ? h('div', { class: 'muted' }, p.invoices.find((i) => i.id === pay.invoice_id)?.invoice_no || '') : null),
+            h('td', { class: 'right', style: { color: Number(pay.amount) < 0 ? 'var(--stop)' : '' } }, rupees(pay.amount)),
+            h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt'))))))) : null,
         h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
           can('billing.create') ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null),
         (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },

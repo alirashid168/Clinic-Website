@@ -3,6 +3,7 @@
 import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName, myBranches, defaultBranchId, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, STATUS_LABELS } from './common.js';
+import { printReceipt } from './invoice.js';
 
 // ---------------------------------------------------------------- today
 export async function renderDashboard(root) {
@@ -100,7 +101,8 @@ export async function renderBilling(root) {
         h('td', { class: 'nowrap' }, timeOf(p.received_at)),
         h('td', {}, p.patient ? h('a', { href: `#/staff/patient/${p.patient_id}` }, p.patient.full_name) : ''),
         h('td', {}, branchName(p.branch_id)), h('td', {}, p.method.replace('_', ' ')),
-        h('td', { class: 'right' }, rupees(p.amount))))))
+        h('td', { class: 'right' }, rupees(p.amount)),
+        h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => printReceipt(p, p.patient, null) }, 'Receipt'))))))
         : empty('No payments yet today.')));
 }
 
