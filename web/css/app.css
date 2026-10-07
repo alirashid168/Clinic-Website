@@ -534,3 +534,5 @@ table.perm-grid .cat td { background: var(--aubergine-soft); font-weight: 700; c
 .details-cell { gap: 0; }
 .quick-tap { flex: 0 0 auto; border: 1px solid var(--line); background: #fff; border-radius: 6px; width: 26px; height: 26px; margin-right: 4px; cursor: pointer; color: var(--muted); font-weight: 700; line-height: 1; }
 .quick-tap:hover { color: var(--aubergine); border-color: var(--aubergine); }
+.phone-link a { text-decoration: none; font-size: 14px; opacity: .8; }
+.phone-link a:hover { opacity: 1; }
