@@ -34,7 +34,7 @@ const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: `$
 async function loginAs(page, label) {
   await page.goto(BASE + '#/login/staff');
   await page.getByRole('button', { name: new RegExp(label) }).click();
-  await page.waitForSelector('.sidebar');
+  await page.waitForSelector('.topbar');
 }
 
 // ------------------------------------------------------------- public
@@ -59,7 +59,8 @@ await step('visitor page lists benefits, braces options and WhatsApp button', as
 // ------------------------------------------------------------- front desk
 await step('front desk sees only their branch and the Aaj ki List', async () => {
   await loginAs(page, 'Front desk \\(North Nazimabad\\)');
-  await page.click('.nav-link:has-text("Aaj ki List")');
+  await page.locator('.topnav .menu:has-text("Aaj ki List") > button').click();
+  await page.locator('.topnav .menu-list a:has-text("Aaj ki List")').click();
   await page.waitForSelector('table.sheet tbody tr');
   const options = await page.locator('.sheet-toolbar select').first().locator('option').allTextContents();
   assert.deepEqual(options, ['North Nazimabad']);
@@ -83,9 +84,27 @@ await step('front desk adds a walk-in with the "+ New walk-in" button', async ()
   await page.waitForSelector('table.sheet tbody tr:has-text("Walkin Person")');
 });
 await step('front desk cannot see accounts or admin', async () => {
-  const nav = await page.locator('.nav-link').allTextContents();
-  assert.ok(!nav.includes('Admin'));
+  const nav = (await page.locator('.topnav a, .topnav .menu-list a').allTextContents()).map((t) => t.trim());
+  assert.ok(!nav.includes('Access list') && !nav.includes('Staff accounts'));
   assert.ok(!nav.includes('Complaints'));
+  assert.ok(!nav.includes('Financial'));
+});
+await step('top bar: patient search by name, Mr# and phone from any screen', async () => {
+  const box = page.locator('.topsearch input');
+  await box.fill('9812');
+  await page.waitForSelector('.search-results a:has-text("Mr# 9812")');
+  await box.fill('Hamza');
+  await page.waitForSelector('.search-results a:has-text("Hamza Qureshi")');
+  await box.fill('03010734521');
+  await page.waitForSelector('.search-results a:has-text("Hamza Qureshi")');
+  await page.locator('.search-results a').first().click();
+  await page.waitForSelector('h1:has-text("Hamza Qureshi")');
+  await box.fill('Zainab');
+  await box.press('Enter');
+  await page.waitForSelector('table.list tbody tr:has-text("Zainab Rizvi")');
+  assert.equal(await page.locator('table.list tbody tr').count(), 1, 'Enter opens the Patients page with the search');
+  await page.goto(BASE + '#/staff/sheet');
+  await page.waitForSelector('table.sheet tbody tr');
 });
 await step('auto-save: editing treatment details shows saved state', async () => {
   const input = page.locator('table.sheet tbody tr:has-text("Komal Test") input[aria-label="Treatment details"]');
@@ -143,7 +162,7 @@ await step('photo month cannot be completed without photos', async () => {
 const p3 = await newPage();
 await step('accountant: P&L, expense entry and cash verification', async () => {
   await loginAs(p3, 'Accountant');
-  await p3.click('.nav-link:has-text("Accounts")');
+  await p3.goto(BASE + '#/staff/accounts');
   await p3.waitForSelector('.tab');
   await p3.getByRole('tab', { name: 'Expenses', exact: true }).click();
   await p3.locator('label:has-text("Category") select').selectOption({ label: 'Rent' });
@@ -161,7 +180,8 @@ await step('accountant: P&L, expense entry and cash verification', async () => {
 const p4 = await newPage();
 await step('admin: access list checkboxes change permissions', async () => {
   await loginAs(p4, 'Dr. Ali Rashid');
-  await p4.click('.nav-link:has-text("Admin")');
+  await p4.locator('.topnav .menu:has-text("More") > button').click();
+  await p4.locator('.topnav .menu-list a:has-text("Access list")').click();
   await p4.waitForSelector('table.perm-grid');
   const box = p4.getByLabel('Assistant: Register new patients (auto Mr#)');
   assert.equal(await box.isChecked(), false);
@@ -170,17 +190,18 @@ await step('admin: access list checkboxes change permissions', async () => {
   await shot(p4, '06-access-list');
 });
 await step('admin: dashboard, Dr. Ali list and complaints', async () => {
-  await p4.click('.nav-link:has-text("Today")');
+  await p4.click('.topnav a:has-text("Today")');
   await p4.waitForSelector('.stat');
   await shot(p4, '07-today');
-  await p4.click('.nav-link:has-text("Dr. Ali")');
+  await p4.locator('.topnav .menu:has-text("More") > button').click();
+  await p4.locator('.topnav .menu-list a:has-text("Dr. Ali\'s list")').click();
   await p4.waitForSelector('table.list');
   assert.ok((await p4.locator('table.list tr').count()) >= 1);
-  await p4.click('.nav-link:has-text("Complaints")');
+  await p4.goto(BASE + '#/staff/complaints');
   await p4.waitForSelector('table.list');
 });
 await step('admin: patient profile with braces guidance', async () => {
-  await p4.click('.nav-link:has-text("Patients")');
+  await p4.click('.topnav a:has-text("Patients")');
   await p4.waitForSelector('table.list tbody tr');
   await p4.click('table.list tbody tr:has(.badge:has-text("Braces")) a');
   await p4.waitForSelector('h2:has-text("Braces")');
@@ -317,15 +338,32 @@ await step('Dr. Ali adds a treatment on the Clinic setup page and it reaches the
   await shot(p7, '13-clinic-setup');
 });
 
-await step('Dr. Ali sees the reports page with trends, dues and doctors', async () => {
-  await p7.goto(BASE + '#/staff/accounts?tab=reports');
-  await p7.waitForSelector('h2:text("Income and expenses by month")');
-  const text = await p7.locator('main').innerText();
-  assert.match(text, /Received in this period/);
-  assert.match(text, /Pending dues by branch/);
-  assert.match(text, /Visits by month/);
-  await p7.locator('select').last().selectOption({ index: 1 });
-  await p7.waitForSelector('h2:text("Income and expenses by month")');
+await step('Reports: families and report tabs like the Healthwire financial report', async () => {
+  await p7.locator('.topnav .menu:has-text("Reports") > button').click();
+  await p7.locator('.topnav .menu-list a:has-text("Financial")').click();
+  await p7.waitForSelector('.report-groups .tab[aria-selected="true"]:has-text("Financial")');
+  const tabs = (await p7.locator('.report-tabs .tab').allTextContents()).map((t) => t.trim());
+  for (const t of ['Transactions', 'Summary', 'Payment mode', 'Procedures', 'Income statement', 'Doctors share', 'Pending payments', 'Advance payments', 'Void invoices', 'Refunds', 'Discounts', 'Statistics', 'Cost per patient']) assert.ok(tabs.includes(t), t);
+  await p7.waitForSelector('h2:text("Transactions")');
+  await p7.locator('input[aria-label="From"]').fill('2020-01-01');
+  await p7.locator('input[aria-label="From"]').dispatchEvent('change');
+  await p7.waitForSelector('.report-table tbody tr');
+  assert.ok(await p7.locator('.stat:has-text("Received")').count());
+  await p7.locator('.report-tabs .tab:has-text("Income statement")').click();
+  await p7.waitForSelector('h2:text("Income statement by month")');
+  await p7.locator('.report-tabs .tab:has-text("Pending payments")').click();
+  await p7.waitForSelector('h2:text("Pending payments by branch")');
+  await p7.locator('.report-tabs .tab:has-text("Doctors share")').click();
+  await p7.waitForSelector('h2:text("Doctors share")');
+  await p7.locator('.report-groups .tab:has-text("OPD")').click();
+  await p7.waitForSelector('h2:text("OPD by day")');
+  await p7.locator('.report-groups .tab:has-text("Inventory")').click();
+  await p7.waitForSelector('h2:text("Stock levels")');
+  await p7.locator('.report-groups .tab:has-text("HR")').click();
+  await p7.locator('.report-tabs .tab:has-text("Logins")').click();
+  await p7.waitForSelector('h2:text("Staff accounts")');
+  await p7.locator('.report-groups .tab:has-text("Financial")').click();
+  await p7.waitForSelector('h2:text("Transactions")');
   await shot(p7, '14-reports');
 });
 
