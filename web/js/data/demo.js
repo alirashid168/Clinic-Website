@@ -15,6 +15,14 @@ const daysAgo = (n) => {
   return d.toISOString().slice(0, 10);
 };
 const fail = (msg) => { throw new Error(msg); };
+// A labelled placeholder "progress photo" (a drawn smile, not a real picture) for the sample patient.
+function samplePhoto(label, bg) {
+  const teeth = [-84, -60, -36, -12, 12, 36, 60].map((x, i) => `<rect x="${200 + x - 10}" y="${150 + Math.abs(i - 3) * 6}" width="22" height="${30 - Math.abs(i - 3) * 4}" rx="6" fill="#fffdf7" stroke="#d9cbb8"/>`).join('');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300"><rect width="400" height="300" fill="${bg}"/>` +
+    `<path d="M70 130 Q200 90 330 130 Q320 230 200 240 Q80 230 70 130Z" fill="#c9686f"/><path d="M90 136 Q200 110 310 136 Q300 200 200 206 Q100 200 90 136Z" fill="#7a2f3a"/>${teeth}` +
+    `<text x="200" y="278" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="18" fill="#5b5048">${label} · sample photo</text></svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
 
 // ---------------------------------------------------------------- seed
 function seed() {
@@ -151,7 +159,11 @@ function seed() {
   }
 
   db.patient_flags = [{ id: uid(), patient_id: db.patients[4].id, kind: 'see_dr_ali', reason: 'Wire poking, relapse in lower anterior', raised_by: 's-asst', raised_at: daysAgo(2) + 'T16:00:00', cleared_at: null }];
-  db.complaints = [{ id: uid(), patient_id: db.patients[7].id, branch_id: 1, subject: 'Waiting time', body: 'I waited almost two hours on Saturday even with a token.', status: 'new', created_at: daysAgo(1) + 'T20:15:00' }];
+  db.complaints = [{ id: uid(), patient_id: db.patients[7].id, branch_id: 1, clinician_id: cl('Dr. Samrah Khan'), subject: 'Waiting time', body: 'I waited almost two hours on Saturday even with a token.', status: 'new', created_at: daysAgo(1) + 'T20:15:00' }];
+  // Doctor percentage: 60/40 on the patients a doctor brings in (Dr. Samrah brought two of the sample patients).
+  db.doctor_commission_rules = [{ id: uid(), clinician_id: null, basis: 'referred', percent: 40, treatment_category: null, active: true, notes: '60% clinic, 40% doctor — only on patients the doctor brings in' }];
+  db.patients[3].referred_by_clinician = cl('Dr. Samrah Khan');
+  db.patients[9].referred_by_clinician = cl('Dr. Samrah Khan');
   db.complaint_messages = [];
   db.discount_requests = [];
   db.expenses = [
@@ -174,7 +186,18 @@ function seed() {
     { id: uid(), patient_id: db.patients[18].id, kind: 'followup', due_date: daysAgo(1), note: 'Post-RCT check', status: 'contacted' },
   ];
   db.visit_ratings = [{ visit_id: db.visits[0].id, patient_id: db.patients[0].id, stars: 2, comment: 'Long wait', created_at: daysAgo(3) }];
-  db.photos = [];
+  // The first patient is the sample account shown by the "See a sample patient account" button:
+  // a next appointment, two labelled progress photos and a message that got a reply.
+  const sample = db.patients[0];
+  db.visits.push({ id: uid(), patient_id: sample.id, branch_id: 2, visit_date: daysAgo(-24), token_no: null, status: 'scheduled', treatment_label: 'Monthly',
+    braces_case_id: db.braces_cases[0].id, braces_month: 4, details_text: '', photo_required: true, photos_uploaded: false, checker_required: true, checked_by: null, created_at: new Date().toISOString(), notes: null });
+  db.photos = [
+    { id: uid(), patient_id: sample.id, visit_id: null, branch_id: 2, taken_on: daysAgo(100), kind: 'edited', view_label: 'Before · front', url: samplePhoto('Before', '#f3e7d8'), storage_path: 'demo/sample-1', public_ok: false, created_at: daysAgo(100) },
+    { id: uid(), patient_id: sample.id, visit_id: null, branch_id: 2, taken_on: daysAgo(5), kind: 'edited', view_label: 'Month 3 · front', url: samplePhoto('Month 3', '#e3eef6'), storage_path: 'demo/sample-2', public_ok: false, created_at: daysAgo(5) },
+  ];
+  const sampleComplaint = { id: uid(), patient_id: sample.id, branch_id: 2, subject: 'Wire poking', body: 'The lower wire has been poking my cheek since my last visit.', status: 'resolved', created_at: daysAgo(12) + 'T19:10:00', resolved_at: daysAgo(11) + 'T11:00:00' };
+  db.complaints.push(sampleComplaint);
+  db.complaint_messages = [{ id: uid(), complaint_id: sampleComplaint.id, author: 'Dr. Ali Rashid', body: 'Sorry about that. Come in any day this week and the assistant will trim the wire; no token needed.', internal_note: false, created_at: daysAgo(11) + 'T10:30:00' }];
   db.documents = [];
   db.schedule = [
     { id: uid(), branch_id: 1, weekday: 1, start_time: '12:00', end_time: '16:00' },
@@ -574,6 +597,25 @@ export function createDemoAdapter() {
       const c = db.complaints.find((x) => x.id === id);
       c.status = status; if (status === 'resolved') c.resolved_at = new Date().toISOString();
     },
+    async linkComplaintDoctor(id, clinicianId) { need('complaints.view'); const c = db.complaints.find((x) => x.id === id); if (c) c.clinician_id = clinicianId || null; },
+    async doctorSummary(clinicianId, from, to) {
+      const s = me();
+      const mine = db.clinicians.find((c) => c.staff_id === s?.id)?.id;
+      if (!can('doctor_log.view_all') && mine !== clinicianId) fail('You can only see your own summary');
+      const inRange = (d) => d >= from && d <= to;
+      const vs = db.visit_staff.filter((x) => x.clinician_id === clinicianId).map((x) => ({ ...x, visit: db.visits.find((v) => v.id === x.visit_id) })).filter((x) => x.visit && x.visit.status === 'completed' && inRange(x.visit.visit_date));
+      const treatedVisits = vs.filter((x) => x.role === 'doctor').map((x) => x.visit.id);
+      const own = db.patients.filter((p) => p.referred_by_clinician === clinicianId);
+      const paid = db.payments.filter((y) => own.some((p) => p.id === y.patient_id) && inRange(String(y.received_at).slice(0, 10))).reduce((t, y) => t + Number(y.amount), 0);
+      const billed = db.invoices.filter((i) => i.status === 'issued' && treatedVisits.includes(i.visit_id)).reduce((t, i) => t + Number(i.total), 0);
+      const rule = (db.doctor_commission_rules || []).find((r) => r.active && r.clinician_id === clinicianId) || (db.doctor_commission_rules || []).find((r) => r.active && !r.clinician_id) || null;
+      const base = rule ? (rule.basis === 'treated' ? billed : rule.basis === 'referred' ? paid : billed + paid) : 0;
+      return { treated: treatedVisits.length, checked: vs.filter((x) => x.role === 'checker').length, assisted: vs.filter((x) => x.role === 'assistant').length,
+        days: new Set(vs.map((x) => x.visit.visit_date)).size, billed, branches: [...new Set(vs.map((x) => x.visit.branch_id))],
+        referred_patients: own.length, referred_paid: paid,
+        complaints: db.complaints.filter((c) => c.clinician_id === clinicianId && inRange(c.created_at.slice(0, 10))).map((c) => ({ id: c.id, subject: c.subject, status: c.status, created_at: c.created_at, branch_id: c.branch_id, patient_name: patient(c.patient_id)?.full_name, mr_number: patient(c.patient_id)?.mr_number })),
+        rule: rule ? { percent: rule.percent, basis: rule.basis, notes: rule.notes } : null, share: rule ? Math.round(base * rule.percent) / 100 : null };
+    },
 
     // ------------------------------------------------------------ coordinator
     async labCases() { if (!can('lab.manage') && !can('patients.view')) return []; return db.lab_cases.map((l) => ({ ...clone(l), patient: clone(patient(l.patient_id)) })); },
@@ -849,6 +891,51 @@ export function createDemoAdapter() {
       return { kind, given: rows.length, inserted: rows.length - existing, updated: existing, items: kind === 'invoices' ? rows.reduce((s, r) => s + r[7].length, 0) : 0, missing: 0 };
     },
     async patientsByMr(mrs) { return db.patients.filter((p) => mrs.includes(p.mr_number)).map((p) => ({ mr_number: p.mr_number })); },
+    // Aaj ki List history: the demo really writes the visits (in memory), following the same rules as the database function.
+    async importAajSheet(rows, createPatients = false) {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can import the Aaj ki List');
+      const today = todayISO();
+      const out = { given: rows.length, future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, cases: {}, unmatched: [] };
+      const find = (r) => db.patients.find((p) => r[2] && p.mr_number === r[2]) || (r[5] && db.patients.find((p) => p.phone === r[5]))
+        || (() => { const same = db.patients.filter((p) => p.full_name.toLowerCase() === String(r[3]).toLowerCase()); return same.length === 1 ? same[0] : null; })();
+      const seenUnmatched = {};
+      for (const r of rows) {
+        if (!r[3]) continue;
+        if (r[0] >= today) { out.future++; continue; }
+        let p = find(r);
+        if (!p && createPatients && (r[2] || r[5])) {
+          p = { id: uid(), mr_number: r[2] || String(db.mr_next++), full_name: r[3], phone: r[5], email: null, first_branch_id: r[1], referral_source: null, photo_consent_public: false,
+            created_at: r[0], notes: `Added from the Aaj ki List (${r[16]}, first seen ${r[0]})`, portal_user_id: null, legacy_source: 'aaj_ki_list' };
+          db.patients.push(p); out.patients_created++;
+        }
+        if (!p) { const k = `${r[3]}|${r[2] || ''}|${r[5] || ''}`; if (!seenUnmatched[k]) { seenUnmatched[k] = { name: r[3], mr: r[2], phone: r[5], rows: 0, first: r[0], last: r[0], tab: r[16] }; out.unmatched.push(seenUnmatched[k]); } seenUnmatched[k].rows++; seenUnmatched[k].last = r[0]; out.rows_unmatched++; continue; }
+        let bc = r[6] ? (activeCase(p.id) || db.braces_cases.find((b) => b.patient_id === p.id)) : null;
+        if (r[6] && !bc) {
+          const start = new Date(r[0] + 'T00:00:00'); start.setDate(start.getDate() - (r[6] - 1) * 30);
+          bc = { id: uid(), patient_id: p.id, start_date: start.toISOString().slice(0, 10), extraction_plan: 'undecided', extractions_done: false, kit_name: null, total_fee: null,
+            status: 'active', treatment_plan_by_dr_ali: null, notes: `From the Aaj ki List history: month rows from ${r[0]}` };
+          db.braces_cases.push(bc); out.cases_created++; out.cases.active = (out.cases.active || 0) + 1;
+        }
+        let v = db.visits.find((x) => x.patient_id === p.id && x.visit_date === r[0]);
+        const note = [`Aaj ki List (${r[16]})`, r[13].length ? 'Also: ' + r[13].join(', ') : null, r[15] ? 'Reminder: ' + r[15] : null].filter(Boolean).join(' · ');
+        if (v) {
+          if (!(v.notes || '').includes('Aaj ki List (')) {
+            v.treatment_label ||= r[7]; v.details_text ||= r[14]; v.braces_case_id ||= bc?.id || null; v.braces_month ||= bc ? r[6] : null;
+            v.notes = [v.notes, note].filter(Boolean).join(' · '); v.protocol_override_by ||= me().id; out.visits_updated++;
+          }
+        } else {
+          v = { id: uid(), patient_id: p.id, branch_id: r[1], visit_date: r[0], token_no: null, status: r[9] || 'completed', treatment_label: r[7], braces_case_id: bc?.id || null,
+            braces_month: bc ? r[6] : null, details_text: r[14], photo_required: false, photos_uploaded: false, checker_required: false, checked_by: null, notes: note,
+            legacy_source: 'aaj_ki_list', protocol_override_by: me().id, created_at: r[0] + 'T20:00:00', completed_at: r[9] === 'completed' ? r[0] + 'T20:00:00' : null };
+          db.visits.push(v); out.visits_inserted++;
+        }
+        if (r[8] && v.token_no == null && !db.visits.some((x) => x.branch_id === v.branch_id && x.visit_date === v.visit_date && x.token_no === r[8])) { v.token_no = r[8]; out.tokens++; }
+        for (const [ids, role] of [[r[11], 'doctor'], [r[12], 'assistant']]) {
+          for (const id of ids) if (clinician(id) && !db.visit_staff.some((s) => s.visit_id === v.id && s.clinician_id === id && s.role === role)) { db.visit_staff.push({ visit_id: v.id, clinician_id: id, role }); out.staff_added++; }
+        }
+      }
+      return out;
+    },
 
     // ------------------------------------------------------------ export
     async exportTable(name) {

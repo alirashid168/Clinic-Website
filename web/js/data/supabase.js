@@ -364,6 +364,7 @@ export async function createSupabaseAdapter() {
       if (status === 'resolved') { patch.resolved_at = new Date().toISOString(); patch.resolved_by = await userId(); }
       check(await sb.from('complaints').update(patch).eq('id', id));
     },
+    async linkComplaintDoctor(id, clinicianId) { check(await sb.from('complaints').update({ clinician_id: clinicianId || null }).eq('id', id)); },
 
     // ------------------------------------------------------------ coordinator
     async labCases() { return attachPatients(check(await sb.from('lab_cases').select('*').order('sent_date', { ascending: false }).limit(300))); },
@@ -472,6 +473,7 @@ export async function createSupabaseAdapter() {
       const visits = await enrichVisits(rows.map((r) => r.visit));
       return visits.map((v, i) => ({ role: rows[i].role, ...v })).sort((a, b) => b.visit_date.localeCompare(a.visit_date));
     },
+    async doctorSummary(clinicianId, from, to) { return check(await sb.rpc('doctor_summary', { p_clinician: clinicianId, p_from: from, p_to: to })); },
     async myClinicianId() {
       const uid = await userId();
       const row = check(await sb.from('clinicians').select('id').eq('staff_id', uid).maybeSingle());
@@ -596,6 +598,7 @@ export async function createSupabaseAdapter() {
 
     // ------------------------------------------------------------ import from Healthwire (admin)
     async importHealthwire(kind, rows) { return check(await sb.rpc('import_healthwire', { p_kind: kind, p_rows: rows })); },
+    async importAajSheet(rows, createPatients = false) { return check(await sb.rpc('import_aaj_sheet', { p_rows: rows, p_create_patients: !!createPatients })); },
     async patientsByMr(mrs) {
       const out = [];
       for (let i = 0; i < mrs.length; i += 200) out.push(...check(await sb.from('patients').select('mr_number').in('mr_number', mrs.slice(i, i + 200))));
