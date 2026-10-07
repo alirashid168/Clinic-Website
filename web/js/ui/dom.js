@@ -66,6 +66,15 @@ export function shortDate(iso) {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+/** Phone number shown with a WhatsApp link (Pakistani numbers: 03xx → 923xx). */
+export function phoneLink(phone, text = '') {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 7) return h('span', { class: 'muted' }, phone || '');
+  const intl = digits.startsWith('0') ? '92' + digits.slice(1) : digits;
+  return h('span', { class: 'phone-link' }, phone, ' ',
+    h('a', { href: `https://wa.me/${intl}${text ? '?text=' + encodeURIComponent(text) : ''}`, target: '_blank', rel: 'noopener', title: 'Message on WhatsApp', 'aria-label': `WhatsApp ${phone}` }, '💬'));
+}
+
 export function timeOf(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
