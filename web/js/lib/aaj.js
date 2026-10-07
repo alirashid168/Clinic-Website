@@ -208,6 +208,9 @@ export function buildImport(tabs, clinicians, treatments, today) {
     }
   }
   summary.days = summary.days.size;
+  // One patient's rows together (then by date), so a patient's braces history lands in one batch.
+  const key = (r) => `${r[2] || ''}|${r[5] || ''}|${String(r[3]).toLowerCase()}`;
+  rows.sort((a, b) => key(a).localeCompare(key(b)) || a[0].localeCompare(b[0]) || a[16].localeCompare(b[16]));
   return { rows, summary };
 }
 
