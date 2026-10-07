@@ -471,6 +471,35 @@ export async function createSupabaseAdapter() {
     },
     async cashClosings() { return check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(200)); },
     async verifyClosing(id) { check(await sb.from('cash_closings').update({ verified_by: await userId(), verified_at: new Date().toISOString() }).eq('id', id)); },
+    // ---- report queries (Reports page): payments, invoices, advances, daily visits in a date range.
+    async paymentsReport({ from, to, branchId, method } = {}) {
+      let q = sb.from('payments').select('*, invoice:invoices(invoice_no)').order('received_at', { ascending: false }).limit(5000);
+      if (from) q = q.gte('received_at', new Date(from + 'T00:00:00+05:00').toISOString());
+      if (to) q = q.lt('received_at', new Date(new Date(to + 'T00:00:00+05:00').getTime() + 86400000).toISOString());
+      if (branchId) q = q.eq('branch_id', Number(branchId));
+      if (method) q = q.eq('method', method);
+      const [rows, names] = await Promise.all([q.then(check), staffNames()]);
+      return attachPatients(rows.map((r) => ({ ...r, invoice_no: r.invoice?.invoice_no || null, received_by_name: names[r.received_by] || null })));
+    },
+    async invoicesReport({ from, to, branchId, status, discounted } = {}) {
+      let q = sb.from('invoices').select('*').order('issue_date', { ascending: false }).limit(5000);
+      if (from) q = q.gte('issue_date', from);
+      if (to) q = q.lte('issue_date', to);
+      if (branchId) q = q.eq('branch_id', Number(branchId));
+      if (status) q = q.eq('status', status);
+      if (discounted) q = q.gt('discount_amount', 0);
+      const [rows, names] = await Promise.all([q.then(check), staffNames()]);
+      return attachPatients(rows.map((r) => ({ ...r, created_by_name: names[r.created_by] || null })));
+    },
+    async advances() {
+      const rows = check(await sb.from('patient_balances').select('patient_id, billed, paid, dues').lt('dues', 0).order('dues', { ascending: true }).limit(500));
+      return attachPatients(rows.map((r) => ({ ...r, advance: -Number(r.dues) })));
+    },
+    async visitsDaily({ from, to, branchId } = {}) {
+      let q = sb.from('visits').select('visit_date, branch_id, status, checked_in_at, started_at, patient_id').gte('visit_date', from).lte('visit_date', to).limit(20000);
+      if (branchId) q = q.eq('branch_id', Number(branchId));
+      return check(await q);
+    },
     async todaysPayments(branchId) {
       const d = todayISO();
       let q = sb.from('payments').select('*').gte('received_at', new Date(d + 'T00:00:00+05:00').toISOString()).order('received_at', { ascending: false });

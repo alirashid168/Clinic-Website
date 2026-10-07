@@ -742,6 +742,25 @@ export function createDemoAdapter() {
     },
     async cashClosings() { if (!can('finance.view') && !can('cash.close')) return []; return clone(db.cash_closings.filter((c) => branchOk(c.branch_id))).sort((a, b) => b.closing_date.localeCompare(a.closing_date)); },
     async verifyClosing(id) { need('cash.verify'); const c = db.cash_closings.find((x) => x.id === id); c.verified_by = me().full_name; c.verified_at = new Date().toISOString(); },
+    async paymentsReport({ from, to, branchId, method } = {}) {
+      if (!can('finance.view') && !can('billing.view')) fail('row-level security policy (finance.view)');
+      return db.payments.filter((p) => (!from || p.received_at.slice(0, 10) >= from) && (!to || p.received_at.slice(0, 10) <= to) && (!branchId || p.branch_id === Number(branchId)) && (!method || p.method === method) && branchOk(p.branch_id))
+        .sort((a, b) => b.received_at.localeCompare(a.received_at))
+        .map((p) => ({ ...clone(p), is_refund: p.amount < 0, patient: clone(patient(p.patient_id)), invoice_no: db.invoices.find((i) => i.id === p.invoice_id)?.invoice_no || null, received_by_name: p.received_by_name || 'Front desk' }));
+    },
+    async invoicesReport({ from, to, branchId, status, discounted } = {}) {
+      if (!can('finance.view') && !can('billing.view')) fail('row-level security policy (finance.view)');
+      return db.invoices.filter((i) => (!from || i.issue_date >= from) && (!to || i.issue_date <= to) && (!branchId || i.branch_id === Number(branchId)) && (!status || i.status === status) && (!discounted || Number(i.discount_amount) > 0))
+        .sort((a, b) => b.issue_date.localeCompare(a.issue_date)).map((i) => ({ ...clone(i), patient: clone(patient(i.patient_id)), created_by_name: 'Front desk' }));
+    },
+    async advances() {
+      need('finance.view');
+      return db.patients.map((p) => ({ patient_id: p.id, dues: dues(p.id) })).filter((r) => r.dues < 0).map((r) => ({ ...r, advance: -r.dues, patient: clone(patient(r.patient_id)) }));
+    },
+    async visitsDaily({ from, to, branchId } = {}) {
+      need('sheet.view');
+      return db.visits.filter((v) => v.visit_date >= from && v.visit_date <= to && (!branchId || v.branch_id === Number(branchId))).map((v) => ({ visit_date: v.visit_date, branch_id: v.branch_id, status: v.status, checked_in_at: v.checked_in_at || null, started_at: v.started_at || null, patient_id: v.patient_id }));
+    },
     async todaysPayments(branchId) {
       need('billing.view');
       return db.payments.filter((p) => (!branchId || p.branch_id === Number(branchId)) && p.received_at.slice(0, 10) === todayISO() && branchOk(p.branch_id))
