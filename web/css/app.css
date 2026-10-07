@@ -261,12 +261,14 @@ table.list tr:last-child td { border-bottom: 0; }
 .login-card h1 { font-size: 1.5rem; }
 .demo-accounts { display: grid; gap: 8px; margin-top: 10px; }
 .demo-accounts button { justify-content: space-between; }
+.offline-banner { background: #3b2a00; color: #ffe7a3; padding: 8px 16px; font-size: 14px; text-align: center; }
+.offline-banner[hidden] { display: none; }
 .demo-note { background: var(--champagne-soft); border: 1px solid #e5d3b3; padding: 10px 12px; border-radius: var(--radius-s); font-size: 13px; margin-bottom: 14px; }
 .login-demo { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .login-demo p { font-size: 13px; margin: 0 0 10px; }
 .hero-demo { font-size: 14px; opacity: .85; margin: 14px 0 0; }
 .hero-demo a { color: var(--champagne); text-decoration: underline; text-underline-offset: 3px; }
-.demo-banner { position: sticky; top: 0; z-index: 5; border-radius: 0; }
+.sample-banner { position: sticky; top: 0; z-index: 5; border-radius: 0; }
 
 /* ============================================================ STAFF APP */
 .app { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100svh; }
