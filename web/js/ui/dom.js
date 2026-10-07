@@ -102,7 +102,7 @@ export function friendlyError(err) {
     ['GROUP_NOT_ALLOWED', null],
     ['CHECKER_NOT_ALLOWED', null],
     ['row-level security', 'You do not have permission to do this. Ask Dr. Ali to tick it in the access list.'],
-    ['Failed to fetch', 'No internet connection. Your changes are kept on this device and will be saved when you are back online.'],
+    ['Failed to fetch', 'No internet connection. On the Aaj ki List your changes wait on this device and go through when you are back online; elsewhere, try again once the connection is back.'],
   ];
   for (const [needle, text] of known) {
     if (msg.includes(needle)) return text || msg.replace(/^[A-Z_]+:\s*/, '');
