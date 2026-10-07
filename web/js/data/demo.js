@@ -548,7 +548,9 @@ export function createDemoAdapter() {
       const overruns = db.braces_cases.filter((b) => b.status === 'active').map((b) => ({ b, done: nextMonth(b.id) - 1 }))
         .filter(({ b, done }) => (b.extraction_plan === 'non_extraction' && done > 12) || (b.extraction_plan === 'extraction' && done > 18))
         .map(({ b, done }) => ({ source: 'overrun', patient: clone(patient(b.patient_id)), reason: `${b.extraction_plan.replace('_', '-')} case at month ${done}`, since: b.start_date }));
-      return [...flags, ...overruns];
+      const plans = db.braces_cases.filter((b) => b.status === 'active' && !b.treatment_plan_by_dr_ali && nextMonth(b.id) <= 3)
+        .map((b) => ({ source: 'plan', patient: clone(patient(b.patient_id)), reason: `Braces started ${b.start_date}: treatment plan needed (month ${nextMonth(b.id)})`, since: b.start_date }));
+      return [...flags, ...overruns, ...plans];
     },
     async complaints() {
       need('complaints.view');
