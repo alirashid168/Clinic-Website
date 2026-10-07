@@ -67,6 +67,18 @@ export async function renderSheet(root, params) {
   const filterSel = select([{ value: '', label: 'All statuses' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))], '', {
     'aria-label': 'Filter', onchange: (e) => { filter = e.target.value; draw(); },
   });
+  // More filters (blueprint 11.1): by doctor, dues, braces month and a quick name search.
+  let doctorFilter = ''; let duesOnly = false; let bracesOnly = false; let textFilter = '';
+  const doctorSel = select([{ value: '', label: 'Any doctor' }, ...state.ref.clinicians.filter((c) => c.is_doctor).map((c) => ({ value: c.id, label: c.display_name }))], '', {
+    'aria-label': 'Doctor', onchange: (e) => { doctorFilter = e.target.value; draw(); },
+  });
+  const duesBox = h('input', { type: 'checkbox', onchange: (e) => { duesOnly = e.target.checked; draw(); } });
+  const bracesBox = h('input', { type: 'checkbox', onchange: (e) => { bracesOnly = e.target.checked; draw(); } });
+  const findBox = h('input', { type: 'search', placeholder: 'Find on this list', 'aria-label': 'Find on this list', oninput: (e) => { textFilter = e.target.value.trim().toLowerCase(); draw(); } });
+  const matches = (r) => (!filter || r.status === filter)
+    && (!doctorFilter || r.staff.some((x) => x.clinician_id === doctorFilter))
+    && (!duesOnly || r.dues > 0) && (!bracesOnly || !!r.braces_month)
+    && (!textFilter || `${r.patient.full_name} ${r.patient.mr_number} ${r.patient.phone || ''} ${r.treatment_label || ''}`.toLowerCase().includes(textFilter));
   const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}`);
 
   async function load() {
@@ -198,6 +210,19 @@ export async function renderSheet(root, params) {
       class: 'cell-input', value: row.details_text || '', disabled: !canTreatment, placeholder: 'e.g. U L 018 PC refresh', 'aria-label': 'Treatment details',
       oninput: (e) => save(row, 'details_text', e.target.value),
     });
+    // Quick-tap chips (blueprint 11.2): arch, wire size, power chain, o-rings, rebond, extraction, elastics.
+    const quickTap = canTreatment ? h('button', { class: 'quick-tap', type: 'button', title: 'Quick-tap treatment details', 'aria-label': 'Quick-tap treatment details', onclick: () => {
+      const groups = [
+        ['Arch', ['U', 'L', 'U L']],
+        ['Wire', ['012', '014', '016', '018', '020', '17x25', '19x25']],
+        ['Done', ['PC', 'O-rings', 'Refresh', 'Rebond', 'Ligature', 'Elastics', 'Cross arch', 'Ext', 'IPR', 'Bite blocks']],
+      ];
+      const add = (t) => { details.value = (details.value ? details.value.replace(/\s+$/, '') + ' ' : '') + t; save(row, 'details_text', details.value); };
+      modal(`Treatment details · ${row.patient.full_name}`, h('div', {},
+        groups.map(([name, items]) => h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'field-label' }, name),
+          h('div', { class: 'inline' }, items.map((t) => h('button', { type: 'button', class: 'btn btn-small', onclick: () => add(t) }, t))))),
+        h('p', { class: 'muted' }, 'Tap to add to the details; type anything else in the cell itself.')), [{ label: 'Done', primary: true }]);
+    } }, '+') : null;
     const notes = h('input', {
       class: 'cell-input', value: row.notes || '', disabled: !canEdit, 'aria-label': 'Notes',
       oninput: (e) => save(row, 'notes', e.target.value),
@@ -218,7 +243,7 @@ export async function renderSheet(root, params) {
       h('td', { style: { minWidth: '150px' } }, treatment),
       h('td', {}, h('div', { class: 'cell' }, status)),
       h('td', { style: { minWidth: '250px' } }, peopleCell(row)),
-      h('td', { style: { minWidth: '230px' } }, details),
+      h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, details, quickTap)),
       h('td', { class: 'right' }, h('div', { class: 'cell', style: { justifyContent: 'flex-end', fontWeight: 700, color: row.dues > 0 ? 'var(--stop)' : 'var(--muted)' } }, can('dues.view') ? (row.dues > 0 ? rupees(row.dues) : '0') : '')),
       h('td', { style: { minWidth: '160px' } }, notes),
       h('td', {}, h('div', { class: 'cell muted nowrap' }, row.patient.phone)));
@@ -236,7 +261,7 @@ export async function renderSheet(root, params) {
   }
 
   function draw() {
-    const shown = filter ? rows.filter((r) => r.status === filter) : rows;
+    const shown = rows.filter(matches);
     branchHead.hidden = !!branchId;
     addPanel.hidden = !branchId || !search;
     mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 11 }, h('div', { class: 'empty' }, branchId ? `No patients on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients on any list for this day.'))));
@@ -299,7 +324,8 @@ export async function renderSheet(root, params) {
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Aaj ki List'), h('p', {}, counts)),
       saveStateEl),
-    h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel,
+    h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel, doctorSel, findBox,
+      h('label', { class: 'inline', style: { gap: '4px' } }, duesBox, 'With dues'), h('label', { class: 'inline', style: { gap: '4px' } }, bracesBox, 'Braces only'),
       h('button', { class: 'btn', onclick: () => { date = todayISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
       h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
       can('export.data') || can('finance.view') ? h('button', { class: 'btn', onclick: download }, 'Download') : null),

@@ -145,6 +145,7 @@ export async function renderPatient(root, id) {
         h('h1', {}, p.full_name),
         h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), p.phone ? ` · ${p.phone}` : ' · No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : '',
           p.referred_by_clinician ? ` · brought in by ${clinicianName(p.referred_by_clinician) || 'a doctor'}` : ''),
+        (() => { const seen = [...new Set(p.visits.filter((v) => v.status === 'completed').map((v) => v.branch_id))].map(branchName).filter(Boolean); return seen.length > 1 ? h('p', { class: 'muted' }, `Visited: ${seen.join(', ')}`) : null; })(),
         h('div', { class: 'inline', style: { marginTop: '6px' } }, duesBadge(p.dues), aliBadge(!!p.flag),
           p.photo_consent_public ? h('span', { class: 'badge badge-ok' }, 'Photo consent') : h('span', { class: 'badge badge-muted' }, 'No public photo consent'),
           p.treatment_consent_at ? h('span', { class: 'badge badge-ok' }, 'Consent signed') : h('span', { class: 'badge badge-muted' }, 'No treatment consent on file'),
