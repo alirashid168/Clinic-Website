@@ -105,17 +105,20 @@ test('rows for import: people matched through aliases, tokens not repeated, toda
   assert.equal(summary.future, 3, 'rows dated today are left to the live sheet');
   assert.equal(rows.length, 3);
   assert.equal(summary.days, 1);
-  const three = rows[1];
+  const three = rows.find((r) => r[2] === '8715');
   assert.deepEqual(three.slice(0, 6), ['2025-10-06', 2, '8715', 'Sample Person Three', 'Sample Person Three lhr', '03004445566']);
   assert.deepEqual(three[11], ['haniya', 'samrah']);
   assert.equal(three[18], 1, 'treatment id from the catalogue');
-  assert.deepEqual(rows[2][13], ['Dr. Unknown Person']);
-  assert.equal(rows[2][9], 'no_show');
+  const seven = rows.find((r) => r[3] === 'Sample Person Seven');
+  assert.deepEqual(seven[13], ['Dr. Unknown Person']);
+  assert.equal(seven[9], 'no_show');
   assert.deepEqual(summary.unmatchedPeople, { 'Dr. Unknown Person': 1 });
   const later = buildImport([{ name: 'North Nazimabad', branchId: 2, read: readTab(TAB) }], clinicians, treatments, '2025-10-08');
   assert.equal(later.rows.length, 6);
-  assert.equal(later.rows[4][8], null, 'a token used twice on one day is kept on the first row only');
-  assert.deepEqual(later.rows[3][12], ['hira'], 'assistants are sent separately from doctors');
+  assert.equal(later.rows.find((r) => r[3] === 'Sample Person Eight')[8], null, 'a token used twice on one day is kept on the first row only');
+  assert.deepEqual(later.rows.find((r) => r[3] === 'Sample Person Two' && r[0] === '2025-10-07')[12], ['hira'], 'assistants are sent separately from doctors');
+  const twos = later.rows.filter((r) => r[2] === '9694');
+  assert.deepEqual(twos.map((r) => r[0]), ['2025-10-06', '2025-10-07'], 'one patient\'s rows sit together, in date order');
 });
 
 console.log(`${passed} passed`);
