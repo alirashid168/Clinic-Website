@@ -15,7 +15,7 @@ The system works without these answers (sensible placeholders are in place), but
 ## Money
 7. Dues hold: warn only, block, or block only at Months 8 and 15? *Now: warn only. Changeable in Admin → Settings.*
 8. Front desk discount limit. *Now: placeholder 10% or Rs 5,000, whichever is lower. Changeable in Admin → Settings.*
-9. Doctor percentage rules (you said you'll explain). *Table is ready; Accounts → Reports → Doctors shows treated / checked counts and billed amounts per doctor; the percentage itself is not calculated until the rule is known.*
+9. Doctor percentage: **answered 7 Oct 2026** — 60/40, the doctor gets 40% only on patients they bring in themselves. Set as a rule in Admin → Clinic setup; patients are marked "Brought in by doctor"; Accounts → Reports → Doctors shows the share (counted on money received — say if it should be on invoiced amounts instead).
 10. Expense categories from Healthwire. *Now: a starter list of 16 categories.*
 11. Invoice template: Classic, Minimal, Premium or Thermal 80mm receipt. *Now: Classic.*
 
@@ -29,5 +29,5 @@ The system works without these answers (sensible placeholders are in place), but
 16. Confirm the five branches: Gulshan (RJ Mall), North Nazimabad, DHA Karachi, Gulberg Lahore, Islamabad. Is the "G…" tab in Aaj ki List Gulberg?
 
 ## Imported history (Healthwire)
-17. Healthwire never recorded a branch on expenses or on most invoices. Invoices were placed by login/name clues (noted on each). Expenses with a branch name in the text are tagged; the rest sit at city level in the P&L. To split salaries and rent per branch, which categories belong to which branch, and from when? *Each branch's opening date can be set in Admin → Clinic setup (Islamabad = Dec 2025 is filled in).*
+17. Healthwire never recorded a branch on expenses or on most invoices. Invoices were placed by login/name clues (noted on each). Expenses with a branch name in the text are tagged; the rest sit at city level in the P&L. To split salaries and rent per branch, which categories belong to which branch, and from when? *Opening dates set 7 Oct 2026: founded 17 Sep 2017; Gulshan 30 Dec 2019, Lahore 3 Nov 2021, DHA 3 Feb 2024, North Nazimabad 29 Jun 2024, Islamabad 25 Nov 2025. Six bills dated before a branch opened were moved to Gulshan.*
 18. Healthwire's patient details export (date of birth, gender, address, email) is never delivered by their email. Names, phones and branches are already on the website from the transaction exports; do you want the rest fetched another way?
