@@ -3,8 +3,8 @@
 One browser-based system for all branches (Gulshan / RJ Mall, North Nazimabad, DHA, Gulberg Lahore, Islamabad). It replaces Healthwire and the daily Aaj ki List Google Sheet once it has been proven in a parallel run.
 
 - **Public website:** home page with a turning 3D smile, three doors (Patient, Visitor, Employee) and Dr. Ali's weekly calendar per branch; visitor page with benefits, braces options, consented results and a WhatsApp consultation button.
-- **Patient portal:** invoices and dues, visit history, photos and X-rays, "see Dr. Ali" message, visit ratings, "Report / complain to Dr. Ali Rashid" button.
-- **Staff system:** Aaj ki List sheet view (per branch or all branches) with auto-save, an offline buffer and a day download, live queue, patients and profiles with automatic Mr#, medical history and consent, braces month-by-month protocol (doctor groups, checker, wires, photo months, extraction and dues rules), braces-off → retainer flow with check dates, invoices with templates, payments matched to invoices, installment plans with an overdue list, $$ dues flag and treatment hold, discount caps with approval, accountant (branch income vs expenses, expenses by city/branch/category, cash closing, reports: monthly trends, dues per branch, visits and new patients, braces, referral sources, photo months, lab costs, doctors, treatments), coordinator (reminders, installments due, drop-offs, lab work, retainers, low ratings), stock per branch, complaints inbox, Dr. Ali review list (flags, treatment plans needed, overruns), doctor daily log, payment receipts, WhatsApp links next to phone numbers, "View as patient" preview of the portal, checkbox access list, staff accounts, settings, clinic setup (branches, doctors, groups, doctor percentage rules, treatments, categories), duplicate-patient review and merge, Healthwire import, data export, audit log.
+- **Patient portal:** invoices and dues, visit history, photos and X-rays, next appointment, installment plan, "see Dr. Ali" message, visit ratings, "Report / complain to Dr. Ali Rashid" button and the clinic's replies. "See a sample patient account" on the homepage and the patient login page shows a made-up account to anyone without logging in.
+- **Staff system:** Aaj ki List sheet view (per branch or all branches) with auto-save, an offline buffer and a day download, live queue, patients and profiles with automatic Mr#, medical history and consent, braces month-by-month protocol (doctor groups, checker, wires, photo months, extraction and dues rules), braces-off → retainer flow with check dates, invoices with templates, payments matched to invoices, installment plans with an overdue list, $$ dues flag and treatment hold, discount caps with approval, accountant (branch income vs expenses, expenses by city/branch/category, cash closing, reports: monthly trends, dues per branch, visits and new patients, braces, referral sources, photo months, lab costs, doctors, treatments), coordinator (reminders, installments due, drop-offs, lab work, retainers, low ratings), stock per branch, complaints inbox (complaints can be linked to a doctor), Dr. Ali review list (flags, treatment plans needed, overruns), doctor daily log and dashboard (patients treated and checked, billed, own patients and their payments, doctor share, complaints), payment receipts, WhatsApp links next to phone numbers, "View as patient" preview of the portal, checkbox access list, staff accounts, settings, clinic setup (branches, doctors, groups, doctor percentage rules, treatments, categories), duplicate-patient review and merge, Healthwire import, Aaj ki List history import (every branch tab and day of the Google Sheet), data export, audit log.
 
 The full plan is in `docs/Clinic_Website_Master_Blueprint.pdf`, with open questions and go-live steps alongside it in `docs/`.
 
@@ -25,8 +25,8 @@ Until `web/js/config.js` has the Supabase URL and key, the site runs in **demo m
 ```bash
 npm run serve            # opens the site at http://localhost:8765 (demo mode)
 npm test                 # logic and importer tests
-npm run test:db          # applies every migration to a local Postgres and runs 80+ rule checks
-npm run test:ui          # clicks through the site as each role in a headless browser (32 checks)
+npm run test:db          # applies every migration to a local Postgres and runs 100+ rule checks
+npm run test:ui          # clicks through the site as each role in a headless browser (35 checks)
 ```
 
 `test:db` needs a local Postgres 16 (`PGHOST`/`PGPORT` pointing at it). `test:ui` needs Playwright.
@@ -38,4 +38,4 @@ npm run test:ui          # clicks through the site as each role in a headless br
 3. Put the project URL and anon key in `web/js/config.js`.
 4. Connect this repository to Vercel; output directory `web`.
 5. Create Dr. Ali's admin login, then staff accounts from **Admin → Staff accounts**.
-6. Import old data from **Admin → Import from Healthwire** (yearly transactions Excel and expenses PDF exports; every year 2021–2025 is reconciled to the rupee) and run `select public.sync_mr_sequence();` so new Mr# continue after the highest existing number.
+6. Import old data from **Admin → Import** (Healthwire yearly transactions Excel and expenses PDF exports — every year 2021–2026 is reconciled to the rupee — then the Aaj ki List Google Sheet downloaded as Excel for doctors, wires, tokens and braces months) and run `select public.sync_mr_sequence();` so new Mr# continue after the highest existing number.
