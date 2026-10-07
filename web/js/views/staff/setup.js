@@ -115,6 +115,19 @@ export async function renderSetup(root) {
       ],
     }),
     editor({
+      title: 'Doctor percentage rules', addLabel: 'New rule', rows: lists.commission_rules || [],
+      help: 'The share a doctor earns on what they treat. Leave the doctor empty for a rule that applies to every doctor; leave the category empty for all treatments. Shown as an estimate on Accounts → Reports → Doctors (only invoices made from a visit on the website count).',
+      onSave: save('doctor_commission_rules'),
+      columns: [
+        { key: 'clinician_id', label: 'Doctor', type: 'select', options: () => [{ value: '', label: 'Every doctor' }, ...lists.clinicians.filter((c) => c.is_doctor).map((c) => ({ value: c.id, label: c.display_name }))], show: (r) => lists.clinicians.find((c) => c.id === r.clinician_id)?.display_name || 'Every doctor' },
+        { key: 'basis', label: 'Paid on', type: 'select', required: true, default: 'treated', options: () => [{ value: 'treated', label: 'Patients they treated' }, { value: 'referred', label: 'Patients they referred' }, { value: 'both', label: 'Treated and referred' }] },
+        { key: 'percent', label: 'Percent', type: 'number', required: true, min: 0, step: 0.5, show: (r) => `${Number(r.percent)}%` },
+        { key: 'treatment_category', label: 'Treatment category', type: 'select', options: () => [{ value: '', label: 'All treatments' }, ...['braces', 'retainer', 'general', 'cosmetic', 'surgery', 'diagnostic'].map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) }))], show: (r) => r.treatment_category || 'All' },
+        { key: 'notes', label: 'Notes', hideInTable: true },
+        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : 'Off') },
+      ],
+    }),
+    editor({
       title: 'Expense categories', addLabel: 'New category', rows: lists.categories,
       help: 'Categories for the Accounts → Expenses form. Imported Healthwire categories appear here too.',
       onSave: save('expense_categories'),
