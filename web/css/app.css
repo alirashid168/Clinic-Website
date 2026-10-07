@@ -297,6 +297,8 @@ table.list tr:last-child td { border-bottom: 0; }
 /* ------------------------------------------------------------ sheet (Aaj ki List) */
 .sheet-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .sheet-toolbar select, .sheet-toolbar input { width: auto; min-width: 150px; }
+.sheet-toolbar input[type=checkbox] { min-width: 0; width: 16px; height: 16px; }
+.sheet-toolbar label.inline { gap: 6px; white-space: nowrap; }
 .sheet-wrap { overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--radius-m); background: #fff; max-height: calc(100svh - 230px); }
 table.sheet { border-collapse: separate; border-spacing: 0; font-size: 13.5px; min-width: 1180px; width: 100%; }
 table.sheet th {
@@ -529,3 +531,6 @@ table.perm-grid .cat td { background: var(--aubergine-soft); font-weight: 700; c
 }
 
 .cx-since { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.details-cell { gap: 0; }
+.quick-tap { flex: 0 0 auto; border: 1px solid var(--line); background: #fff; border-radius: 6px; width: 26px; height: 26px; margin-right: 4px; cursor: pointer; color: var(--muted); font-weight: 700; line-height: 1; }
+.quick-tap:hover { color: var(--aubergine); border-color: var(--aubergine); }
