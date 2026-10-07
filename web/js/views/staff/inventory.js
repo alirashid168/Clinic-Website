@@ -1,6 +1,6 @@
 // Stock: brackets, wires, elastics and consumables per branch. Every change
 // is a "move" (received, used, adjustment) so the quantity is always explained.
-import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf, downloadCSV, todayISO } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 
 const CATEGORIES = ['brackets', 'wires', 'elastics', 'bonding', 'consumables', 'instruments', 'other'];
@@ -51,8 +51,20 @@ export async function renderInventory(root, params) {
     const stockOf = (id) => stock.find((s) => s.item_id === id);
     const low = items.filter((it) => { const s = stockOf(it.id); return s && Number(s.reorder_level) > 0 && Number(s.quantity) <= Number(s.reorder_level); });
     const itemName = (id) => items.find((it) => it.id === id)?.name || '';
+    // Reorder list for the supplier: what is low, grouped by supplier, with the quantity to bring stock back to twice the reorder level.
+    const reorderRows = low.map((it) => { const s = stockOf(it.id); return { supplier: it.supplier || 'No supplier set', item: it.name, category: it.category, in_stock: Number(s.quantity), reorder_at: Number(s.reorder_level), order: Math.max(1, Number(s.reorder_level) * 2 - Number(s.quantity)), unit: it.unit }; })
+      .sort((a, b) => a.supplier.localeCompare(b.supplier) || a.item.localeCompare(b.item));
+    const bySupplier = reorderRows.reduce((m, r) => { (m[r.supplier] ||= []).push(r); return m; }, {});
     mount(out,
       low.length ? h('div', { class: 'alert alert-warning' }, h('strong', {}, `${low.length} item${low.length > 1 ? 's' : ''} at or below the reorder level: `), low.map((it) => it.name).join(', ')) : null,
+      low.length ? h('section', { class: 'panel reorder-list' },
+        h('div', { class: 'panel-head' }, h('h2', {}, `Reorder list · ${branchName(branchId)}`),
+          h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`reorder-list_${branchName(branchId).replace(/\W+/g, '-')}_${todayISO()}.csv`, reorderRows) }, 'Download for the supplier')),
+        Object.entries(bySupplier).map(([sup, rows]) => h('div', { style: { marginBottom: '10px' } },
+          h('h3', {}, sup),
+          h('table', { class: 'list' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'Item'), h('th', { class: 'right' }, 'In stock'), h('th', { class: 'right' }, 'Reorder at'), h('th', { class: 'right' }, 'Order'))),
+            h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, r.item), h('td', { class: 'right' }, `${r.in_stock} ${r.unit}`), h('td', { class: 'right' }, r.reorder_at), h('td', { class: 'right' }, h('strong', {}, `${r.order} ${r.unit}`))))))))) : null,
       h('section', { class: 'panel' },
         h('div', { class: 'panel-head' }, h('h2', {}, `Stock · ${branchName(branchId)}`), can('inventory.manage') ? h('button', { class: 'btn btn-primary btn-small', onclick: newItem }, 'New item') : null),
         items.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },

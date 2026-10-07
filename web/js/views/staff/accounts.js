@@ -88,7 +88,15 @@ async function expenses(root) {
   const paidTo = h('input', { placeholder: 'Paid to' });
   const method = select([{ value: 'cash', label: 'Cash' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'card', label: 'Card' }, { value: 'cheque', label: 'Cheque' }], 'cash');
   const notes = h('input', { placeholder: 'Notes' });
+  const receipt = h('input', { type: 'file', accept: 'image/*,.pdf', 'aria-label': 'Receipt photo' });
   const cityField = field('City', city, 'Only used when no branch is chosen.');
+  const hasReceipt = (r) => r.receipt_path && !/^hw-exp-/.test(r.receipt_path);
+  const openReceipt = async (r) => { try { const url = await d.receiptUrl(r.receipt_path); if (url) window.open(url, '_blank', 'noopener'); } catch (e) { toast(friendlyError(e), 'error'); } };
+  const attachReceipt = (r) => {
+    const input = h('input', { type: 'file', accept: 'image/*,.pdf' });
+    input.onchange = async () => { if (!input.files[0]) return; try { await d.uploadReceipt(r.id, input.files[0]); toast('Receipt attached.', 'ok'); load(); } catch (e) { toast(friendlyError(e), 'error'); } };
+    input.click();
+  };
   const syncCity = () => { cityField.hidden = !!branch.value; };
   branch.addEventListener('change', syncCity);
   syncCity();
@@ -105,10 +113,12 @@ async function expenses(root) {
       rows.length ? h('div', {},
         h('p', { class: 'muted' }, Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}: ${rupees(v)}`).join(' · ')),
         h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-          h('thead', {}, h('tr', {}, h('th', {}, 'Date'), h('th', {}, 'Branch / city'), h('th', {}, 'Category'), h('th', {}, 'Paid to'), h('th', {}, 'Notes'), h('th', { class: 'right' }, 'Amount'))),
+          h('thead', {}, h('tr', {}, h('th', {}, 'Date'), h('th', {}, 'Branch / city'), h('th', {}, 'Category'), h('th', {}, 'Paid to'), h('th', {}, 'Notes'), h('th', { class: 'right' }, 'Amount'), h('th', {}, 'Receipt'))),
           h('tbody', {}, rows.map((r) => h('tr', {},
             h('td', { class: 'nowrap' }, shortDate(r.expense_date)), h('td', {}, r.branch_id ? branchName(r.branch_id) : `${cityName(r.city_id)} (city)`),
-            h('td', {}, catName(r.category_id)), h('td', {}, r.paid_to || ''), h('td', {}, r.notes || ''), h('td', { class: 'right' }, rupees(r.amount))))))))
+            h('td', {}, catName(r.category_id)), h('td', {}, r.paid_to || ''), h('td', {}, r.notes || ''), h('td', { class: 'right' }, rupees(r.amount)),
+            h('td', { class: 'nowrap' }, hasReceipt(r) ? h('button', { class: 'btn btn-small', onclick: () => openReceipt(r) }, 'View')
+              : can('expenses.manage') ? h('button', { class: 'link-btn', onclick: () => attachReceipt(r) }, 'Attach') : '')))))))
         : empty('No expenses this month.'));
   }
 
@@ -120,14 +130,15 @@ async function expenses(root) {
         if (!category.value) return toast('Choose a category.');
         if (!(Number(amount.value) > 0)) return toast('Enter the amount.');
         try {
-          await d.addExpense({ expense_date: date.value, branch_id: branch.value || null, city_id: Number(city.value), category_id: Number(category.value), amount: Number(amount.value), paid_to: paidTo.value, method: method.value, notes: notes.value });
+          const saved = await d.addExpense({ expense_date: date.value, branch_id: branch.value || null, city_id: Number(city.value), category_id: Number(category.value), amount: Number(amount.value), paid_to: paidTo.value, method: method.value, notes: notes.value });
+          if (receipt.files[0] && saved?.id) { try { await d.uploadReceipt(saved.id, receipt.files[0]); } catch (err) { toast('Expense saved, but the receipt could not be uploaded: ' + friendlyError(err), 'error', 8000); } }
           toast(`Expense of ${rupees(amount.value)} saved.`, 'ok');
-          amount.value = ''; paidTo.value = ''; notes.value = '';
+          amount.value = ''; paidTo.value = ''; notes.value = ''; receipt.value = '';
           load();
         } catch (err) { toast(friendlyError(err), 'error'); }
       },
     },
-    h('div', { class: 'form-grid' }, field('Date', date), field('Branch', branch), cityField, field('Category', category), field('Amount (Rs)', amount), field('Paid to', paidTo), field('Paid by', method), field('Notes', notes)),
+    h('div', { class: 'form-grid' }, field('Date', date), field('Branch', branch), cityField, field('Category', category), field('Amount (Rs)', amount), field('Paid to', paidTo), field('Paid by', method), field('Notes', notes), field('Receipt photo (optional)', receipt, 'A photo or PDF of the bill, kept with the expense.')),
     h('button', { class: 'btn btn-primary', type: 'submit' }, 'Save expense'))) : null;
 
   monthInput.addEventListener('change', load);

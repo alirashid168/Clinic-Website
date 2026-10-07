@@ -50,7 +50,14 @@ export async function renderStaff(root, path, params, signOut) {
       h('button', { class: 'link-btn', onclick: signOut }, 'Try another role'))
     : null;
 
+  // Load-shedding: say so at the top. The Aaj ki List keeps working offline (its changes queue on the device); other screens need the connection.
+  const offlineBanner = h('div', { class: 'offline-banner', role: 'status', hidden: navigator.onLine },
+    h('strong', {}, 'No internet connection. '), 'The Aaj ki List keeps working and sends its changes when the connection is back; payments, invoices and other entries need the connection.');
+  window.addEventListener('online', () => { offlineBanner.hidden = true; });
+  window.addEventListener('offline', () => { offlineBanner.hidden = false; });
+
   mount(root,
+    offlineBanner,
     h('div', { class: 'mobile-bar' },
       h('button', { class: 'icon-btn', 'aria-label': 'Menu', onclick: () => sidebar.classList.toggle('open') }, '☰'),
       h('strong', {}, page?.label || 'Clinic'),

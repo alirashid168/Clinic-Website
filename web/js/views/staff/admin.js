@@ -72,8 +72,9 @@ async function access(root) {
 // ---------------------------------------------------------------- staff
 async function staff(root, redraw) {
   const d = state.data;
-  const [list, gridData] = await Promise.all([d.staffList(), d.permissionGrid()]);
+  const [list, gridData, logins] = await Promise.all([d.staffList(), d.permissionGrid(), isAdmin() ? d.staffLogins().catch(() => null) : null]);
   const { permissions, grid, overrides } = gridData;
+  const lastLogin = (id) => { const row = logins?.staff?.find((x) => x.id === id); return row?.last_sign_in_at ? `${shortDate(row.last_sign_in_at.slice(0, 10))} ${new Date(row.last_sign_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : 'Never'; };
 
   // Readable passwords to hand over at the desk: no look-alike letters (l/1, O/0).
   const newPassword = () => {
@@ -164,10 +165,11 @@ async function staff(root, redraw) {
   mount(root, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Staff accounts'), h('button', { class: 'btn btn-primary btn-small', onclick: add }, 'New staff account')),
     h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Email'), h('th', {}, 'Role'), h('th', {}, 'Branches'), h('th', {}, ''), h('th', {}))),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Email'), h('th', {}, 'Role'), h('th', {}, 'Branches'), logins ? h('th', {}, 'Last login') : null, h('th', {}, ''), h('th', {}))),
       h('tbody', {}, list.map((s) => h('tr', { style: { opacity: s.active ? 1 : .55 } },
         h('td', {}, s.full_name), h('td', {}, s.email), h('td', {}, ROLE_LABELS[s.role]),
         h('td', {}, s.restrict_to_branches ? s.branch_ids.map(branchName).join(', ') : 'All'),
+        logins ? h('td', { class: 'nowrap muted' }, lastLogin(s.id)) : null,
         h('td', {}, s.role !== 'admin' && Object.keys(overrides[s.id] || {}).length ? h('span', { class: 'badge badge-warn' }, 'Personal changes') : null),
         h('td', { class: 'right nowrap' },
           s.role !== 'admin' ? h('button', { class: 'btn btn-small', onclick: () => personal(s) }, 'Personal access') : null, ' ',
@@ -286,8 +288,16 @@ async function exportData(root) {
 }
 
 async function audit(root) {
-  const rows = await state.data.auditLog();
-  mount(root, h('section', { class: 'panel' }, h('h2', {}, 'Recent changes'),
+  const [rows, logins] = await Promise.all([state.data.auditLog(), isAdmin() ? state.data.staffLogins().catch(() => null) : null]);
+  const when = (iso) => `${shortDate(iso.slice(0, 10))} ${new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  const device = (ua) => { const u = ua || ''; const os = /iPhone|iPad/.test(u) ? 'iPhone/iPad' : /Android/.test(u) ? 'Android' : /Windows/.test(u) ? 'Windows' : /Mac/.test(u) ? 'Mac' : /Linux/.test(u) ? 'Linux' : ''; const br = /Edg\//.test(u) ? 'Edge' : /Chrome\//.test(u) ? 'Chrome' : /Safari\//.test(u) ? 'Safari' : /Firefox\//.test(u) ? 'Firefox' : ''; return [br, os].filter(Boolean).join(' on ') || u.slice(0, 40); };
+  mount(root,
+    logins ? h('section', { class: 'panel' }, h('h2', {}, 'Logins'),
+      h('p', { class: 'muted' }, 'Every sign-in to the staff system and the patient portal. The last-login time on Staff accounts comes from the login system itself.'),
+      logins.events?.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Device'))),
+        h('tbody', {}, logins.events.slice(0, 100).map((e) => h('tr', {}, h('td', { class: 'nowrap' }, when(e.at)), h('td', {}, e.name || '', e.role ? h('span', { class: 'muted' }, ` · ${ROLE_LABELS[e.role] || e.role}`) : e.kind === 'patient' ? h('span', { class: 'muted' }, ' · patient') : null), h('td', {}, device(e.user_agent))))))) : empty('No sign-ins recorded yet.')) : null,
+    h('section', { class: 'panel' }, h('h2', {}, 'Recent changes'),
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'What'), h('th', {}, 'Change'))),
       h('tbody', {}, rows.map((r) => h('tr', {},
