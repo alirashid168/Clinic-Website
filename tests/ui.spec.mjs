@@ -431,6 +431,19 @@ await step('sheet filters (doctor, dues, find) and quick-tap treatment details',
   assert.match(v, /018 PC$/);
 });
 
+await step('payment receipt opens from the patient record; WhatsApp link next to the phone', async () => {
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.click('table.list tbody tr:first-child a');
+  await p7.waitForSelector('h2:has-text("Money")');
+  assert.ok(await p7.locator('.phone-link a[href^="https://wa.me/92"]').count(), 'WhatsApp link');
+  await p7.locator('details summary:has-text("payments")').click();
+  await p7.locator('button:has-text("Receipt")').first().click();
+  await p7.waitForSelector('.modal .invoice-sheet:has-text("Payment receipt")');
+  assert.match(await p7.locator('.modal .invoice-sheet').innerText(), /Received/);
+  await p7.locator('.modal .modal-actions').getByRole('button', { name: 'Close' }).click();
+});
+
 const p6 = await newPage({ width: 390, height: 844 });
 await step('sheet works on a phone', async () => {
   await loginAs(p6, 'Front desk \\(Gulshan\\)').catch(async () => {
