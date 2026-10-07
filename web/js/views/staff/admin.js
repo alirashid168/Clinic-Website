@@ -9,6 +9,7 @@ import { tabs } from './accounts.js';
 import { CONFIG } from '../../config.js';
 import { renderImport } from './import.js';
 import { renderSetup } from './setup.js';
+import { renderDuplicates } from './duplicates.js';
 
 export async function renderAdmin(root, params) {
   const available = [
@@ -19,6 +20,7 @@ export async function renderAdmin(root, params) {
     can('schedule.manage') && ['calendar', "Dr. Ali's calendar"],
     can('export.data') && ['export', 'Download data'],
     isAdmin() && ['import', 'Import from Healthwire'],
+    isAdmin() && ['duplicates', 'Duplicate patients'],
     can('audit.view') && ['audit', 'Audit log'],
   ].filter(Boolean);
   let tab = params.get('tab') || available[0]?.[0];
@@ -35,6 +37,7 @@ export async function renderAdmin(root, params) {
       else if (tab === 'calendar') await calendar(body, draw);
       else if (tab === 'export') await exportData(body);
       else if (tab === 'import') await renderImport(body);
+      else if (tab === 'duplicates') await renderDuplicates(body);
       else await audit(body);
     } catch (e) { mount(body, empty(friendlyError(e))); }
   }

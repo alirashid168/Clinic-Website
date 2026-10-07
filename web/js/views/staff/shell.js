@@ -9,6 +9,7 @@ import { renderAccounts } from './accounts.js';
 import { renderCoordinator } from './coordinator.js';
 import { renderAdmin } from './admin.js';
 import { renderInventory } from './inventory.js';
+import { renderPortalPreview } from '../portal.js';
 
 const PAGES = [
   { path: 'today', label: 'Today', show: () => true, render: renderDashboard },
@@ -29,7 +30,7 @@ let refLoaded = false;
 
 export async function renderStaff(root, path, params, signOut) {
   if (!refLoaded) { await loadStaffRef(); refLoaded = true; }
-  const [section, id] = path.split('/');
+  const [section, id, sub] = path.split('/');
   const page = PAGES.find((p) => p.path === section);
   const s = state.session.staff;
 
@@ -57,7 +58,8 @@ export async function renderStaff(root, path, params, signOut) {
     h('div', { class: 'app' }, sidebar, h('div', {}, h('div', { class: 'main', style: { paddingBottom: 0 } }, demoBanner), main)));
 
   try {
-    if (section === 'patient' && id && can('patients.view')) await renderPatient(main, id);
+    if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);
+    else if (section === 'patient' && id && can('patients.view')) await renderPatient(main, id);
     else if (page && page.show()) await page.render(main, params);
     else mount(main, empty('This page is not available for your account.', h('a', { class: 'btn', href: '#/staff/today' }, 'Go to Today')));
   } catch (e) {

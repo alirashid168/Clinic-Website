@@ -152,6 +152,7 @@ export async function renderPatient(root, id) {
         medicalLine ? h('p', { style: { color: 'var(--stop)', marginTop: '6px' } }, h('strong', {}, 'Medical: '), medicalLine) : null),
       h('div', { class: 'inline' },
         can('patients.edit') ? h('button', { class: 'btn', onclick: editPatient }, 'Edit') : null,
+        h('a', { class: 'btn', href: `#/staff/patient/${id}/portal`, title: 'See this record the way the patient sees it in their account' }, 'View as patient'),
         can('portal.invite') && !p.portal_user_id ? h('button', { class: 'btn', onclick: async () => {
           if (!p.email) return toast("Add the patient's email first (Edit), then invite them.");
           try { await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); }
