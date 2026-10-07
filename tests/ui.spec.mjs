@@ -374,6 +374,43 @@ await step('edited photo upload is marked for the patient and the website', asyn
   await p7.waitForSelector('figcaption:has-text("edited (patient sees it)")');
 });
 
+await step('duplicate patients: a second record with the same phone is found and merged', async () => {
+  // Patient 2 in the demo has phone 03010734521 (i = 1). Register a second record with that number.
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.getByRole('button', { name: 'New patient' }).click();
+  const m = p7.locator('.modal');
+  await m.locator('label:has-text("Full name") input').fill('Duplicate Test Person');
+  await m.locator('label:has-text("Phone number") input').fill('03010734521');
+  await m.locator('label:has-text("Phone number") input').press('Tab');
+  await p7.waitForSelector('.modal .alert-warning:has-text("Possible existing patient")');
+  await m.getByRole('button', { name: 'Create patient' }).click();
+  await p7.waitForSelector('.toast:has-text("registered as Mr#")');
+  await p7.goto(BASE + '#/staff/admin?tab=duplicates');
+  await p7.waitForSelector('h2:has-text("03010734521")');
+  const group = p7.locator('section.panel', { hasText: '03010734521' });
+  assert.ok(await group.locator('td:has-text("Duplicate Test Person")').count());
+  await group.getByRole('button', { name: 'Merge into the ticked one' }).click();
+  await p7.locator('.modal').getByRole('button', { name: /^Merge 1 into Mr#/ }).click();
+  await p7.waitForSelector('.toast:has-text("Merged:")');
+  assert.equal(await p7.locator('h2:has-text("03010734521")').count(), 0);
+  await shot(p7, '17-duplicates');
+});
+
+await step('"View as patient" shows the record the way the patient sees it', async () => {
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.click('table.list tbody tr:first-child a');
+  await p7.waitForSelector('h2:has-text("Money")');
+  await p7.getByRole('link', { name: 'View as patient' }).click();
+  await p7.waitForSelector('.alert:has-text("Patient view")');
+  assert.ok(await p7.locator('h1:has-text("Hello,")').count());
+  assert.ok(await p7.locator('h2:has-text("Invoices and payments")').count());
+  assert.ok(await p7.locator('button:has-text("Report / complain")[disabled]').count(), 'complaint button is switched off in the preview');
+  await shot(p7, '18-view-as-patient');
+  await p7.getByRole('link', { name: 'Back to the record' }).click();
+  await p7.waitForSelector('h2:has-text("Money")');
+});
+
 const p6 = await newPage({ width: 390, height: 844 });
 await step('sheet works on a phone', async () => {
   await loginAs(p6, 'Front desk \\(Gulshan\\)').catch(async () => {
