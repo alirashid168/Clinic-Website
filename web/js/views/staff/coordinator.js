@@ -45,8 +45,18 @@ export async function renderCoordinator(root, params) {
 
 async function reminders(root, redraw) {
   const d = state.data;
-  const rows = await d.reminders();
+  const [rows, due] = await Promise.all([d.reminders(), d.installmentsDue ? d.installmentsDue().catch(() => []) : []]);
   const today = todayISO();
+  const installmentsPanel = due.length ? h('section', { class: 'panel' },
+    h('h2', {}, 'Installments due'),
+    h('p', { class: 'muted' }, 'From installment plans on patient pages. Overdue first; "due soon" is within a week.'),
+    h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Due'), h('th', {}, 'Patient'), h('th', {}, 'Installment'), h('th', { class: 'right' }, 'Amount'), h('th', { class: 'right' }, 'Behind by'), h('th', {}))),
+      h('tbody', {}, due.map((r) => h('tr', {},
+        h('td', { class: 'nowrap', style: { color: r.status === 'overdue' ? 'var(--stop)' : '' } }, shortDate(r.due_date)),
+        h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, r.patient?.phone)),
+        h('td', {}, r.note || ''), h('td', { class: 'right' }, rupees(r.amount)), h('td', { class: 'right' }, rupees(r.remaining)),
+        h('td', {}, h('span', { class: ['badge', r.status === 'overdue' ? 'badge-dues' : 'badge-warn'] }, r.status === 'overdue' ? 'Overdue' : 'Due soon')))))))) : null;
   const add = () => {
     const pp = pickPatient();
     const kind = select(Object.entries(REMINDER_KINDS).map(([value, label]) => ({ value, label })), 'followup');
@@ -60,7 +70,7 @@ async function reminders(root, redraw) {
       } },
     ]);
   };
-  mount(root, h('section', { class: 'panel' },
+  mount(root, installmentsPanel, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Who to call'), h('button', { class: 'btn btn-primary btn-small', onclick: add }, 'New reminder')),
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Due'), h('th', {}, 'Patient'), h('th', {}, 'Type'), h('th', {}, 'Note'), h('th', {}, 'Status'))),
@@ -145,30 +155,47 @@ async function retainers(root, redraw) {
     ]);
   };
   const stageDate = { fabrication: 'fabricated_date', ready: 'ready_date', delivered: 'delivered_date' };
+  const today = todayISO();
+  const overdue = rows.filter((r) => r.next_check_date && r.next_check_date < today && r.stage !== 'closed');
+  const nextCheckCell = (r) => {
+    const late = r.next_check_date && r.next_check_date < today && r.stage !== 'closed';
+    if (!can('retainers.manage')) return h('td', { class: 'nowrap', style: { color: late ? 'var(--stop)' : '' } }, shortDate(r.next_check_date));
+    return h('td', {}, h('input', { type: 'date', value: r.next_check_date || '', 'aria-label': 'Next check', style: { width: '150px', color: late ? 'var(--stop)' : '' },
+      onchange: async (e) => { try { await d.saveRetainerCase({ id: r.id, next_check_date: e.target.value || null }); toast('Next check saved.', 'ok'); } catch (err) { toast(friendlyError(err), 'error'); } } }));
+  };
   mount(root, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Retainers (made in-house)'), can('retainers.manage') ? h('button', { class: 'btn btn-primary btn-small', onclick: add }, 'New retainer') : null),
+    overdue.length ? h('div', { class: 'alert alert-warning' }, `${overdue.length} retainer check${overdue.length > 1 ? 's are' : ' is'} overdue: `, overdue.slice(0, 6).map((r, i) => [i ? ', ' : '', h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name || 'patient')]), overdue.length > 6 ? ', …' : '', '. Call them for a follow-up.') : null,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Patient'), h('th', {}, 'Arch'), h('th', {}, 'Impression'), h('th', { class: 'right' }, 'Lab cost'), h('th', {}, 'Stage'))),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Patient'), h('th', {}, 'Arch'), h('th', {}, 'Impression'), h('th', {}, 'Next check'), h('th', { class: 'right' }, 'Lab cost'), h('th', {}, 'Stage'))),
       h('tbody', {}, rows.map((r) => h('tr', {},
         h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), r.is_replacement ? h('span', { class: 'badge badge-warn', style: { marginLeft: '6px' } }, 'Repeat') : null),
-        h('td', {}, r.arch), h('td', { class: 'nowrap' }, shortDate(r.impression_date)), h('td', { class: 'right' }, r.lab_cost ? rupees(r.lab_cost) : ''),
+        h('td', {}, r.arch), h('td', { class: 'nowrap' }, shortDate(r.impression_date)), nextCheckCell(r), h('td', { class: 'right' }, r.lab_cost ? rupees(r.lab_cost) : ''),
         h('td', {}, can('retainers.manage') ? select(Object.entries(RETAINER_STAGES).map(([value, label]) => ({ value, label })), r.stage, {
           'aria-label': 'Retainer stage', style: { minWidth: '160px' },
           onchange: async (e) => {
             const patch = { id: r.id, stage: e.target.value };
             if (stageDate[e.target.value]) patch[stageDate[e.target.value]] = todayISO();
-            try { await d.saveRetainerCase(patch); toast('Updated.', 'ok'); } catch (err) { toast(friendlyError(err), 'error'); }
+            // Delivered → first check a month later, unless a date is already set.
+            if (e.target.value === 'delivered' && !r.next_check_date) { const dt = new Date(today + 'T00:00:00'); dt.setMonth(dt.getMonth() + 1); patch.next_check_date = dt.toISOString().slice(0, 10); }
+            if (e.target.value === 'closed') patch.next_check_date = null;
+            try { await d.saveRetainerCase(patch); Object.assign(r, patch); toast('Updated.', 'ok'); if (patch.next_check_date !== undefined) redraw(); } catch (err) { toast(friendlyError(err), 'error'); }
           },
         }) : RETAINER_STAGES[r.stage])))))) : empty('No retainer cases yet.')));
 }
 
 async function ratings(root) {
-  const rows = await state.data.lowRatings();
+  const d = state.data;
+  const rows = await d.lowRatings();
   mount(root, h('section', { class: 'panel' },
     h('h2', {}, 'Low ratings to follow up'),
+    h('p', { class: 'muted' }, 'Call the patient, then mark the rating as followed up so it leaves this list.'),
     rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r) => h('tr', {},
       h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, r.patient?.phone)),
       h('td', {}, '★'.repeat(r.stars) + '☆'.repeat(5 - r.stars)),
       h('td', {}, r.comment || ''),
-      h('td', { class: 'nowrap muted' }, shortDate(String(r.created_at).slice(0, 10))))))) : empty('No low ratings. Patients are happy.')));
+      h('td', { class: 'nowrap muted' }, shortDate(String(r.created_at).slice(0, 10))),
+      h('td', { class: 'right' }, can('reminders.manage') ? h('button', { class: 'btn btn-small', onclick: async () => {
+        try { await d.followUpRating(r.visit_id); toast('Marked as followed up.', 'ok'); ratings(root); } catch (e) { toast(friendlyError(e), 'error'); }
+      } }, 'Followed up') : null))))) : empty('No low ratings waiting. Patients are happy.')));
 }

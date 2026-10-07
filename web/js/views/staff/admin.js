@@ -1,5 +1,6 @@
 // Admin (Dr. Ali): access list with checkboxes, staff accounts, settings,
-// Dr. Ali's calendar, data export, import from Healthwire, audit log.
+// clinic setup (branches, doctors, treatments), Dr. Ali's calendar, data
+// export, import from Healthwire, audit log.
 import { h, mount, toast, friendlyError, modal, field, select, empty, downloadCSV, todayISO, shortDate } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
@@ -7,12 +8,14 @@ import { WEEKDAYS } from '../../content.js';
 import { tabs } from './accounts.js';
 import { CONFIG } from '../../config.js';
 import { renderImport } from './import.js';
+import { renderSetup } from './setup.js';
 
 export async function renderAdmin(root, params) {
   const available = [
     can('users.manage') && ['access', 'Access list'],
     can('users.manage') && ['staff', 'Staff accounts'],
     isAdmin() && ['settings', 'Settings'],
+    isAdmin() && ['setup', 'Clinic setup'],
     can('schedule.manage') && ['calendar', "Dr. Ali's calendar"],
     can('export.data') && ['export', 'Download data'],
     isAdmin() && ['import', 'Import from Healthwire'],
@@ -28,6 +31,7 @@ export async function renderAdmin(root, params) {
       if (tab === 'access') await access(body);
       else if (tab === 'staff') await staff(body, draw);
       else if (tab === 'settings') await settings(body);
+      else if (tab === 'setup') await renderSetup(body);
       else if (tab === 'calendar') await calendar(body, draw);
       else if (tab === 'export') await exportData(body);
       else if (tab === 'import') await renderImport(body);
@@ -182,6 +186,8 @@ async function settings(root) {
   ], typeof s.dues_hold_mode === 'string' ? s.dues_hold_mode : 'warn');
   const wa = h('input', { value: s.whatsapp_number || '', placeholder: '03xx xxxxxxx' });
   const drop = h('input', { type: 'number', min: 7, value: s.dropoff_days ?? 42 });
+  const timeout = h('input', { type: 'number', min: 5, max: 720, value: s.session_timeout_minutes ?? 30 });
+  const lowStars = select([1, 2, 3, 4].map((n) => ({ value: n, label: `${n} star${n > 1 ? 's' : ''} or less` })), Number(s.low_rating_threshold ?? 3));
   const capRows = ['front_desk', 'accountant', 'coordinator'].map((role) => {
     const c = caps[role] || { maxPercent: null, maxAmount: null };
     return { role, pct: h('input', { type: 'number', min: 0, max: 100, value: c.maxPercent ?? '', placeholder: 'No % limit' }), amt: h('input', { type: 'number', min: 0, value: c.maxAmount ?? '', placeholder: 'No rupee limit' }) };
@@ -191,6 +197,8 @@ async function settings(root) {
       await d.setSetting('dues_hold_mode', hold.value);
       await d.setSetting('whatsapp_number', wa.value.trim());
       await d.setSetting('dropoff_days', Number(drop.value) || 42);
+      await d.setSetting('session_timeout_minutes', Math.min(720, Math.max(5, Number(timeout.value) || 30)));
+      await d.setSetting('low_rating_threshold', Number(lowStars.value) || 3);
       for (const r of capRows) await d.setDiscountCap(r.role, r.pct.value === '' ? null : Number(r.pct.value), r.amt.value === '' ? null : Number(r.amt.value));
       state.ref.settings = await d.settings();
       toast('Settings saved.', 'ok');
@@ -203,7 +211,9 @@ async function settings(root) {
       h('table', { class: 'list' }, h('thead', {}, h('tr', {}, h('th', {}, 'Role'), h('th', {}, 'Max %'), h('th', {}, 'Max Rs'))),
         h('tbody', {}, capRows.map((r) => h('tr', {}, h('td', {}, ROLE_LABELS[r.role]), h('td', {}, r.pct), h('td', {}, r.amt)))))),
     h('section', { class: 'panel' }, h('h2', {}, 'Website and follow-ups'),
-      h('div', { class: 'form-grid' }, field('WhatsApp number for "Book free consultation"', wa), field('Drop-off list after (days without a visit)', drop))),
+      h('div', { class: 'form-grid' }, field('WhatsApp number for "Book free consultation"', wa), field('Drop-off list after (days without a visit)', drop),
+        field('Low rating alert', lowStars, 'Ratings at or below this go to the coordinator\'s "Low ratings" list.'),
+        field('Log staff out after (minutes of no activity)', timeout, 'Shared clinic computers. Takes effect at the next login.'))),
     h('button', { class: 'btn btn-primary', style: { marginTop: '16px' }, onclick: saveAll }, 'Save settings'));
 }
 
@@ -263,7 +273,9 @@ async function exportData(root) {
     h('div', { class: 'inline' }, tables.map(([key, label]) => h('button', { class: 'btn', onclick: async () => {
       try {
         let rows = await d.exportTable(key);
-        if (branch.value && rows.length && 'branch_id' in rows[0]) rows = rows.filter((r) => String(r.branch_id) === branch.value);
+        // Patients carry the branch they first came to; everything else carries the branch it happened at.
+        const branchKey = key === 'patients' ? 'first_branch_id' : 'branch_id';
+        if (branch.value && rows.length && branchKey in rows[0]) rows = rows.filter((r) => String(r[branchKey]) === branch.value);
         const tag = branch.value ? state.ref.branches.find((b) => String(b.id) === branch.value)?.code : 'ALL';
         downloadCSV(`${key}_${tag}_${todayISO()}.csv`, rows);
       } catch (e) { toast(friendlyError(e), 'error'); }

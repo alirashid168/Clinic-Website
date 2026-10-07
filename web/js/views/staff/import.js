@@ -50,6 +50,7 @@ async function runImport(kind, rows, progress, label) {
   const parts = chunk(rows, BATCH);
   for (let i = 0; i < parts.length; i++) {
     progress(`${label}: ${Math.min((i + 1) * BATCH, rows.length)} of ${rows.length}…`);
+    document.dispatchEvent(new Event('app:activity')); // a long import counts as activity (no idle logout half-way)
     const r = await state.data.importHealthwire(kind, parts[i]);
     for (const k of Object.keys(total)) total[k] += Number(r?.[k] || 0);
   }

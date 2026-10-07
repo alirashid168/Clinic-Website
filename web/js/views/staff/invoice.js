@@ -91,15 +91,39 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
   ]);
 }
 
-export function paymentModal(patient, { branchId, dues, onDone } = {}) {
-  const amount = h('input', { type: 'number', min: 1, step: 100, value: dues > 0 ? dues : '' });
+/** Issued invoices with what is still unpaid on each (payments are matched to invoices when taken). */
+export function invoiceBalances(invoices, payments) {
+  const paid = {};
+  for (const p of payments || []) if (p.invoice_id) paid[p.invoice_id] = (paid[p.invoice_id] || 0) + Number(p.amount);
+  return (invoices || []).filter((i) => i.status === 'issued').map((i) => {
+    const total = Number(i.total ?? i.subtotal - i.discount_amount);
+    return { ...i, paid_amount: paid[i.id] || 0, remaining: Math.max(0, total - (paid[i.id] || 0)) };
+  });
+}
+
+export async function paymentModal(patient, { branchId, dues, invoices, payments, onDone } = {}) {
+  // Payments are taken against an invoice so each invoice shows what is still unpaid.
+  let balances = [];
+  try {
+    if (!invoices) ({ invoices, payments } = await state.data.patientBilling(patient.id));
+    balances = invoiceBalances(invoices, payments).sort((a, b) => a.issue_date.localeCompare(b.issue_date));
+  } catch { balances = []; }
+  const open = balances.filter((i) => i.remaining > 0);
+  const first = open[0];
+  const amount = h('input', { type: 'number', min: 1, step: 100, value: first ? first.remaining : dues > 0 ? dues : '' });
   const method = select([{ value: 'cash', label: 'Cash' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'card', label: 'Card' }, { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' }], 'cash');
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
+  const invoiceSel = select([
+    ...open.map((i) => ({ value: i.id, label: `${i.invoice_no} · ${shortDate(i.issue_date)} · ${rupees(i.remaining)} unpaid` })),
+    ...balances.filter((i) => i.remaining <= 0).map((i) => ({ value: i.id, label: `${i.invoice_no} · ${shortDate(i.issue_date)} · paid` })),
+    { value: '', label: 'Not for a particular invoice (advance)' },
+  ], first?.id || '', { onchange: (e) => { const i = open.find((x) => x.id === e.target.value); if (i && !refund?.checked) amount.value = i.remaining; } });
   const notes = h('input', { placeholder: 'Optional' });
   const refund = can('billing.refund') ? h('input', { type: 'checkbox' }) : null;
   modal(`Take payment · ${patient.full_name}`, h('div', {},
     h('p', { class: 'muted' }, `Pending dues: ${rupees(Math.max(0, dues || 0))}`),
     h('div', { class: 'form-grid' }, field('Amount (Rs)', amount), field('Method', method), field('Branch', branchSel)),
+    field('For invoice', invoiceSel, open.length ? 'Pick the invoice this money is for. The unpaid amount fills in by itself.' : 'No unpaid invoice. An advance counts towards the next invoice.'),
     field('Notes', notes),
     refund ? h('label', { class: 'inline' }, refund, 'This is a refund (money given back)') : null), [
     { label: 'Cancel' },
@@ -107,8 +131,77 @@ export function paymentModal(patient, { branchId, dues, onDone } = {}) {
       const value = Number(amount.value);
       if (!(value > 0)) { toast('Enter an amount.'); return false; }
       try {
-        await state.data.recordPayment({ patient_id: patient.id, branch_id: Number(branchSel.value), amount: refund?.checked ? -value : value, method: method.value, notes: notes.value || null });
+        await state.data.recordPayment({ patient_id: patient.id, branch_id: Number(branchSel.value), amount: refund?.checked ? -value : value, method: method.value, invoice_id: invoiceSel.value || null, notes: notes.value || null });
         toast(refund?.checked ? 'Refund recorded.' : `Payment of ${rupees(value)} saved.`, 'ok');
+        onDone?.();
+      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+    } },
+  ]);
+}
+
+const PLAN_STATUS = { paid: ['badge-ok', 'Paid'], overdue: ['badge-dues', 'Overdue'], due_soon: ['badge-warn', 'Due soon'], upcoming: ['badge-muted', 'Upcoming'] };
+
+/** Where each installment of a plan stands: payments since the plan started are applied to installments in order. */
+export function planProgress(plan, payments) {
+  const paid = (payments || []).filter((p) => p.received_at.slice(0, 10) >= plan.starts_on).reduce((s, p) => s + Number(p.amount), 0);
+  const today = new Date().toISOString().slice(0, 10);
+  const soon = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  let cum = 0;
+  const rows = [...(plan.installments || [])].sort((a, b) => a.due_date.localeCompare(b.due_date)).map((i) => {
+    cum += Number(i.amount);
+    const status = paid >= cum - 0.5 ? 'paid' : i.due_date < today ? 'overdue' : i.due_date <= soon ? 'due_soon' : 'upcoming';
+    return { ...i, status, remaining: Math.max(0, cum - paid) };
+  });
+  return { paid, rows, total: cum, remaining: Math.max(0, cum - paid), overdue: rows.filter((r) => r.status === 'overdue').length };
+}
+
+export function planTable(plan, payments) {
+  const prog = planProgress(plan, payments);
+  return h('div', {},
+    h('p', { class: 'muted' }, `${rupees(prog.paid)} paid of ${rupees(prog.total)} since ${shortDate(plan.starts_on)} · ${rupees(prog.remaining)} to go${plan.notes ? ' · ' + plan.notes : ''}`),
+    h('table', { class: 'list' }, h('tbody', {}, prog.rows.map((r) => h('tr', {},
+      h('td', { class: 'nowrap' }, shortDate(r.due_date)), h('td', {}, r.note || ''), h('td', { class: 'right' }, rupees(r.amount)),
+      h('td', {}, h('span', { class: ['badge', PLAN_STATUS[r.status][0]] }, PLAN_STATUS[r.status][1])))))));
+}
+
+/** Set up an installment plan: total split into equal parts from a first due date. */
+export function installmentPlanModal(patient, { totalFee, bracesCaseId, onDone } = {}) {
+  const total = h('input', { type: 'number', min: 1, step: 1000, value: totalFee || '' });
+  const count = h('input', { type: 'number', min: 1, max: 36, value: 6 });
+  const firstDue = h('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+  const every = select([{ value: 1, label: 'Every month' }, { value: 2, label: 'Every 2 months' }, { value: 3, label: 'Every 3 months' }], 1);
+  const startsOn = h('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
+  const notes = h('input', { placeholder: 'e.g. 70k braces kit, Rs 10,000 at bonding then monthly' });
+  const preview = h('div', {});
+  let rows = [];
+  const build = () => {
+    const t = Number(total.value) || 0; const n = Math.max(1, Math.min(36, Number(count.value) || 1));
+    const base = Math.floor(t / n / 100) * 100;
+    rows = Array.from({ length: n }, (_, k) => {
+      const d = new Date(firstDue.value + 'T00:00:00'); d.setMonth(d.getMonth() + k * Number(every.value));
+      return { due_date: d.toISOString().slice(0, 10), amount: k === n - 1 ? t - base * (n - 1) : base, note: `Installment ${k + 1} of ${n}` };
+    });
+    mount(preview, t > 0 ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r, k) => h('tr', {},
+      h('td', { class: 'nowrap' }, shortDate(r.due_date)), h('td', {}, r.note),
+      h('td', { class: 'right' }, h('input', { type: 'number', min: 0, step: 100, value: r.amount, style: { width: '110px' }, 'aria-label': `Amount ${k + 1}`, oninput: (e) => { rows[k].amount = Number(e.target.value) || 0; } })))))) : null);
+  };
+  [total, count, firstDue, every].forEach((el) => el.addEventListener('change', build));
+  build();
+  modal(`Installment plan · ${patient.full_name}`, h('div', {},
+    h('p', { class: 'muted' }, 'Payments taken from the start date are counted towards the installments in order, so the coordinator sees who is behind.'),
+    h('div', { class: 'form-grid' }, field('Total to pay (Rs)', total), field('Number of installments', count), field('First installment due', firstDue), field('Then', every), field('Count payments from', startsOn, 'Usually the bonding date.')),
+    field('Notes', notes),
+    preview), [
+    { label: 'Cancel' },
+    { label: 'Save plan', primary: true, onClick: async () => {
+      const t = Number(total.value);
+      if (!(t > 0)) { toast('Enter the total.'); return false; }
+      const sum = rows.reduce((s, r) => s + Number(r.amount), 0);
+      if (Math.round(sum) !== Math.round(t)) { toast(`The installments add up to ${rupees(sum)}, not ${rupees(t)}.`); return false; }
+      if (rows.some((r) => !(r.amount > 0))) { toast('Every installment needs an amount.'); return false; }
+      try {
+        await state.data.savePaymentPlan({ patient_id: patient.id, braces_case_id: bracesCaseId || null, total_fee: t, starts_on: startsOn.value, notes: notes.value.trim() || null, installments: rows });
+        toast('Installment plan saved.', 'ok');
         onDone?.();
       } catch (e) { toast(friendlyError(e), 'error'); return false; }
     } },

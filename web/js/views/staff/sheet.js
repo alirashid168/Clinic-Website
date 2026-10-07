@@ -1,7 +1,7 @@
 // Aaj ki List: the daily sheet, Google Sheets style. Every change saves by
 // itself; if the internet drops, changes wait on this device and are sent
 // when it comes back.
-import { h, mount, toast, friendlyError, todayISO, rupees, modal, select, timeOf, $$ } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, todayISO, rupees, modal, select, timeOf, downloadCSV, $$ } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
@@ -57,20 +57,35 @@ export async function renderSheet(root, params) {
   const tableBody = h('tbody', {});
   const counts = h('span', { class: 'muted' });
 
-  const branchSel = select(branches.map((b) => ({ value: b.id, label: b.name })), branchId, {
-    'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); setURL(); load(); },
+  // "All branches" (people who work across branches): read-only overview, add patients from a single branch.
+  const allBranches = branches.length > 1;
+  if (params.get('branch') === 'all' && allBranches) branchId = 0;
+  const branchSel = select([...(allBranches ? [{ value: 0, label: 'All branches' }] : []), ...branches.map((b) => ({ value: b.id, label: b.name }))], branchId, {
+    'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); setURL(); draw(); load(); },
   });
   const dateInput = h('input', { type: 'date', value: date, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
   const filterSel = select([{ value: '', label: 'All statuses' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))], '', {
     'aria-label': 'Filter', onchange: (e) => { filter = e.target.value; draw(); },
   });
-  const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId}&date=${date}`);
+  const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}`);
 
   async function load() {
     try {
-      rows = await d.listVisits({ branchId, date });
+      rows = await d.listVisits({ branchId: branchId || null, date });
+      if (!branchId) rows.sort((a, b) => a.branch_id - b.branch_id || (a.token_no ?? 999) - (b.token_no ?? 999));
       draw();
     } catch (e) { toast(friendlyError(e), 'error'); }
+  }
+
+  // The day's list as a spreadsheet file (for the clinic cloud or printing).
+  function download() {
+    const name = (branchId ? branchName(branchId) : 'all-branches').replace(/\W+/g, '-');
+    downloadCSV(`aaj-ki-list_${name}_${date}.csv`, rows.map((r) => ({
+      token: r.token_no ?? '', patient: r.patient.full_name, mr_number: r.patient.mr_number, branch: branchName(r.branch_id),
+      braces_month: r.braces_month ?? '', treatment: r.treatment_label || '', status: STATUS_LABELS[r.status],
+      doctors: r.staff.map((x) => (x.role === 'checker' ? '✓ ' : '') + x.name).join(', '), details: r.details_text || '',
+      dues: can('dues.view') ? r.dues : '', notes: r.notes || '', phone: r.patient.phone || '',
+    })));
   }
 
   // ---------------------------------------------------------------- cells
@@ -159,7 +174,10 @@ export async function renderSheet(root, params) {
       can('flags.raise') && !row.see_dr_ali ? h('button', { class: 'btn', onclick: () => flagForAliModal(row.patient, load) }, 'Next appointment with Dr. Ali') : null,
       h('a', { class: 'btn', href: `#/staff/patient/${row.patient_id}` }, 'Open profile'),
     ];
+    const mh = row.patient.medical_history || {};
+    const medical = [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
     modal(`${row.patient.full_name} · Mr# ${row.patient.mr_number}`, h('div', {},
+      medical ? h('div', { class: 'alert alert-warning' }, h('strong', {}, 'Medical history: '), medical) : null,
       row.dues > 0 && can('dues.view') ? h('div', { class: 'alert alert-stop' }, `Pending dues ${rupees(row.dues)}. Clear dues before treatment.`) : null,
       row.see_dr_ali ? h('div', { class: 'alert alert-warning' }, 'Flagged: next appointment should be with Dr. Ali Rashid.') : null,
       g ? guidancePanel(g) : null,
@@ -190,6 +208,7 @@ export async function renderSheet(root, params) {
       : h('span', { class: 'muted' }, '–');
 
     return h('tr', { dataset: { id: row.id } },
+      !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(row.branch_id))) : null,
       h('td', { class: 'frozen' }, h('div', { class: 'cell' },
         h('span', { class: 'token', title: row.checked_in_at ? `Arrived ${timeOf(row.checked_in_at)}` : '' }, row.token_no ?? '–'),
         h('button', { class: 'link-btn', style: { textDecoration: 'none', textAlign: 'left' }, onclick: () => openRow(row) },
@@ -218,7 +237,9 @@ export async function renderSheet(root, params) {
 
   function draw() {
     const shown = filter ? rows.filter((r) => r.status === filter) : rows;
-    mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 10 }, h('div', { class: 'empty' }, `No patients on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.`))));
+    branchHead.hidden = !!branchId;
+    addPanel.hidden = !branchId || !search;
+    mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 11 }, h('div', { class: 'empty' }, branchId ? `No patients on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients on any list for this day.'))));
     drawCounts();
   }
 
@@ -250,6 +271,13 @@ export async function renderSheet(root, params) {
     onNew: async (text) => { const p = await newPatientModal(text, branchId); if (p) addPatient(p); },
   }) : null;
 
+  const branchHead = h('th', { hidden: true }, 'Branch');
+  const addPanel = search ? h('div', { class: 'add-panel' },
+    h('div', { class: 'add-panel-text' },
+      h('strong', {}, 'Add a patient to this list'),
+      h('span', { class: 'muted' }, 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.')),
+    search,
+    can('patients.create') ? h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => { const p = await newPatientModal('', branchId); if (p) addPatient(p); } }, '+ New walk-in') : null) : h('div', { hidden: true });
   const onReload = () => load();
   document.addEventListener('sheet-reload', onReload);
   const busy = () => q.pendingCount || tableBody.contains(document.activeElement) || document.querySelector('.modal');
@@ -258,7 +286,7 @@ export async function renderSheet(root, params) {
   let liveTimer = null;
   let stopLive = null;
   const onLive = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!busy()) load(); }, 300); };
-  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId, onLive) : null; };
+  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId || null, onLive) : null; };
   branchSel.addEventListener('change', listen);
   listen();
   // Safety net: also check every 20 seconds while nobody is typing.
@@ -273,17 +301,14 @@ export async function renderSheet(root, params) {
       saveStateEl),
     h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel,
       h('button', { class: 'btn', onclick: () => { date = todayISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
-      h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId}` }, 'Queue board')),
-    search ? h('div', { class: 'add-panel' },
-      h('div', { class: 'add-panel-text' },
-        h('strong', {}, 'Add a patient to this list'),
-        h('span', { class: 'muted' }, 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.')),
-      search,
-      can('patients.create') ? h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => { const p = await newPatientModal('', branchId); if (p) addPatient(p); } }, '+ New walk-in') : null) : null,
+      h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
+      can('export.data') || can('finance.view') ? h('button', { class: 'btn', onclick: download }, 'Download') : null),
+    addPanel,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
     h('div', { class: 'sheet-wrap', onkeydown: onKey },
       h('table', { class: 'sheet' },
         h('thead', {}, h('tr', {},
+          branchHead,
           h('th', { class: 'frozen', style: { minWidth: '210px' } }, 'Token · Patient'), h('th', {}, 'Flags'), h('th', {}, 'Month'), h('th', {}, 'Treatment'),
           h('th', {}, 'Status'), h('th', {}, "Doctor's name"), h('th', {}, 'Treatment details'), h('th', { class: 'right' }, 'P.P'),
           h('th', {}, 'Notes'), h('th', {}, 'Contact'))),

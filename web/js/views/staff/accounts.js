@@ -1,5 +1,5 @@
 // Accounts: expenses by city and branch, branch income vs expenses, daily
-// cash closing.
+// cash closing, and the reports page (trends, dues, referrals, doctors).
 import { h, mount, rupees, shortDate, toast, friendlyError, field, select, empty, todayISO, downloadCSV } from '../../ui/dom.js';
 import { state, can, branchName, cityName, myBranches, defaultBranchId } from '../../state.js';
 
@@ -13,6 +13,7 @@ export async function renderAccounts(root, params) {
   const available = [
     can('finance.view') && ['pnl', 'Branch income vs expenses'],
     can('finance.view') && ['expenses', 'Expenses'],
+    can('finance.view') && ['reports', 'Reports'],
     (can('cash.close') || can('cash.verify')) && ['cash', 'Cash closing'],
   ].filter(Boolean);
   let tab = params.get('tab') || available[0]?.[0];
@@ -23,6 +24,7 @@ export async function renderAccounts(root, params) {
     mount(head, tabs(available, tab, pick));
     if (tab === 'pnl') await pnl(body);
     else if (tab === 'expenses') await expenses(body);
+    else if (tab === 'reports') await reports(body);
     else await cash(body);
   }
   mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Accounts')), head, body);
@@ -180,5 +182,81 @@ async function cash(root) {
               : can('cash.verify') ? h('button', { class: 'btn btn-small', onclick: async () => { await d.verifyClosing(c.id); toast('Verified.', 'ok'); load(); } }, 'Verify') : h('span', { class: 'badge badge-muted' }, 'Waiting'))))))) : empty('No cash closings yet.')));
   }
   mount(root, out);
+  await load();
+}
+
+// ---------------------------------------------------------------- reports
+const monthLabel = (m) => (m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '');
+const sumBy = (rows, keys, fields) => {
+  const out = {};
+  for (const r of rows) {
+    const k = keys.map((x) => r[x] ?? '').join('|');
+    out[k] ||= Object.fromEntries([...keys.map((x) => [x, r[x]]), ...fields.map((f) => [f, 0])]);
+    for (const f of fields) out[k][f] += Number(r[f] || 0);
+  }
+  return Object.values(out);
+};
+
+async function reports(root) {
+  const d = state.data;
+  const today = todayISO();
+  const from = h('input', { type: 'date', value: `${Number(today.slice(0, 4)) - 1}${today.slice(4, 8)}01` });
+  const to = h('input', { type: 'date', value: today });
+  const branch = select([{ value: '', label: 'All branches' }, ...state.ref.branches.map((b) => ({ value: b.id, label: b.name }))], '', { 'aria-label': 'Branch', style: { maxWidth: '260px' } });
+  const out = h('div', {});
+  const bname = (id) => (id === null || id === undefined || id === '' ? h('span', { class: 'muted' }, 'No branch') : branchName(id) || `Branch ${id}`);
+  const money = (v) => h('td', { class: 'right', style: { color: Number(v) < 0 ? 'var(--stop)' : '' } }, rupees(v));
+  const num = (v) => h('td', { class: 'right' }, Number(v || 0).toLocaleString('en-PK'));
+
+  // One table per report: columns = [label, key, kind] where kind is money | num | text | branch | month.
+  const section = (title, help, rows, columns, csvName) => h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', {}, title), can('export.data') && rows.length ? h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`${csvName}_${from.value}_${to.value}.csv`, rows.map((r) => Object.fromEntries(columns.map(([label, key, kind]) => [label, kind === 'branch' ? (branchName(r[key]) || '') : r[key]])))) }, 'Download') : null),
+    help ? h('p', { class: 'muted' }, help) : null,
+    rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+      h('thead', {}, h('tr', {}, columns.map(([label, , kind]) => h('th', { class: kind === 'money' || kind === 'num' ? 'right' : '' }, label)))),
+      h('tbody', {}, rows.map((r) => h('tr', {}, columns.map(([, key, kind]) =>
+        kind === 'money' ? money(r[key]) : kind === 'num' ? num(r[key]) : kind === 'branch' ? h('td', {}, bname(r[key])) : kind === 'month' ? h('td', { class: 'nowrap' }, monthLabel(r[key])) : kind === 'patient' ? h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r[key])) : h('td', {}, r[key] ?? ''))))))) : empty('Nothing in this period.'));
+
+  async function load() {
+    mount(out, h('p', { class: 'muted' }, 'Loading reports…'));
+    const kinds = ['pnl_trend', 'payment_methods', 'visits', 'braces', 'dues_by_branch', 'top_dues', 'referrals', 'photo_compliance', 'lab_costs', 'doctors', 'treatments'];
+    const got = {};
+    await Promise.all(kinds.map(async (k) => { try { got[k] = await d.report(k, from.value, to.value); } catch (e) { got[k] = []; toast(`${k}: ${friendlyError(e)}`, 'error'); } }));
+    const b = branch.value;
+    const byBranch = (rows) => (b ? rows.filter((r) => String(r.branch_id) === b) : rows);
+
+    const pnl = sumBy(byBranch(got.pnl_trend), ['month'], ['income', 'expenses']).map((r) => ({ ...r, profit: r.income - r.expenses })).sort((x, y) => x.month.localeCompare(y.month));
+    const pnlBranch = sumBy(got.pnl_trend.filter((r) => r.branch_id !== null), ['branch_id'], ['income', 'expenses']).map((r) => ({ ...r, profit: r.income - r.expenses })).sort((x, y) => y.income - x.income);
+    const unassigned = got.pnl_trend.filter((r) => r.branch_id === null).reduce((s, r) => s + Number(r.expenses), 0);
+    const methods = sumBy(got.payment_methods, ['month', 'method'], ['amount', 'count']).sort((x, y) => x.month.localeCompare(y.month) || y.amount - x.amount);
+    const visits = sumBy(byBranch(got.visits), ['month'], ['visits', 'patients', 'new_patients', 'no_shows']).sort((x, y) => x.month.localeCompare(y.month));
+    const braces = sumBy(byBranch(got.braces), ['month'], ['bondings', 'braces_off', 'cases_started']).sort((x, y) => x.month.localeCompare(y.month));
+    const photos = sumBy(byBranch(got.photo_compliance), ['month'], ['photo_months', 'uploaded']).map((r) => ({ ...r, missing: r.photo_months - r.uploaded, pct: r.photo_months ? Math.round((100 * r.uploaded) / r.photo_months) + '%' : '' })).sort((x, y) => x.month.localeCompare(y.month));
+    const lab = sumBy(byBranch(got.lab_costs), ['month'], ['cases', 'cost']).sort((x, y) => x.month.localeCompare(y.month));
+    const totalDues = got.dues_by_branch.reduce((s, r) => s + Number(r.dues), 0);
+
+    mount(out,
+      h('div', { class: 'stat-row', style: { marginBottom: '16px' } },
+        h('div', { class: 'stat' }, h('strong', {}, rupees(pnl.reduce((s, r) => s + r.income, 0))), h('span', {}, 'Received in this period')),
+        h('div', { class: 'stat' }, h('strong', {}, rupees(pnl.reduce((s, r) => s + r.expenses, 0))), h('span', {}, 'Expenses in this period')),
+        h('div', { class: 'stat' }, h('strong', {}, visits.reduce((s, r) => s + r.visits, 0).toLocaleString('en-PK')), h('span', {}, 'Completed visits')),
+        h('div', { class: 'stat' }, h('strong', {}, visits.reduce((s, r) => s + r.new_patients, 0).toLocaleString('en-PK')), h('span', {}, 'New patients (first visit)')),
+        h('div', { class: 'stat' }, h('strong', { style: { color: 'var(--stop)' } }, rupees(totalDues)), h('span', {}, 'Pending dues today (all time)'))),
+      section('Income and expenses by month', b ? 'Income at this branch and expenses tagged to it.' : `All branches. ${unassigned > 0 ? rupees(unassigned) + ' of expenses were recorded against a city only (rent, salaries, ads) and are included.' : ''}`,
+        pnl, [['Month', 'month', 'month'], ['Income', 'income', 'money'], ['Expenses', 'expenses', 'money'], ['Profit', 'profit', 'money']], 'income_expenses'),
+      b ? null : section('Income and expenses by branch (whole period)', 'Expenses with no branch are not in this table.', pnlBranch, [['Branch', 'branch_id', 'branch'], ['Income', 'income', 'money'], ['Expenses', 'expenses', 'money'], ['Profit', 'profit', 'money']], 'branches'),
+      section('Visits by month', 'A new patient is someone whose first ever completed visit falls in that month.', visits, [['Month', 'month', 'month'], ['Visits', 'visits', 'num'], ['Patients seen', 'patients', 'num'], ['New patients', 'new_patients', 'num'], ['No-shows', 'no_shows', 'num']], 'visits'),
+      section('Pending dues by branch', 'Dues today, grouped by the branch each patient first came to. The top 100 are listed below.', got.dues_by_branch, [['Branch', 'branch_id', 'branch'], ['Patients with dues', 'patients', 'num'], ['Dues', 'dues', 'money']], 'dues_by_branch'),
+      section('Patients with the highest dues', null, got.top_dues.map((r) => ({ ...r, name: `${r.full_name} (Mr# ${r.mr_number})` })), [['Patient', 'name', 'patient'], ['Phone', 'phone', 'text'], ['Branch', 'branch_id', 'branch'], ['Dues', 'dues', 'money'], ['Last payment', 'last_payment', 'text']], 'top_dues'),
+      section('Braces by month', 'Bondings and braces-off visits from Aaj ki List (including imported history), and cases started on the website.', braces, [['Month', 'month', 'month'], ['Bondings', 'bondings', 'num'], ['Braces off', 'braces_off', 'num'], ['Cases started', 'cases_started', 'num']], 'braces'),
+      section('Payments by method', null, methods, [['Month', 'month', 'month'], ['Method', 'method', 'text'], ['Amount', 'amount', 'money'], ['Payments', 'count', 'num']], 'payment_methods'),
+      section('Where new patients heard about us', 'From the "How did they hear about us?" box when a patient is registered.', byBranch(got.referrals), [['Source', 'source', 'text'], ['Branch', 'branch_id', 'branch'], ['Patients', 'patients', 'num']], 'referrals'),
+      section('Photo months', 'Braces photo months and how many had photos uploaded.', photos, [['Month', 'month', 'month'], ['Photo months', 'photo_months', 'num'], ['Photos uploaded', 'uploaded', 'num'], ['Missing', 'missing', 'num'], ['Done', 'pct', 'text']], 'photo_months'),
+      section('Lab and retainer costs', 'From Coordinator → Lab work and Retainers. Add these as expenses if they are not already paid through Accounts.', lab, [['Month', 'month', 'month'], ['Cases', 'cases', 'num'], ['Cost', 'cost', 'money']], 'lab_costs'),
+      section('Doctors', 'Completed visits in the period. "Billed" counts invoices made from a visit on Aaj ki List (imported history has none).', got.doctors, [['Doctor', 'name', 'text'], ['Treated', 'treated', 'num'], ['Checked', 'checked', 'num'], ['Assisted', 'assisted', 'num'], ['Days', 'days', 'num'], ['Billed', 'billed', 'money']], 'doctors'),
+      section('Treatments invoiced', 'Invoice lines in the period, biggest first.', got.treatments, [['Treatment', 'treatment', 'text'], ['Times', 'count', 'num'], ['Amount', 'amount', 'money']], 'treatments'));
+  }
+  [from, to, branch].forEach((el) => el.addEventListener('change', load));
+  mount(root, h('div', { class: 'inline', style: { marginBottom: '12px' } }, h('label', { class: 'inline' }, 'From ', from), h('label', { class: 'inline' }, 'To ', to), branch), out);
   await load();
 }

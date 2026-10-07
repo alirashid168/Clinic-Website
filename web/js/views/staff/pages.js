@@ -31,10 +31,13 @@ export async function renderDashboard(root) {
       h('h2', {}, 'Branches today'),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', {}, 'Branch'), h('th', { class: 'right' }, 'Patients'), h('th', { class: 'right' }, 'Waiting'), h('th', { class: 'right' }, 'Completed'),
-          can('billing.view') ? h('th', { class: 'right' }, 'Received') : null, h('th', {}, 'Cash closing'), h('th', {}))),
+          can('billing.view') ? h('th', { class: 'right' }, 'Received') : null, can('dues.view') ? h('th', { class: 'right' }, "Dues on today's list") : null,
+          can('complaints.view') ? h('th', { class: 'right' }, 'New complaints') : null, h('th', {}, 'Cash closing'), h('th', {}))),
         h('tbody', {}, visible.map((r) => h('tr', {},
           h('td', {}, h('strong', {}, r.branch.name)), h('td', { class: 'right' }, r.patients), h('td', { class: 'right' }, r.waiting), h('td', { class: 'right' }, r.completed),
           can('billing.view') ? h('td', { class: 'right' }, rupees(r.received)) : null,
+          can('dues.view') ? h('td', { class: 'right', style: { color: r.dues > 0 ? 'var(--stop)' : '' } }, r.dues > 0 ? `${rupees(r.dues)} (${r.dues_patients})` : '–') : null,
+          can('complaints.view') ? h('td', { class: 'right' }, r.new_complaints ? h('a', { href: '#/staff/complaints' }, r.new_complaints) : '–') : null,
           h('td', {}, r.closing ? h('span', { class: ['badge', Number(r.closing.difference) === 0 ? 'badge-ok' : 'badge-dues'] }, Number(r.closing.difference) === 0 ? 'Closed, matches' : `Closed, off by ${rupees(r.closing.difference)}`) : h('span', { class: 'badge badge-muted' }, 'Not closed')),
           h('td', { class: 'right' }, h('a', { class: 'btn btn-small', href: `#/staff/sheet?branch=${r.branch.id}&date=${day}` }, 'Open list')))))))));
 }
@@ -60,10 +63,15 @@ export async function renderQueue(root, params) {
     mount(board, col('waiting', 'Waiting'), col('in_treatment', 'In treatment'), col('completed', 'Completed'));
   }
   mount(root,
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Queue'), h('p', {}, 'Updates every 15 seconds')), branchSel),
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Queue'), h('p', {}, d.subscribeVisits ? 'Updates by itself as the list changes' : 'Updates every 15 seconds')), branchSel),
     board);
   await load();
-  const t = setInterval(() => { if (!document.body.contains(board)) clearInterval(t); else load(); }, 15000);
+  // Live: redraw the moment a visit at this branch changes; a 15-second check is the safety net.
+  let stopLive = null; let liveTimer = null;
+  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId, () => { clearTimeout(liveTimer); liveTimer = setTimeout(load, 300); }) : null; };
+  branchSel.addEventListener('change', listen);
+  listen();
+  const t = setInterval(() => { if (!document.body.contains(board)) { clearInterval(t); stopLive?.(); } else load(); }, 15000);
 }
 
 // ---------------------------------------------------------------- billing desk

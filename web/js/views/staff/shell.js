@@ -8,6 +8,7 @@ import { renderDashboard, renderQueue, renderBilling, renderReview, renderCompla
 import { renderAccounts } from './accounts.js';
 import { renderCoordinator } from './coordinator.js';
 import { renderAdmin } from './admin.js';
+import { renderInventory } from './inventory.js';
 
 const PAGES = [
   { path: 'today', label: 'Today', show: () => true, render: renderDashboard },
@@ -17,6 +18,7 @@ const PAGES = [
   { path: 'billing', label: 'Billing', show: () => can('billing.view') || can('discount.approve'), render: renderBilling },
   { path: 'accounts', label: 'Accounts', show: () => can('finance.view') || can('cash.close') || can('cash.verify'), render: renderAccounts },
   { path: 'coordinator', label: 'Coordinator', show: () => can('reminders.manage') || can('lab.manage') || can('retainers.manage'), render: renderCoordinator },
+  { path: 'stock', label: 'Stock', show: () => can('inventory.manage'), render: renderInventory },
   { path: 'complaints', label: 'Complaints', show: () => can('complaints.view'), render: renderComplaints },
   { path: 'review', label: "Dr. Ali's list", show: () => isAdmin() || can('complaints.view') || can('flags.clear'), render: renderReview },
   { path: 'log', label: 'Doctor log', show: () => state.session.staff.role === 'doctor' || can('doctor_log.view_all'), render: renderDoctorLog },

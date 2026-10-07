@@ -103,9 +103,13 @@ export const PHOTO_VIEWS = ['Front', 'Smile', 'Left', 'Right', 'Upper occlusal',
 export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
   const files = h('input', { type: 'file', accept: 'image/*', multiple: true, capture: 'environment' });
   const view = select(PHOTO_VIEWS, 'Front');
+  const edited = h('input', { type: 'checkbox' });
+  const publicOk = h('input', { type: 'checkbox', disabled: !patient.photo_consent_public });
   modal(`Upload photos · ${patient.full_name}`, h('div', {},
-    h('p', { class: 'muted' }, 'Raw photos go to the clinic photos folder (staff only). Edited before/after versions are added later and shared with the patient.'),
-    field('Photos', files), field('View', view, 'For several photos, the view is numbered automatically.')), [
+    h('p', { class: 'muted' }, 'Raw photos go to the clinic photos folder (staff only). Tick "edited" for the finished before/after versions: those are the ones the patient sees in their account.'),
+    field('Photos', files), field('View', view, 'For several photos, the view is numbered automatically. Choose "X-ray / OPG" for X-rays.'),
+    h('label', { class: 'inline' }, edited, 'Edited before/after version (shared with the patient)'),
+    h('label', { class: 'inline', style: { marginTop: '6px' } }, publicOk, patient.photo_consent_public ? 'May be shown on the website (patient has given consent)' : 'May be shown on the website — the patient has not given photo consent yet')), [
     { label: 'Cancel' },
     { label: 'Upload', primary: true, onClick: async () => {
       if (!files.files.length) { toast('Choose at least one photo.'); return false; }
@@ -113,7 +117,8 @@ export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
         let i = 0;
         for (const file of files.files) {
           i++;
-          await state.data.uploadPhoto({ patientId: patient.id, visitId, branchId, file, viewLabel: files.files.length > 1 ? `${view.value} ${i}` : view.value });
+          await state.data.uploadPhoto({ patientId: patient.id, visitId, branchId, file, viewLabel: files.files.length > 1 ? `${view.value} ${i}` : view.value,
+            kind: edited.checked ? 'edited' : 'raw', publicOk: edited.checked && publicOk.checked && patient.photo_consent_public });
         }
         toast(`${files.files.length} photo${files.files.length > 1 ? 's' : ''} uploaded.`, 'ok');
         onDone?.();
