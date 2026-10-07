@@ -109,10 +109,10 @@ export async function renderReview(root) {
   const d = state.data;
   const rows = await d.reviewList().catch((e) => { toast(friendlyError(e), 'error'); return []; });
   mount(root,
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, "Dr. Ali's list"), h('p', {}, 'Patients flagged by staff, and braces cases running past their end month.'))),
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, "Dr. Ali's list"), h('p', {}, 'Patients flagged by staff, new braces cases waiting for your treatment plan (Month 1), and cases running past their end month.'))),
     h('section', { class: 'panel' }, rows.length ? h('table', { class: 'list' }, h('tbody', {}, rows.map((r) => h('tr', {},
       h('td', {}, h('a', { href: `#/staff/patient/${r.patient?.id || r.patient_id}` }, r.patient?.full_name || 'Patient'), h('div', { class: 'muted' }, r.patient ? `Mr# ${r.patient.mr_number}${r.patient.phone ? ' · ' + r.patient.phone : ''}` : '')),
-      h('td', {}, h('span', { class: ['badge', r.source === 'flag' ? 'badge-ali' : 'badge-warn'] }, r.source === 'flag' ? 'Flagged' : 'Overrun')),
+      h('td', {}, h('span', { class: ['badge', r.source === 'flag' ? 'badge-ali' : r.source === 'plan' ? 'badge-photo' : 'badge-warn'] }, r.source === 'flag' ? 'Flagged' : r.source === 'plan' ? 'Plan needed' : 'Overrun')),
       h('td', {}, r.reason),
       h('td', { class: 'nowrap muted' }, shortDate(String(r.since).slice(0, 10))),
       h('td', { class: 'right' }, r.flag_id && can('flags.clear') ? h('button', { class: 'btn btn-small', onclick: async () => { await d.clearFlag(r.flag_id, 'Seen by Dr. Ali'); toast('Flag cleared.', 'ok'); renderReview(root); } }, 'Seen, clear flag') : null)))))

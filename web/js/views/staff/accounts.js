@@ -240,7 +240,10 @@ async function reports(root) {
     const pnlBranch = sumBy(got.pnl_trend.filter((r) => r.branch_id !== null), ['branch_id'], ['income', 'expenses']).map((r) => ({ ...r, profit: r.income - r.expenses })).sort((x, y) => y.income - x.income);
     const unassigned = got.pnl_trend.filter((r) => r.branch_id === null).reduce((s, r) => s + Number(r.expenses), 0);
     const methods = sumBy(got.payment_methods, ['month', 'method'], ['amount', 'count']).sort((x, y) => x.month.localeCompare(y.month) || y.amount - x.amount);
-    const visits = sumBy(byBranch(got.visits), ['month'], ['visits', 'patients', 'new_patients', 'no_shows']).sort((x, y) => x.month.localeCompare(y.month));
+    const visits = sumBy(byBranch(got.visits), ['month'], ['visits', 'patients', 'new_patients', 'no_shows']).map((r) => {
+      const src = byBranch(got.visits).filter((x) => x.month === r.month && x.avg_wait_min !== null && x.avg_wait_min !== undefined);
+      return { ...r, avg_wait: src.length ? Math.round(src.reduce((s, x) => s + Number(x.avg_wait_min) * Number(x.visits || 1), 0) / Math.max(1, src.reduce((s, x) => s + Number(x.visits || 1), 0))) + ' min' : '' };
+    }).sort((x, y) => x.month.localeCompare(y.month));
     const braces = sumBy(byBranch(got.braces), ['month'], ['bondings', 'braces_off', 'cases_started']).sort((x, y) => x.month.localeCompare(y.month));
     const photos = sumBy(byBranch(got.photo_compliance), ['month'], ['photo_months', 'uploaded']).map((r) => ({ ...r, missing: r.photo_months - r.uploaded, pct: r.photo_months ? Math.round((100 * r.uploaded) / r.photo_months) + '%' : '' })).sort((x, y) => x.month.localeCompare(y.month));
     const lab = sumBy(byBranch(got.lab_costs), ['month'], ['cases', 'cost']).sort((x, y) => x.month.localeCompare(y.month));
@@ -256,7 +259,7 @@ async function reports(root) {
       section('Income and expenses by month', b ? 'Income at this branch and expenses tagged to it.' : `All branches. ${unassigned > 0 ? rupees(unassigned) + ' of expenses were recorded against a city only (rent, salaries, ads) and are included.' : ''}`,
         pnl, [['Month', 'month', 'month'], ['Income', 'income', 'money'], ['Expenses', 'expenses', 'money'], ['Profit', 'profit', 'money']], 'income_expenses'),
       b ? null : section('Income and expenses by branch (whole period)', 'Expenses with no branch are not in this table.', pnlBranch, [['Branch', 'branch_id', 'branch'], ['Income', 'income', 'money'], ['Expenses', 'expenses', 'money'], ['Profit', 'profit', 'money']], 'branches'),
-      section('Visits by month', 'A new patient is someone whose first ever completed visit falls in that month.', visits, [['Month', 'month', 'month'], ['Visits', 'visits', 'num'], ['Patients seen', 'patients', 'num'], ['New patients', 'new_patients', 'num'], ['No-shows', 'no_shows', 'num']], 'visits'),
+      section('Visits by month', 'A new patient is someone whose first ever completed visit falls in that month. Waiting time = check-in to treatment start, for visits run on the website.', visits, [['Month', 'month', 'month'], ['Visits', 'visits', 'num'], ['Patients seen', 'patients', 'num'], ['New patients', 'new_patients', 'num'], ['No-shows', 'no_shows', 'num'], ['Avg wait', 'avg_wait', 'text']], 'visits'),
       section('Pending dues by branch', 'Dues today, grouped by the branch each patient first came to. The top 100 are listed below.', got.dues_by_branch, [['Branch', 'branch_id', 'branch'], ['Patients with dues', 'patients', 'num'], ['Dues', 'dues', 'money']], 'dues_by_branch'),
       section('Patients with the highest dues', null, got.top_dues.map((r) => ({ ...r, name: `${r.full_name} (Mr# ${r.mr_number})` })), [['Patient', 'name', 'patient'], ['Phone', 'phone', 'text'], ['Branch', 'branch_id', 'branch'], ['Dues', 'dues', 'money'], ['Last payment', 'last_payment', 'text']], 'top_dues'),
       section('Braces by month', 'Bondings and braces-off visits from Aaj ki List (including imported history), and cases started on the website.', braces, [['Month', 'month', 'month'], ['Bondings', 'bondings', 'num'], ['Braces off', 'braces_off', 'num'], ['Cases started', 'cases_started', 'num']], 'braces'),

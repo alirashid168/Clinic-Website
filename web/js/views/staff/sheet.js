@@ -72,11 +72,17 @@ export async function renderSheet(root, params) {
   const doctorSel = select([{ value: '', label: 'Any doctor' }, ...state.ref.clinicians.filter((c) => c.is_doctor).map((c) => ({ value: c.id, label: c.display_name }))], '', {
     'aria-label': 'Doctor', onchange: (e) => { doctorFilter = e.target.value; draw(); },
   });
+  let groupFilter = '';
+  const groupSel = select([{ value: '', label: 'Any group' }, { value: '1', label: 'Group 1' }, { value: '2', label: 'Group 2' }, { value: '3', label: 'Group 3' }], '', {
+    'aria-label': 'Doctor group', onchange: (e) => { groupFilter = e.target.value; draw(); },
+  });
+  const groupOf = (id) => state.ref.clinicians.find((c) => c.id === id)?.doctor_group_id;
   const duesBox = h('input', { type: 'checkbox', onchange: (e) => { duesOnly = e.target.checked; draw(); } });
   const bracesBox = h('input', { type: 'checkbox', onchange: (e) => { bracesOnly = e.target.checked; draw(); } });
   const findBox = h('input', { type: 'search', placeholder: 'Find on this list', 'aria-label': 'Find on this list', oninput: (e) => { textFilter = e.target.value.trim().toLowerCase(); draw(); } });
   const matches = (r) => (!filter || r.status === filter)
     && (!doctorFilter || r.staff.some((x) => x.clinician_id === doctorFilter))
+    && (!groupFilter || String(r.doctor_group_id || '') === groupFilter || r.staff.some((x) => String(groupOf(x.clinician_id) || '') === groupFilter))
     && (!duesOnly || r.dues > 0) && (!bracesOnly || !!r.braces_month)
     && (!textFilter || `${r.patient.full_name} ${r.patient.mr_number} ${r.patient.phone || ''} ${r.treatment_label || ''}`.toLowerCase().includes(textFilter));
   const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}`);
@@ -324,7 +330,7 @@ export async function renderSheet(root, params) {
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Aaj ki List'), h('p', {}, counts)),
       saveStateEl),
-    h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel, doctorSel, findBox,
+    h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel, doctorSel, groupSel, findBox,
       h('label', { class: 'inline', style: { gap: '4px' } }, duesBox, 'With dues'), h('label', { class: 'inline', style: { gap: '4px' } }, bracesBox, 'Braces only'),
       h('button', { class: 'btn', onclick: () => { date = todayISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
       h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
