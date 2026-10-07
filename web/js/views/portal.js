@@ -79,7 +79,7 @@ function portalPage(root, { d, p, ratings, signOut, preview, reload }) {
     preview === true ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
       h('span', {}, h('strong', {}, 'Patient view. '), `This is what ${p.full_name} sees after logging in to their account. Buttons are switched off here.`),
       h('a', { class: 'btn btn-small', href: `#/staff/patient/${p.id}` }, 'Back to the record')) : null,
-    preview === 'demo' ? h('div', { class: 'alert alert-warning inline demo-banner', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
+    preview === 'demo' ? h('div', { class: 'alert alert-warning inline sample-banner', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
       h('span', {}, h('strong', {}, 'Sample patient account. '), 'Made-up data showing what you see after logging in. Tap around; nothing here is real.'),
       h('span', { class: 'nowrap' }, h('a', { class: 'btn btn-small btn-primary', href: '#/login/patient' }, 'Patient login'), ' ', h('a', { class: 'btn btn-small', href: '#/' }, 'Home'))) : null,
     preview ? null : h('div', { class: 'mobile-bar', style: { display: 'flex' } },
