@@ -770,6 +770,7 @@ export function createDemoAdapter() {
       });
     },
     async totalDues() { return db.patients.reduce((s, p) => s + Math.max(0, dues(p.id)), 0); },
+    async commissionRules() { return clone((db.doctor_commission_rules || []).filter((r) => r.active !== false)); },
     // Reports (a few of the real ones, from the demo data).
     async report(kind, from, to) {
       need('finance.view');
@@ -801,15 +802,17 @@ export function createDemoAdapter() {
     async setupLists() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
       db.doctor_groups ||= [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
-      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories, staff: db.staff.filter((s) => s.active) });
+      db.doctor_commission_rules ||= [];
+      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories, staff: db.staff.filter((s) => s.active), commission_rules: db.doctor_commission_rules });
     },
     async saveSetupRow(table, row) {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
-      const list = { branches: db.branches, clinicians: db.clinicians, doctor_groups: db.doctor_groups, treatments: db.treatments, expense_categories: db.expense_categories }[table];
+      db.doctor_commission_rules ||= [];
+      const list = { branches: db.branches, clinicians: db.clinicians, doctor_groups: db.doctor_groups, treatments: db.treatments, expense_categories: db.expense_categories, doctor_commission_rules: db.doctor_commission_rules }[table];
       if (!list) fail('Unknown list ' + table);
       const found = row.id !== undefined && row.id !== null && row.id !== '' ? list.find((x) => String(x.id) === String(row.id)) : null;
       if (found) Object.assign(found, row);
-      else list.push({ active: true, ...row, id: row.id ?? (table === 'clinicians' ? uid() : Math.max(0, ...list.map((x) => Number(x.id) || 0)) + 1) });
+      else list.push({ active: true, ...row, id: row.id ?? (table === 'clinicians' || table === 'doctor_commission_rules' ? uid() : Math.max(0, ...list.map((x) => Number(x.id) || 0)) + 1) });
     },
 
     // ------------------------------------------------------------ import from Healthwire (admin)

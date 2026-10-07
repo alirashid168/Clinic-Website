@@ -564,11 +564,12 @@ export async function createSupabaseAdapter() {
       const rows = check(await sb.from('patient_balances').select('dues').gt('dues', 0));
       return rows.reduce((t, r) => t + Number(r.dues), 0);
     },
+    async commissionRules() { return check(await sb.from('doctor_commission_rules').select('*').eq('active', true)); },
     async report(kind, from, to) { return check(await sb.rpc('clinic_report', { p_kind: kind, p_from: from, p_to: to })) || []; },
 
     // ------------------------------------------------------------ clinic setup (admin)
     async setupLists() {
-      const [branches, cities, clinicians, groups, treatments, categories, staff] = await Promise.all([
+      const [branches, cities, clinicians, groups, treatments, categories, staff, rules] = await Promise.all([
         sb.from('branches').select('*').order('sort_order').order('id').then(check),
         this.cities(),
         sb.from('clinicians').select('*').order('is_doctor', { ascending: false }).order('display_name').then(check),
@@ -576,11 +577,12 @@ export async function createSupabaseAdapter() {
         sb.from('treatments').select('*').order('sort_order').order('name').then(check),
         sb.from('expense_categories').select('*').order('sort_order').order('name').then(check),
         sb.from('staff').select('id,full_name,role,active').order('full_name').then(check),
+        sb.from('doctor_commission_rules').select('*').order('percent', { ascending: false }).then(check).catch(() => []),
       ]);
-      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.filter((s) => s.active) };
+      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.filter((s) => s.active), commission_rules: rules };
     },
     async saveSetupRow(table, row) {
-      const tables = ['branches', 'clinicians', 'doctor_groups', 'treatments', 'expense_categories'];
+      const tables = ['branches', 'clinicians', 'doctor_groups', 'treatments', 'expense_categories', 'doctor_commission_rules'];
       if (!tables.includes(table)) throw new Error('Unknown list ' + table);
       const { id, ...data } = row;
       if (table === 'doctor_groups' && !(await sb.from('doctor_groups').select('id').eq('id', id).then(check)).length) check(await sb.from(table).insert({ id, ...data }));
