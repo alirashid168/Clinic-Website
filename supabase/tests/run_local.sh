@@ -9,5 +9,5 @@ $PSQL -d postgres -c "drop database if exists $DB" -c "create database $DB"
 for r in anon authenticated service_role; do $PSQL -d postgres -c "drop role if exists $r" >/dev/null 2>&1 || true; done
 $PSQL -d $DB -f tests/00_supabase_stub.sql
 for f in migrations/*.sql; do echo "== $f"; $PSQL -d $DB -f "$f"; done
-for f in tests/1*.sql; do echo "== $f"; $PSQL -d $DB -f "$f" >/dev/null; done
+for f in tests/[1-9]*.sql; do echo "== $f"; $PSQL -d $DB -f "$f" >/dev/null; done
 echo "ALL DATABASE TESTS PASSED"
