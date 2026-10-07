@@ -76,7 +76,10 @@ export async function createSupabaseAdapter() {
     async signIn(email, password) {
       check(await sb.auth.signInWithPassword({ email: email.trim().toLowerCase(), password }));
       cachedSession = null;
-      return this.getSession();
+      const session = await this.getSession();
+      // Login log (security plan): the account records its own sign-in; Dr. Ali reads the log.
+      try { if (session) await sb.from('login_events').insert({ user_id: await userId(), kind: session.kind, user_agent: navigator.userAgent.slice(0, 300) }); } catch { /* the log never blocks a login */ }
+      return session;
     },
     async sendPasswordReset(email) {
       check(await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo: location.origin + '/reset-password.html' }));
@@ -430,6 +433,19 @@ export async function createSupabaseAdapter() {
         notes: row.notes || null, created_by: await userId(),
       }).select().single());
     },
+    // Receipt photo or PDF for an expense: private "receipts" bucket, <expense id>.<ext>.
+    async uploadReceipt(expenseId, file) {
+      const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+      const path = `${expenseId}.${ext}`;
+      check(await sb.storage.from('receipts').upload(path, file, { contentType: file.type || undefined, upsert: true }));
+      check(await sb.from('expenses').update({ receipt_path: path }).eq('id', expenseId));
+      return path;
+    },
+    async receiptUrl(path) {
+      const { data, error } = await sb.storage.from('receipts').createSignedUrl(path, 600);
+      if (error) throw error;
+      return data.signedUrl;
+    },
     async branchPnl(month) {
       const first = month + '-01';
       const [rows, branches] = await Promise.all([sb.from('branch_monthly_pnl').select('*').eq('month', first).then(check), this.branches()]);
@@ -536,6 +552,7 @@ export async function createSupabaseAdapter() {
       else check(await sb.from('dr_ali_schedule').insert(row));
     },
     async deleteScheduleRow(id) { check(await sb.from('dr_ali_schedule').delete().eq('id', id)); },
+    async staffLogins() { return check(await sb.rpc('staff_logins', { p_limit: 200 })); },
     async auditLog() {
       const [rows, names] = await Promise.all([sb.from('audit_log').select('*').order('at', { ascending: false }).limit(200).then(check), staffNames()]);
       return rows.map((r) => ({ ...r, actor_name: names[r.actor] || null }));

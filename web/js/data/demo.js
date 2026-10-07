@@ -290,8 +290,16 @@ export function createDemoAdapter() {
         const s = db.staff.find((x) => x.id === id);
         if (!s || !s.active) fail('This account is switched off.');
         session = { staff: s };
+        s.last_sign_in_at = new Date().toISOString();
       }
+      db.login_events ||= [];
+      db.login_events.unshift({ at: new Date().toISOString(), kind: session.patient ? 'patient' : 'staff', name: session.patient ? session.patient.full_name : session.staff.full_name, role: session.staff?.role || null, user_agent: 'This browser' });
       return this.getSession();
+    },
+    async staffLogins() {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can see the login log');
+      return { staff: db.staff.map((s) => ({ id: s.id, full_name: s.full_name, email: s.email, role: s.role, active: s.active, last_sign_in_at: s.last_sign_in_at || null,
+          sign_ins_30d: (db.login_events || []).filter((e) => e.name === s.full_name).length })), events: clone(db.login_events || []) };
     },
     async signIn() { fail('In demo mode, pick an account from the list.'); },
     async signOut() { session = null; },
@@ -689,6 +697,14 @@ export function createDemoAdapter() {
       need('finance.view');
       return clone(db.expenses.filter((e) => (!from || e.expense_date >= from) && (!to || e.expense_date <= to))).sort((a, b) => b.expense_date.localeCompare(a.expense_date));
     },
+    async uploadReceipt(expenseId, file) {
+      need('expenses.manage');
+      const e = db.expenses.find((x) => x.id === expenseId); if (!e) fail('Expense not found');
+      e.receipt_path = `${expenseId}.${(file.name.split('.').pop() || 'jpg').toLowerCase()}`;
+      e._receipt_url = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+      return e.receipt_path;
+    },
+    async receiptUrl(path) { const e = db.expenses.find((x) => x.receipt_path === path); return e?._receipt_url || ''; },
     async addExpense(row) {
       need('expenses.manage');
       if (!(Number(row.amount) > 0)) fail('Enter an amount greater than zero.');
