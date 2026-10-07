@@ -40,7 +40,7 @@ export async function createSupabaseAdapter() {
     return Object.fromEntries(rows.map((r) => [r.patient_id, r]));
   }
 
-  const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
+  const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone,medical_history), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
   async function enrichVisits(rows) {
     const ids = [...new Set(rows.map((r) => r.patient_id))];
     const [dues, flags] = await Promise.all([duesFor(ids), flagsFor(ids)]);
@@ -171,16 +171,18 @@ export async function createSupabaseAdapter() {
         sb.from('payments').select('*').eq('patient_id', id).order('received_at', { ascending: false }).then(check),
         sb.from('photos').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).then(check),
         sb.from('retainer_cases').select('*').eq('patient_id', id).then(check),
-        sb.from('complaints').select('*').eq('patient_id', id).then(check),
+        sb.from('complaints').select('*, messages:complaint_messages(*)').eq('patient_id', id).order('created_at', { ascending: false }).then(check),
         sb.from('braces_cases').select('*').eq('patient_id', id).eq('status', 'active').then(check),
         duesFor([id]), flagsFor([id]),
         sb.from('patient_documents').select('*').eq('patient_id', id).order('added_on', { ascending: false }).then(check),
+        this.paymentPlans(id).catch(() => []),
       ]);
       for (const ph of photos) {
         const { data } = await sb.storage.from('clinic-photos').createSignedUrl(ph.storage_path, 3600);
         ph.url = data?.signedUrl || null;
       }
       const documents = rest[0] || [];
+      const plans = rest[1] || [];
       for (const doc of documents) {
         const { data } = await sb.storage.from('patient-documents').createSignedUrl(doc.storage_path, 3600);
         doc.url = data?.signedUrl || null;
@@ -190,7 +192,7 @@ export async function createSupabaseAdapter() {
         const next = check(await sb.rpc('next_braces_month', { p_case: braces_case.id }));
         braces_case = { ...braces_case, next_month: next };
       }
-      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents, retainers, complaints };
+      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents, plans, retainers, complaints };
     },
 
     // ------------------------------------------------------------ braces
@@ -218,8 +220,8 @@ export async function createSupabaseAdapter() {
     // Live updates: calls onChange the moment any visit at this branch (or a
     // visit's doctor list) changes. Returns a function that stops listening.
     subscribeVisits(branchId, onChange) {
-      const ch = sb.channel(`visits-${branchId}-${Math.random().toString(36).slice(2)}`)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'visits', filter: `branch_id=eq.${Number(branchId)}` }, onChange)
+      const ch = sb.channel(`visits-${branchId || 'all'}-${Math.random().toString(36).slice(2)}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'visits', ...(branchId ? { filter: `branch_id=eq.${Number(branchId)}` } : {}) }, onChange)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'visit_staff' }, onChange)
         .subscribe();
       return () => { sb.removeChannel(ch); };
@@ -253,14 +255,22 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ photos
-    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId }) {
+    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false }) {
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-      const path = `${patientId}/raw/${todayISO()}_${(viewLabel || 'photo').replace(/\W+/g, '-')}_${crypto.randomUUID().slice(0, 8)}.${ext}`;
+      const folder = kind === 'edited' ? 'edited' : 'raw';
+      const path = `${patientId}/${folder}/${todayISO()}_${(viewLabel || 'photo').replace(/\W+/g, '-')}_${crypto.randomUUID().slice(0, 8)}.${ext}`;
       check(await sb.storage.from('clinic-photos').upload(path, file, { contentType: file.type, upsert: false }));
       return check(await sb.from('photos').insert({
         patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, view_label: viewLabel || null,
-        storage_path: path, kind: 'raw', uploaded_by: await userId(),
+        storage_path: path, kind, public_ok: kind === 'edited' && !!publicOk, uploaded_by: await userId(),
       }).select().single());
+    },
+    // Admin puts a consented, edited before/after photo on the public website gallery.
+    async publishPhoto(photo) {
+      if (!photo.public_ok) throw new Error('This photo is not marked as allowed on the website.');
+      const name = `${photo.taken_on}_${(photo.view_label || 'case').replace(/\W+/g, '-')}_${photo.id.slice(0, 8)}.${photo.storage_path.split('.').pop()}`;
+      check(await sb.storage.from('clinic-photos').copy(photo.storage_path, name, { destinationBucket: 'public-cases' }));
+      return sb.storage.from('public-cases').getPublicUrl(name).data.publicUrl;
     },
     // Consent forms, ID copies, reports: private "patient-documents" bucket, one folder per patient.
     async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
@@ -293,6 +303,29 @@ export async function createSupabaseAdapter() {
     },
     async voidInvoice(id, reason) {
       check(await sb.from('invoices').update({ status: 'void', void_reason: reason }).eq('id', id));
+    },
+    // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
+    async patientBilling(patientId) {
+      const [invoices, payments] = await Promise.all([
+        sb.from('invoices').select('id,invoice_no,issue_date,subtotal,discount_amount,total,status').eq('patient_id', patientId).order('issue_date').then(check),
+        sb.from('payments').select('id,invoice_id,amount,received_at').eq('patient_id', patientId).then(check),
+      ]);
+      return { invoices, payments };
+    },
+    // ------------------------------------------------------------ installment plans
+    async paymentPlans(patientId) {
+      return check(await sb.from('payment_plans').select('*, installments:plan_installments(*)').eq('patient_id', patientId).order('created_at', { ascending: false }));
+    },
+    async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments }) {
+      const plan = check(await sb.from('payment_plans').insert({ patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_by: await userId() }).select().single());
+      check(await sb.from('plan_installments').insert(installments.map((i) => ({ plan_id: plan.id, due_date: i.due_date, amount: Number(i.amount), note: i.note || null }))));
+      return plan;
+    },
+    async deletePaymentPlan(id) { check(await sb.from('payment_plans').delete().eq('id', id)); },
+    // Installments that are overdue or due within a week, for the coordinator's call list.
+    async installmentsDue() {
+      const rows = check(await sb.from('installment_status').select('*').in('status', ['overdue', 'due_soon']).order('due_date'));
+      return attachPatients(rows);
     },
     async discountRequests() {
       const rows = check(await sb.from('discount_requests').select('*, invoice:invoices(*)').eq('status', 'pending').order('created_at'));
@@ -354,7 +387,30 @@ export async function createSupabaseAdapter() {
     async dropoffs() { return attachPatients(check(await sb.from('braces_dropoffs').select('*').order('last_visit', { ascending: true, nullsFirst: true }))); },
     async lowRatings() {
       const settings = await this.settings();
-      return attachPatients(check(await sb.from('visit_ratings').select('*').lte('stars', Number(settings.low_rating_threshold ?? 3)).is('followed_up_at', null)));
+      return attachPatients(check(await sb.from('visit_ratings').select('*').lte('stars', Number(settings.low_rating_threshold ?? 3)).is('followed_up_at', null).order('created_at', { ascending: false })));
+    },
+    async followUpRating(visitId) {
+      check(await sb.from('visit_ratings').update({ followed_up_by: await userId(), followed_up_at: new Date().toISOString() }).eq('visit_id', visitId));
+    },
+
+    // ------------------------------------------------------------ stock
+    async inventory(branchId) {
+      const [items, stock, moves] = await Promise.all([
+        sb.from('inventory_items').select('*').order('category').order('name').then(check),
+        sb.from('inventory_stock').select('*').eq('branch_id', Number(branchId)).then(check),
+        sb.from('inventory_moves').select('*').eq('branch_id', Number(branchId)).order('created_at', { ascending: false }).limit(50).then(check).catch(() => []),
+      ]);
+      return { items, stock, moves };
+    },
+    async saveInventoryItem(row) {
+      const { id, ...data } = row;
+      if (id) check(await sb.from('inventory_items').update(data).eq('id', id)); else check(await sb.from('inventory_items').insert(data));
+    },
+    async moveStock({ branch_id, item_id, change, reason, visit_id = null }) {
+      check(await sb.from('inventory_moves').insert({ branch_id: Number(branch_id), item_id: Number(item_id), change: Number(change), reason, visit_id, created_by: await userId() }));
+    },
+    async setReorderLevel({ branch_id, item_id, reorder_level }) {
+      check(await sb.from('inventory_stock').upsert({ branch_id: Number(branch_id), item_id: Number(item_id), reorder_level: Number(reorder_level) }, { onConflict: 'branch_id,item_id' }));
     },
 
     // ------------------------------------------------------------ accounts
@@ -407,6 +463,10 @@ export async function createSupabaseAdapter() {
 
     // ------------------------------------------------------------ doctor log
     async doctorLog({ clinicianId, from, to }) {
+      // A doctor sees only their own log unless allowed to see everyone's (same rule as demo mode).
+      const session = await this.getSession();
+      const mayViewAll = session?.staff?.role === 'admin' || session?.perms?.has('doctor_log.view_all');
+      if (!mayViewAll && clinicianId !== await this.myClinicianId()) throw new Error('You can only see your own daily log.');
       const rows = check(await sb.from('visit_staff').select('role, visit:visits!inner(' + VISIT_SELECT + ')')
         .eq('clinician_id', clinicianId).eq('visit.status', 'completed').gte('visit.visit_date', from).lte('visit.visit_date', to));
       const visits = await enrichVisits(rows.map((r) => r.visit));
@@ -482,22 +542,50 @@ export async function createSupabaseAdapter() {
       const day = date || todayISO();
       const [branches, visits, closings] = await Promise.all([
         this.branches(),
-        sb.from('visits').select('branch_id,status').eq('visit_date', day).then(check),
+        sb.from('visits').select('branch_id,status,patient_id').eq('visit_date', day).then(check),
         sb.from('cash_closings').select('*').eq('closing_date', day).then(check),
       ]);
-      let income = [];
+      let income = []; let complaints = []; let dues = {};
       try { income = check(await sb.from('branch_daily_income').select('*').eq('day', day)); } catch { income = []; }
+      try { complaints = check(await sb.from('complaints').select('branch_id').eq('status', 'new')); } catch { complaints = []; }
+      try { dues = await duesFor([...new Set(visits.map((v) => v.patient_id))]); } catch { dues = {}; }
       return branches.map((b) => {
         const vs = visits.filter((v) => v.branch_id === b.id);
+        const withDues = [...new Set(vs.map((v) => v.patient_id))].filter((pid) => (dues[pid] || 0) > 0);
         return { branch: b, patients: vs.length, completed: vs.filter((v) => v.status === 'completed').length,
           waiting: vs.filter((v) => v.status === 'waiting').length,
           received: Number(income.find((i) => i.branch_id === b.id)?.net || 0),
+          dues_patients: withDues.length, dues: withDues.reduce((s, pid) => s + dues[pid], 0),
+          new_complaints: complaints.filter((c) => c.branch_id === b.id).length,
           closing: closings.find((c) => c.branch_id === b.id) || null };
       });
     },
     async totalDues() {
       const rows = check(await sb.from('patient_balances').select('dues').gt('dues', 0));
       return rows.reduce((t, r) => t + Number(r.dues), 0);
+    },
+    async report(kind, from, to) { return check(await sb.rpc('clinic_report', { p_kind: kind, p_from: from, p_to: to })) || []; },
+
+    // ------------------------------------------------------------ clinic setup (admin)
+    async setupLists() {
+      const [branches, cities, clinicians, groups, treatments, categories, staff] = await Promise.all([
+        sb.from('branches').select('*').order('sort_order').order('id').then(check),
+        this.cities(),
+        sb.from('clinicians').select('*').order('is_doctor', { ascending: false }).order('display_name').then(check),
+        sb.from('doctor_groups').select('*').order('id').then(check),
+        sb.from('treatments').select('*').order('sort_order').order('name').then(check),
+        sb.from('expense_categories').select('*').order('sort_order').order('name').then(check),
+        sb.from('staff').select('id,full_name,role,active').order('full_name').then(check),
+      ]);
+      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.filter((s) => s.active) };
+    },
+    async saveSetupRow(table, row) {
+      const tables = ['branches', 'clinicians', 'doctor_groups', 'treatments', 'expense_categories'];
+      if (!tables.includes(table)) throw new Error('Unknown list ' + table);
+      const { id, ...data } = row;
+      if (table === 'doctor_groups' && !(await sb.from('doctor_groups').select('id').eq('id', id).then(check)).length) check(await sb.from(table).insert({ id, ...data }));
+      else if (id !== undefined && id !== null && id !== '') check(await sb.from(table).update(data).eq('id', id));
+      else check(await sb.from(table).insert(data));
     },
 
     // ------------------------------------------------------------ import from Healthwire (admin)

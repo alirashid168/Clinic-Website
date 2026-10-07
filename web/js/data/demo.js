@@ -218,7 +218,7 @@ export function createDemoAdapter() {
 
   const enrichVisit = (v) => {
     const p = patient(v.patient_id);
-    return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone },
+    return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, medical_history: clone(p.medical_history) || {} },
       staff: db.visit_staff.filter((s) => s.visit_id === v.id).map((s) => ({ ...s, name: clinician(s.clinician_id)?.display_name })),
       dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id) };
   };
@@ -346,8 +346,9 @@ export function createDemoAdapter() {
         payments: clone(db.payments.filter((x) => x.patient_id === id)),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
+        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id)),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
-        complaints: clone(db.complaints.filter((c) => c.patient_id === id)),
+        complaints: db.complaints.filter((c) => c.patient_id === id).map((c) => ({ ...clone(c), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id && (s?.kind === 'staff' || !m.internal_note))) })),
       };
     },
 
@@ -437,15 +438,16 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ photos
-    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId }) {
+    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false }) {
       need('photos.upload');
       const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
-      const ph = { id: uid(), patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, taken_on: todayISO(), kind: 'raw',
-        view_label: viewLabel || null, url: dataUrl, storage_path: `demo/${uid()}`, public_ok: false, created_at: new Date().toISOString() };
+      const ph = { id: uid(), patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, taken_on: todayISO(), kind,
+        view_label: viewLabel || null, url: dataUrl, storage_path: `demo/${uid()}`, public_ok: kind === 'edited' && !!publicOk, created_at: new Date().toISOString() };
       db.photos.push(ph);
       if (visitId) { const v = db.visits.find((x) => x.id === visitId); if (v) v.photos_uploaded = true; }
       return clone(ph);
     },
+    async publishPhoto(photo) { if (me()?.role !== 'admin') fail('Only Dr. Ali can publish photos'); const ph = db.photos.find((x) => x.id === photo.id); if (ph) ph.published = true; return ph?.url; },
     async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
       if (!can('patients.edit') && !can('photos.upload')) fail('row-level security policy (patients.edit)');
       const url = URL.createObjectURL(file);
@@ -477,6 +479,36 @@ export function createDemoAdapter() {
       const pay = { id: uid(), patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_at: new Date().toISOString(), received_by: me().full_name };
       db.payments.push(pay); audit('payments', 'INSERT', pay);
       return clone(pay);
+    },
+    async patientBilling(patientId) {
+      need('billing.view');
+      return { invoices: clone(db.invoices.filter((i) => i.patient_id === patientId)), payments: clone(db.payments.filter((x) => x.patient_id === patientId)) };
+    },
+    // ------------------------------------------------------------ installment plans
+    async paymentPlans(patientId) { return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId)); },
+    async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments }) {
+      need('billing.create');
+      db.payment_plans ||= [];
+      const plan = { id: uid(), patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_at: new Date().toISOString(),
+        installments: installments.map((i) => ({ id: uid(), due_date: i.due_date, amount: Number(i.amount), note: i.note || null })) };
+      db.payment_plans.push(plan);
+      return clone(plan);
+    },
+    async deletePaymentPlan(id) { need('billing.create'); db.payment_plans = (db.payment_plans || []).filter((p) => p.id !== id); },
+    async installmentsDue() {
+      if (!can('billing.view')) return [];
+      const today = todayISO(); const soon = daysAgo(-7);
+      const out = [];
+      for (const plan of db.payment_plans || []) {
+        const paid = db.payments.filter((x) => x.patient_id === plan.patient_id && x.received_at.slice(0, 10) >= plan.starts_on).reduce((s, x) => s + x.amount, 0);
+        let cum = 0;
+        for (const i of [...plan.installments].sort((a, b) => a.due_date.localeCompare(b.due_date))) {
+          cum += i.amount;
+          const status = paid >= cum ? 'paid' : i.due_date < today ? 'overdue' : i.due_date <= soon ? 'due_soon' : 'upcoming';
+          if (status === 'overdue' || status === 'due_soon') out.push({ ...clone(i), plan_id: plan.id, patient_id: plan.patient_id, status, paid, remaining: cum - paid, patient: clone(patient(plan.patient_id)) });
+        }
+      }
+      return out.sort((a, b) => a.due_date.localeCompare(b.due_date));
     },
     async voidInvoice(id, reason) {
       need('billing.edit');
@@ -571,7 +603,41 @@ export function createDemoAdapter() {
     },
     async lowRatings() {
       if (!can('reminders.manage')) return [];
-      return db.visit_ratings.filter((r) => r.stars <= db.settings.low_rating_threshold).map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) }));
+      return db.visit_ratings.filter((r) => r.stars <= db.settings.low_rating_threshold && !r.followed_up_at).map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) }));
+    },
+    async followUpRating(visitId) {
+      need('reminders.manage');
+      const r = db.visit_ratings.find((x) => x.visit_id === visitId);
+      if (r) { r.followed_up_by = me().id; r.followed_up_at = new Date().toISOString(); }
+    },
+
+    // ------------------------------------------------------------ stock
+    async inventory(branchId) {
+      db.inventory_items ||= [{ id: 1, name: '022 MBT brackets (upper)', category: 'brackets', unit: 'set', supplier: 'Feroze Dental', active: true }, { id: 2, name: '014 NiTi wire', category: 'wires', unit: 'pcs', supplier: null, active: true }, { id: 3, name: 'Elastic ligatures', category: 'elastics', unit: 'pack', supplier: null, active: true }];
+      db.inventory_stock ||= [{ branch_id: 1, item_id: 1, quantity: 12, reorder_level: 5 }, { branch_id: 1, item_id: 2, quantity: 3, reorder_level: 10 }];
+      db.inventory_moves ||= [];
+      return clone({ items: db.inventory_items, stock: db.inventory_stock.filter((s) => s.branch_id === Number(branchId)), moves: db.inventory_moves.filter((m) => m.branch_id === Number(branchId)).slice(-50).reverse() });
+    },
+    async saveInventoryItem(row) {
+      need('inventory.manage');
+      db.inventory_items ||= [];
+      if (row.id) Object.assign(db.inventory_items.find((x) => x.id === row.id), row);
+      else db.inventory_items.push({ active: true, ...row, id: Math.max(0, ...db.inventory_items.map((x) => x.id)) + 1 });
+    },
+    async moveStock({ branch_id, item_id, change, reason }) {
+      need('inventory.manage');
+      db.inventory_moves ||= []; db.inventory_stock ||= [];
+      db.inventory_moves.push({ id: uid(), branch_id: Number(branch_id), item_id: Number(item_id), change: Number(change), reason, created_at: new Date().toISOString() });
+      let s = db.inventory_stock.find((x) => x.branch_id === Number(branch_id) && x.item_id === Number(item_id));
+      if (!s) { s = { branch_id: Number(branch_id), item_id: Number(item_id), quantity: 0, reorder_level: 0 }; db.inventory_stock.push(s); }
+      s.quantity += Number(change);
+    },
+    async setReorderLevel({ branch_id, item_id, reorder_level }) {
+      need('inventory.manage');
+      db.inventory_stock ||= [];
+      let s = db.inventory_stock.find((x) => x.branch_id === Number(branch_id) && x.item_id === Number(item_id));
+      if (!s) { s = { branch_id: Number(branch_id), item_id: Number(item_id), quantity: 0, reorder_level: 0 }; db.inventory_stock.push(s); }
+      s.reorder_level = Number(reorder_level);
     },
 
     // ------------------------------------------------------------ accounts
@@ -696,11 +762,55 @@ export function createDemoAdapter() {
         const visits = db.visits.filter((v) => v.branch_id === b.id && v.visit_date === day);
         const received = db.payments.filter((p) => p.branch_id === b.id && p.received_at.slice(0, 10) === day).reduce((s, p) => s + p.amount, 0);
         const closing = db.cash_closings.find((c) => c.branch_id === b.id && c.closing_date === day) || null;
+        const withDues = [...new Set(visits.map((v) => v.patient_id))].filter((pid) => dues(pid) > 0);
         return { branch: clone(b), patients: visits.length, completed: visits.filter((v) => v.status === 'completed').length,
-          waiting: visits.filter((v) => v.status === 'waiting').length, received, closing: clone(closing) };
+          waiting: visits.filter((v) => v.status === 'waiting').length, received, closing: clone(closing),
+          dues_patients: withDues.length, dues: withDues.reduce((s, pid) => s + dues(pid), 0),
+          new_complaints: can('complaints.view') ? db.complaints.filter((c) => c.branch_id === b.id && c.status === 'new').length : 0 };
       });
     },
     async totalDues() { return db.patients.reduce((s, p) => s + Math.max(0, dues(p.id)), 0); },
+    // Reports (a few of the real ones, from the demo data).
+    async report(kind, from, to) {
+      need('finance.view');
+      const inRange = (d) => d >= from && d <= to;
+      const month = (d) => d.slice(0, 7);
+      const group = (rows, keyOf, add) => {
+        const out = {};
+        for (const r of rows) { const k = keyOf(r); out[k] ||= { ...JSON.parse(k), ...add.init() }; add.fold(out[k], r); }
+        return Object.values(out);
+      };
+      if (kind === 'pnl_trend') return group([
+        ...db.payments.filter((p) => inRange(p.received_at.slice(0, 10))).map((p) => ({ month: month(p.received_at), branch_id: p.branch_id, city_id: null, income: p.amount, expenses: 0 })),
+        ...db.expenses.filter((e) => inRange(e.expense_date)).map((e) => ({ month: month(e.expense_date), branch_id: e.branch_id || null, city_id: e.branch_id ? null : e.city_id, income: 0, expenses: e.amount })),
+      ], (r) => JSON.stringify({ month: r.month, branch_id: r.branch_id, city_id: r.city_id }), { init: () => ({ income: 0, expenses: 0 }), fold: (o, r) => { o.income += r.income; o.expenses += r.expenses; } });
+      if (kind === 'payment_methods') return group(db.payments.filter((p) => inRange(p.received_at.slice(0, 10))), (p) => JSON.stringify({ month: month(p.received_at), method: p.method }), { init: () => ({ amount: 0, count: 0 }), fold: (o, p) => { o.amount += p.amount; o.count++; } });
+      if (kind === 'visits') {
+        const first = {};
+        for (const v of db.visits) if (v.status === 'completed' && (!first[v.patient_id] || v.visit_date < first[v.patient_id])) first[v.patient_id] = v.visit_date;
+        return group(db.visits.filter((v) => inRange(v.visit_date)), (v) => JSON.stringify({ month: month(v.visit_date), branch_id: v.branch_id }), { init: () => ({ visits: 0, patients: 0, no_shows: 0, new_patients: 0, _p: {} }), fold: (o, v) => { if (v.status === 'completed') { o.visits++; if (!o._p[v.patient_id]) { o._p[v.patient_id] = 1; o.patients++; } if (first[v.patient_id] === v.visit_date) o.new_patients++; } if (v.status === 'no_show') o.no_shows++; } }).map(({ _p, ...r }) => r);
+      }
+      if (kind === 'referrals') return group(db.patients.filter((p) => inRange(p.created_at.slice(0, 10))), (p) => JSON.stringify({ source: p.referral_source || 'Not recorded', branch_id: p.first_branch_id }), { init: () => ({ patients: 0 }), fold: (o) => { o.patients++; } });
+      if (kind === 'dues_by_branch') return group(db.patients.filter((p) => dues(p.id) > 0), (p) => JSON.stringify({ branch_id: p.first_branch_id }), { init: () => ({ patients: 0, dues: 0 }), fold: (o, p) => { o.patients++; o.dues += dues(p.id); } });
+      if (kind === 'top_dues') return db.patients.filter((p) => dues(p.id) > 0).map((p) => ({ patient_id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, branch_id: p.first_branch_id, dues: dues(p.id), last_payment: null })).sort((a, b) => b.dues - a.dues).slice(0, 100);
+      if (kind === 'braces') return group(db.braces_cases.filter((b) => inRange(b.start_date)), (b) => JSON.stringify({ month: month(b.start_date), branch_id: b.bonding_branch_id || null }), { init: () => ({ bondings: 0, braces_off: 0, cases_started: 0 }), fold: (o) => { o.cases_started++; } });
+      return [];
+    },
+
+    // ------------------------------------------------------------ clinic setup (admin)
+    async setupLists() {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
+      db.doctor_groups ||= [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
+      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories, staff: db.staff.filter((s) => s.active) });
+    },
+    async saveSetupRow(table, row) {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
+      const list = { branches: db.branches, clinicians: db.clinicians, doctor_groups: db.doctor_groups, treatments: db.treatments, expense_categories: db.expense_categories }[table];
+      if (!list) fail('Unknown list ' + table);
+      const found = row.id !== undefined && row.id !== null && row.id !== '' ? list.find((x) => String(x.id) === String(row.id)) : null;
+      if (found) Object.assign(found, row);
+      else list.push({ active: true, ...row, id: row.id ?? (table === 'clinicians' ? uid() : Math.max(0, ...list.map((x) => Number(x.id) || 0)) + 1) });
+    },
 
     // ------------------------------------------------------------ import from Healthwire (admin)
     async importHealthwire(kind, rows) {
