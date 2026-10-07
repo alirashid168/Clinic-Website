@@ -815,6 +815,30 @@ export function createDemoAdapter() {
       else list.push({ active: true, ...row, id: row.id ?? (table === 'clinicians' || table === 'doctor_commission_rules' ? uid() : Math.max(0, ...list.map((x) => Number(x.id) || 0)) + 1) });
     },
 
+    // ------------------------------------------------------------ duplicates (admin)
+    async patientDuplicates() {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can review duplicates');
+      const groups = {};
+      for (const p of db.patients) if (p.phone) (groups[p.phone] ||= []).push(p);
+      return Object.entries(groups).filter(([, l]) => l.length > 1).map(([phone, l]) => ({ phone, members: l.length,
+        patients: l.map((p) => ({ id: p.id, mr_number: p.mr_number, full_name: p.full_name, created_at: p.created_at, first_branch_id: p.first_branch_id,
+          visits: db.visits.filter((v) => v.patient_id === p.id).length, invoices: db.invoices.filter((i) => i.patient_id === p.id).length, dues: dues(p.id),
+          last_visit: db.visits.filter((v) => v.patient_id === p.id).map((v) => v.visit_date).sort().pop() || null })) }));
+    },
+    async mergePatients(keepId, removeId) {
+      if (me()?.role !== 'admin') fail('Only Dr. Ali can merge patients');
+      const keep = patient(keepId); const rem = patient(removeId);
+      if (!keep || !rem || keepId === removeId) fail('Choose two different patients');
+      let visits = 0, invoices = 0, payments = 0;
+      for (const list of [db.visits, db.invoices, db.payments, db.braces_cases, db.retainer_cases, db.photos, db.reminders, db.complaints, db.patient_flags, db.visit_ratings, db.documents, db.payment_plans || []]) {
+        for (const row of list) if (row.patient_id === removeId) { row.patient_id = keepId; if (list === db.visits) visits++; if (list === db.invoices) invoices++; if (list === db.payments) payments++; }
+      }
+      for (const k of ['email', 'gender', 'date_of_birth', 'address', 'first_branch_id']) if (!keep[k] && rem[k]) keep[k] = rem[k];
+      keep.notes = [keep.notes, `Merged with Mr# ${rem.mr_number} (${rem.full_name})`].filter(Boolean).join(' · ');
+      db.patients = db.patients.filter((p) => p.id !== removeId);
+      return { kept: keepId, removed_mr: rem.mr_number, visits, invoices, payments };
+    },
+
     // ------------------------------------------------------------ import from Healthwire (admin)
     async importHealthwire(kind, rows) {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can import Healthwire data');

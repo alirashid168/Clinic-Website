@@ -590,6 +590,10 @@ export async function createSupabaseAdapter() {
       else check(await sb.from(table).insert(data));
     },
 
+    // ------------------------------------------------------------ duplicates (admin)
+    async patientDuplicates() { return check(await sb.rpc('patient_duplicates')) || []; },
+    async mergePatients(keepId, removeId) { return check(await sb.rpc('merge_patients', { p_keep: keepId, p_remove: removeId })); },
+
     // ------------------------------------------------------------ import from Healthwire (admin)
     async importHealthwire(kind, rows) { return check(await sb.rpc('import_healthwire', { p_kind: kind, p_rows: rows })); },
     async patientsByMr(mrs) {
