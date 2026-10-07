@@ -249,6 +249,131 @@ await step('Dr. Ali imports a Healthwire transactions export on the Import page'
   await shot(p7, '12-import-healthwire');
 });
 
+await step('Dr. Ali adds a treatment on the Clinic setup page and it reaches the sheet dropdown', async () => {
+  await p7.goto(BASE + '#/staff/admin?tab=setup');
+  await p7.waitForSelector('h2:text("Treatments")');
+  assert.ok((await p7.locator('h2:text("Branches")').count()) && (await p7.locator('h2:text("Doctors and assistants")').count()));
+  await p7.locator('section', { hasText: 'Treatments' }).getByRole('button', { name: 'New treatment' }).click();
+  const m = p7.locator('.modal');
+  await m.locator('label:has-text("Name") input').fill('Night guard');
+  await m.locator('label:has-text("Default price") input').fill('15000');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.toast:has-text("Saved")');
+  await p7.waitForSelector('td:text("Night guard")');
+  await p7.goto(BASE + '#/staff/sheet');
+  await p7.waitForSelector('#sheet-treatments', { state: 'attached' });
+  assert.ok(await p7.locator('#sheet-treatments option[value="Night guard"]').count());
+  await shot(p7, '13-clinic-setup');
+});
+
+await step('Dr. Ali sees the reports page with trends, dues and doctors', async () => {
+  await p7.goto(BASE + '#/staff/accounts?tab=reports');
+  await p7.waitForSelector('h2:text("Income and expenses by month")');
+  const text = await p7.locator('main').innerText();
+  assert.match(text, /Received in this period/);
+  assert.match(text, /Pending dues by branch/);
+  assert.match(text, /Visits by month/);
+  await p7.locator('select').last().selectOption({ index: 1 });
+  await p7.waitForSelector('h2:text("Income and expenses by month")');
+  await shot(p7, '14-reports');
+});
+
+await step('installment plan: set up on the patient page, overdue shows for the coordinator', async () => {
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.click('table.list tbody tr:has(.badge:has-text("Braces")) a');
+  await p7.waitForSelector('h3:text("Installment plan")');
+  await p7.getByRole('button', { name: /Set up a plan|New plan/ }).click();
+  const m = p7.locator('.modal');
+  await m.locator('label:has-text("Total to pay") input').fill('60000');
+  await m.locator('label:has-text("Number of installments") input').fill('3');
+  const past = new Date(); past.setMonth(past.getMonth() - 2);
+  await m.locator('label:has-text("First installment due") input').fill(past.toISOString().slice(0, 10));
+  await m.locator('label:has-text("First installment due") input').dispatchEvent('change');
+  await m.locator('label:has-text("Count payments from") input').fill(past.toISOString().slice(0, 10));
+  await m.getByRole('button', { name: 'Save plan' }).click();
+  await p7.waitForSelector('.toast:has-text("Installment plan saved")');
+  await p7.waitForSelector('.badge:has-text("Overdue")');
+  // Take a payment against the oldest unpaid invoice: the form offers the invoice list.
+  await p7.getByRole('button', { name: 'Take payment' }).click();
+  await p7.waitForSelector('.modal label:has-text("For invoice") select');
+  await p7.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
+  await p7.goto(BASE + '#/staff/coordinator?tab=reminders');
+  await p7.waitForSelector('h2:text("Installments due")');
+  assert.ok(await p7.locator('.badge:has-text("Overdue")').count());
+  await shot(p7, '15-installments-due');
+});
+
+await step('braces off → retainer case with a next check date', async () => {
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.click('table.list tbody tr:has(.badge:has-text("Braces")) a');
+  await p7.waitForSelector('h2:has-text("Braces")');
+  await p7.getByRole('button', { name: 'Edit case' }).click();
+  await p7.locator('.modal label:has-text("Case status") select').selectOption('debonded');
+  await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.modal:has-text("start the retainer case")');
+  await p7.locator('.modal').getByRole('button', { name: 'Start retainer case' }).click();
+  await p7.waitForSelector('.toast:has-text("Retainer case started")');
+  await p7.waitForSelector('h2:text("Retainers")');
+  await p7.goto(BASE + '#/staff/coordinator?tab=retainers');
+  await p7.waitForSelector('th:text("Next check")');
+  assert.ok(await p7.locator('input[aria-label="Next check"]').count());
+});
+
+await step('medical history is saved and shown on the patient page', async () => {
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.click('table.list tbody tr:first-child a');
+  await p7.waitForSelector('h2:has-text("Money")');
+  await p7.getByRole('button', { name: 'Edit', exact: true }).click();
+  await p7.locator('.modal label:has-text("Diabetes") input').check();
+  await p7.locator('.modal label:has-text("Allergies") input').fill('penicillin');
+  await p7.locator('.modal label:has-text("Treatment consent form signed") input').check();
+  await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.toast:has-text("Saved")');
+  await p7.waitForSelector('p:has-text("Medical:")');
+  assert.match(await p7.locator('p:has-text("Medical:")').innerText(), /Diabetes.*penicillin/);
+  assert.ok(await p7.locator('.badge:has-text("Consent signed")').count());
+});
+
+await step('Aaj ki List: all branches view and the day download button', async () => {
+  await p7.goto(BASE + '#/staff/sheet?branch=all');
+  await p7.waitForSelector('table.sheet');
+  await p7.waitForSelector('th:text("Branch"):not([hidden])');
+  assert.ok((await p7.locator('table.sheet tbody tr').count()) >= 1);
+  assert.ok(await p7.getByRole('button', { name: 'Download' }).count());
+  assert.equal(await p7.locator('.add-panel:not([hidden])').count(), 0);
+  await p7.locator('select[aria-label="Branch"]').selectOption({ index: 1 });
+  await p7.waitForSelector('.add-panel:not([hidden])');
+});
+
+await step('stock: receive and use items, low-stock warning', async () => {
+  await p7.goto(BASE + '#/staff/stock');
+  await p7.waitForSelector('h2:has-text("Stock ·")');
+  assert.ok(await p7.locator('.alert-warning:has-text("reorder level")').count(), 'demo seed has a low item');
+  await p7.locator('tr', { hasText: '014 NiTi wire' }).getByRole('button', { name: '+ Received' }).click();
+  await p7.locator('.modal label:has-text("Quantity") input').fill('20');
+  await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.toast:has-text("Stock updated")');
+  await p7.waitForSelector('tr:has-text("014 NiTi wire") td:has-text("23 pcs")');
+  assert.ok(await p7.locator('h2:has-text("Recent moves")').count());
+  await shot(p7, '16-stock');
+});
+
+await step('edited photo upload is marked for the patient and the website', async () => {
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.click('table.list tbody tr:first-child a');
+  await p7.waitForSelector('h2:has-text("Photos and X-rays")');
+  await p7.getByRole('button', { name: 'Upload photos' }).click();
+  await p7.setInputFiles('.modal input[type=file]', { name: 'after.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64') });
+  await p7.locator('.modal label:has-text("Edited before/after") input').check();
+  await p7.locator('.modal').getByRole('button', { name: 'Upload' }).click();
+  await p7.waitForSelector('.toast:has-text("uploaded")');
+  await p7.waitForSelector('figcaption:has-text("edited (patient sees it)")');
+});
+
 const p6 = await newPage({ width: 390, height: 844 });
 await step('sheet works on a phone', async () => {
   await loginAs(p6, 'Front desk \\(Gulshan\\)').catch(async () => {
