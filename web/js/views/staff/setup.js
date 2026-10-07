@@ -72,7 +72,7 @@ export async function renderSetup(root) {
         { key: 'city_id', label: 'City', type: 'select', required: true, options: () => lists.cities.map((c) => ({ value: c.id, label: c.name })), show: (r) => cityName(r.city_id) },
         { key: 'address', label: 'Address', hideInTable: true },
         { key: 'phone', label: 'Phone', hideInTable: true },
-        { key: 'opened_on', label: 'Opened on', type: 'date', help: 'Expenses dated before this day are never put under this branch.' },
+        { key: 'opened_on', label: 'Opened on', type: 'date', help: 'Used in reports. Expenses before this day count as the branch\'s setup costs; patients and payments before it are flagged for checking.' },
         { key: 'sort_order', label: 'Order', type: 'number', default: 10, hideInTable: true },
         { key: 'active', label: 'Open (shown on the website)', type: 'check', show: (r) => (r.active ? 'Open' : 'Switched off') },
       ],
