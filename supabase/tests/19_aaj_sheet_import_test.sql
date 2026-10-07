@@ -91,5 +91,15 @@ set role authenticated;
 create temp table res2 as select public.import_aaj_sheet(pg_temp.sheet_rows(), true) r;
 select pg_temp.check((select (r->>'visits_inserted')::int + (r->>'visits_updated')::int + (r->>'patients_created')::int + (r->>'cases_created')::int + (r->>'staff_added')::int from res2) = 0,
   'a second run adds nothing');
+
+-- A patient whose old rows arrive in one batch and recent rows in the next: the case made from the old batch is reopened.
+create temp table res3 as select public.import_aaj_sheet(jsonb_build_array(
+  jsonb_build_array('2024-01-10', 2, '77002', 'Hina Baig', null, null, 1, 'Bonding', 2, 'completed', null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'Bonding', null, 'North Nazimabad', true, 4),
+  jsonb_build_array('2024-02-12', 2, '77002', 'Hina Baig', null, null, 2, 'Monthly', 2, 'completed', null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'U L 012', null, 'North Nazimabad', false, 1)), false) r;
+select pg_temp.check((select status = 'discontinued' from public.braces_cases where patient_id = :p2), 'old rows alone make a discontinued case (no entry for 75+ days)');
+create temp table res4 as select public.import_aaj_sheet(jsonb_build_array(
+  jsonb_build_array(((now() at time zone 'Asia/Karachi')::date - 20)::text, 2, '77002', 'Hina Baig', null, null, 3, 'Monthly', 2, 'completed', null, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'U L 014', null, 'North Nazimabad', false, 1)), false) r;
+select pg_temp.check((select status = 'active' and notes like '%Entries continue to%' from public.braces_cases where patient_id = :p2), 'a later batch with recent rows reopens the case');
+select pg_temp.check((select count(*) from public.visits where patient_id = :p2 and braces_month is not null) = 3 and (select (r->>'cases_created')::int from res4) = 0, 'the recent row joined the same case; no second case');
 reset role; select set_config('request.jwt.claim.sub', '', false);
 rollback;
