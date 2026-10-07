@@ -148,8 +148,10 @@ await step('accountant: P&L, expense entry and cash verification', async () => {
   await p3.getByRole('tab', { name: 'Expenses', exact: true }).click();
   await p3.locator('label:has-text("Category") select').selectOption({ label: 'Rent' });
   await p3.fill('label:has-text("Amount") input', '120000');
+  await p3.locator('input[aria-label="Receipt photo"]').setInputFiles({ name: 'rent-receipt.png', mimeType: 'image/png', buffer: Buffer.from('89504e470d0a1a0a', 'hex') });
   await p3.click('button:has-text("Save expense")');
   await p3.waitForSelector('.toast:has-text("Expense")');
+  await p3.waitForSelector('table.list tbody tr:has-text("Rent") button:has-text("View")');
   await p3.click('.tab:has-text("Branch income")');
   await p3.waitForSelector('table.list');
   await shot(p3, '05-accounts');
@@ -210,7 +212,7 @@ await step('patient portal on a phone: complaint goes to Dr. Ali', async () => {
 await step('sample patient account opens without a login and shows photos, dues and a reply', async () => {
   await p5.goto(BASE + '#/');
   await p5.click('a:has-text("See a sample patient account")');
-  await p5.waitForSelector('.demo-banner');
+  await p5.waitForSelector('.sample-banner');
   await p5.waitForSelector('h1:has-text("Hello")');
   assert.equal(await p5.locator('.photo-grid img').count(), 2, 'two sample photos');
   assert.ok(await p5.locator('.alert-info:has-text("Your next appointment")').count(), 'next appointment');
@@ -237,7 +239,15 @@ await step('Dr. Ali creates a staff login with a password, then changes its emai
   await lm.getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('td:text("dha.reception@dralirashid.com")');
   assert.equal(await p7.locator('td:text("test.reception@dralirashid.com")').count(), 0);
+  assert.ok(await p7.locator('th:text("Last login")').count(), 'last login column');
+  assert.ok(await p7.locator('tr:has-text("Dr. Ali Rashid") td:has-text("Never")').count() === 0, "Dr. Ali's own login is recorded");
   await shot(p7, '11-staff-accounts');
+});
+await step('Admin → Audit log lists sign-ins', async () => {
+  await p7.goto(BASE + '#/staff/admin?tab=audit');
+  await p7.waitForSelector('h2:text("Logins")');
+  await p7.waitForSelector('table.list tr:has-text("Dr. Ali Rashid")');
+  assert.ok(await p7.locator('h2:text("Recent changes")').count());
 });
 
 await step('Dr. Ali imports a Healthwire transactions export on the Import page', async () => {
@@ -393,11 +403,14 @@ await step('stock: receive and use items, low-stock warning', async () => {
   await p7.goto(BASE + '#/staff/stock');
   await p7.waitForSelector('h2:has-text("Stock ·")');
   assert.ok(await p7.locator('.alert-warning:has-text("reorder level")').count(), 'demo seed has a low item');
-  await p7.locator('tr', { hasText: '014 NiTi wire' }).getByRole('button', { name: '+ Received' }).click();
+  assert.ok(await p7.locator('.reorder-list h2:has-text("Reorder list")').count(), 'reorder list for the supplier');
+  assert.ok(await p7.locator('.reorder-list button:has-text("Download for the supplier")').count());
+  await p7.locator('.reorder-list ~ section tr', { hasText: '014 NiTi wire' }).getByRole('button', { name: '+ Received' }).click();
   await p7.locator('.modal label:has-text("Quantity") input').fill('20');
   await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('.toast:has-text("Stock updated")');
   await p7.waitForSelector('tr:has-text("014 NiTi wire") td:has-text("23 pcs")');
+  assert.equal(await p7.locator('.reorder-list tr:has-text("014 NiTi wire")').count(), 0, 'restocked item leaves the reorder list');
   assert.ok(await p7.locator('h2:has-text("Recent moves")').count());
   await shot(p7, '16-stock');
 });
