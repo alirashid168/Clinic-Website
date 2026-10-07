@@ -411,6 +411,26 @@ await step('"View as patient" shows the record the way the patient sees it', asy
   await p7.waitForSelector('h2:has-text("Money")');
 });
 
+await step('sheet filters (doctor, dues, find) and quick-tap treatment details', async () => {
+  await p7.goto(BASE + '#/staff/sheet?branch=1');
+  await p7.waitForSelector('table.sheet tbody tr');
+  const total = await p7.locator('table.sheet tbody tr').count();
+  await p7.locator('label:has-text("With dues") input').check();
+  const withDues = await p7.locator('table.sheet tbody tr').count();
+  assert.ok(withDues <= total);
+  await p7.locator('label:has-text("With dues") input').uncheck();
+  await p7.locator('input[aria-label="Find on this list"]').fill('zzzz-no-such-name');
+  assert.ok(await p7.locator('table.sheet tbody td:has-text("No patients")').count());
+  await p7.locator('input[aria-label="Find on this list"]').fill('');
+  await p7.waitForSelector('table.sheet tbody tr .quick-tap');
+  await p7.locator('table.sheet tbody tr .quick-tap').first().click();
+  await p7.locator('.modal button:has-text("018")').click();
+  await p7.locator('.modal button:has-text("PC")').first().click();
+  await p7.locator('.modal').getByRole('button', { name: 'Done' }).click();
+  const v = await p7.locator('table.sheet tbody tr').first().locator('input[aria-label="Treatment details"]').inputValue();
+  assert.match(v, /018 PC$/);
+});
+
 const p6 = await newPage({ width: 390, height: 844 });
 await step('sheet works on a phone', async () => {
   await loginAs(p6, 'Front desk \\(Gulshan\\)').catch(async () => {
