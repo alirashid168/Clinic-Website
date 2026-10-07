@@ -4,7 +4,7 @@ One browser-based system for all branches (Gulshan / RJ Mall, North Nazimabad, D
 
 - **Public website:** home page with a turning 3D smile, three doors (Patient, Visitor, Employee) and Dr. Ali's weekly calendar per branch; visitor page with benefits, braces options, consented results and a WhatsApp consultation button.
 - **Patient portal:** invoices and dues, visit history, photos and X-rays, "see Dr. Ali" message, visit ratings, "Report / complain to Dr. Ali Rashid" button.
-- **Staff system:** Aaj ki List sheet view (per branch or all branches) with auto-save, an offline buffer and a day download, live queue, patients and profiles with automatic Mr#, medical history and consent, braces month-by-month protocol (doctor groups, checker, wires, photo months, extraction and dues rules), braces-off → retainer flow with check dates, invoices with templates, payments matched to invoices, installment plans with an overdue list, $$ dues flag and treatment hold, discount caps with approval, accountant (branch income vs expenses, expenses by city/branch/category, cash closing, reports: monthly trends, dues per branch, visits and new patients, braces, referral sources, photo months, lab costs, doctors, treatments), coordinator (reminders, installments due, drop-offs, lab work, retainers, low ratings), stock per branch, complaints inbox, Dr. Ali review list, doctor daily log, checkbox access list, staff accounts, settings, clinic setup (branches, doctors, groups, treatments, categories), Healthwire import, data export, audit log.
+- **Staff system:** Aaj ki List sheet view (per branch or all branches) with auto-save, an offline buffer and a day download, live queue, patients and profiles with automatic Mr#, medical history and consent, braces month-by-month protocol (doctor groups, checker, wires, photo months, extraction and dues rules), braces-off → retainer flow with check dates, invoices with templates, payments matched to invoices, installment plans with an overdue list, $$ dues flag and treatment hold, discount caps with approval, accountant (branch income vs expenses, expenses by city/branch/category, cash closing, reports: monthly trends, dues per branch, visits and new patients, braces, referral sources, photo months, lab costs, doctors, treatments), coordinator (reminders, installments due, drop-offs, lab work, retainers, low ratings), stock per branch, complaints inbox, Dr. Ali review list (flags, treatment plans needed, overruns), doctor daily log, payment receipts, WhatsApp links next to phone numbers, "View as patient" preview of the portal, checkbox access list, staff accounts, settings, clinic setup (branches, doctors, groups, doctor percentage rules, treatments, categories), duplicate-patient review and merge, Healthwire import, data export, audit log.
 
 The full plan is in `docs/Clinic_Website_Master_Blueprint.pdf`, with open questions and go-live steps alongside it in `docs/`.
 
@@ -26,7 +26,7 @@ Until `web/js/config.js` has the Supabase URL and key, the site runs in **demo m
 npm run serve            # opens the site at http://localhost:8765 (demo mode)
 npm test                 # logic and importer tests
 npm run test:db          # applies every migration to a local Postgres and runs 80+ rule checks
-npm run test:ui          # clicks through the site as each role in a headless browser (28 checks)
+npm run test:ui          # clicks through the site as each role in a headless browser (32 checks)
 ```
 
 `test:db` needs a local Postgres 16 (`PGHOST`/`PGPORT` pointing at it). `test:ui` needs Playwright.
