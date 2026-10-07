@@ -51,6 +51,8 @@ export function newPatientModal(prefillName = '', branchId) {
     const dob = h('input', { type: 'date' });
     const branch = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
     const source = select(['', 'Walk-in', 'Instagram', 'Facebook', 'Google', 'Referral (patient)', 'Referral (doctor)', 'TikTok', 'Other'].map((v) => ({ value: v, label: v || 'Choose…' })), '');
+    // A doctor's own patient (they brought them in): their 40% share counts on this patient's bills.
+    const ownDoctor = select([{ value: '', label: "Clinic's patient (Dr. Ali)" }, ...state.ref.clinicians.filter((c) => c.is_doctor && c.display_name !== 'Dr. Ali Rashid').map((c) => ({ value: c.id, label: c.display_name }))], '');
     const consent = h('input', { type: 'checkbox' });
     const warn = h('div', {});
     const checkDupes = async () => {
@@ -67,7 +69,7 @@ export function newPatientModal(prefillName = '', branchId) {
       h('div', { class: 'form-grid' },
         field('Full name', name), field('Phone number', phone), field('Email', email),
         field('Branch', branch), field('Gender', gender), field('Date of birth', dob),
-        field('How did they hear about us?', source)),
+        field('How did they hear about us?', source), field('Brought in by doctor', ownDoctor, "Only when a doctor brings their own patient. Their percentage is counted on this patient's bills.")),
       h('label', { class: 'inline' }, consent, 'Patient agrees their before/after photos can be shown on the website')), [
       { label: 'Cancel', onClick: () => resolve(null) },
       { label: 'Create patient', primary: true, onClick: async () => {
@@ -75,7 +77,7 @@ export function newPatientModal(prefillName = '', branchId) {
         if (phone.value.replace(/\D/g, '').length < 10) { toast('Write a full phone number.'); return false; }
         try {
           const p = await state.data.createPatient({ full_name: name.value, phone: phone.value, email: email.value || null, gender: gender.value || null,
-            date_of_birth: dob.value || null, first_branch_id: Number(branch.value), referral_source: source.value || null,
+            date_of_birth: dob.value || null, first_branch_id: Number(branch.value), referral_source: source.value || null, referred_by_clinician: ownDoctor.value || null,
             photo_consent_public: consent.checked, photo_consent_at: consent.checked ? new Date().toISOString() : null });
           toast(`${p.full_name} registered as Mr# ${p.mr_number}.`, 'ok');
           resolve(p);

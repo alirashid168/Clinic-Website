@@ -224,10 +224,14 @@ async function reports(root) {
     let rules = [];
     await Promise.all([...kinds.map(async (k) => { try { got[k] = await d.report(k, from.value, to.value); } catch (e) { got[k] = []; toast(`${k}: ${friendlyError(e)}`, 'error'); } }),
       (async () => { try { rules = await d.commissionRules(); } catch { rules = []; } })()]);
-    // Doctor share: their own rule first, otherwise the rule for every doctor (basis treated or both).
+    // Doctor share: their own rule first, otherwise the rule for every doctor. "referred" = on the doctor's
+    // own patients (brought in by them); "treated" = on invoices from visits they treated; "both" = the two added.
     const doctors = got.doctors.map((r) => {
-      const rule = rules.find((x) => x.clinician_id === r.clinician_id && x.basis !== 'referred') || rules.find((x) => !x.clinician_id && x.basis !== 'referred');
-      return { ...r, share: rule ? Number(r.billed) * Number(rule.percent) / 100 : null, rule: rule ? `${Number(rule.percent)}%` : '' };
+      const rule = rules.find((x) => x.clinician_id === r.clinician_id) || rules.find((x) => !x.clinician_id);
+      if (!rule) return { ...r, share: null, rule: '' };
+      const base = (rule.basis === 'treated' ? Number(r.billed) : 0) + (rule.basis === 'referred' ? Number(r.referred_paid || 0) : 0)
+        + (rule.basis === 'both' ? Number(r.billed) + Number(r.referred_paid || 0) : 0);
+      return { ...r, share: base * Number(rule.percent) / 100, rule: `${Number(rule.percent)}% of ${rule.basis === 'referred' ? 'own patients' : rule.basis === 'treated' ? 'treated' : 'both'}` };
     });
     const b = branch.value;
     const byBranch = (rows) => (b ? rows.filter((r) => String(r.branch_id) === b) : rows);
@@ -260,7 +264,7 @@ async function reports(root) {
       section('Where new patients heard about us', 'From the "How did they hear about us?" box when a patient is registered.', byBranch(got.referrals), [['Source', 'source', 'text'], ['Branch', 'branch_id', 'branch'], ['Patients', 'patients', 'num']], 'referrals'),
       section('Photo months', 'Braces photo months and how many had photos uploaded.', photos, [['Month', 'month', 'month'], ['Photo months', 'photo_months', 'num'], ['Photos uploaded', 'uploaded', 'num'], ['Missing', 'missing', 'num'], ['Done', 'pct', 'text']], 'photo_months'),
       section('Lab and retainer costs', 'From Coordinator → Lab work and Retainers. Add these as expenses if they are not already paid through Accounts.', lab, [['Month', 'month', 'month'], ['Cases', 'cases', 'num'], ['Cost', 'cost', 'money']], 'lab_costs'),
-      section('Doctors', 'Completed visits in the period. "Billed" counts invoices made from a visit on Aaj ki List (imported history has none); "Share" applies the percentage rules from Admin → Clinic setup to that amount.', doctors, [['Doctor', 'name', 'text'], ['Treated', 'treated', 'num'], ['Checked', 'checked', 'num'], ['Assisted', 'assisted', 'num'], ['Days', 'days', 'num'], ['Billed', 'billed', 'money'], ['Rule', 'rule', 'text'], ['Share (est.)', 'share', 'money']], 'doctors'),
+      section('Doctors', 'Completed visits in the period. "Own patients" are patients marked "brought in by" that doctor: what they paid in the period is the base for the 60/40 rule (Admin → Clinic setup). "Billed" counts invoices made from a visit on Aaj ki List.', doctors, [['Doctor', 'name', 'text'], ['Treated', 'treated', 'num'], ['Checked', 'checked', 'num'], ['Days', 'days', 'num'], ['Own patients', 'referred_patients', 'num'], ['Own patients paid', 'referred_paid', 'money'], ['Billed (treated)', 'billed', 'money'], ['Rule', 'rule', 'text'], ['Doctor share', 'share', 'money']], 'doctors'),
       section('Treatments invoiced', 'Invoice lines in the period, biggest first.', got.treatments, [['Treatment', 'treatment', 'text'], ['Times', 'count', 'num'], ['Amount', 'amount', 'money']], 'treatments'));
   }
   [from, to, branch].forEach((el) => el.addEventListener('change', load));

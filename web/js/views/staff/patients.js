@@ -1,6 +1,6 @@
 // Patients: search list and full patient profile.
 import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty } from '../../ui/dom.js';
-import { state, can, branchName, isAdmin } from '../../state.js';
+import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress } from './invoice.js';
 
@@ -114,7 +114,9 @@ export async function renderPatient(root, id) {
     const medications = h('input', { value: mh.medications || '', placeholder: 'Regular medicines' });
     const mhNotes = h('input', { value: mh.notes || '', placeholder: 'Anything else the doctor should know' });
     const treatConsent = h('input', { type: 'checkbox', checked: !!p.treatment_consent_at });
+    const ownDoctor = select([{ value: '', label: "Clinic's patient (Dr. Ali)" }, ...state.ref.clinicians.filter((c) => c.is_doctor && c.display_name !== 'Dr. Ali Rashid').map((c) => ({ value: c.id, label: c.display_name }))], p.referred_by_clinician || '');
     modal('Edit patient', h('div', {}, mr ? field('Mr# (admin only)', mr) : null, field('Name', name), field('Phone', phone), field('Email', email),
+      field('Brought in by doctor', ownDoctor, "A doctor's own patient: their percentage (Admin → Clinic setup) is counted on this patient's bills."),
       h('label', { class: 'inline', style: { marginBottom: '12px' } }, consent, 'Before/after photos may be shown publicly'),
       h('h3', {}, 'Medical history'),
       h('div', { class: 'inline', style: { marginBottom: '8px' } }, condBoxes.map(({ c, box }) => h('label', { class: 'inline' }, box, c))),
@@ -123,7 +125,7 @@ export async function renderPatient(root, id) {
       field('Notes', notes)), [
       { label: 'Cancel' },
       { label: 'Save', primary: true, onClick: async () => {
-        const changes = { full_name: name.value.trim(), phone: phone.value.trim() || null, email: email.value.trim() || null, photo_consent_public: consent.checked, notes: notes.value || null,
+        const changes = { full_name: name.value.trim(), phone: phone.value.trim() || null, email: email.value.trim() || null, photo_consent_public: consent.checked, notes: notes.value || null, referred_by_clinician: ownDoctor.value || null,
           medical_history: { conditions: condBoxes.filter((x) => x.box.checked).map((x) => x.c), allergies: allergies.value.trim() || null, medications: medications.value.trim() || null, notes: mhNotes.value.trim() || null, updated_at: new Date().toISOString().slice(0, 10) } };
         if (consent.checked && !p.photo_consent_public) changes.photo_consent_at = new Date().toISOString();
         if (treatConsent.checked && !p.treatment_consent_at) changes.treatment_consent_at = new Date().toISOString();
@@ -141,7 +143,8 @@ export async function renderPatient(root, id) {
     h('div', { class: 'profile-head page-head' },
       h('div', {},
         h('h1', {}, p.full_name),
-        h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), p.phone ? ` · ${p.phone}` : ' · No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : ''),
+        h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), p.phone ? ` · ${p.phone}` : ' · No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : '',
+          p.referred_by_clinician ? ` · brought in by ${clinicianName(p.referred_by_clinician) || 'a doctor'}` : ''),
         h('div', { class: 'inline', style: { marginTop: '6px' } }, duesBadge(p.dues), aliBadge(!!p.flag),
           p.photo_consent_public ? h('span', { class: 'badge badge-ok' }, 'Photo consent') : h('span', { class: 'badge badge-muted' }, 'No public photo consent'),
           p.treatment_consent_at ? h('span', { class: 'badge badge-ok' }, 'Consent signed') : h('span', { class: 'badge badge-muted' }, 'No treatment consent on file'),
