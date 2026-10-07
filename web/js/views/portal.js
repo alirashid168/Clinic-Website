@@ -8,7 +8,21 @@ export async function renderPortal(root, signOut) {
   const d = state.data;
   const me = state.session.patient;
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
-  return portalPage(root, { p, ratings, signOut, preview: false });
+  return portalPage(root, { d, p, ratings, signOut, preview: false, reload: () => renderPortal(root, signOut) });
+}
+
+/** Public demo: a made-up sample patient, so anyone can see what the portal looks like before logging in. */
+let demoAdapter;
+export async function renderPortalDemo(root) {
+  if (!demoAdapter) {
+    const { createDemoAdapter } = await import('../data/demo.js');
+    demoAdapter = createDemoAdapter();
+    await demoAdapter.signInDemo('p-demo');
+  }
+  const d = demoAdapter;
+  const me = (await d.getSession()).patient;
+  const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
+  return portalPage(root, { d, p, ratings, signOut: null, preview: 'demo', reload: () => renderPortalDemo(root) });
 }
 
 /** Staff preview: exactly what this patient sees in their account (buttons switched off). */
@@ -19,14 +33,13 @@ export async function renderPortalPreview(root, patientId) {
   p.photos = (p.photos || []).filter((ph) => ph.kind === 'edited');
   p.complaints = (p.complaints || []).map((c) => ({ ...c, messages: (c.messages || []).filter((m) => !m.internal_note) }));
   p.invoices = (p.invoices || []).filter((i) => i.status === 'issued');
-  return portalPage(root, { p, ratings: [], signOut: null, preview: true });
+  return portalPage(root, { d, p, ratings: [], signOut: null, preview: true, reload: () => renderPortalPreview(root, patientId) });
 }
 
-function portalPage(root, { p, ratings, signOut, preview }) {
-  const d = state.data;
+function portalPage(root, { d, p, ratings, signOut, preview, reload }) {
   const rated = new Set(ratings.map((r) => r.visit_id));
   const completed = p.visits.filter((v) => v.status === 'completed');
-  const off = preview ? { disabled: true, title: 'Switched off in the preview' } : {};
+  const off = preview === true ? { disabled: true, title: 'Switched off in the preview' } : {};
 
   const rate = (visit) => {
     let stars = 0;
@@ -40,7 +53,7 @@ function portalPage(root, { p, ratings, signOut, preview }) {
       { label: 'Cancel' },
       { label: 'Send rating', primary: true, onClick: async () => {
         if (!stars) { toast('Tap a star first.'); return false; }
-        try { await d.rateVisit(visit.id, stars, comment.value); toast('Thank you for your rating.', 'ok'); renderPortal(root, signOut); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.rateVisit(visit.id, stars, comment.value); toast('Thank you for your rating.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
   };
@@ -54,7 +67,7 @@ function portalPage(root, { p, ratings, signOut, preview }) {
       { label: 'Cancel' },
       { label: 'Send to Dr. Ali', primary: true, onClick: async () => {
         if (!subject.value.trim() || !body.value.trim()) { toast('Add a subject and a message.'); return false; }
-        try { await d.fileComplaint({ subject: subject.value.trim(), body: body.value.trim() }); toast('Sent to Dr. Ali.', 'ok'); renderPortal(root, signOut); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.fileComplaint({ subject: subject.value.trim(), body: body.value.trim() }); toast(preview === 'demo' ? 'Sent (sample account: nothing is really sent).' : 'Sent to Dr. Ali.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
   };
@@ -63,9 +76,12 @@ function portalPage(root, { p, ratings, signOut, preview }) {
   const today = new Date().toISOString().slice(0, 10);
   const next = p.visits.filter((v) => v.status === 'scheduled' && v.visit_date >= today).sort((a, b) => a.visit_date.localeCompare(b.visit_date))[0];
   mount(root,
-    preview ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
+    preview === true ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
       h('span', {}, h('strong', {}, 'Patient view. '), `This is what ${p.full_name} sees after logging in to their account. Buttons are switched off here.`),
       h('a', { class: 'btn btn-small', href: `#/staff/patient/${p.id}` }, 'Back to the record')) : null,
+    preview === 'demo' ? h('div', { class: 'alert alert-warning inline demo-banner', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
+      h('span', {}, h('strong', {}, 'Sample patient account. '), 'Made-up data showing what you see after logging in. Tap around; nothing here is real.'),
+      h('span', { class: 'nowrap' }, h('a', { class: 'btn btn-small btn-primary', href: '#/login/patient' }, 'Patient login'), ' ', h('a', { class: 'btn btn-small', href: '#/' }, 'Home'))) : null,
     preview ? null : h('div', { class: 'mobile-bar', style: { display: 'flex' } },
       h('strong', {}, "Dr. Ali Rashid's Dental Clinic"),
       h('button', { class: 'link-btn', onclick: signOut }, 'Log out')),

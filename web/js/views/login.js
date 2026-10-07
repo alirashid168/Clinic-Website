@@ -57,6 +57,9 @@ export async function renderLogin(root, who, onSignedIn) {
       h('p', {}, h('a', { href: '#/' }, "← Dr. Ali Rashid's Dental Clinic")),
       h('h1', {}, title),
       demo || form,
+      !isStaff && !demo ? h('div', { class: 'login-demo' },
+        h('p', { class: 'muted' }, 'Not sure what your account shows? Your visits, invoices and dues, progress photos and X-rays, your next appointment and a direct line to Dr. Ali.'),
+        h('a', { class: 'btn', href: '#/patient/demo', style: { width: '100%' } }, 'See a sample patient account')) : null,
       h('p', { class: 'muted', style: { fontSize: '13px', marginTop: '16px' } },
         isStaff ? h('a', { href: '#/login/patient' }, 'Are you a patient? Patient login') : h('a', { href: '#/login/staff' }, 'Clinic staff? Staff login')))));
 }
