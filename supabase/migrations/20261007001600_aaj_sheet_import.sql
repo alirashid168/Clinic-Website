@@ -130,6 +130,11 @@ begin
   select coalesce(sum(c), 0), coalesce(jsonb_object_agg(s, c), '{}') into n_cases, v_cases from (select status s, count(*) c from ins group by status) t;
   update aaj a set case_id = (select b.id from public.braces_cases b where b.patient_id = a.patient_id order by (b.status = 'active') desc, b.start_date desc limit 1)
    where a.month is not null and a.patient_id is not null and a.case_id is null;
+  -- A case made from an earlier batch of old rows was marked "discontinued"; rows in this batch show treatment continues.
+  update public.braces_cases b set status = 'active', notes = concat_ws(' · ', b.notes, 'Entries continue to ' || to_char(m.last_d, 'DD Mon YYYY'))
+    from (select a.case_id, max(a.d) last_d from aaj a where a.case_id is not null and not a.dup and a.month is not null group by a.case_id) m
+   where b.id = m.case_id and b.status = 'discontinued' and b.notes like 'From the Aaj ki List history%' and m.last_d >= v_today - 75
+     and not exists (select 1 from public.braces_cases x where x.patient_id = b.patient_id and x.status = 'active');
 
   -- 5. The visit: complete the one already there for that day, otherwise add it.
   update aaj a set visit_id = (select v.id from public.visits v where v.patient_id = a.patient_id and v.visit_date = a.d order by (v.branch_id = a.branch) desc, v.created_at limit 1)
