@@ -1,10 +1,10 @@
 // Router: #/ (home), #/visitor, #/login/staff, #/login/patient, #/patient
-// (portal), #/staff/<page>. Hash routing keeps the site a set of static files.
+// (portal), #/patient/demo (sample portal), #/staff/<page>. Hash routing keeps the site a set of static files.
 import { h, mount, toast, friendlyError, empty } from './ui/dom.js';
 import { state, init } from './state.js';
 import { renderHome, renderVisitor } from './views/public.js';
 import { renderLogin } from './views/login.js';
-import { renderPortal } from './views/portal.js';
+import { renderPortal, renderPortalDemo } from './views/portal.js';
 import { renderStaff } from './views/staff/shell.js';
 
 const root = document.getElementById('app');
@@ -44,6 +44,7 @@ async function route() {
       return await renderLogin(root, who, () => { location.hash = state.session.kind === 'staff' ? '#/staff/today' : '#/patient'; armIdleLogout(); });
     }
     if (parts[0] === 'patient') {
+      if (parts[1] === 'demo') return await renderPortalDemo(root);
       if (s?.kind !== 'patient') { location.hash = '#/login/patient'; return; }
       return await renderPortal(root, signOut);
     }
