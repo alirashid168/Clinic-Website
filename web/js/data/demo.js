@@ -29,11 +29,11 @@ function seed() {
     } } };
   db.cities = [{ id: 1, name: 'Karachi' }, { id: 2, name: 'Lahore' }, { id: 3, name: 'Islamabad' }];
   db.branches = [
-    { id: 1, code: 'GUL', name: 'Gulshan (RJ Mall)', city_id: 1, address: 'RJ Mall, 3rd Floor, Gulshan-e-Iqbal, Karachi', active: true },
-    { id: 2, code: 'NN', name: 'North Nazimabad', city_id: 1, address: 'Block M, North Nazimabad, Karachi', active: true },
-    { id: 3, code: 'DHA', name: 'DHA Karachi', city_id: 1, address: 'Bukhari Commercial, DHA Phase 6, Karachi', active: true },
-    { id: 4, code: 'LHR', name: 'Gulberg Lahore', city_id: 2, address: 'Al Hafeez Business Avenue, Gulberg 3, Lahore', active: true },
-    { id: 5, code: 'ISB', name: 'Islamabad', city_id: 3, address: 'Giga Downtown, DHA Phase II, Islamabad', active: true },
+    { id: 1, code: 'GUL', name: 'Gulshan (RJ Mall)', city_id: 1, address: 'RJ Mall, 3rd Floor, Gulshan-e-Iqbal, Karachi', active: true, opened_on: '2019-12-30' },
+    { id: 2, code: 'NN', name: 'North Nazimabad', city_id: 1, address: 'Block M, North Nazimabad, Karachi', active: true, opened_on: '2024-06-29' },
+    { id: 3, code: 'DHA', name: 'DHA Karachi', city_id: 1, address: 'Bukhari Commercial, DHA Phase 6, Karachi', active: true, opened_on: '2024-02-03' },
+    { id: 4, code: 'LHR', name: 'Gulberg Lahore', city_id: 2, address: 'Al Hafeez Business Avenue, Gulberg 3, Lahore', active: true, opened_on: '2021-11-03' },
+    { id: 5, code: 'ISB', name: 'Islamabad', city_id: 3, address: 'Giga Downtown, DHA Phase II, Islamabad', active: true, opened_on: '2025-11-25' },
   ];
   const doc = (name, group, region, is_doctor = true) => ({ id: uid(), display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
   db.clinicians = [
