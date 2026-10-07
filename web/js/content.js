@@ -25,6 +25,7 @@ export const VISITOR = {
 // Homepage wording carried over from the old dralirashid.com website.
 export const HOME = {
   trust: [
+    { big: '2017', small: 'founded 17 September 2017' },
     { big: '5', small: 'clinics in Karachi, Lahore and Islamabad' },
     { big: '140+', small: 'Google reviews' },
     { big: 'BDS', small: 'Baqai University' },
@@ -32,7 +33,7 @@ export const HOME = {
   ],
   aboutTitle: 'Meet Dr. Ali Rashid',
   about: [
-    'Dr. Ali Rashid (BDS, Baqai University) leads a team of dentists across five clinics, focused on braces, smile makeovers, veneers and everyday dentistry.',
+    'Dr. Ali Rashid (BDS, Baqai University) founded the clinic on 17 September 2017 and leads a team of dentists across five clinics, focused on braces, smile makeovers, veneers and everyday dentistry.',
     'Every braces patient follows the same month-by-month plan at every branch, with senior doctors at the key months and progress photos you can see in your own patient account.',
   ],
   reviewsUrl: 'https://www.google.com/maps/search/?api=1&query=Dr.+Ali+Rashid%27s+Dental+Clinic',
