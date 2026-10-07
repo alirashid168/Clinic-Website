@@ -207,6 +207,17 @@ await step('patient portal on a phone: complaint goes to Dr. Ali', async () => {
   await p5.click('.modal button:has-text("Send to Dr. Ali")');
   await p5.waitForSelector('.toast:has-text("Sent")');
 });
+await step('sample patient account opens without a login and shows photos, dues and a reply', async () => {
+  await p5.goto(BASE + '#/');
+  await p5.click('a:has-text("See a sample patient account")');
+  await p5.waitForSelector('.demo-banner');
+  await p5.waitForSelector('h1:has-text("Hello")');
+  assert.equal(await p5.locator('.photo-grid img').count(), 2, 'two sample photos');
+  assert.ok(await p5.locator('.alert-info:has-text("Your next appointment")').count(), 'next appointment');
+  assert.ok(await p5.locator('text=Reply from the clinic').count(), 'reply shown');
+  assert.ok(await p5.locator('button:has-text("Rate this visit")').count(), 'rating button is live');
+  await shot(p5, '09b-portal-sample');
+});
 const p7 = await newPage();
 await step('Dr. Ali creates a staff login with a password, then changes its email and password', async () => {
   await loginAs(p7, 'Dr. Ali Rashid');
@@ -246,6 +257,36 @@ await step('Dr. Ali imports a Healthwire transactions export on the Import page'
   await p7.getByRole('button', { name: /Import this file: 2 patients, 2 invoices, 2 payments, 2 visits/ }).click();
   await p7.waitForSelector('.alert:has-text("Invoices: 2 added")');
   assert.match(await p7.locator('.alert').innerText(), /Patients: 2 added/);
+});
+await step('Dr. Ali imports an Aaj ki List tab: branch and date chosen, visits with doctors land on the patients', async () => {
+  await p7.goto(BASE + '#/staff/admin?tab=import');
+  await p7.waitForSelector('h2:text("4. Aaj ki List history")');
+  const csv = [
+    "Tt Mr #,Tt Patient Name,Monthly,Tt Treatment,Token No,Waiting,Group,Doctor's Name,Tt Treatment Details,P.P,Healthwire,Tt Contact No,Reminder Status",
+    '9811,Areeba Siddiqui,4,Monthly,3,Completed,,"Dr. Komal Rubab, Hira Anis",U L 016 Pc refresh,,Done,,',
+    ',Hamza Qureshi,8,Monthly,4,Completed,Group 3,Dr Hameeda,U L 018,,,,Called',
+    ',Nobody Here At All,,Checkup,5,Completed,,Dr. Nobody Listed,,,,,',
+    ''].join('\n');
+  const aaj = p7.locator('section.panel:has(h2:text("4. Aaj ki List history")) input[type=file]');
+  await aaj.setInputFiles({ name: 'aaj-ki-list-sample.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await p7.waitForSelector('section[data-tab]');
+  await p7.locator('section[data-tab] select[aria-label^="Branch for"]').selectOption('2');
+  await p7.locator('section[data-tab] input[type=date]').fill('2026-08-20');
+  await p7.locator('section[data-tab] input[type=date]').dispatchEvent('change');
+  await p7.waitForSelector('button:has-text("Import 3 visits")');
+  assert.match(await p7.locator('main').innerText(), /Dr\. Nobody Listed \(1\)/, 'unknown doctor name listed');
+  await p7.getByRole('button', { name: 'Import 3 visits' }).click();
+  await p7.waitForSelector('.alert:has-text("Visits: 2 added")');
+  const text = await p7.locator('main').innerText();
+  assert.match(text, /Doctors and assistants added to 3 visit slots/);
+  assert.match(text, /1 names could not be matched/);
+  await p7.goto(BASE + '#/staff/patients');
+  await p7.fill('input[type=search]', '9811');
+  await p7.locator('table.list tbody tr:has-text("9811") a').first().click();
+  await p7.waitForSelector('h2:has-text("Money")');
+  const visitText = await p7.locator('main').innerText();
+  assert.match(visitText, /20 Aug 2026/);
+  assert.match(visitText, /Aaj ki List \(aaj-ki-list-sample\)/);
   await shot(p7, '12-import-healthwire');
 });
 
@@ -442,6 +483,26 @@ await step('payment receipt opens from the patient record; WhatsApp link next to
   await p7.waitForSelector('.modal .invoice-sheet:has-text("Payment receipt")');
   assert.match(await p7.locator('.modal .invoice-sheet').innerText(), /Received/);
   await p7.locator('.modal .modal-actions').getByRole('button', { name: 'Close' }).click();
+});
+
+await step('complaint linked to a doctor shows on that doctor\'s own dashboard with the 60/40 share', async () => {
+  await p7.goto(BASE + '#/staff/complaints');
+  await p7.waitForSelector('table.list tbody tr');
+  await p7.locator('table.list tbody tr').first().locator('button.link-btn').click();
+  await p7.waitForSelector('.modal select[aria-label="About which doctor"]');
+  await p7.locator('.modal select[aria-label="About which doctor"]').selectOption({ label: 'Dr. Komal Rubab' });
+  await p7.waitForSelector('.toast:has-text("Saved")');
+  await p7.keyboard.press('Escape');
+  const pd = await newPage();
+  await loginAs(pd, 'Dr. Samrah Khan');
+  await pd.goto(BASE + '#/staff/log');
+  await pd.waitForSelector('.stat:has-text("Own patients (brought in)")');
+  const text = await pd.locator('main').innerText();
+  assert.match(text, /Own patients \(brought in\)/);
+  assert.match(text, /Your share \(40% of own patients paid\)/);
+  assert.match(text, /Complaints about your work/);
+  await shot(pd, '13-doctor-dashboard');
+  await pd.close();
 });
 
 const p6 = await newPage({ width: 390, height: 844 });
