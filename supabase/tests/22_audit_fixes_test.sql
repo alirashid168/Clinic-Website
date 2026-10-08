@@ -1,12 +1,15 @@
 -- The audit migration (20261007002000_audit_fixes.sql): report totals (payments_summary, opd_summary, total_dues),
 -- the one-call invoice and plan saves with their idempotency keys, row-level security inside all of them, and the
--- statements the website falls back to while those functions are not installed. (Voiding needs a reason: 22_void_reason_test.sql.)
+-- statements the website falls back to while those functions are not installed, and running the migration a second time.
+-- (Voiding needs a reason: 22_void_reason_test.sql.)
 \set ON_ERROR_STOP 1
 \set admin  '''00000000-0000-0000-0000-000000002300'''
 \set fd     '''00000000-0000-0000-0000-000000002301'''
 \set fd1    '''00000000-0000-0000-0000-000000002302'''
 \set acc    '''00000000-0000-0000-0000-000000002303'''
 \set doc    '''00000000-0000-0000-0000-000000002304'''
+\set portal1 '''00000000-0000-0000-0000-000000002305'''
+\set portal2 '''00000000-0000-0000-0000-000000002306'''
 \set pat1   '''00000000-0000-0000-0000-000000002311'''
 \set pat2   '''00000000-0000-0000-0000-000000002312'''
 \set invA   '''00000000-0000-0000-0000-000000002321'''
@@ -52,7 +55,8 @@ select set_config('test.pat1', :pat1, false), set_config('test.pat2', :pat2, fal
 select set_config('test.dues_before', public.total_dues()::text, false);
 insert into auth.users (id, email) values
   (:admin, 'admin23@dralirashid.com'), (:fd, 'fd23@dralirashid.com'), (:fd1, 'fd23b@dralirashid.com'),
-  (:acc, 'acc23@dralirashid.com'), (:doc, 'doc23@dralirashid.com');
+  (:acc, 'acc23@dralirashid.com'), (:doc, 'doc23@dralirashid.com'),
+  (:portal1, 'portal23a@dralirashid.com'), (:portal2, 'portal23b@dralirashid.com');   -- patient-portal logins: no staff row
 insert into public.staff (id, full_name, email, role, restrict_to_branches, branch_ids) values
   (:admin, 'Admin', 'admin23@dralirashid.com', 'admin', false, '{}'),
   (:fd,    'Front Desk', 'fd23@dralirashid.com', 'front_desk', false, '{}'),
@@ -61,6 +65,11 @@ insert into public.staff (id, full_name, email, role, restrict_to_branches, bran
   (:doc,   'Doctor', 'doc23@dralirashid.com', 'doctor', false, '{}');
 insert into public.patients (id, mr_number, full_name, phone, first_branch_id) values
   (:pat1, '23001', 'Audit Patient One', '03002300001', 1), (:pat2, '23002', 'Audit Patient Two', '03002300002', 2);
+-- Linking a portal login to a patient is for the admin only (a trigger refuses anyone else), so link them as the admin.
+select pg_temp.act_as(:admin);
+update public.patients set portal_user_id = :portal1 where id = :pat1;
+update public.patients set portal_user_id = :portal2 where id = :pat2;
+select pg_temp.act_as('');
 -- Everything below is dated March 2001 and every query names that month, so rows other tests leave in the database cannot count.
 -- Payments: cash / card / bank mix, a refund, two branches, and rows either side of Karachi midnight (UTC+5).
 insert into public.payments (patient_id, branch_id, amount, method, received_at) values
@@ -159,6 +168,19 @@ select pg_temp.check((public.opd_summary('2001-03-01', '2001-03-31', null)->'tot
 select pg_temp.check(public.total_dues() = (select coalesce(sum(dues), 0) from public.patient_balances where dues > 0), 'total_dues for that user equals what they see in patient_balances');
 select pg_temp.act_as(:acc);
 select pg_temp.check((public.payments_summary('2001-03-01', '2001-03-31', null, null)->'totals'->>'count')::int = 7 and public.total_dues() = current_setting('test.dues_before')::numeric + 6500, 'the accountant sees everything');
+-- A patient-portal login is not staff: the "own rows" policies (current_patient_id()) are all that lets it see anything.
+select pg_temp.act_as(:portal1);   -- Audit Patient One: 4 of the 7 payments, 5 of the 7 visits, owes 6,500
+select pg_temp.check(public.payments_summary('2001-03-01', '2001-03-31', null, null)->'totals' = '{"received": 14500, "cash": 5000, "card": 2500, "bank": 7000, "refunds": 1000, "net": 13500, "count": 4}'::jsonb,
+  'a patient-portal user totals only their own payments (4 of the 7), not the clinic''s');
+select pg_temp.check(public.opd_summary('2001-03-01', '2001-03-31', null)->'totals' = '{"visits": 5, "completed": 4, "no_shows": 0, "cancelled": 1, "waited": 2, "wait_min_total": 75, "avg_wait_min": 38, "patients": 1}'::jsonb,
+  'and counts only their own visits (5 of the 7, one patient)');
+select pg_temp.check(public.total_dues() = 6500, 'and total_dues is their own balance (6,500), not what the other patients owe');
+select pg_temp.act_as(:portal2);   -- Audit Patient Two: 3 payments, 2 visits, paid more than billed
+select pg_temp.check(public.payments_summary('2001-03-01', '2001-03-31', null, null)->'totals' = '{"received": 5800, "cash": 1500, "card": 0, "bank": 4300, "refunds": 0, "net": 5800, "count": 3}'::jsonb,
+  'another patient-portal user totals their own 3 payments, not the first patient''s');
+select pg_temp.check(public.opd_summary('2001-03-01', '2001-03-31', null)->'totals' = '{"visits": 2, "completed": 1, "no_shows": 1, "cancelled": 0, "waited": 1, "wait_min_total": 10, "avg_wait_min": 10, "patients": 1}'::jsonb,
+  'and their own 2 visits');
+select pg_temp.check(public.total_dues() = 0, 'and a patient who has paid ahead owes nothing, so their total is 0');
 reset role;
 
 set role anon;
@@ -252,7 +274,7 @@ declare
   pat uuid := current_setting('test.pat1')::uuid;
   plan jsonb := pg_temp.plan(current_setting('test.pat1')::uuid, 30000);
   rows3 jsonb := jsonb_build_array(pg_temp.inst('2026-11-07', 10000, '1 of 3'), pg_temp.inst('2026-12-07', 10000, '2 of 3'), pg_temp.inst('2027-01-07', 10000, '3 of 3'));
-  p1 jsonb; row_json jsonb; fixed jsonb; keyless jsonb;
+  p1 jsonb; row_json jsonb; fixed jsonb; keyless jsonb; inv_id text; n bigint;
 begin
   perform pg_temp.act_as(current_setting('test.fd'));
   p1 := public.save_installment_plan(pg_temp.k(50), plan, rows3);
@@ -268,6 +290,23 @@ begin
   perform pg_temp.expect_error(format($f$select public.save_installment_plan(%L, %L, %L)$f$, pg_temp.k(50), plan, rows3 - 2),
     'IDEMPOTENCY_MISMATCH', 'same key, fewer installments: refused');
   perform pg_temp.check((select count(*) from public.plan_installments where plan_id = (p1->>'id')::uuid) = 3, 'a refused retry added nothing');
+
+  -- A key belongs to the kind of save that first used it: an invoice's key is not a plan's key, nor a plan's an invoice's.
+  -- k(1) was used for an invoice above and k(50) for the plan just now.
+  select count(*) into n from public.invoices;
+  perform pg_temp.expect_error(format($f$select public.save_installment_plan(%L, %L, %L)$f$, pg_temp.k(1), plan, rows3),
+    'This plan was already saved', 'a key an invoice was saved with cannot be used for a plan');
+  perform pg_temp.expect_error(format($f$select public.save_invoice(%L, %L, %L)$f$, pg_temp.k(50), pg_temp.hdr(pat, 1), jsonb_build_array(pg_temp.ln('Scaling', 1, 3000))),
+    'This invoice was already saved', 'and a key a plan was saved with cannot be used for an invoice');
+  perform pg_temp.check((select count(*) from public.invoices) = n and (select count(*) from public.payment_plans where patient_id = pat) = 1, 'neither refusal created anything');
+  -- Random ids never collide across tables, so the answer above does not depend on the kind check. This does: a key stored for the OTHER kind
+  -- that points at a record that really exists (request_hash empty, like a key saved before that column was added) must still not be answered with it.
+  select id::text into inv_id from public.invoices where created_by = current_setting('test.fd')::uuid order by invoice_no limit 1;
+  insert into public.idempotency_keys (key, kind, result_id) values (pg_temp.k(54), 'invoice', p1->>'id'), (pg_temp.k(55), 'plan', inv_id);
+  perform pg_temp.expect_error(format($f$select public.save_installment_plan(%L, %L, %L)$f$, pg_temp.k(54), plan, rows3),
+    'This plan was already saved', 'a plan save is not answered with the plan an invoice-kind key points at');
+  perform pg_temp.expect_error(format($f$select public.save_invoice(%L, %L, %L)$f$, pg_temp.k(55), pg_temp.hdr(pat, 1), jsonb_build_array(pg_temp.ln('Scaling', 1, 3000))),
+    'This invoice was already saved', 'an invoice save is not answered with the invoice a plan-kind key points at');
 
   perform pg_temp.expect_error(format($f$select public.save_installment_plan(%L, %L, %L)$f$, pg_temp.k(51), plan,
     jsonb_build_array(pg_temp.inst('2026-11-07', 10000), pg_temp.inst('2026-12-07', 0))), 'violates check constraint', 'an installment the table refuses (amount 0) fails the whole plan');
@@ -353,9 +392,36 @@ rollback;
 
 -- ================================================================= running the migration a second time
 -- (create or replace / if not exists / drop policy if exists: it says it is safe to run again.)
--- Plain DO blocks from here on: the helper functions above lived in the transaction that was just rolled back.
+-- The migration commits, so it cannot run inside the transaction above (that one is rolled back, fixtures and all). Run it again
+-- first, then seed a small fixture and check the functions against hand-counted numbers: on an empty database they would answer
+-- 0 and 0 whatever the second run had done to them.
 \ir ../migrations/20261007002000_audit_fixes.sql
 begin;
+-- Dues owed before this block adds any (earlier tests may leave patients behind).
+select set_config('test.dues_before', public.total_dues()::text, false);
+insert into auth.users (id, email) values (:admin, 'admin23@dralirashid.com');
+insert into public.staff (id, full_name, email, role, restrict_to_branches, branch_ids) values
+  (:admin, 'Admin', 'admin23@dralirashid.com', 'admin', false, '{}');
+insert into public.patients (id, mr_number, full_name, phone, first_branch_id) values
+  (:pat1, '23001', 'Audit Patient One', '03002300001', 1), (:pat2, '23002', 'Audit Patient Two', '03002300002', 2);
+-- Dated February 2001 (no other test uses it) and every query names that month. Payments: cash / card / bank, a refund,
+-- and rows either side of Karachi midnight (UTC+5).
+insert into public.payments (patient_id, branch_id, amount, method, received_at) values
+  (:pat1, 1, 3000, 'cash',          '2001-02-05 18:59:59+00'),   -- 23:59:59 on 5 February in Karachi
+  (:pat1, 1, 2000, 'card',          '2001-02-05 19:00:00+00'),   -- 00:00:00 on 6 February
+  (:pat1, 1, 4500, 'bank_transfer', '2001-02-06 08:00:00+00'),
+  (:pat1, 1, -500, 'cash',          '2001-02-06 09:00:00+00'),   -- a refund
+  (:pat2, 2, 800,  'cash',          '2001-03-15 10:00:00+00');   -- an advance from a patient who owes nothing: in March, so in no February total
+-- Visits: waits of 20 and 50 minutes, a no-show, and one that started before it checked in (no wait).
+insert into public.visits (patient_id, branch_id, visit_date, status, checked_in_at, started_at) values
+  (:pat1, 1, '2001-02-06', 'completed', '2001-02-06 05:00:00+00', '2001-02-06 05:20:00+00'),
+  (:pat1, 1, '2001-02-06', 'completed', '2001-02-06 06:00:00+00', '2001-02-06 06:50:00+00'),
+  (:pat1, 1, '2001-02-07', 'no_show',   null, null),
+  (:pat1, 1, '2001-02-06', 'completed', '2001-02-06 07:00:00+00', '2001-02-06 06:30:00+00');
+-- Patient One billed 12,000 and paid 9,000 net, so owes 3,000; patient two paid ahead and owes nothing.
+insert into public.invoices (invoice_no, patient_id, branch_id, status) values ('T23-3', :pat1, 1, 'issued');
+insert into public.invoice_items (invoice_id, description, quantity, unit_price)
+  select id, 'Treatment', 1, 12000 from public.invoices where invoice_no = 'T23-3';
 select set_config('request.jwt.claim.sub', :admin, false);
 set role authenticated;
 do $$
@@ -374,12 +440,25 @@ begin
     raise exception 'TEST FAILED: after a second run there is not exactly one of each new function';
   end if;
   raise notice 'ok - second run: still one of each of the five functions';
-  if public.total_dues() is distinct from (select coalesce(sum(dues), 0) from public.patient_balances where dues > 0)
-     or (public.opd_summary('2001-03-01', '2001-03-31', null)->'totals'->>'visits')::int <> 0
-     or (public.payments_summary('2001-03-01', '2001-03-31', null, null)->'totals'->>'count')::int <> 0 then
-    raise exception 'TEST FAILED: after a second run the functions give different answers';
+  if (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
+        and proname in ('save_invoice', 'save_installment_plan', 'payments_summary', 'opd_summary', 'total_dues') and not prosecdef) <> 5 then
+    raise exception 'TEST FAILED: after a second run the five new functions are not all SECURITY INVOKER';
   end if;
-  raise notice 'ok - second run: the functions still work';
+  raise notice 'ok - second run: the five functions are still SECURITY INVOKER';
+  perform pg_temp.check(public.payments_summary('2001-02-01', '2001-02-28', null, null)->'totals'
+      = '{"received": 9500, "cash": 3000, "card": 2000, "bank": 4500, "refunds": 500, "net": 9000, "count": 4}'::jsonb,
+    'second run: payments_summary still adds up the fixture (4 payments, one refund)');
+  perform pg_temp.check((select jsonb_array_length(r->'byDay') = 2 and r->'byDay'->0->>'day' = '2001-02-06' and (r->'byDay'->0->>'net')::numeric = 6000
+        and (r->'byDay'->1->>'cash')::numeric = 3000 and jsonb_array_length(r->'byMethod') = 3
+      from (select public.payments_summary('2001-02-01', '2001-02-28', null, null) r) x),
+    'second run: and still splits them by Karachi day (23:59:59 on the 5th, 00:00:00 on the 6th) and by method');
+  perform pg_temp.check(public.opd_summary('2001-02-01', '2001-02-28', null)
+      = '{"totals": {"visits": 4, "completed": 3, "no_shows": 1, "cancelled": 0, "waited": 2, "wait_min_total": 70, "avg_wait_min": 35, "patients": 1},
+          "byDay": [{"day": "2001-02-07", "branch_id": 1, "visits": 1, "completed": 0, "no_shows": 1, "cancelled": 0, "waited": 0, "wait_min_total": 0, "avg_wait_min": null},
+                    {"day": "2001-02-06", "branch_id": 1, "visits": 3, "completed": 3, "no_shows": 0, "cancelled": 0, "waited": 2, "wait_min_total": 70, "avg_wait_min": 35}],
+          "waitByBranch": [{"branch_id": 1, "waited": 2, "wait_min_total": 70, "avg_wait_min": 35, "long": 1}]}'::jsonb,
+    'second run: opd_summary still gives the hand-counted visits and waits (the visit that started before it checked in has no wait)');
+  perform pg_temp.check(public.total_dues() = current_setting('test.dues_before')::numeric + 3000, 'second run: total_dues still adds the one patient who owes (3,000), and the other patient''s advance does not offset it');
 end $$;
 reset role;
 rollback;

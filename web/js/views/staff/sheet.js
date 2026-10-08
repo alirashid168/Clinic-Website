@@ -2,30 +2,29 @@
 // details, notes) save by themselves; if the internet drops, those typed
 // changes wait on this device and are sent when it comes back. Status, doctor
 // and new-patient changes need the connection, and say so when they fail.
-import { h, mount, toast, friendlyError, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, isLostAnswer, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
 
-// Lost connection, or no answer in time. A database "statement timeout" (HTTP 500, code 57014) is the server
-// refusing a slow query, not an outage: queueing and retrying it would never succeed, so it is not matched.
-// The app's own "TIMEOUT:" (a read that gave up) and "did not respond" (the online services never answered)
-// count; so does Safari's "The network connection was lost."; so does a gateway that gave up on the server
-// ("Gateway Time-out", "Bad Gateway", "Service Unavailable", "upstream request timeout"), by its wording or
-// by its HTTP status (check() in data/supabase.js puts the status on the error), since a gateway's body is
-// not always readable text. Same list as friendlyError() in ui/dom.js and ANSWER_LOST in invoice.js, plus
-// the wording only this list has.
-const NETWORK = /Failed to fetch|NetworkError|\bnetwork (error|request failed|connection)|Load failed|\bTIMEOUT:|\btimed out\b|did not respond|\bgateway[\s-]*time-?out\b|\bbad gateway\b|\bservice unavailable\b|\bupstream (connect error|(request )?time-?out)\b/i;
-const GATEWAY_STATUS = [408, 429, 502, 503, 504];
-const lostAnswer = (e) => NETWORK.test(e?.message || String(e)) || GATEWAY_STATUS.includes(Number(e?.status));
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = { treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes' };
 
-const isNetworkError = (e) => lostAnswer(e) || !navigator.onLine;
-// Status, doctor and new-patient changes are not queued offline: say plainly that nothing was saved.
-const notSaved = (e, still) => (isNetworkError(e) ? `Not saved: no internet connection. ${still} Try again once you are back online.` : friendlyError(e));
+// Whether a request's answer was lost (the connection dropped, it timed out, or a gateway gave up) is decided by
+// isLostAnswer() in ui/dom.js, the one test shared with invoice.js and friendlyError(); there is no list to keep in
+// step here. A database "statement timeout" is not lost: the server refused a slow query, and retrying never helps.
+//
+// Wording: only a browser that reports itself offline is "no internet connection". A gateway, a 503 or 429, or a
+// time-out while the connection works is the server not answering, and the write may still have been committed.
+const noAnswer = (e) => isLostAnswer(e) || !navigator.onLine;
+// Status, doctor and new-patient changes are not queued offline, so they say plainly that they were not sent.
+const notSaved = (e, still) => {
+  if (!navigator.onLine) return `Not saved: no internet connection. ${still} Try again once you are back online.`;
+  if (isLostAnswer(e)) return 'The server did not answer, so this may not have been saved. Reload the page to check, then try again.';
+  return friendlyError(e);
+};
 
 // ---------------------------------------------------------------- offline queue
 // One queue per signed-in staff member: autosave.js stores their typed edits under a key that
@@ -38,7 +37,14 @@ let hadProblem = false;
 
 const currentUser = () => state.session?.staff?.id || null;
 const failedEdits = () => (Array.isArray(queue?.failed) ? queue.failed : []);
-const errorText = (error) => { const msg = typeof error === 'string' ? error : error?.message; return msg ? friendlyError({ message: msg }) : ''; };
+// Why a typed change is on the "not saved" list (autosave keeps only the message). A change whose answer was lost is
+// kept on this device either way; the list has Try again and Discard.
+const errorText = (error) => {
+  const msg = typeof error === 'string' ? error : error?.message;
+  if (!msg) return '';
+  if (isLostAnswer({ message: msg })) return `${navigator.onLine ? 'The server did not answer.' : 'No internet connection.'} Your change is kept on this device.`;
+  return friendlyError({ message: msg });
+};
 
 function describeEdit(edit) {
   if (!edit) return 'a change';
@@ -73,7 +79,7 @@ function getQueue() {
       } catch (e) {
         // Lost connection or no answer: the queue retries quietly (with backoff, and gives up after a few tries).
         // Anything else is the server's "no".
-        if (lostAnswer(e)) throw e;
+        if (isLostAnswer(e)) throw e;
         document.dispatchEvent(new CustomEvent('sheet-reload'));
         throw new PermanentSaveError(e?.message || String(e));
       }
@@ -255,7 +261,7 @@ export async function renderSheet(root, params, signal) {
       }
     } catch (e) {
       ctl.set(before);
-      if (isNetworkError(e)) { toast(notSaved(e, `${who} is still "${STATUS_LABELS[before]}".`), 'error', 10000); return; }
+      if (noAnswer(e)) { toast(notSaved(e, `${who} is still "${STATUS_LABELS[before]}".`), 'error', 10000); return; }
       const msg = friendlyError(e);
       if (/dues/i.test(e.message) && can('dues.override')) {
         modal('Pending dues', h('p', {}, msg), [

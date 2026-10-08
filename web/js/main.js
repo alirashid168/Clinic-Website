@@ -8,7 +8,7 @@
 // state.ready resolves. Login, portal and staff code load only when visited.
 import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink } from './ui/dom.js';
 import { state } from './state.js';
-import { authChangeHandler } from './auth-watch.js';
+import { authChangeHandler, endedNotice } from './auth-watch.js';
 import { CONFIG } from './config.js';
 import * as content from './content.js';
 import { renderHome, renderVisitor } from './views/public.js';
@@ -243,7 +243,8 @@ function waitingMessage(left) {
 // { remote: true }: the login already ended in another tab, so there is nothing to send or to end here.
 // { local: true }: end only this computer's login (the data layer keeps other computers on a shared login signed in).
 // { notice }: a message to show after logging out, along with the one about waiting Aaj ki List edits.
-async function signOut({ remote = false, local = false, notice = '' } = {}) {
+// { reason }: why, for the other tabs of this browser, which only see that the login ended (see noticeFor()).
+async function signOut({ remote = false, local = false, notice = '', reason = '' } = {}) {
   if (signingOut) return;
   signingOut = true;
   stopIdle();
@@ -265,7 +266,7 @@ async function signOut({ remote = false, local = false, notice = '' } = {}) {
   // stored login was removed. (An adapter that answers nothing is taken as confirmed.)
   let confirmed = true;
   if (!remote) {
-    try { confirmed = (await state.data?.signOut(local ? { scope: 'local' } : undefined)) !== false; } catch (e) { console.error(e); confirmed = false; }
+    try { confirmed = (await state.data?.signOut(local ? { scope: 'local', reason } : undefined)) !== false; } catch (e) { console.error(e); confirmed = false; }
   }
   state.session = null;
   clearMessages(); // anything that arrived while the edits were being sent
@@ -392,22 +393,25 @@ function warnIdle() {
   idleTimer = setTimeout(idleSignOut, left);
 }
 
+// What the person is told after a logout they did not ask for (the wording is in auth-watch.js).
+const noticeFor = (reason) => endedNotice(reason, { patient: state.session?.kind === 'patient', idleMinutes: Math.max(1, Math.round(idleLimitMs() / 60000)) });
+
 async function idleSignOut() {
   if (!idleApplies()) return;
-  const minutes = Math.max(1, Math.round(idleLimitMs() / 60000));
   if (location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId: state.session?.staff?.id };
   // Only this computer's login ends: the same shared login may be in use on another computer.
-  await signOut({ local: true, notice: `You were logged out because there was no activity for ${minutes} minute${minutes === 1 ? '' : 's'}.` });
+  await signOut({ local: true, reason: 'idle', notice: noticeFor('idle') });
 }
 
-// The login ended in another tab (logged out there, or the session expired): leave the same way
-// signOut() does, instead of leaving patient details on screen under a login that no longer exists.
-// Only called on a definitive signal (the SIGNED_OUT event, or another person's login; see auth-watch.js),
-// never because a lookup came back empty. { remote: true } below sends nothing to the server for the same reason.
-async function endedElsewhere() {
+// The login ended (logged out in another tab, the account was switched off or deleted, or the session expired): leave the
+// same way signOut() does, instead of leaving patient details on screen under a login that no longer exists.
+// Only called on a definitive signal (the SIGNED_OUT event, another person's login, or the data layer saying the account
+// is gone; see auth-watch.js), never because a lookup came back empty. { remote: true } below sends nothing to the
+// server for the same reason: there is no login left here to end.
+async function endedElsewhere(reason) {
   const staffId = state.session?.staff?.id;
   if (staffId && location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId };
-  await signOut({ remote: true, notice: 'You were logged out. Your login ended in another tab or window, or it expired. Please log in again.' });
+  await signOut({ remote: true, notice: noticeFor(reason) });
 }
 
 // 'app:activity' is sent by long jobs (an import running for an hour) so they are not cut off mid-way.

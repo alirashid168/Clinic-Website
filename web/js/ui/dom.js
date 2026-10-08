@@ -227,6 +227,8 @@ export function clearMessages() {
 // here as "TIMEOUT: ..." (postgrest-js puts the error name in front), and a CDN that never answered says "did not respond".
 // "The network connection was lost." is Safari's wording.
 const NETWORK = /Failed to fetch|NetworkError|Load failed|\bnetwork (error|request failed|connection)|\bTIMEOUT:|\btimed out\b|did not respond/i;
+// The part of NETWORK where the connection itself failed, as opposed to a request that went out and timed out.
+const NO_CONNECTION = /Failed to fetch|NetworkError|Load failed|\bnetwork (error|request failed|connection)/i;
 // A gateway or proxy in front of the server gave up or turned the request away. Its body is not always readable
 // text, so the HTTP status counts as well (check() in data/supabase.js puts it on the error as e.status).
 const GATEWAY = /\bgateway[\s-]*time-?out\b|\bbad gateway\b|\bservice unavailable\b|\bupstream (connect error|(request )?time-?out)\b/i;
@@ -261,8 +263,8 @@ export function friendlyError(err, { audience = 'staff' } = {}) {
       : 'The database took too long on this. Try a shorter date range or a narrower search.';
   }
   if (isLostAnswer(err)) {
-    // A gateway that answered with an error page is not "no internet": the connection works, the server did not.
-    if (!NETWORK.test(msg)) {
+    // A gateway error page or a timeout is not "no internet": the connection works, the server did not answer.
+    if (!NO_CONNECTION.test(msg)) {
       return isPublic
         ? 'The clinic system is busy right now. Please try again in a minute.'
         : 'The clinic system did not answer in time. If you were saving something, check that it went through, then try again.';

@@ -315,6 +315,9 @@ export function createDemoAdapter() {
     async signIn() { fail('In demo mode, pick an account from the list.'); },
     async sendPasswordReset() { fail('Password reset emails are not sent in the demo.'); },
     async signOut() { session = null; return true; },
+    // The demo has one login in one page: no other tab or computer can end it and it never expires, so no login event ever
+    // arrives. Same call as the live adapter (fn(eventName, reason)); returns the function that stops listening.
+    onAuthChange() { return () => {}; },
     async getSession() {
       if (!session) return null;
       if (session.patient) return { kind: 'patient', patient: clone(session.patient), perms: new Set() };

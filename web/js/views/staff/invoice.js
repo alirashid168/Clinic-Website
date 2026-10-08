@@ -1,5 +1,5 @@
 // Invoices: printable templates, new invoice form, payment form.
-import { h, mount, rupees, shortDate, modal, field, select, toast, friendlyError, showFormErrors, clearFieldErrors, localISO, addMonthsISO, addDaysISO } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, modal, field, select, toast, friendlyError, isLostAnswer, showFormErrors, clearFieldErrors, localISO, addMonthsISO, addDaysISO } from '../../ui/dom.js';
 import { state, branchName, can, myBranches, defaultBranchId } from '../../state.js';
 import { CONFIG } from '../../config.js';
 
@@ -14,9 +14,9 @@ export const TEMPLATES = {
 /** The Karachi calendar day of a timestamp (a payment at 1 AM PKT belongs to that day, not the UTC day before). */
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 
-// A save is one request. When the connection drops or it times out, the request may still have been committed:
-// it is the answer that was lost. Same patterns as friendlyError() in dom.js.
-const ANSWER_LOST = /Failed to fetch|NetworkError|Load failed|network (error|request failed)|\bTIMEOUT:|\btimed out\b|did not respond/i;
+// A save is one request. When the connection drops, it times out or a gateway gives up, the request may still have
+// been committed: it is the answer that was lost. isLostAnswer() in dom.js is the one test for that (it is also what
+// the Aaj ki List uses), so there is no list of patterns to keep in step here.
 const isMismatch = (e) => e?.code === 'IDEMPOTENCY_MISMATCH' || /IDEMPOTENCY_MISMATCH/.test(e?.message || '');
 
 /**
@@ -28,7 +28,7 @@ function saveFailure(e, what) {
     const said = friendlyError(e);
     return { stuck: true, text: `${said.charAt(0).toUpperCase()}${said.slice(1)} Close this form, check the patient record, then start again.` };
   }
-  if (ANSWER_LOST.test(e?.message || String(e))) return { text: `This may or may not have been saved. Check the patient's ${what} before saving again.` };
+  if (isLostAnswer(e)) return { text: `${navigator.onLine ? 'The server did not answer.' : 'No internet connection.'} This may or may not have been saved. Check the patient's ${what} before saving again.` };
   return { text: friendlyError(e) };
 }
 

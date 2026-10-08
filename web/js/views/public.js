@@ -109,8 +109,12 @@ function meetSection() {
   };
 }
 
-/** Words that only name a file, not what is in the picture ("IMG_20260101_123456", "Screenshot 2026-01-01 at 10.30.00 AM"). */
-const FILE_NAME_WORDS = /^(case|img|mvimg|dsc|dscn|dscf|pxl|mp|photo|picture|image|screenshot|whatsapp|copy|at|am|pm)$/i;
+/**
+ * Words that only name a file, not what is in the picture ("IMG_20260101_123456", "Screenshot 2026-01-01 at 10.30.00 AM").
+ * A prefix may carry its own digits ("DSC00123", "IMG1234", "photo2", "case1"); WhatsApp's "IMG-20260101-WA0001"
+ * ends in "WA" plus a counter.
+ */
+const FILE_NAME_WORDS = /^(?:(?:case|img|mvimg|dsc|dscn|dscf|pxl|mp|photo|picture|image|screenshot|whatsapp|copy|at|am|pm)\d*|wa\d+)$/i;
 
 /**
  * Alt text from the photo's label when it is a real description. Published photos are named

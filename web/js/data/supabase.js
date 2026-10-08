@@ -95,9 +95,34 @@ function timeoutError() {
   return err;
 }
 
+// The token refresh is the one request whose answer can end a login by itself: when the access token has run out, auth-js
+// deletes the stored login on any answer it does not know to be "try again later". A rate limit (429), a timeout (408) or an
+// error page from a proxy, firewall or captive portal (not JSON) says nothing about the login, so those are thrown like a
+// failed fetch: auth-js then keeps the login and asks again. Only a JSON answer from the login server itself counts (refresh
+// token not found or used up, session gone, account switched off or deleted).
+const REFRESH_URL = /\/auth\/v1\/token\?(?:[^#]*&)?grant_type=refresh_token(?:[&#]|$)/;
+async function refreshFetch(input, init, onRefused) {
+  const res = await fetch(input, init);
+  if (res.ok) return res;
+  // Any 5xx counts as "no answer" too: auth-js only retries some of them, and Supabase's own 544 (upstream timeout)
+  // or a 507 would otherwise end a login whose refresh token is still good.
+  if (res.status >= 500 || res.status === 429 || res.status === 408 || !/json/i.test(res.headers.get('content-type') || '')) {
+    throw new TypeError(`The login server gave no usable answer (${res.status}); the login is kept.`);
+  }
+  // The server's final word about the account is the reason for the SIGNED_OUT that auth-js sends next.
+  try {
+    const body = await res.clone().json();
+    const code = typeof body?.code === 'string' ? body.code : body?.error_code; // the answer names the error as "code" (API version 2024-01-01) or "error_code"
+    if (code === 'user_banned') onRefused?.('switched_off');
+    else if (code === 'user_not_found') onRefused?.('account_gone');
+  } catch { /* not readable: the generic reason applies */ }
+  return res;
+}
+
 /** Reads give up after READ_TIMEOUT_MS instead of hanging; uploads and saves are left alone. */
-function timedFetch(input, init = {}) {
+function timedFetch(input, init = {}, onRefused) {
   const method = String(init.method || 'GET').toUpperCase();
+  if (method === 'POST' && REFRESH_URL.test(String(input?.url ?? input))) return refreshFetch(input, init, onRefused);
   if ((method !== 'GET' && method !== 'HEAD') || init.signal || typeof AbortController === 'undefined') return fetch(input, init);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
@@ -110,6 +135,17 @@ const READ_RPCS = new Set(['payments_summary', 'opd_summary', 'total_dues', 'cli
   'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins']);
 // How long to wait for the server to confirm a logout before ending it on this computer alone.
 const SIGNOUT_TIMEOUT_MS = 4000;
+
+// Why a login ended, so the screen can tell the person (the adapter's onAuthChange(fn) calls fn('SIGNED_OUT', reason); main.js words it):
+//   'switched_off' = Dr. Ali switched the account off     'account_gone' = the account was deleted or no longer has a staff or patient record
+//   'idle'         = this computer's inactivity logout    no reason      = logged out in another tab or on the server, or the login expired
+// A definitive answer of the login server ends the login at once; a failed or slow answer never does (see userId()).
+const ACCOUNT_ERRORS = {
+  switched_off: { code: 'ACCOUNT_OFF', message: 'This account is switched off. Contact Dr. Ali.' },
+  account_gone: { code: 'ACCOUNT_GONE', message: 'This login no longer belongs to an account here. Contact Dr. Ali.' },
+};
+const REASON_KEY = 'clinic-logout-reason'; // in localStorage, so the other tabs of this browser, which only see SIGNED_OUT, can say the same
+const REASON_TTL_MS = 30000;
 
 // ------------------------------------------------------------ report totals (pure; also used by demo.js)
 const KARACHI_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE || 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -197,10 +233,30 @@ export async function createSupabaseAdapter() {
   const { createClient } = await getSdk();
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true },
-    global: { fetch: timedFetch },
+    global: { fetch: (input, init) => timedFetch(input, init, noteReason) },
   });
 
   let cachedSession = null;
+  let endReason = null; // { reason, at }: why the login is ending, read by the SIGNED_OUT event that follows
+
+  /** Remembers why the login is ending (also in localStorage, for the other tabs of this browser). */
+  function noteReason(reason) {
+    endReason = { reason, at: Date.now() };
+    try { localStorage.setItem(REASON_KEY, JSON.stringify(endReason)); } catch { /* storage blocked: only this tab hears it */ }
+  }
+  function forgetReason() {
+    endReason = null;
+    try { localStorage.removeItem(REASON_KEY); } catch { /* storage blocked */ }
+  }
+  /** The reason noted in the last REASON_TTL_MS by this tab or another one, or null. */
+  function currentReason() {
+    let latest = endReason;
+    try {
+      const saved = JSON.parse(localStorage.getItem(REASON_KEY) || 'null');
+      if (typeof saved?.reason === 'string' && Number.isFinite(saved.at) && (!latest || saved.at > latest.at)) latest = saved;
+    } catch { /* storage blocked or unreadable */ }
+    return latest && Date.now() - latest.at < REASON_TTL_MS ? latest.reason : null;
+  }
   // Saves made with an idempotency key while the database functions are not installed:
   // key -> what the earlier attempt already wrote, so pressing Save again finishes that record instead of starting a new one.
   const partial = new Map();
@@ -286,10 +342,14 @@ export async function createSupabaseAdapter() {
     return out;
   }
 
-  /** Ends the stored login. The "local" scope of sb.auth.signOut goes through the same request, so it cannot rescue a hung one. */
-  async function endSession({ scope = 'global' } = {}) {
+  /**
+   * Ends the stored login. The "local" scope of sb.auth.signOut goes through the same request, so it cannot rescue a hung one.
+   * `reason` ('idle', ...) is passed on with the SIGNED_OUT event, here and in the other tabs of this browser.
+   */
+  async function endSession({ scope = 'global', reason = null } = {}) {
     cachedSession = null;
     partial.clear();
+    if (reason) noteReason(reason);
     let confirmed = false;
     try { confirmed = !(await withTimeout(sb.auth.signOut({ scope }), SIGNOUT_TIMEOUT_MS))?.error; } catch { /* timed out, or no connection */ }
     if (!confirmed) {
@@ -302,13 +362,27 @@ export async function createSupabaseAdapter() {
   }
 
   /**
+   * The login server (or the staff record) said this account is switched off or gone: end the login on this computer (the
+   * server decides about other computers) with the reason, then fail with the same words. Never called for a failed or
+   * slow answer.
+   */
+  async function endLogin(reason) {
+    await endSession({ scope: 'local', reason });
+    throw plainError(ACCOUNT_ERRORS[reason].message, ACCOUNT_ERRORS[reason].code);
+  }
+
+  /**
    * The logged-in user's id, or null when the server confirms there is no login (no session, or a token it refuses with a 4xx).
    * A network failure, a 5xx or a rate limit is NOT "no login": it throws, so getSession() never reports a valid login as
    * gone and created_by / received_by / uploaded_by are never written as null because one GET /user failed.
+   * The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE): GoTrue refuses even a still
+   * valid token of a switched-off account with 403 user_banned, and one of a deleted account with 403 user_not_found.
    */
   async function userId() {
     const { data, error } = await sb.auth.getUser();
     if (error) {
+      if (error.code === 'user_banned') await endLogin('switched_off');
+      if (error.code === 'user_not_found') await endLogin('account_gone');
       const refused = error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
       if (!refused) check({ error, status: error.status });
     }
@@ -370,6 +444,28 @@ export async function createSupabaseAdapter() {
     return q;
   }
 
+  /** The staff or patient record of a login, or null when it has none. A switched-off staff account ends the login. */
+  async function loadProfile(uid) {
+    const staff = check(await sb.from('staff').select('*').eq('id', uid).maybeSingle());
+    if (staff) {
+      if (!staff.active) await endLogin('switched_off');
+      let perms;
+      if (staff.role === 'admin') perms = new Set(PERMISSIONS.map((p) => p.key));
+      else {
+        const [grid, overrides] = await Promise.all([
+          sb.from('role_permissions').select('permission_key,allowed').eq('role', staff.role).then(check),
+          sb.from('staff_permission_overrides').select('permission_key,allowed').eq('staff_id', uid).then(check),
+        ]);
+        const map = Object.fromEntries(grid.map((g) => [g.permission_key, g.allowed]));
+        for (const o of overrides) map[o.permission_key] = o.allowed;
+        perms = new Set(Object.keys(map).filter((k) => map[k]));
+      }
+      return { kind: 'staff', staff, perms };
+    }
+    const patient = check(await sb.from('patients').select('*').eq('portal_user_id', uid).maybeSingle());
+    return patient ? { kind: 'patient', patient, perms: new Set() } : null;
+  }
+
   return {
     mode: 'live',
 
@@ -377,7 +473,11 @@ export async function createSupabaseAdapter() {
     async demoAccounts() { return []; },
     async signInDemo() { throw new Error('Demo accounts are not available on the live system.'); },
     async signIn(email, password) {
-      check(await sb.auth.signInWithPassword({ email: email.trim().toLowerCase(), password }));
+      forgetReason(); // a reason left by the last logout must not label a later one
+      const res = await sb.auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
+      // A switched-off account is refused here with 400 user_banned: say it the way the rest of the app does.
+      if (res.error?.code === 'user_banned') throw plainError(ACCOUNT_ERRORS.switched_off.message, ACCOUNT_ERRORS.switched_off.code);
+      check(res);
       cachedSession = null;
       const session = await this.getSession();
       // Login log (security plan): the account records its own sign-in; Dr. Ali reads the log.
@@ -401,36 +501,42 @@ export async function createSupabaseAdapter() {
      * by hand. Resolves true when the server confirmed, false when only this computer was signed out.
      */
     async signOut(opts) { return endSession(opts); },
-    async getSession() {
+    /**
+     * Who is logged in: { kind: 'staff', staff, perms } or { kind: 'patient', patient, perms }, or null when nobody is, or when the
+     * server cannot be asked right now (a failed request throws instead). A switched-off or deleted account ends the login
+     * and throws ACCOUNT_OFF / ACCOUNT_GONE. { strict: true } (the login watcher) also treats a login that the server knows but
+     * that has neither a staff nor a patient record any more as that final answer: asked twice, then checked once more.
+     */
+    async getSession({ strict = false } = {}) {
       const uid = await userId();
       if (!uid) return null;
-      if (cachedSession?.uid === uid) return cachedSession.value;
-      const staff = check(await sb.from('staff').select('*').eq('id', uid).maybeSingle());
-      let value = null;
-      if (staff) {
-        if (!staff.active) { await endSession(); throw new Error('This account is switched off. Contact Dr. Ali.'); }
-        let perms;
-        if (staff.role === 'admin') perms = new Set(PERMISSIONS.map((p) => p.key));
-        else {
-          const [grid, overrides] = await Promise.all([
-            sb.from('role_permissions').select('permission_key,allowed').eq('role', staff.role).then(check),
-            sb.from('staff_permission_overrides').select('permission_key,allowed').eq('staff_id', uid).then(check),
-          ]);
-          const map = Object.fromEntries(grid.map((g) => [g.permission_key, g.allowed]));
-          for (const o of overrides) map[o.permission_key] = o.allowed;
-          perms = new Set(Object.keys(map).filter((k) => map[k]));
-        }
-        value = { kind: 'staff', staff, perms };
-      } else {
-        const patient = check(await sb.from('patients').select('*').eq('portal_user_id', uid).maybeSingle());
-        if (patient) value = { kind: 'patient', patient, perms: new Set() };
+      if (cachedSession?.uid === uid && (cachedSession.value || !strict)) return cachedSession.value;
+      let value = await loadProfile(uid);
+      if (!value && strict) {
+        // A read that went out without the person's token would answer empty as well, so one empty answer is not proof.
+        value = await loadProfile(uid);
+        if (!value && (await userId()) === uid) await endLogin('account_gone');
       }
       cachedSession = { uid, value };
       return value;
     },
-    // fn(eventName) runs after every login event (SIGNED_IN, TOKEN_REFRESHED, SIGNED_OUT ...). Its result is deliberately not
-    // returned: auth-js awaits this callback while it holds its lock, so handing back fn's promise could deadlock it.
-    onAuthChange(fn) { sb.auth.onAuthStateChange((event) => { cachedSession = null; fn(event); }); },
+    // fn(eventName, reason) runs after every login event (SIGNED_IN, TOKEN_REFRESHED, SIGNED_OUT ...); reason comes with SIGNED_OUT only
+    // (see ACCOUNT_ERRORS). Its result is deliberately not returned: auth-js waits for this callback before it carries on, so handing
+    // back fn's promise would make it wait for the app's own network calls (and deadlock when a lock is held and fn asks for the session).
+    // Returns the function that stops listening.
+    onAuthChange(fn) {
+      const { data } = sb.auth.onAuthStateChange((event) => { cachedSession = null; fn(event, event === 'SIGNED_OUT' ? currentReason() : null); });
+      // A tab that logs out without a connection (or whose logout request hangs) removes the stored login by hand, and then sends
+      // the other tabs no event at all. That removal arrives here as a storage event (only in the other tabs, never the one doing it).
+      const onStorage = (e) => {
+        if (e.key !== null && e.key !== sb.auth.storageKey) return;
+        let stored;
+        try { stored = localStorage.getItem(sb.auth.storageKey); } catch { return; }
+        if (!stored) { cachedSession = null; fn('SIGNED_OUT', currentReason()); }
+      };
+      window.addEventListener('storage', onStorage);
+      return () => { data.subscription.unsubscribe(); window.removeEventListener('storage', onStorage); };
+    },
 
     // ------------------------------------------------------------ reference
     async branches() { return check(await sb.from('branches').select('*').eq('active', true).order('sort_order')); },
@@ -580,10 +686,13 @@ export async function createSupabaseAdapter() {
       return visitById(created.id);
     },
     async updateVisit(id, changes) {
-      const uid = await userId();
       const patch = { ...changes };
-      if (patch.dues_override_by === true) patch.dues_override_by = uid;
-      if (patch.protocol_override_by === true) patch.protocol_override_by = uid;
+      // Only an override stamps who made it; any other change must not depend on a request to the login server.
+      if (patch.dues_override_by === true || patch.protocol_override_by === true) {
+        const uid = await userId();
+        if (patch.dues_override_by === true) patch.dues_override_by = uid;
+        if (patch.protocol_override_by === true) patch.protocol_override_by = uid;
+      }
       delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff;
       check(await sb.from('visits').update(patch).eq('id', id));
       return visitById(id);
