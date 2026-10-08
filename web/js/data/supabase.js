@@ -99,34 +99,54 @@ function timeoutError() {
 // deletes the stored login on any answer it does not know to be "try again later". A rate limit (429), a timeout (408) or an
 // error page from a proxy, firewall or captive portal (not JSON) says nothing about the login, so those are thrown like a
 // failed fetch: auth-js then keeps the login and asks again. Only a JSON answer from the login server itself counts (refresh
-// token not found or used up, session gone, account switched off or deleted).
+// token not found or used up, session gone, account switched off or deleted): a JSON answer without a login-server error code
+// ({"message":"Invalid API key"} from an API gateway, a WAF) is a proxy's, not the login server's, so it is kept the same way.
 const REFRESH_URL = /\/auth\/v1\/token\?(?:[^#]*&)?grant_type=refresh_token(?:[&#]|$)/;
-async function refreshFetch(input, init, onRefused) {
+const LOGOUT_URL = /\/auth\/v1\/logout(?:[?#]|$)/;
+const USER_URL = /\/auth\/v1\/user(?:[?#]|$)/;
+async function refreshFetch(input, init, hooks = {}) {
+  const asked = hooks.storedUser?.() ?? null; // whose stored login this refresh is for (the answer may come after somebody else has logged in)
   const res = await fetch(input, init);
   if (res.ok) return res;
   // Any 5xx counts as "no answer" too: auth-js only retries some of them, and Supabase's own 544 (upstream timeout)
-  // or a 507 would otherwise end a login whose refresh token is still good.
-  if (res.status >= 500 || res.status === 429 || res.status === 408 || !/json/i.test(res.headers.get('content-type') || '')) {
+  // or a 507 would otherwise end a login whose refresh token is still good. A 409 ("conflict") is GoTrue giving up on its row lock
+  // after too many refreshes of one session at once (two windows waking together, a slow database): "try again", not "this login is over".
+  if (res.status >= 500 || res.status === 429 || res.status === 408 || res.status === 409 || !/json/i.test(res.headers.get('content-type') || '')) {
     throw new TypeError(`The login server gave no usable answer (${res.status}); the login is kept.`);
   }
-  // The server's final word about the account is the reason for the SIGNED_OUT that auth-js sends next.
+  let code = null;
+  let fromLoginServer = false;
   try {
     const body = await res.clone().json();
-    const code = typeof body?.code === 'string' ? body.code : body?.error_code; // the answer names the error as "code" (API version 2024-01-01) or "error_code"
-    if (code === 'user_banned') onRefused?.('switched_off');
-    else if (code === 'user_not_found') onRefused?.('account_gone');
-  } catch { /* not readable: the generic reason applies */ }
+    code = typeof body?.code === 'string' ? body.code : body?.error_code; // the answer names the error as "code" (API version 2024-01-01) or "error_code"
+    fromLoginServer = (typeof code === 'string' && code !== '') || typeof body?.error_description === 'string'; // (the OAuth-style body of older GoTrue)
+  } catch { /* not readable: not a login server's answer */ }
+  if (!fromLoginServer) throw new TypeError(`The login server gave no usable answer (${res.status}); the login is kept.`);
+  // The server's final word about the account is the reason for the SIGNED_OUT that auth-js sends next. A deleted account's refresh is
+  // refused as refresh_token_not_found (its sessions and tokens went with it), which is also what an ended or expired login looks like:
+  // that answer alone keeps the generic wording, but onNotFound lets the adapter ask the login server about the access token, which
+  // while it is still valid tells the two apart (see askAfterRefusal()).
+  if (code === 'user_banned') hooks.onRefused?.('switched_off', asked);
+  else if (code === 'user_not_found') hooks.onRefused?.('account_gone', asked);
+  else if (code === 'refresh_token_not_found') hooks.onNotFound?.(asked);
   return res;
 }
 
 /** Reads give up after READ_TIMEOUT_MS instead of hanging; uploads and saves are left alone. */
-function timedFetch(input, init = {}, onRefused) {
+function timedFetch(input, init = {}, hooks = {}) {
   const method = String(init.method || 'GET').toUpperCase();
-  if (method === 'POST' && REFRESH_URL.test(String(input?.url ?? input))) return refreshFetch(input, init, onRefused);
-  if ((method !== 'GET' && method !== 'HEAD') || init.signal || typeof AbortController === 'undefined') return fetch(input, init);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
-  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  const url = String(input?.url ?? input);
+  if (method === 'POST' && REFRESH_URL.test(url)) return refreshFetch(input, init, hooks);
+  if (method === 'POST' && LOGOUT_URL.test(url) && hooks.logout) return hooks.logout(input, init);
+  if (method !== 'GET' && method !== 'HEAD') return fetch(input, init);
+  let request;
+  if (init.signal || typeof AbortController === 'undefined') request = fetch(input, init);
+  else {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
+    request = fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  }
+  return method === 'GET' && hooks.vetUser && USER_URL.test(url) ? request.then((res) => hooks.vetUser(init, res)) : request;
 }
 
 // Database functions that only read. They are sent as POST, which timedFetch leaves alone, so callRpc gives them
@@ -145,7 +165,10 @@ const ACCOUNT_ERRORS = {
   account_gone: { code: 'ACCOUNT_GONE', message: 'This login no longer belongs to an account here. Contact Dr. Ali.' },
 };
 const REASON_KEY = 'clinic-logout-reason'; // in localStorage, so the other tabs of this browser, which only see SIGNED_OUT, can say the same
-const REASON_TTL_MS = 30000;
+// How long a note stays good. A tab that was frozen in the background (a browser's memory or energy saver) hears the SIGNED_OUT
+// when it thaws, which can be minutes later. The note is also tied to one person and used once per tab, and goes with the next
+// sign-in or logout (see noteReason()), so a longer life cannot label a later logout.
+const REASON_TTL_MS = 5 * 60 * 1000;
 
 // ------------------------------------------------------------ report totals (pure; also used by demo.js)
 const KARACHI_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE || 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -231,31 +254,141 @@ const alertLevel = (text) => (STOP_WORDS.some((w) => text.includes(w)) ? 'stop' 
 
 export async function createSupabaseAdapter() {
   const { createClient } = await getSdk();
+  let cachedSession = null;
+  let endReason = null; // this tab's own note (see noteReason): only used when localStorage is blocked
+  let usedNoteId = null; // the note this tab has already put on a SIGNED_OUT
+  const hungLogouts = new Set(); // gives up each logout request still in flight (see logoutFetch, endSession)
+  let askedAfterRefusalAt = 0;
+  let startChecked = false; // getSession() looks for what this page's start-up found out only the first time
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true },
-    global: { fetch: (input, init) => timedFetch(input, init, noteReason) },
+    global: {
+      fetch: (input, init) => timedFetch(input, init, {
+        storedUser: storedUserId,
+        // An answer about the login that was stored when the request went out. If that login is not the stored one any more (it
+        // was ended, and somebody else signed in), the answer is nobody's business: it must not label the next person's logout.
+        onRefused: (reason, asked) => { if (asked !== storedUserId()) return; noteReason(reason, asked); askAfterRefusal(); },
+        onNotFound: (asked) => { if (asked === storedUserId()) askAfterRefusal(); },
+        logout: logoutFetch,
+        vetUser,
+      }),
+    },
   });
+  // The person whose login was stored when this page opened, i.e. the one its start-up refresh and first look are about.
+  const startUid = storedUserId();
 
-  let cachedSession = null;
-  let endReason = null; // { reason, at }: why the login is ending, read by the SIGNED_OUT event that follows
-
-  /** Remembers why the login is ending (also in localStorage, for the other tabs of this browser). */
-  function noteReason(reason) {
-    endReason = { reason, at: Date.now() };
+  /** Who the stored login belongs to, read from the stored session itself (best effort: null when there is none or it cannot be read). */
+  function storedUserId() {
+    try { return JSON.parse(localStorage.getItem(sb.auth.storageKey) || 'null')?.user?.id || null; } catch { return null; }
+  }
+  /** The claims of a JWT (the part between the dots), or null. */
+  function claimsOf(jwt) {
+    try { return JSON.parse(atob(String(jwt).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
+  }
+  /**
+   * The login server's answer about an access token (GET /user), before auth-js sees it. auth-js answers "session_not_found" by deleting
+   * whatever login is stored when the answer arrives, not the one the question was about: a slow answer for Ali's old token, arriving
+   * after Ali logged out and Sara logged in (on this tab or another one), would delete Sara's login, which stays valid on the
+   * server, and send every tab to the login page. So an answer about a session that is not the stored one any more (or when nobody is
+   * stored) is dropped like a lost connection: nothing is deleted, and the caller sees that the login changed (see confirmedLogin()).
+   * When the session cannot be told apart (storage blocked, a token without a session id) the answer goes through as it came.
+   */
+  async function vetUser(init, res) {
+    if (res.ok || res.status < 400 || res.status >= 500) return res;
+    let code;
+    try {
+      const body = await res.clone().json();
+      code = typeof body?.code === 'string' ? body.code : body?.error_code;
+    } catch { return res; }
+    if (code !== 'session_not_found') return res;
+    const headers = init?.headers;
+    const authorization = typeof headers?.get === 'function' ? headers.get('authorization') : headers && Object.entries(headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
+    const asked = claimsOf(String(authorization || '').replace(/^Bearer /i, ''))?.session_id;
+    let raw;
+    try { raw = localStorage.getItem(sb.auth.storageKey); } catch { return res; }
+    let stored = null;
+    if (raw) {
+      try { stored = JSON.parse(raw); } catch { return res; }
+      if (typeof claimsOf(stored?.access_token)?.session_id !== 'string') return res;
+    }
+    if (typeof asked !== 'string') return res;
+    if (stored && claimsOf(stored.access_token).session_id === asked) return res;
+    throw new TypeError('The login server answered about a login that is not the stored one any more; the answer is dropped.');
+  }
+  /**
+   * Remembers why the login is ending, in localStorage so the other tabs of this browser, which only see SIGNED_OUT, can say the same.
+   * A note is about ONE login: it names the person (when known), is put on one SIGNED_OUT per tab, and goes when somebody
+   * else signs in (on any tab), at the next sign-in here, at the next logout, or after REASON_TTL_MS, so it can never label a later logout.
+   */
+  function noteReason(reason, uid = storedUserId()) {
+    endReason = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, reason, at: Date.now(), uid };
     try { localStorage.setItem(REASON_KEY, JSON.stringify(endReason)); } catch { /* storage blocked: only this tab hears it */ }
   }
   function forgetReason() {
     endReason = null;
     try { localStorage.removeItem(REASON_KEY); } catch { /* storage blocked */ }
   }
-  /** The reason noted in the last REASON_TTL_MS by this tab or another one, or null. */
+  /** The note every tab shares (another tab's sign-in removes it for all of them); this tab's own one when storage is blocked. */
+  function readNote() {
+    let raw;
+    try { raw = localStorage.getItem(REASON_KEY); } catch { return endReason; }
+    try { return JSON.parse(raw || 'null'); } catch { return null; }
+  }
+  /** The reason of a note made in the last REASON_TTL_MS that this tab has not used yet, or null. Using it marks it used. */
   function currentReason() {
-    let latest = endReason;
-    try {
-      const saved = JSON.parse(localStorage.getItem(REASON_KEY) || 'null');
-      if (typeof saved?.reason === 'string' && Number.isFinite(saved.at) && (!latest || saved.at > latest.at)) latest = saved;
-    } catch { /* storage blocked or unreadable */ }
-    return latest && Date.now() - latest.at < REASON_TTL_MS ? latest.reason : null;
+    const note = readNote();
+    if (typeof note?.reason !== 'string' || !Number.isFinite(note.at) || note.id === usedNoteId) return null;
+    const age = Date.now() - note.at;
+    if (age < 0 || age >= REASON_TTL_MS) return null;
+    usedNoteId = note.id;
+    return note.reason;
+  }
+  /**
+   * `uid` is logged in now (an event of this tab, or one that another tab sent): a note that is not about this very person is no
+   * longer anybody's business, and must not label a later logout of theirs. (A note without a name goes too: it cannot be shown to be theirs.)
+   */
+  function forgetNoteOfOtherPerson(uid) {
+    const note = readNote();
+    if (note && (!note.uid || note.uid !== uid)) forgetReason();
+  }
+  /** The reason ('switched_off' / 'account_gone') of a fresh note about `uid`'s login, or null. Reading it does not use it up. */
+  function freshNoteAbout(uid) {
+    const note = readNote();
+    const age = Date.now() - note?.at;
+    return uid && note?.uid === uid && typeof note.reason === 'string' && age >= 0 && age < REASON_TTL_MS ? note.reason : null;
+  }
+  const endedJustNow = (reason, uid) => freshNoteAbout(uid) === reason;
+
+  /**
+   * The logout request, which can be given up on: auth-js waits for it while holding its lock and, when it finally ends, removes
+   * whatever login is stored then (a later person's included), so one that never answers must not be left hanging. Every request in
+   * flight is kept (two logouts can overlap), and endSession() gives them all up together.
+   */
+  function logoutFetch(input, init = {}) {
+    if (init.signal || typeof AbortController === 'undefined') return fetch(input, init);
+    const ctrl = new AbortController();
+    let drop = () => {};
+    const dropped = new Promise((_, reject) => { drop = () => { ctrl.abort(); reject(new TypeError('The logout was given up: the login server did not answer in time.')); }; });
+    dropped.catch(() => {}); // only the race below hands the rejection to auth-js
+    const request = fetch(input, { ...init, signal: ctrl.signal });
+    hungLogouts.add(drop);
+    const done = () => { hungLogouts.delete(drop); };
+    request.then(done, done);
+    return Promise.race([request, dropped]);
+  }
+
+  /**
+   * A token refresh was refused for a reason about the account (banned, deleted, or "refresh token not found", which is how a deleted
+   * account is refused too). auth-js only ends the login by itself when the access token has run out; a refresh that fires early (its 90 s
+   * margin) while the access token still works is refused and the login is kept, so nothing would notice until the token ran out. While
+   * the access token works, the login server tells the cases apart (403 user_banned / user_not_found), so ask it once, from outside
+   * auth-js's own lock, with the same strict rules as any other check (userId() ends only the login that is stored, only on such an
+   * answer). Once is enough: asking again would learn nothing new. If the login is already gone there is nothing to ask about.
+   */
+  function askAfterRefusal() {
+    if (Date.now() - askedAfterRefusalAt < 30000) return;
+    askedAfterRefusalAt = Date.now();
+    setTimeout(() => { userId().catch(() => { /* ended by userId() itself, or nothing to confirm: the next check looks again */ }); }, 0);
   }
   // Saves made with an idempotency key while the database functions are not installed:
   // key -> what the earlier attempt already wrote, so pressing Save again finishes that record instead of starting a new one.
@@ -346,13 +479,16 @@ export async function createSupabaseAdapter() {
    * Ends the stored login. The "local" scope of sb.auth.signOut goes through the same request, so it cannot rescue a hung one.
    * `reason` ('idle', ...) is passed on with the SIGNED_OUT event, here and in the other tabs of this browser.
    */
-  async function endSession({ scope = 'global', reason = null } = {}) {
+  async function endSession({ scope = 'global', reason = null, uid } = {}) {
     cachedSession = null;
     partial.clear();
-    if (reason) noteReason(reason);
+    if (reason) noteReason(reason, uid); else forgetReason(); // a logout without a reason must not inherit the note of an earlier one
     let confirmed = false;
     try { confirmed = !(await withTimeout(sb.auth.signOut({ scope }), SIGNOUT_TIMEOUT_MS))?.error; } catch { /* timed out, or no connection */ }
     if (!confirmed) {
+      // Requests that never answered are given up now (all of them, not only the latest): they would otherwise end whatever login is
+      // stored when they finally do.
+      for (const drop of [...hungLogouts]) drop();
       // Without this the tokens stay in localStorage, and a reload or a new tab is still signed in.
       Promise.resolve(sb.auth.stopAutoRefresh?.()).catch(() => {});
       const key = sb.auth.storageKey;
@@ -361,33 +497,67 @@ export async function createSupabaseAdapter() {
     return confirmed;
   }
 
+  /** True for an answer that says there is no usable login (as opposed to one that says nothing: no connection, a 5xx, a rate limit, a timeout). */
+  const isRefusal = (error) => error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
+
+  /**
+   * The stored login as { uid, jwt }, or null when there is none or the library's refresh of an expired token was refused. A refresh
+   * that failed for a reason that says nothing about the login (offline, 5xx, 429) throws instead, like any failed read.
+   */
+  async function storedLogin() {
+    const { data, error } = await sb.auth.getSession();
+    const session = data?.session;
+    if (session?.access_token && session.user?.id) return { uid: session.user.id, jwt: session.access_token };
+    if (error && !isRefusal(error)) check({ error, status: error.status });
+    return null;
+  }
+
   /**
    * The login server (or the staff record) said this account is switched off or gone: end the login on this computer (the
    * server decides about other computers) with the reason, then fail with the same words. Never called for a failed or
-   * slow answer.
+   * slow answer. `uid` is the person the answer was about: an answer that arrives late, after somebody else has logged in (or
+   * nobody is any more), is about a login that is already gone and must not end the stored one (nor label it), so then nothing is ended.
+   * One exception: nobody is stored any more, and a note of the last few minutes says this very login was ended for this very reason
+   * (another tab of this browser got there first): the answer is the same, so it is given as such (a page that was reloading then
+   * still learns why), and nothing is ended or noted again.
    */
-  async function endLogin(reason) {
-    await endSession({ scope: 'local', reason });
+  async function endLogin(reason, uid) {
+    let now;
+    try { now = (await storedLogin())?.uid ?? null; } catch { now = undefined; } // undefined: could not be told just now
+    if (now !== uid) {
+      if (now === null && endedJustNow(reason, uid)) throw plainError(ACCOUNT_ERRORS[reason].message, ACCOUNT_ERRORS[reason].code);
+      throw plainError('The login changed while it was being checked. Please try again.', 'LOGIN_CHANGED');
+    }
+    await endSession({ scope: 'local', reason, uid });
     throw plainError(ACCOUNT_ERRORS[reason].message, ACCOUNT_ERRORS[reason].code);
   }
 
   /**
-   * The logged-in user's id, or null when the server confirms there is no login (no session, or a token it refuses with a 4xx).
-   * A network failure, a 5xx or a rate limit is NOT "no login": it throws, so getSession() never reports a valid login as
-   * gone and created_by / received_by / uploaded_by are never written as null because one GET /user failed.
-   * The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE): GoTrue refuses even a still
-   * valid token of a switched-off account with 403 user_banned, and one of a deleted account with 403 user_not_found.
+   * The stored login as { uid, jwt } once the login server has confirmed that token, or null when the server confirms there is no
+   * login (no session, or a token it refuses with a 4xx). A network failure, a 5xx or a rate limit is NOT "no login": it throws, so
+   * getSession() never reports a valid login as gone and created_by / received_by / uploaded_by are never written as null
+   * because one GET /user failed. The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE):
+   * GoTrue refuses even a still valid token of a switched-off account with 403 user_banned, and one of a deleted account with
+   * 403 user_not_found. The question is asked with the stored token itself (not with whatever the library holds when the request
+   * goes out), so the answer belongs to that person and only ever ends that person's login (see endLogin()).
    */
-  async function userId() {
-    const { data, error } = await sb.auth.getUser();
+  async function confirmedLogin() {
+    const login = await storedLogin();
+    if (!login) return null;
+    const { data, error } = await sb.auth.getUser(login.jwt);
     if (error) {
-      if (error.code === 'user_banned') await endLogin('switched_off');
-      if (error.code === 'user_not_found') await endLogin('account_gone');
-      const refused = error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
-      if (!refused) check({ error, status: error.status });
+      if (error.code === 'user_banned') await endLogin('switched_off', login.uid);
+      if (error.code === 'user_not_found') await endLogin('account_gone', login.uid);
+      if (!isRefusal(error)) {
+        // A failed answer (a dropped one too, see vetUser()) about a login that is not the stored one any more is no news either.
+        const now = await storedLogin().then((l) => l?.uid ?? null, () => undefined);
+        if (now !== undefined && now !== login.uid) throw plainError('The login changed while it was being checked. Please try again.', 'LOGIN_CHANGED');
+        check({ error, status: error.status });
+      }
     }
-    return data?.user?.id || null;
+    return data?.user?.id ? { uid: data.user.id, jwt: login.jwt } : null;
   }
+  async function userId() { return (await confirmedLogin())?.uid ?? null; }
 
   async function duesFor(ids) {
     if (!ids.length) return {};
@@ -444,17 +614,23 @@ export async function createSupabaseAdapter() {
     return q;
   }
 
-  /** The staff or patient record of a login, or null when it has none. A switched-off staff account ends the login. */
-  async function loadProfile(uid) {
-    const staff = check(await sb.from('staff').select('*').eq('id', uid).maybeSingle());
+  /**
+   * The staff or patient record of the login `uid` (whose token is `jwt`), or null when it has none. A switched-off staff account
+   * ends the login. Every read is sent with exactly that token, never with whatever the library holds when the request goes out:
+   * a refresh in flight, or one that failed, makes it send the anonymous key, and an anonymous read comes back empty for a
+   * person who does have a record.
+   */
+  async function loadProfile(uid, jwt) {
+    const as = (query) => query.setHeader('Authorization', `Bearer ${jwt}`);
+    const staff = check(await as(sb.from('staff').select('*').eq('id', uid)).maybeSingle());
     if (staff) {
-      if (!staff.active) await endLogin('switched_off');
+      if (!staff.active) await endLogin('switched_off', uid);
       let perms;
       if (staff.role === 'admin') perms = new Set(PERMISSIONS.map((p) => p.key));
       else {
         const [grid, overrides] = await Promise.all([
-          sb.from('role_permissions').select('permission_key,allowed').eq('role', staff.role).then(check),
-          sb.from('staff_permission_overrides').select('permission_key,allowed').eq('staff_id', uid).then(check),
+          as(sb.from('role_permissions').select('permission_key,allowed').eq('role', staff.role)).then(check),
+          as(sb.from('staff_permission_overrides').select('permission_key,allowed').eq('staff_id', uid)).then(check),
         ]);
         const map = Object.fromEntries(grid.map((g) => [g.permission_key, g.allowed]));
         for (const o of overrides) map[o.permission_key] = o.allowed;
@@ -462,7 +638,7 @@ export async function createSupabaseAdapter() {
       }
       return { kind: 'staff', staff, perms };
     }
-    const patient = check(await sb.from('patients').select('*').eq('portal_user_id', uid).maybeSingle());
+    const patient = check(await as(sb.from('patients').select('*').eq('portal_user_id', uid)).maybeSingle());
     return patient ? { kind: 'patient', patient, perms: new Set() } : null;
   }
 
@@ -506,17 +682,38 @@ export async function createSupabaseAdapter() {
      * server cannot be asked right now (a failed request throws instead). A switched-off or deleted account ends the login
      * and throws ACCOUNT_OFF / ACCOUNT_GONE. { strict: true } (the login watcher) also treats a login that the server knows but
      * that has neither a staff nor a patient record any more as that final answer: asked twice, then checked once more.
+     * { fresh: true } reads the record again instead of answering from the one remembered since the last login event.
+     * The answer is about the login the server confirmed: if another person is logged in by the time it is complete, the
+     * lookup fails with LOGIN_CHANGED instead of reporting the earlier person. A lookup that finds the login in motion (its token was
+     * replaced while the empty answers came in) fails with LOGIN_UNCONFIRMED: no proof either way, the next event looks again.
+     * The first look of a page (state.js, while loading) that finds nobody stored also reports an account that was switched off or
+     * deleted: the login this page opened with was just ended for that reason (the page's own start-up refresh was refused as banned,
+     * or another tab got there first), which is the same ACCOUNT_OFF / ACCOUNT_GONE failure as when the look itself ends the login.
      */
-    async getSession({ strict = false } = {}) {
-      const uid = await userId();
-      if (!uid) return null;
-      if (cachedSession?.uid === uid && (cachedSession.value || !strict)) return cachedSession.value;
-      let value = await loadProfile(uid);
-      if (!value && strict) {
-        // A read that went out without the person's token would answer empty as well, so one empty answer is not proof.
-        value = await loadProfile(uid);
-        if (!value && (await userId()) === uid) await endLogin('account_gone');
+    async getSession({ strict = false, fresh = false } = {}) {
+      const first = !startChecked;
+      startChecked = true;
+      const login = await confirmedLogin();
+      if (!login) {
+        const why = first ? freshNoteAbout(startUid) : null;
+        if (ACCOUNT_ERRORS[why]) throw plainError(ACCOUNT_ERRORS[why].message, ACCOUNT_ERRORS[why].code);
+        return null;
       }
+      const { uid, jwt } = login;
+      if (!fresh && cachedSession?.uid === uid && (cachedSession.value || !strict)) return cachedSession.value;
+      let value = await loadProfile(uid, jwt);
+      if (!value && strict) {
+        value = await loadProfile(uid, jwt);
+        if (!value) {
+          // The empty answers were sent with this one token (see loadProfile()), so the server judged them as this person. They are proof
+          // only if the login server still confirms the CURRENT stored login as this person's, on this same token: a refresh that landed
+          // meanwhile, or another person's login, means these answers describe a login that is no longer the stored one.
+          const now = await confirmedLogin();
+          if (now?.uid === uid && now.jwt === jwt) await endLogin('account_gone', uid);
+          throw plainError('The login could not be confirmed just now.', 'LOGIN_UNCONFIRMED');
+        }
+      }
+      if ((await storedLogin().catch(() => null))?.uid !== uid) throw plainError('The login changed while it was being checked. Please try again.', 'LOGIN_CHANGED');
       cachedSession = { uid, value };
       return value;
     },
@@ -525,7 +722,11 @@ export async function createSupabaseAdapter() {
     // back fn's promise would make it wait for the app's own network calls (and deadlock when a lock is held and fn asks for the session).
     // Returns the function that stops listening.
     onAuthChange(fn) {
-      const { data } = sb.auth.onAuthStateChange((event) => { cachedSession = null; fn(event, event === 'SIGNED_OUT' ? currentReason() : null); });
+      const { data } = sb.auth.onAuthStateChange((event, session) => {
+        cachedSession = null;
+        if (session?.user?.id) forgetNoteOfOtherPerson(session.user.id); // somebody is logged in: a note about anybody else is over
+        fn(event, event === 'SIGNED_OUT' ? currentReason() : null);
+      });
       // A tab that logs out without a connection (or whose logout request hangs) removes the stored login by hand, and then sends
       // the other tabs no event at all. That removal arrives here as a storage event (only in the other tabs, never the one doing it).
       const onStorage = (e) => {

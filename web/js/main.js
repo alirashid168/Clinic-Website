@@ -8,7 +8,7 @@
 // state.ready resolves. Login, portal and staff code load only when visited.
 import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink } from './ui/dom.js';
 import { state } from './state.js';
-import { authChangeHandler, endedNotice } from './auth-watch.js';
+import { authChangeHandler, endedNotice, startRecheck, RECHECK_EVENT } from './auth-watch.js';
 import { CONFIG } from './config.js';
 import * as content from './content.js';
 import { renderHome, renderVisitor } from './views/public.js';
@@ -32,6 +32,7 @@ let signingOut = false;
 // { hash, staffId }, which only that same person is taken back to (see onSignedIn).
 let returnTo = null;
 let onLoginPage = false;
+let recheck = null; // the periodic look at the login (see the end of this file); poke() after every change of who is signed in
 
 function setMeta(title, description = HOME_DESC) {
   document.title = title;
@@ -220,6 +221,7 @@ function onSignedIn() {
   const back = mine && returnTo?.hash.startsWith(area) ? returnTo.hash : null;
   returnTo = null;
   startIdle();
+  recheck?.poke();
   location.hash = back || (kind === 'staff' ? '#/staff/today' : '#/patient');
 }
 
@@ -269,6 +271,7 @@ async function signOut({ remote = false, local = false, notice = '', reason = ''
     try { confirmed = (await state.data?.signOut(local ? { scope: 'local', reason } : undefined)) !== false; } catch (e) { console.error(e); confirmed = false; }
   }
   state.session = null;
+  recheck?.poke();
   clearMessages(); // anything that arrived while the edits were being sent
   const notices = [{ message: waitingMessage(left), ms: 12000 }, { message: notice, ms: 10000 }].filter((n) => n.message);
   // Offline there is nothing hung to clear, and a reload would only show the browser's "no internet" page.
@@ -443,19 +446,30 @@ window.addEventListener('hashchange', route);
 route();
 
 state.ready.then(() => {
+  // A switched-off or deleted account whose login was found to be over while this page was loading, in the tab that had been showing
+  // that login (a reload; state.js leaves a new tab out, and so every visitor of the public pages): say why, the way a login that ends
+  // on screen does. (Nobody is signed in now; the login page it lands on says nothing of the kind.)
+  if (state.endedReason) toast(endedNotice(state.endedReason, { patient: /^#\/(?:login\/)?patient/.test(location.hash) }), 'info', 10000);
   if (!state.data) return;
   // Only a definitive signal ends the login on screen (see auth-watch.js): a failed or empty answer while the
   // network hiccups, or a token refresh is in flight, leaves the person, their dialogs and their forms alone.
-  state.data.onAuthChange?.(authChangeHandler({
+  const watch = authChangeHandler({
     data: state.data,
     current: () => state.session,
     busy: () => signingOut,
     ended: endedElsewhere,
     accept: (session) => {
       state.session = session;
+      recheck?.poke();
       if (!idleApplies()) stopIdle();
       else if (!idleTimer && !warning) scheduleIdle();
     },
-  }));
+  });
+  state.data.onAuthChange?.(watch);
+  // The events above come when the login or the tab changes. A tab that stays visible and saves nothing would otherwise only
+  // learn that its account was switched off or deleted when its access token runs out, up to an hour later: look again every
+  // few minutes while the tab is visible and somebody is signed in (never in demo mode, whose login lives in this page).
+  recheck = startRecheck({ fire: () => watch(RECHECK_EVENT), active: () => !signingOut && !!state.session && state.data?.mode !== 'demo' });
+  recheck.poke();
   if (idleApplies()) startIdle();
 });

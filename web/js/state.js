@@ -7,10 +7,26 @@
 // holds the error and the lists stay empty, so the public pages can still show
 // their own wording and a way to contact the clinic.
 import { getData } from './data/index.js';
+import { accountEnding } from './auth-watch.js';
 
+// Whether THIS tab was showing somebody's login (sessionStorage: it survives a reload of the tab, and nothing else). A person whose account
+// was switched off or deleted while the tab was open, and who reloads it, is told why. Whoever opens a new tab or the site later on a
+// shared computer is not: the notice is about somebody else's account, and a visitor on the public pages would not understand it.
+const LOGIN_MARK = 'tab-had-login';
+function markLogin(on) {
+  try { if (on) sessionStorage.setItem(LOGIN_MARK, '1'); else sessionStorage.removeItem(LOGIN_MARK); } catch { /* storage blocked: no notice after a reload */ }
+}
+function tabHadLogin() {
+  try { return sessionStorage.getItem(LOGIN_MARK) === '1'; } catch { return false; }
+}
+
+let shownSession = null;
 export const state = {
   data: null,
-  session: null,
+  // (main.js, login.js and this file all assign it: every change of who is shown also updates the tab's mark)
+  get session() { return shownSession; },
+  set session(value) { shownSession = value; markLogin(!!value); },
+  endedReason: null, // 'switched_off' / 'account_gone' when this tab had a login on screen and it was found, while loading, to be of such an account: main.js says why
   ready: null,
   dataError: null,
   ref: { branches: [], cities: [], clinicians: [], treatments: [], categories: [], settings: {} },
@@ -43,11 +59,15 @@ export function init() {
 
 async function start() {
   try {
+    const hadLogin = tabHadLogin(); // before the first assignment of state.session below
     state.data = await getData();
     // Who is logged in and the public lists load side by side.
     const [session, ref] = await Promise.allSettled([state.data.getSession(), loadPublicRef()]);
     if (timedOut) return; // the pages have already been told the system is not available
     state.session = session.status === 'fulfilled' ? session.value : null;
+    // A switched-off or deleted account was found out while loading (the data layer has ended its login): the person is told why, not
+    // just shown the login page, if this very tab had been showing that login (a reload; see LOGIN_MARK). A new tab says nothing.
+    state.endedReason = hadLogin && session.status === 'rejected' ? accountEnding(session.reason) : null;
     if (ref.status === 'rejected') throw ref.reason;
   } catch (e) {
     if (timedOut) return;
