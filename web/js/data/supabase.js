@@ -1376,6 +1376,16 @@ export async function createSupabaseAdapter() {
       if (error) throw new Error(error.message);
       if (data?.error) throw new Error(data.error);
     },
+    async updateStaffBranches(id, branchIds) {
+      // An empty list means all branches. The home branch stays if it is still allowed, else the first allowed one.
+      const ids = [...new Set((branchIds || []).map(Number))];
+      const current = check(await sb.from('staff').select('home_branch_id').eq('id', id).single());
+      const home = current.home_branch_id ?? null;
+      const saved = check(await sb.from('staff').update({
+        branch_ids: ids, restrict_to_branches: ids.length > 0, home_branch_id: ids.length && !ids.includes(home) ? ids[0] : home,
+      }).eq('id', id).select('id'));
+      if (!saved?.length) throw new Error('The branches were not saved. Try again.');
+    },
     async deactivateStaff(id) {
       check(await sb.rpc('deactivate_staff', { p_staff: id }));
       await sb.functions.invoke('admin-users', { body: { action: 'ban_user', user_id: id } });

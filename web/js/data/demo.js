@@ -884,6 +884,18 @@ export function createDemoAdapter() {
       }
       if (password != null && password !== '' && String(password).length < 8) fail('The password needs at least 8 characters.');
     },
+    async updateStaffBranches(id, branchIds) {
+      need('users.manage');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      // The database trigger's rules: only an admin may change an admin account, or their own branches.
+      if (me().role !== 'admin' && s.role === 'admin') fail('Only admin can change an admin account');
+      if (me().role !== 'admin' && s.id === me().id) fail('You cannot change your own role, branches or active flag');
+      const ids = [...new Set((branchIds || []).map(Number))];
+      const home = s.home_branch_id ?? null;
+      Object.assign(s, { branch_ids: ids, restrict_to_branches: ids.length > 0, home_branch_id: ids.length && !ids.includes(home) ? ids[0] : home });
+      audit('staff', 'UPDATE', s);
+    },
     async reactivateStaff(id) { need('users.manage'); db.staff.find((x) => x.id === id).active = true; },
     async setSetting(key, value) { if (me()?.role !== 'admin') fail('Only admin can change settings'); db.settings[key] = value; },
     async discountCaps() { return clone(db.discount_caps); },
