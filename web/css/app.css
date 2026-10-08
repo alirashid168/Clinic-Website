@@ -550,7 +550,7 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .benefit h3 { margin-bottom: var(--space-2); }
 .braces-types { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); }
 .brace-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); padding: var(--space-5); display: grid; gap: var(--space-2); align-content: start; }
-.brace-card .price { font-weight: 800; color: var(--text-accent); }
+.braces-pricing { margin: 0 0 var(--space-4); font-size: var(--fs-lg); font-weight: 800; color: var(--text-accent); }
 .cases { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); }
 .cases img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--radius-m); background: var(--aubergine-soft); }
 .cta-band { background: var(--surface-inverse); color: var(--on-dark-strong); border-radius: var(--radius-l); padding: var(--space-7); display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
@@ -871,6 +871,7 @@ table.invoice-lines input { min-width: 0; }
 .mx-name { margin: var(--space-5) 0 0; font-size: clamp(3.5rem, 7.6vw, 6.25rem); line-height: .88; letter-spacing: -.02em; color: var(--aubergine-deep); overflow-wrap: anywhere; }
 .mx-name span { display: block; }
 .mx-cred { margin: var(--space-5) 0 0; font-family: var(--font-display); font-weight: 500; font-style: italic; font-size: clamp(1.3rem, 2vw, 1.6rem); line-height: 1.2; color: var(--gold-ink); }
+.mx-founded { margin: var(--space-2) 0 0; font-size: var(--fs-sm); font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
 .mx-rule { width: 4rem; height: 1px; margin: var(--space-7) 0 var(--space-6); background: var(--gold); }
 .mx-body { margin: 0 0 var(--space-4); max-width: 52ch; font-size: var(--fs-md); line-height: 1.75; color: var(--text-muted); text-wrap: pretty; }
 .mx-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-6); margin-top: var(--space-6); }
@@ -892,19 +893,12 @@ table.invoice-lines input { min-width: 0; }
   font-size: var(--fs-ui); color: var(--text-muted); text-decoration: none;
 }
 .mx-rating b { font-family: var(--font-display); font-size: var(--fs-2xl); font-weight: 600; line-height: 1; color: var(--aubergine-deep); }
-.mx-rating:hover > span:not(.mx-stars):not(.sr-only) { color: var(--aubergine-deep); text-decoration: underline; }
+.mx-rating:hover > span:not(.sr-only) { color: var(--aubergine-deep); text-decoration: underline; }
 /* Stars are aria-hidden: the number and the text beside them say the same thing. A full star is solid
    gold-ink (4.7:1 on ivory); an empty one is only an outline in --control-border (3.7:1), and a half star is
    solid on its left half, so the three states differ in shape and not just in hue. The outline is the star
    itself with a smaller ivory star (::after) cut out of its middle. The base rule is the unfilled star (class
    "none" in public.js; not "empty", which is the global empty-state rule); .full and .half override it. */
-.mx-stars { display: inline-flex; gap: 3px; }
-.mx-stars i { position: relative; width: .875rem; height: .875rem; background: var(--control-border); clip-path: polygon(50% 0, 61.8% 35.4%, 100% 35.4%, 69.1% 57.3%, 80.9% 92.7%, 50% 70.8%, 19.1% 92.7%, 30.9% 57.3%, 0 35.4%, 38.2% 35.4%); }
-.mx-stars i::after { content: ''; position: absolute; inset: 0; background: var(--ivory); clip-path: polygon(50% 24.7%, 56.5% 44.2%, 77.5% 44.2%, 60.5% 56.3%, 67% 75.7%, 50% 63.7%, 33% 75.7%, 39.5% 56.3%, 22.5% 44.2%, 43.5% 44.2%); }
-.mx-stars i.full { background: var(--gold-ink); }
-.mx-stars i.full::after { display: none; }
-.mx-stars i.half { background: linear-gradient(90deg, var(--gold-ink) 50%, var(--control-border) 50%); }
-.mx-stars i.half::after { background: linear-gradient(90deg, transparent 50%, var(--ivory) 50%); }
 @media (max-width: 860px) {
   .mx-inner { grid-template-columns: 1fr; gap: 3.5rem; } /* more than the block's overhang under the photo */
   .mx-photo { width: min(430px, 84%); justify-self: end; }
@@ -1170,11 +1164,6 @@ table.invoice-lines input { min-width: 0; }
   .cx-cal-day.is-visit.is-past { background: Canvas; color: CanvasText; border: 2px dashed Highlight; }
   .badge, .status-chip, .person, .cx-status, .sx-chip, .sx-today { border: 1px solid CanvasText; }
   .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn { border: 1px solid ButtonText; }
-  .mx-stars i { forced-color-adjust: none; background: GrayText; }
-  .mx-stars i::after { background: Canvas; }
-  .mx-stars i.full { background: Highlight; }
-  .mx-stars i.half { background: linear-gradient(90deg, Highlight 50%, GrayText 50%); }
-  .mx-stars i.half::after { background: linear-gradient(90deg, transparent 50%, Canvas 50%); }
   .modal, .menu-list, .search-results, .suggestions, .combobox [role="listbox"], .toast { border: 1px solid CanvasText; }
   .sidebar.open, body.drawer-open .sidebar { border-right: 1px solid CanvasText; }
   .stars [aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; }

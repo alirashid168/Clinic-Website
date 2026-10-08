@@ -3,7 +3,7 @@
 // once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce } from '../ui/dom.js';
 import { state } from '../state.js';
-import { VISITOR, HOME, CONTACT, PRICES_APPROVED } from '../content.js';
+import { VISITOR, HOME, CONTACT, BRACES_PRICING } from '../content.js';
 import { aliWeekSection, clinicsSection, clinicFacts } from './schedule.js';
 import { CONFIG } from '../config.js';
 import { smileCard } from '../ui/smile-card.js';
@@ -80,11 +80,6 @@ function footer() {
 }
 
 // "Meet Dr. Ali": his portrait over a night-coloured block, his name set large beside it.
-// An unfilled star is class "none", not "empty": .empty is the global empty-state rule (padding, centred muted text).
-function stars(score) {
-  return h('span', { class: 'mx-stars', 'aria-hidden': 'true' }, [1, 2, 3, 4, 5].map((i) =>
-    h('i', { class: score >= i ? 'full' : score >= i - 0.5 ? 'half' : 'none' })));
-}
 
 /** The section is built once; fill(f) writes the wording that quotes clinic facts, so the photo is never rebuilt. */
 function meetSection() {
@@ -100,12 +95,13 @@ function meetSection() {
           h('span', { class: 'eyebrow dark' }, m.role),
           h('h2', { class: 'display mx-name', id: 'mx-title' }, h('span', {}, m.name[0]), ' ', h('span', {}, m.name[1])),
           h('p', { class: 'display mx-cred' }, m.credential),
+          h('p', { class: 'mx-founded' }, m.founded),
           h('div', { class: 'mx-rule', 'aria-hidden': 'true' }),
           body,
           h('div', { class: 'mx-actions' },
             waLink('Hi, I would like to book a free consultation.', 'Book a free consultation', 'mx-btn'),
-            h('a', { class: 'mx-link', href: '#/visitor' }, PRICES_APPROVED ? 'Braces options and prices' : 'Braces options')),
-          extLink(HOME.reviewsUrl, [stars(HOME.rating.score), h('b', {}, String(HOME.rating.score)), h('span', {}, HOME.rating.text)], { class: 'mx-rating' })))),
+            h('a', { class: 'mx-link', href: '#/visitor' }, 'Braces options and prices')),
+          extLink(HOME.reviewsUrl, [h('b', {}, HOME.rating.count), ' ', h('span', {}, HOME.rating.text)], { class: 'mx-rating' })))),
   };
 }
 
@@ -267,9 +263,10 @@ export async function renderVisitor(root) {
           benefits),
         h('section', {},
           h('div', { class: 'section-title' }, h('h2', {}, 'Braces options')),
+          h('p', { class: 'braces-pricing' }, BRACES_PRICING),
           h('div', { class: 'braces-types' }, VISITOR.braces.map((b) =>
-            h('div', { class: 'brace-card' }, h('h3', {}, b.name), h('span', { class: 'price' }, PRICES_APPROVED ? b.price : VISITOR.priceHidden), h('p', { class: 'muted' }, b.body)))),
-          h('p', { class: 'muted', style: { marginTop: '12px' } }, PRICES_APPROVED ? VISITOR.bracesNote : VISITOR.bracesNoteUnpriced)),
+            h('div', { class: 'brace-card' }, h('h3', {}, b.name), h('p', { class: 'muted' }, b.body)))),
+          h('p', { class: 'muted', style: { marginTop: '12px' } }, VISITOR.bracesNote)),
         results.node,
         h('section', {},
           h('div', { class: 'section-title' }, h('h2', {}, 'Other treatments')),

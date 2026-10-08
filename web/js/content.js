@@ -16,12 +16,11 @@ const clinics = (n) => `${n} ${n === 1 ? 'clinic' : 'clinics'}`;
 // number on 2026-10-07; the phone is assumed to be the same number.
 export const CONTACT = { phone: '+92 310 0000464', whatsapp: '923100000464', tel: '+923100000464' };
 
-// TO CONFIRM: braces prices stay hidden ("Price after your check-up") until Dr. Ali approves them.
-export const PRICES_APPROVED = false;
+// Braces pricing as approved by the clinic owner on 2026-10-08. The per-kit prices below are not shown.
+export const BRACES_PRICING = 'Monthly charges Rs 4,000, and advance starting from Rs 35,000 only.';
 
-// TO CONFIRM: carried over from the old website. Update by hand from the Google listing.
-// The only place the review count is written (the rating line in the Meet section reads it).
-export const GOOGLE_REVIEWS = '140+';
+// Confirmed by the clinic owner on 2026-10-08. The only place the review count is written (the Meet section reads it).
+export const GOOGLE_REVIEWS = '200+';
 
 export const VISITOR = {
   intro: 'Straighter teeth and a confident smile, planned by Dr. Ali Rashid and treated by a team that follows one careful protocol at every branch.',
@@ -35,7 +34,7 @@ export const VISITOR = {
     { title: 'Retainers made in-house', body: 'Retainers are made in our own lab, so they are ready faster and fit the result we planned.' },
     { title: 'Direct line to Dr. Ali', body: 'Any concern can be sent straight to Dr. Ali from your patient account.' },
   ],
-  // TO CONFIRM: braces options and prices. Prices show only once PRICES_APPROVED is true.
+  // Braces options. Only BRACES_PRICING is shown; the kit prices are kept for reference and stay hidden.
   // The kits are named by rank because nothing else is known yet; once Dr. Ali confirms what each kit
   // contains (for example metal, ceramic or self-ligating brackets), name each one by that and list the differences.
   braces: [
@@ -44,9 +43,7 @@ export const VISITOR = {
     { name: 'Premium kit', price: 'Rs 80,000', body: 'Premium kit for longer or more complex cases.' },
     { name: 'Top-tier kit', price: 'Rs 120,000', body: 'Top-tier kit, recommended for selected cases.' },
   ],
-  priceHidden: 'Price after your check-up',
-  bracesNote: 'Prices are a guide. Your doctor recommends the right kit after a check-up and X-ray. Installment plans are available.',
-  bracesNoteUnpriced: 'Your doctor recommends the right kit, and gives you its price, after a check-up and X-ray. Installment plans are available.',
+  bracesNote: 'Your doctor recommends the right kit after a check-up and X-ray.',
   otherTreatments: ['Smile makeovers', 'Veneers', 'Crowns', 'Root canal treatment', 'Scaling and polishing', 'Fillings', 'Extractions', 'Retainers'],
 };
 
@@ -57,6 +54,7 @@ export const HOME = {
     role: 'Founder and lead dentist',
     name: ['Dr. Ali', 'Rashid'],
     credential: 'BDS, Baqai University',
+    founded: 'Founded 17 September 2017',
     body: (f) => [
       `Dr. Ali Rashid leads a team of dentists across ${f.count ? `${clinics(f.count)} in ${f.cities}` : 'our clinics'}. His work centres on braces, smile makeovers and veneers, and on the moment a patient first sees their finished smile.`,
       'Every braces patient follows the same month-by-month plan at every branch, with senior doctors at the months that matter most. Your progress photos, X-rays and invoices are kept in your own patient account.',
@@ -66,8 +64,7 @@ export const HOME = {
     photoHeight: 909,
     photoAlt: 'Dr. Ali Rashid in clinic scrubs, smiling with his arms crossed',
   },
-  // TO CONFIRM: the 4.5 score. The review count is GOOGLE_REVIEWS above, so there is one place to update it.
-  rating: { score: 4.5, text: `on Google from ${GOOGLE_REVIEWS} reviews` },
+  rating: { count: GOOGLE_REVIEWS, text: 'positive reviews across all our branches' },
   // TO CONFIRM: a general Google Maps search. Replace with the clinic's Google Business listing link(s).
   reviewsUrl: 'https://www.google.com/maps/search/?api=1&query=Dr.+Ali+Rashid%27s+Dental+Clinic',
   social: [

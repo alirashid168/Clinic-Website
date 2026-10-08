@@ -159,7 +159,8 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
       if (!filled.length) errors.push({ input: lines[0].desc, message: 'Add at least one treatment with a price.' });
       const sub = subtotalOf();
       const off = Number(discount.value || 0);
-      if (!errors.length && !(sub > 0)) errors.push({ input: filled[0].price, message: 'The invoice total is Rs 0. Enter a price above zero.' });
+      // A Rs 0 invoice is allowed (owner, 2026-10-08): complimentary treatment is recorded that way. Prices and
+      // quantities still cannot be negative or zero-quantity, and the database requires subtotal >= 0.
       if (off < 0) errors.push({ input: discount, message: 'The discount cannot be negative.' });
       else if (!errors.length && off > sub) errors.push({ input: discount, message: `The discount cannot be more than the subtotal (${rupees(sub)}).` });
       if (off > 0 && !reason.value.trim()) errors.push({ input: reason, message: 'Write a reason for the discount.' });
