@@ -42,11 +42,13 @@ export function fullDateLabel(iso) {
     return `${LONG[dayKeyOf(iso)]} ${d} ${MONTH_NAMES[m - 1]}`;
 }
 // ---------------------------------------------------------------- times
-/** "16:00" -> "4 PM", "12:00" -> "12 PM", "14:30" -> "2:30 PM" */
+/** Between a time and AM/PM: a no-break space, so "9" and "PM" are never split across two lines. */
+const NBSP = '\xa0';
+/** "16:00" -> "4 PM", "12:00" -> "12 PM", "14:30" -> "2:30 PM" (no-break space before AM/PM) */
 export function clock(t) {
     const [hh, mm] = t.slice(0, 5).split(':').map(Number);
     const h12 = hh % 12 === 0 ? 12 : hh % 12;
-    return `${h12}${mm ? ':' + String(mm).padStart(2, '0') : ''} ${hh < 12 ? 'AM' : 'PM'}`;
+    return `${h12}${mm ? ':' + String(mm).padStart(2, '0') : ''}${NBSP}${hh < 12 ? 'AM' : 'PM'}`;
 }
 /** "12:00-21:00" or ("12:00:00","21:00:00") -> "12 PM – 9 PM" */
 export function range(a, b) {

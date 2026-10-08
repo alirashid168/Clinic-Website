@@ -72,16 +72,28 @@ export async function renderCoordinator(root, params) {
   // Each draw gets a number. A list that arrives after the person has moved to another tab (or
   // after a newer draw) finds its number out of date and leaves the panel alone.
   let gen = 0;
+  // The tab whose list is in the panel right now (null while it holds a note). Choosing another tab clears
+  // the panel at once, so the old list, with its live status selects, never sits under the new tab's name
+  // while the new one loads (reads can take 20 seconds on a bad connection). A redraw of the same tab after
+  // a save keeps the list in place instead, so it does not flash and the focus restore in remount() still works.
+  let shown = null;
   async function draw() {
     const mine = ++gen;
     const live = () => mine === gen;
+    if (shown !== tab) { shown = null; mount(panel, h('p', { class: 'muted' }, 'Loading…')); }
+    panel.setAttribute('aria-busy', 'true');
     try {
       if (tab === 'reminders') await reminders(panel, draw, live);
       else if (tab === 'dropoffs') await dropoffs(panel, live);
       else if (tab === 'lab') await lab(panel, draw, live);
       else if (tab === 'retainers') await retainers(panel, draw, live);
       else await ratings(panel, draw, live);
-    } catch (e) { if (live()) mount(panel, empty(friendlyError(e))); }
+      if (live()) shown = tab;
+    } catch (e) {
+      if (live()) { mount(panel, empty(friendlyError(e))); shown = null; }
+    } finally {
+      if (live()) panel.removeAttribute('aria-busy');
+    }
   }
   // The tab strip is built once; choosing a tab only redraws the panel (role=tabpanel, linked by
   // tabs()), so focus stays on the tab.

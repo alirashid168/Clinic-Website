@@ -270,11 +270,27 @@ test('autosave: an edit typed while the same row is being sent is saved too, not
 });
 
 test('autosave: the sender gets a copy, so changing it cannot change the queue', async () => {
+  // The first send changes what it was handed and then fails with a network error, so the edit stays queued. If the sender
+  // were handed the queued edit itself, the queue (and the copy stored on the device) would now hold 'tampered'.
+  const store = memoryStore();
   const timers = manualTimers();
-  const q = new AutosaveQueue({ store: memoryStore(), ...timers, send: async (e) => { e.changes.status = 'tampered'; } });
+  const handed: unknown[] = [];
+  const q = new AutosaveQueue({
+    store, ...timers,
+    send: async (e) => {
+      handed.push(e.changes.status);
+      e.changes.status = 'tampered';
+      e.changes.extra = 'tampered';
+      if (handed.length === 1) throw new Error('Failed to fetch');
+    },
+  });
   q.edit('visits', 'r1', 'status', 'completed');
   await q.flush();
-  assert.equal(q.pendingCount, 0);
+  assert.equal(q.pendingCount, 1, 'the failed send left the edit queued');
+  assert.deepEqual(JSON.parse(store.getItem('clinic-autosave-v1')!)[0].changes, { status: 'completed' }, 'the stored edit still has the typed value');
+  await q.flush();
+  assert.deepEqual(handed, ['completed', 'completed'], 'the retry was handed the typed value, not what the first send made of it');
+  assert.equal(q.pendingCount, 0, 'and it saved');
   q.dispose();
 });
 

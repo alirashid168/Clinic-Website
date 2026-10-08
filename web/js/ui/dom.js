@@ -225,9 +225,28 @@ export function clearMessages() {
 
 // Plain connection trouble. The app's own markers count too: a read that gave up (js/data/supabase.js) reaches
 // here as "TIMEOUT: ..." (postgrest-js puts the error name in front), and a CDN that never answered says "did not respond".
-const NETWORK = /Failed to fetch|NetworkError|Load failed|network (error|request failed)|\bTIMEOUT:|\btimed out\b|did not respond/i;
+// "The network connection was lost." is Safari's wording.
+const NETWORK = /Failed to fetch|NetworkError|Load failed|\bnetwork (error|request failed|connection)|\bTIMEOUT:|\btimed out\b|did not respond/i;
+// A gateway or proxy in front of the server gave up or turned the request away. Its body is not always readable
+// text, so the HTTP status counts as well (check() in data/supabase.js puts it on the error as e.status).
+const GATEWAY = /\bgateway[\s-]*time-?out\b|\bbad gateway\b|\bservice unavailable\b|\bupstream (connect error|(request )?time-?out)\b/i;
+const GATEWAY_STATUS = [408, 429, 502, 503, 504];
 // The database stopped a slow query (Postgres code 57014). The connection is fine; the request was too big.
 const DB_BUSY = /statement timeout|lock timeout|canceling statement/i;
+
+const errorText = (err) => (err && (err.message || err.error_description || String(err))) || '';
+const isGateway = (err) => GATEWAY.test(errorText(err)) || GATEWAY_STATUS.includes(Number(err?.status));
+
+/**
+ * True when the request may have been sent but its answer never arrived: the connection dropped, it timed out,
+ * or a gateway gave up. A save that fails this way may still have been committed, so callers that retry
+ * (sheet.js's offline queue) or warn "may or may not have been saved" (invoice.js) use this one test, and
+ * friendlyError() below. A database "statement timeout" is not matched: the server refused a slow query.
+ */
+export function isLostAnswer(err) {
+  if (err?.code === '57014' || DB_BUSY.test(errorText(err))) return false;
+  return NETWORK.test(errorText(err)) || isGateway(err);
+}
 
 /**
  * Turns database errors into plain sentences. Staff wording by default;
@@ -241,7 +260,13 @@ export function friendlyError(err, { audience = 'staff' } = {}) {
       ? 'The clinic system is busy right now. Please try again in a minute.'
       : 'The database took too long on this. Try a shorter date range or a narrower search.';
   }
-  if (NETWORK.test(msg)) {
+  if (isLostAnswer(err)) {
+    // A gateway that answered with an error page is not "no internet": the connection works, the server did not.
+    if (!NETWORK.test(msg)) {
+      return isPublic
+        ? 'The clinic system is busy right now. Please try again in a minute.'
+        : 'The clinic system did not answer in time. If you were saving something, check that it went through, then try again.';
+    }
     return isPublic
       ? 'We could not reach the clinic system. Check your internet connection and try again.'
       : 'No internet connection, so this did not go through. Try again once the connection is back.';

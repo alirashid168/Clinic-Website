@@ -15,9 +15,11 @@ function loading(root, text) {
 }
 
 export async function renderPortal(root, signOut) {
-  loading(root, 'Loading your account…');
   const d = state.data;
-  const me = state.session.patient;
+  const me = state.session?.patient;
+  // The route guard checked the login, but it can end (another tab signed out) while this page's code was loading.
+  if (!me) { location.replace('#/login/patient'); return; }
+  loading(root, 'Loading your account…');
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
   return portalPage(root, { d, p, ratings, signOut, preview: false });
 }
@@ -34,7 +36,8 @@ export async function renderPortalDemo(root) {
     demoAdapter = adapter; // only once it works, so a failed load is tried again next time
   }
   const d = demoAdapter;
-  const me = (await d.getSession()).patient;
+  // The sample login lives in memory (nothing to lose to a bad connection); sign in again rather than fail if it was ever cleared.
+  const me = (await d.getSession())?.patient || (await d.signInDemo('p-demo')).patient;
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
   // The sample's visits use the sample clinic's own branch ids, so their names come from the sample data.
   // Never copied into state.ref: during an outage the public pages would list sample branches as real ones.

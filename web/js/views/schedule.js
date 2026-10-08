@@ -75,6 +75,28 @@ function loadProblem(text, whatsappLink, onRetry) {
       onRetry ? h('button', { type: 'button', class: 'btn', onclick: busy(onRetry) }, 'Try again') : null));
 }
 
+/**
+ * The week strip scrolls sideways on tablets (see .sx-days in app.css). Safari does not put a scroller that has no
+ * focusable content into the tab order, so a keyboard or switch user could never reach Wed-Fri. While the strip really
+ * scrolls it is a labelled tab stop (the .sx-days:focus-visible ring is in the stylesheet); when everything fits, or
+ * the days are stacked on a phone, it is not. Checked again whenever the strip or a day changes size (window, zoom, text size).
+ * The strip stays a list: a region role is not allowed on an <ol> and would orphan its <li> days.
+ */
+function labelWhenScrollable(strip, label) {
+  const update = () => {
+    const scrolls = /^(auto|scroll)$/.test(getComputedStyle(strip).overflowX) && strip.scrollWidth > strip.clientWidth + 1;
+    if (scrolls) { strip.tabIndex = 0; strip.setAttribute('aria-label', label); }
+    else { strip.removeAttribute('tabindex'); strip.removeAttribute('aria-label'); }
+  };
+  // Without ResizeObserver (very old browsers) the strip simply keeps no tab stop, as before.
+  if (typeof ResizeObserver === 'function') {
+    const watch = new ResizeObserver(update);
+    watch.observe(strip);
+    for (const day of strip.children) watch.observe(day);
+  }
+  return strip;
+}
+
 // ---------------------------------------------------------------- this week
 export function aliWeekSection(schedule, whatsappLink, { onRetry } = {}) {
   const c = ctx(schedule);
@@ -137,7 +159,7 @@ export function aliWeekSection(schedule, whatsappLink, { onRetry } = {}) {
       h('div', { class: 'sx-head' },
         titles,
         nowLine ? h('div', { class: 'sx-now' }, nowLine) : null),
-      h('ol', { class: 'sx-days' }, days),
+      labelWhenScrollable(h('ol', { class: 'sx-days' }, days), 'This week with Dr. Ali, scroll sideways'),
       h('div', { class: 'sx-foot' },
         f.walkInCities && f.visitCities ? h('p', {}, icon('info'), `Our ${f.walkInCities} branches keep their usual opening hours while Dr. Ali is in ${f.visitCities}.`) : null,
         later.length ? h('div', { class: 'sx-chips' }, h('span', {}, 'Next visits'),
@@ -184,7 +206,8 @@ function timeline(days) {
       h('div', { class: 'cx-track', role: 'img', 'aria-label': `${d.open ? `Open ${range(d.open[0], d.open[1])}` : 'Closed'}${d.ali.length ? ', Dr. Ali ' + d.ali.map((a) => range(a[0], a[1])).join(' and ') : ''}` },
         d.open ? h('span', { class: 'cx-open', style: { left: pct(d.open[0]), width: width(d.open) } }) : null,
         d.ali.map((a) => h('span', { class: 'cx-ali', style: { left: pct(a[0]), width: width(a) } }))),
-      h('span', { class: 'cx-time' }, d.open ? range(d.open[0], d.open[1]).replace(/ PM – /, ' – ') : 'Closed'))));
+      // "12 PM – 9 PM" -> "12 – 9 PM" in the narrow time column (the space before PM is a no-break space, see clock()).
+      h('span', { class: 'cx-time' }, d.open ? range(d.open[0], d.open[1]).replace(/\xa0PM – /, ' – ') : 'Closed'))));
 }
 
 function aliNote(c, b, days) {

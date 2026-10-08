@@ -131,8 +131,17 @@ export async function renderPatient(root, id) {
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     // The profile still shows the old braces case, so it reloads however this closes (a button, ×, Escape or the
-    // backdrop). Not when the router closed it to leave the page: root has been replaced by then.
-    ], { onClose: () => { if (root.isConnected) reload(); } });
+    // backdrop). The router (and logout) close dialogs first and swap #app straight after, in the same task, so
+    // the check waits one microtask: by then a page change has detached root and nothing is reloaded.
+    ], { onClose: () => queueMicrotask(async () => {
+      if (!root.isConnected) return;
+      await reload();
+      // The dialog had just put focus on the old heading, which the redraw replaced. Put it on the new one,
+      // unless the person has already moved on (another dialog, a control they tabbed to).
+      const active = document.activeElement;
+      const heading = root.isConnected && root.querySelector('h1');
+      if (heading && (!active || active === document.body || active === document.documentElement)) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+    }) });
   };
 
   const startBraces = () => {
@@ -175,8 +184,9 @@ export async function renderPatient(root, id) {
       { label: 'Save', primary: true, onClick: async () => {
         // The same checks as registering a patient; a phone is only checked when it was changed (old records may hold short numbers).
         const errors = [];
-        if (name.value.trim().length < 2) errors.push({ input: name, message: 'Write the patient name.' });
+        // In the order the fields appear (Mr# sits above Name), so focus lands on the first error on screen.
         if (mr && !mr.value.trim()) errors.push({ input: mr, message: 'The Mr# cannot be empty.' });
+        if (name.value.trim().length < 2) errors.push({ input: name, message: 'Write the patient name.' });
         if (phone.value.trim() && phone.value.trim() !== (p.phone || '') && phone.value.replace(/\D/g, '').length < 10) errors.push({ input: phone, message: 'Write a full phone number with at least 10 digits, e.g. 0300 1234567.' });
         if (errors.length) return showFormErrors(body, errors);
         clearFieldErrors(body);

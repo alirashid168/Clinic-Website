@@ -128,11 +128,6 @@
       "source": "/(wp-admin|wp-login\\.php|wp-content|wp-includes|category|tag|author|feed)(.*)",
       "destination": "/",
       "permanent": false
-    },
-    {
-      "source": "/:slug([a-z0-9-]+)/",
-      "destination": "/",
-      "permanent": false
     }
   ]
 }

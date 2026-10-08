@@ -1,6 +1,7 @@
 // Staff area: a top menu bar (Today · Aaj ki List ▾ · Patients · Billing · Reports ▾ · Coordinator ▾ · More ▾),
 // a patient search box that finds by name, Mr# or phone from any screen, the signed-in person's menu,
-// and page routing. On phones the same menu opens as a side drawer.
+// and page routing. Below 73.75em (1180px at the default text size: phones, tablets, small laptops and
+// larger text settings) the same menu opens as a side drawer.
 // Each page's module is loaded the first time it is opened, so the heavy ones (reports, admin with
 // its importers) are only downloaded by the people who use them.
 import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from '../../ui/dom.js';
@@ -99,10 +100,12 @@ function markCurrent(container) {
   }
 }
 
-// The top bar needs room for the menu, the search box and the account menu, so below 1180px the
-// same menu is a drawer (the CSS uses the same breakpoint).
-const hoverMenus = matchMedia('(hover: hover) and (min-width: 1180px)');
-const wideScreen = matchMedia('(min-width: 1180px)');
+// The top bar needs room for the menu, the search box and the account menu, so below 73.75em the same
+// menu is a drawer (the CSS uses the same breakpoint). It is in em, not px: a media query's em is the
+// browser's default text size, so at 125% or 150% text the switch moves out to 1475px or 1770px and the
+// bar never overflows. 73.75em is 1180px at the default size.
+const hoverMenus = matchMedia('(hover: hover) and (min-width: 73.75em)');
+const wideScreen = matchMedia('(min-width: 73.75em)');
 let refSession = null; // the session the clinician, treatment and settings lists were loaded for
 let renderCtl = null;
 
@@ -195,9 +198,9 @@ export async function renderStaff(root, path, params, signOut) {
     h('button', { type: 'button', class: 'menu-btn', onclick: signOut }, 'Log out'));
   const userMenu = disclosure(h('div', { class: 'menu user-menu' }, userBtn, userList), userBtn, userList);
 
-  // ---- phone: the menu as a drawer (same items, dropdowns expanded as groups). It closes on the
-  // scrim, on Escape, on its close button and on navigation, gives focus back to ☰, and is inert
-  // (out of the tab order) while closed.
+  // ---- narrow screens (below the drawer breakpoint above): the menu as a drawer (same items, dropdowns
+  // expanded as groups). It closes on the scrim, on Escape, on its close button and on navigation, gives
+  // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
   const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
   const drawer = h('nav', { class: 'sidebar', id: 'staff-drawer', 'aria-label': 'Staff navigation' },
@@ -275,6 +278,9 @@ export async function renderStaff(root, path, params, signOut) {
     }
   } catch (e) {
     toast(friendlyError(e), 'error');
+    // The tab and screen-reader title say so too, like "Page not available" above. Not when the person has
+    // already moved on (this render was aborted): the route they went to has set its own title by now.
+    if (!signal.aborted) document.title = 'This page could not load | Clinic system';
     mount(main, h('div', { class: 'page-head' }, h('h1', {}, 'This page could not load')), empty(friendlyError(e)));
   }
 }

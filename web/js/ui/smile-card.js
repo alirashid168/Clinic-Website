@@ -3,7 +3,9 @@
 // are unavailable, the CSS arch simply stays.
 // Heavy work stays off the first frames: the images decode off the main thread, the card is built in idle
 // time and shaders compile in parallel where the browser allows. The card frees its GPU context and listeners
-// as soon as its stage leaves the page, whether or not it is animating, and it can be paused (WCAG 2.2.2).
+// as soon as its stage leaves the page, whether or not it is animating. It holds still under prefers-reduced-motion.
+// setPaused() is an internal API only: the page shows no pause control (the owner removed the button on purpose), so
+// a visitor cannot stop the sway from the UI. That is the open audit item a11y-public-13 (WCAG 2.2.2), left open by decision.
 const W = window, D = document, M = Math;
 const AR = 1400 / 781, T_IN = 1.4, PAD = 56;
 const PHOTO = 'img/hero-smile.webp', DEPTH = 'img/hero-smile-depth.png';
@@ -76,7 +78,7 @@ function whenAttached(stage) {
 
 /**
  * Starts loading the photo card for this stage. Returns a controller:
- * setPaused(true|false) stops or restarts the motion; destroy() removes the card.
+ * setPaused(true|false) stops or restarts the motion (internal: no control in the page calls it); destroy() removes the card.
  */
 export function smileCard(stage, opts) {
   var ctl = {

@@ -9,14 +9,21 @@ import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '.
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
 
-// Lost connection only. A database "statement timeout" is the server refusing a slow query, not an outage:
-// queueing and retrying it would never succeed. The app's own "TIMEOUT:" (a read that gave up) and "did not
-// respond" (the online services never answered) count; so does Safari's "The network connection was lost."
-const NETWORK = /Failed to fetch|NetworkError|\bnetwork (error|request failed|connection)|Load failed|\bTIMEOUT:|\btimed out\b|did not respond/i;
+// Lost connection, or no answer in time. A database "statement timeout" (HTTP 500, code 57014) is the server
+// refusing a slow query, not an outage: queueing and retrying it would never succeed, so it is not matched.
+// The app's own "TIMEOUT:" (a read that gave up) and "did not respond" (the online services never answered)
+// count; so does Safari's "The network connection was lost."; so does a gateway that gave up on the server
+// ("Gateway Time-out", "Bad Gateway", "Service Unavailable", "upstream request timeout"), by its wording or
+// by its HTTP status (check() in data/supabase.js puts the status on the error), since a gateway's body is
+// not always readable text. Same list as friendlyError() in ui/dom.js and ANSWER_LOST in invoice.js, plus
+// the wording only this list has.
+const NETWORK = /Failed to fetch|NetworkError|\bnetwork (error|request failed|connection)|Load failed|\bTIMEOUT:|\btimed out\b|did not respond|\bgateway[\s-]*time-?out\b|\bbad gateway\b|\bservice unavailable\b|\bupstream (connect error|(request )?time-?out)\b/i;
+const GATEWAY_STATUS = [408, 429, 502, 503, 504];
+const lostAnswer = (e) => NETWORK.test(e?.message || String(e)) || GATEWAY_STATUS.includes(Number(e?.status));
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = { treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes' };
 
-const isNetworkError = (e) => NETWORK.test(e?.message || String(e)) || !navigator.onLine;
+const isNetworkError = (e) => lostAnswer(e) || !navigator.onLine;
 // Status, doctor and new-patient changes are not queued offline: say plainly that nothing was saved.
 const notSaved = (e, still) => (isNetworkError(e) ? `Not saved: no internet connection. ${still} Try again once you are back online.` : friendlyError(e));
 
@@ -64,10 +71,11 @@ function getQueue() {
       try {
         await state.data.updateVisit(edit.rowId, edit.changes);
       } catch (e) {
-        const msg = e?.message || String(e);
-        if (NETWORK.test(msg)) throw e;
+        // Lost connection or no answer: the queue retries quietly (with backoff, and gives up after a few tries).
+        // Anything else is the server's "no".
+        if (lostAnswer(e)) throw e;
         document.dispatchEvent(new CustomEvent('sheet-reload'));
-        throw new PermanentSaveError(msg);
+        throw new PermanentSaveError(e?.message || String(e));
       }
     },
     onState: (s, pending) => { if (queue === q) showSaveState(s, pending); },

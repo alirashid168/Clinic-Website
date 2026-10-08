@@ -8,6 +8,7 @@
 // state.ready resolves. Login, portal and staff code load only when visited.
 import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink } from './ui/dom.js';
 import { state } from './state.js';
+import { authChangeHandler } from './auth-watch.js';
 import { CONFIG } from './config.js';
 import * as content from './content.js';
 import { renderHome, renderVisitor } from './views/public.js';
@@ -161,6 +162,9 @@ async function route() {
   } catch (e) {
     console.error(e);
     if (!current()) return;
+    // The tab and screen-reader title say what is on screen now, not the route that failed (shell.js does the same
+    // for its own pages). Staff titles stay fixed page names.
+    setMeta(parts[0] === 'staff' ? 'This page could not load | Clinic system' : `Sorry, this page could not load | ${SITE}`);
     mount(view, parts[0] === 'staff'
       ? h('main', { class: 'public-main' }, h('h1', {}, 'This page could not load'), empty(friendlyError(e), retryButton()))
       : visitorFallback('Sorry, this page could not load', 'Please try again in a moment. You can always reach the clinic directly:'));
@@ -199,6 +203,7 @@ function contactLinks() {
 // Login, portal and staff screens need the clinic system. If it could not load, say so plainly.
 function unavailable(view) {
   if (!state.dataError) return false;
+  setMeta(`Clinic system not available | ${SITE}`); // not the login or portal title the route set before it knew
   mount(view, visitorFallback('The clinic system is not available right now',
     'We could not connect to the clinic system. Please try again in a few minutes. To book or ask a question, contact the clinic directly:'));
   focusHeading(view);
@@ -397,6 +402,8 @@ async function idleSignOut() {
 
 // The login ended in another tab (logged out there, or the session expired): leave the same way
 // signOut() does, instead of leaving patient details on screen under a login that no longer exists.
+// Only called on a definitive signal (the SIGNED_OUT event, or another person's login; see auth-watch.js),
+// never because a lookup came back empty. { remote: true } below sends nothing to the server for the same reason.
 async function endedElsewhere() {
   const staffId = state.session?.staff?.id;
   if (staffId && location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId };
@@ -433,17 +440,18 @@ route();
 
 state.ready.then(() => {
   if (!state.data) return;
-  const personOf = (s) => s?.staff?.id || s?.patient?.id || null;
-  state.data.onAuthChange?.(async () => {
-    let s;
-    try { s = await state.data.getSession(); } catch (e) { console.error(e); return; } // a hiccup (offline?) is not a logout
-    if (signingOut) return;
-    const was = state.session;
-    // The login this tab was using is gone, or another person signed in from another tab.
-    if (was && personOf(s) !== personOf(was)) { endedElsewhere(); return; }
-    state.session = s;
-    if (!idleApplies()) stopIdle();
-    else if (!idleTimer && !warning) scheduleIdle();
-  });
+  // Only a definitive signal ends the login on screen (see auth-watch.js): a failed or empty answer while the
+  // network hiccups, or a token refresh is in flight, leaves the person, their dialogs and their forms alone.
+  state.data.onAuthChange?.(authChangeHandler({
+    data: state.data,
+    current: () => state.session,
+    busy: () => signingOut,
+    ended: endedElsewhere,
+    accept: (session) => {
+      state.session = session;
+      if (!idleApplies()) stopIdle();
+      else if (!idleTimer && !warning) scheduleIdle();
+    },
+  }));
   if (idleApplies()) startIdle();
 });

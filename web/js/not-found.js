@@ -2,7 +2,8 @@
 // this one, and anything else to the homepage. This is a plain script, not a module, because the
 // 404 page is served at any address and shares nothing with the app.
 (function () {
-  var path = location.pathname.replace(/\/+$/, '').replace(/\.html?$/, '').toLowerCase();
+  // Capital letters, a trailing slash (old links of the previous website end with one) and ".html" make no difference.
+  var path = location.pathname.toLowerCase().replace(/\/+$/, '').replace(/\.html?$/, '').replace(/\/+$/, '');
   var route = path.replace(/^\//, '');
   var target = '/#/';
   if (/^(visitor|clinics|dr-ali|login\/(staff|patient)|patient(\/demo)?)$/.test(route)) target = '/#/' + route;

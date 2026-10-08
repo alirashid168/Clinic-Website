@@ -148,7 +148,7 @@ async function staff(root, redraw) {
     const body = h('div', {},
       h('div', { class: 'form-grid' }, field('Name', name, null, { required: true }), field('Login email', email, 'Used only as their login name. It does not need a real inbox. If they forget their password, you set a new one with "Login and password".', { required: true }), field('Role', role), field('Link to doctor/assistant name', doctor, 'So their visits count in their daily log')),
       h('div', { class: 'form-grid', style: { marginTop: '10px' } }, field('How will they log in?', how), pwWrap),
-      h('fieldset', { style: { border: 0, padding: 0, margin: '8px 0 0', minWidth: 0 } }, h('legend', { class: 'field-label', style: { padding: 0, marginBottom: '6px' } }, 'Limit to branches (leave empty for all branches)'),
+      h('fieldset', { class: 'fieldset-plain' }, h('legend', {}, 'Limit to branches (leave empty for all branches)'),
         h('div', { class: 'inline' }, branchBoxes.map(({ b, box }) => h('label', { class: 'inline' }, box, b.name)))));
     modal('New staff account', body, [
       { label: 'Cancel' },

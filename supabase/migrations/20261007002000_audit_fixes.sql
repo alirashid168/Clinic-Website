@@ -305,6 +305,9 @@ $$;
 --      byDay:  [{day, branch_id, visits, completed, no_shows, cancelled, waited, wait_min_total, avg_wait_min}],
 --      waitByBranch: [{branch_id, waited, wait_min_total, avg_wait_min, long}] }
 --    Waits are check-in to treatment start in minutes; "long" = over 45 minutes.
+--    A visit whose start is not after its check-in (back-filled or edited times) has no wait
+--    and is left out of every wait figure, exactly as clinic_report() leaves it out
+--    (started_at > checked_in_at), so the OPD and Reports screens give the same average.
 -- -----------------------------------------------------------------------------
 create or replace function public.opd_summary(p_from date, p_to date, p_branch bigint default null)
 returns jsonb
@@ -319,6 +322,7 @@ as $$
            vi.status::text as status,
            vi.patient_id,
            case when vi.checked_in_at is not null and vi.started_at is not null
+                     and vi.started_at > vi.checked_in_at          -- same rule as clinic_report()
                 then extract(epoch from (vi.started_at - vi.checked_in_at)) / 60.0 end as wait
       from public.visits vi
      where (p_from is null or vi.visit_date >= p_from)

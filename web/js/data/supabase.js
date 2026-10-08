@@ -153,7 +153,8 @@ export function summarizePayments(rows) {
 
 /**
  * Visit rows (visit_date, branch_id, status, checked_in_at, started_at, patient_id) -> { totals, byDay, waitByBranch }.
- * Same shape as the opd_summary() SQL function. Waits are check-in to treatment start, in minutes.
+ * Same shape as the opd_summary() SQL function. Waits are check-in to treatment start, in minutes. A visit that started before
+ * it checked in (back-filled or edited times) has no wait and is left out of the wait figures, as clinic_report() leaves it out.
  * totals: { visits, completed, no_shows, cancelled, waited, wait_min_total, avg_wait_min, patients }.
  * byDay[i]: totals without patients, plus day and branch_id. waitByBranch[i]: { branch_id, waited, wait_min_total, avg_wait_min, long } (long = over 45 min).
  */
@@ -166,7 +167,9 @@ export function summarizeVisits(rows) {
   for (const v of rows) {
     const k = `${v.visit_date}|${v.branch_id ?? ''}`;
     if (!days.has(k)) days.set(k, { day: v.visit_date, branch_id: v.branch_id ?? null, ...blank() });
-    const wait = v.checked_in_at && v.started_at ? (new Date(v.started_at) - new Date(v.checked_in_at)) / 60000 : null;
+    // Only a start after the check-in is a wait: same rule as opd_summary() and clinic_report() (started_at > checked_in_at).
+    const gap = v.checked_in_at && v.started_at ? (new Date(v.started_at) - new Date(v.checked_in_at)) / 60000 : null;
+    const wait = gap > 0 ? gap : null;
     for (const o of [totals, days.get(k)]) {
       o.visits += 1;
       if (v.status === 'completed') o.completed += 1;
@@ -298,8 +301,17 @@ export async function createSupabaseAdapter() {
     return confirmed;
   }
 
+  /**
+   * The logged-in user's id, or null when the server confirms there is no login (no session, or a token it refuses with a 4xx).
+   * A network failure, a 5xx or a rate limit is NOT "no login": it throws, so getSession() never reports a valid login as
+   * gone and created_by / received_by / uploaded_by are never written as null because one GET /user failed.
+   */
   async function userId() {
-    const { data } = await sb.auth.getUser();
+    const { data, error } = await sb.auth.getUser();
+    if (error) {
+      const refused = error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
+      if (!refused) check({ error, status: error.status });
+    }
     return data?.user?.id || null;
   }
 
@@ -416,7 +428,9 @@ export async function createSupabaseAdapter() {
       cachedSession = { uid, value };
       return value;
     },
-    onAuthChange(fn) { sb.auth.onAuthStateChange(() => { cachedSession = null; fn(); }); },
+    // fn(eventName) runs after every login event (SIGNED_IN, TOKEN_REFRESHED, SIGNED_OUT ...). Its result is deliberately not
+    // returned: auth-js awaits this callback while it holds its lock, so handing back fn's promise could deadlock it.
+    onAuthChange(fn) { sb.auth.onAuthStateChange((event) => { cachedSession = null; fn(event); }); },
 
     // ------------------------------------------------------------ reference
     async branches() { return check(await sb.from('branches').select('*').eq('active', true).order('sort_order')); },
@@ -653,10 +667,16 @@ export async function createSupabaseAdapter() {
       const earlier = key ? partial.get('invoice:' + key) : null;
       let inv = earlier ? check(await sb.from('invoices').select('*, items:invoice_items(id)').eq('id', earlier.id).maybeSingle()) : null;
       if (inv?.status === 'void') inv = null; // voided since: this is a new invoice
+      // The one half-finished state that is not a draft: the header went in over the person's discount limit, so the database
+      // made it "pending approval" at once, and the lines insert never happened (the connection dropped between the two).
+      const waitingNoLines = inv?.status === 'pending_approval' && !inv.items?.length;
       if (inv && inv.status !== 'draft') {
         // An earlier attempt got as far as issuing it (or sending it for discount approval): the same save again, or a mismatch.
+        // The approval request was raised for the discount that attempt asked for and cannot be changed from here, so a
+        // changed form is a mismatch even while the lines are missing (editing the discount now would get a bigger one approved).
         if (earlier.sig !== sig) throw mismatchError(`invoice ${inv.invoice_no}`, 'void it');
-        return full(inv.id);
+        // Not yet complete: carry on below, which adds the lines to this invoice. Never issue it: only an approver can.
+        if (!waitingNoLines) return full(inv.id);
       }
       // Saved as a draft first so its lines can be added, then issued. Discounts above
       // the person's limit stay "pending approval" (the database decides).

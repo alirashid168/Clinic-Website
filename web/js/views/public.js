@@ -80,9 +80,10 @@ function footer() {
 }
 
 // "Meet Dr. Ali": his portrait over a night-coloured block, his name set large beside it.
+// An unfilled star is class "none", not "empty": .empty is the global empty-state rule (padding, centred muted text).
 function stars(score) {
   return h('span', { class: 'mx-stars', 'aria-hidden': 'true' }, [1, 2, 3, 4, 5].map((i) =>
-    h('i', { class: score >= i ? 'full' : score >= i - 0.5 ? 'half' : 'empty' })));
+    h('i', { class: score >= i ? 'full' : score >= i - 0.5 ? 'half' : 'none' })));
 }
 
 /** The section is built once; fill(f) writes the wording that quotes clinic facts, so the photo is never rebuilt. */
@@ -108,16 +109,22 @@ function meetSection() {
   };
 }
 
+/** Words that only name a file, not what is in the picture ("IMG_20260101_123456", "Screenshot 2026-01-01 at 10.30.00 AM"). */
+const FILE_NAME_WORDS = /^(case|img|mvimg|dsc|dscn|dscf|pxl|mp|photo|picture|image|screenshot|whatsapp|copy|at|am|pm)$/i;
+
 /**
  * Alt text from the photo's label when it is a real description. Published photos are named
  * "YYYY-MM-DD_label_xxxxxxxx.jpg" (publishPhoto in data/supabase.js): the date and the hash are not a
- * description, and neither is the "case" placeholder or a camera file name.
+ * description, and neither is the "case" placeholder or a camera file name. A label whose words are all
+ * file-name words or numbers, however many number groups it has, is not a description.
  */
 function caseAlt(c, i) {
   const base = String(c.view_label || '').replace(/\.[a-z0-9]+$/i, '');
   const named = base.match(/^\d{4}-\d{2}-\d{2}_(.*)_[0-9a-f]{8}$/i);
   const label = (named ? named[1] : base).replace(/[-_]+/g, ' ').trim();
-  return /[a-z]{3}/i.test(label) && !/^(case|img|dsc|pxl|photo|image)\s*\d*$/i.test(label) ? `Before and after: ${label}` : `Before and after result ${i + 1}`;
+  const words = label.split(/[\s.]+/).filter((w) => w && !/^\d+$/.test(w));
+  const described = /[a-z]{3}/i.test(label) && !words.every((w) => FILE_NAME_WORDS.test(w));
+  return described ? `Before and after: ${label}` : `Before and after result ${i + 1}`;
 }
 
 /** Only when there are photos to show: no empty "Results" section. */

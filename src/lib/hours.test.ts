@@ -27,17 +27,31 @@ const ROWS: ScheduleRow[] = [
   d(ISB, '2026-10-26', '16:00', '22:00'), d(ISB, '2026-10-27', '14:00', '20:00'),
 ];
 const H = branchHoursFrom(JSON.stringify(SETTING)) as Record<string, BranchHours>;
+// Times use a no-break space before AM/PM, so "9" and "PM" never land on two lines. nb() turns the spaces
+// written in the expectations below into those no-break spaces.
+const nb = (s: string) => s.replace(/ (AM|PM)\b/g, '\xa0$1');
 
 test('times read the way patients say them', () => {
-  assert.equal(clock('12:00:00'), '12 PM');
-  assert.equal(clock('21:00'), '9 PM');
-  assert.equal(clock('14:30'), '2:30 PM');
-  assert.equal(range('15:00-21:00'), '3 PM – 9 PM');
+  assert.equal(clock('12:00:00'), nb('12 PM'));
+  assert.equal(clock('21:00'), nb('9 PM'));
+  assert.equal(clock('14:30'), nb('2:30 PM'));
+  assert.equal(clock('00:05'), nb('12:05 AM'));
+  assert.equal(range('15:00-21:00'), nb('3 PM – 9 PM'));
+  assert.equal(range('09:00:00', '13:00:00'), nb('9 AM – 1 PM'));
   assert.equal(dateLabel('2026-10-08'), 'Thu 8 Oct');
 });
 
+test('a time never breaks between the number and AM/PM', () => {
+  for (const t of ['00:00', '09:00', '12:00', '14:30', '21:00']) {
+    assert.match(clock(t), /^\d{1,2}(:\d\d)?\xa0(AM|PM)$/, t);
+    assert.ok(!clock(t).includes(' '), 'no plain space inside a time');
+  }
+  // The dash keeps its normal spaces, so a long range may still wrap between the two times.
+  assert.equal(range('12:00', '21:00').split(' ').length, 3);
+});
+
 test('Lahore lists only visit dates, with the times of the dated rows (Friday starts at 3 PM)', () => {
-  const trip = 'Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM';
+  const trip = nb('Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM');
   assert.deepEqual(visitRuns(ROWS, LHR, '2026-10-06').map((r) => r.text),
     [`Thu 8 Oct – Sun 11 Oct, ${trip}`, `Thu 22 Oct – Sun 25 Oct, ${trip}`]);
   assert.deepEqual(visitRuns(ROWS, LHR, '2026-10-12').map((r) => r.label), ['Thu 22 Oct – Sun 25 Oct'], 'past trips drop off');
@@ -46,19 +60,19 @@ test('Lahore lists only visit dates, with the times of the dated rows (Friday st
 
 test("a trip's times come as pieces that never split, days with the same time grouped", () => {
   const lhr = visitRuns(ROWS, LHR, '2026-10-06')[0];
-  assert.deepEqual(lhr.parts, ['Thu 12 PM – 9 PM', 'Fri 3 PM – 9 PM', 'Sat – Sun 12 PM – 9 PM']);
+  assert.deepEqual(lhr.parts, ['Thu 12 PM – 9 PM', 'Fri 3 PM – 9 PM', 'Sat – Sun 12 PM – 9 PM'].map(nb));
   assert.equal(lhr.time, lhr.parts.join(' · '));
   const same = visitRuns([d(LHR, '2026-10-20', '12:00', '21:00'), d(LHR, '2026-10-21', '12:00', '21:00')], LHR, '2026-10-19')[0];
-  assert.deepEqual(same.parts, ['12 PM – 9 PM'], 'one time for every day: one piece, no weekday names');
-  assert.equal(same.text, 'Tue 20 Oct – Wed 21 Oct, 12 PM – 9 PM');
+  assert.deepEqual(same.parts, [nb('12 PM – 9 PM')], 'one time for every day: one piece, no weekday names');
+  assert.equal(same.text, nb('Tue 20 Oct – Wed 21 Oct, 12 PM – 9 PM'));
   const back = visitRuns([d(LHR, '2026-10-20', '12:00', '21:00'), d(LHR, '2026-10-21', '15:00', '21:00'), d(LHR, '2026-10-22', '12:00', '21:00')], LHR, '2026-10-19')[0];
-  assert.deepEqual(back.parts, ['Tue 12 PM – 9 PM', 'Wed 3 PM – 9 PM', 'Thu 12 PM – 9 PM'], 'a time that comes back is a new piece');
+  assert.deepEqual(back.parts, ['Tue 12 PM – 9 PM', 'Wed 3 PM – 9 PM', 'Thu 12 PM – 9 PM'].map(nb), 'a time that comes back is a new piece');
 });
 
 test('Islamabad visit days keep their different times', () => {
-  const trip = 'Mon 4 PM – 10 PM · Tue 2 PM – 8 PM';
+  const trip = nb('Mon 4 PM – 10 PM · Tue 2 PM – 8 PM');
   assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-06').map((r) => r.text), [`Mon 12 Oct – Tue 13 Oct, ${trip}`, `Mon 26 Oct – Tue 27 Oct, ${trip}`]);
-  assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-13').map((r) => r.text), ['Tue 13 Oct, 2 PM – 8 PM', `Mon 26 Oct – Tue 27 Oct, ${trip}`]);
+  assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-13').map((r) => r.text), [nb('Tue 13 Oct, 2 PM – 8 PM'), `Mon 26 Oct – Tue 27 Oct, ${trip}`]);
 });
 
 test("one rule for Dr. Ali's times: the strip, cards and trips all read slotsOn", () => {
@@ -124,16 +138,16 @@ const T = '2026-10-06'; // Tuesday
 const at = (hhmm: string) => toMin(hhmm);
 
 test('branch status reads like a receptionist would say it', () => {
-  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, T, at('17:10')), { open: true, text: 'Open now · until 9 PM' });
-  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, T, at('10:00')), { open: false, text: 'Opens today, 12 PM' });
-  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, '2026-10-10', at('22:00')), { open: false, text: 'Opens Monday, 12 PM' }, 'Sat night skips Sunday');
-  assert.deepEqual(branchStatus(H[NN], ROWS, NN, T, at('17:10')), { open: false, text: 'Opens Thursday, 4 PM' });
-  assert.deepEqual(branchStatus(H[DHA], ROWS, DHA, T, at('21:30')), { open: false, text: 'Opens Tue 13 Oct, 4 PM' });
-  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, T, at('17:10')), { open: false, text: 'Opens Thursday, 12 PM' });
-  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('13:00')), { open: false, text: 'Opens today, 3 PM' }, "Lahore Friday: Dr. Ali's dated row says 3 PM, not the old 12");
-  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('16:00')), { open: true, text: 'Open now · until 9 PM' });
-  assert.deepEqual(branchStatus(H[ISB], ROWS, ISB, '2026-10-14', at('12:00')), { open: false, text: 'Next open Mon 26 Oct' });
-  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-26', at('12:00')), { open: false, text: 'No dates scheduled yet' });
+  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, T, at('17:10')), { open: true, text: nb('Open now · until 9 PM') });
+  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, T, at('10:00')), { open: false, text: nb('Opens today, 12 PM') });
+  assert.deepEqual(branchStatus(H[GUL], ROWS, GUL, '2026-10-10', at('22:00')), { open: false, text: nb('Opens Monday, 12 PM') }, 'Sat night skips Sunday');
+  assert.deepEqual(branchStatus(H[NN], ROWS, NN, T, at('17:10')), { open: false, text: nb('Opens Thursday, 4 PM') });
+  assert.deepEqual(branchStatus(H[DHA], ROWS, DHA, T, at('21:30')), { open: false, text: nb('Opens Tue 13 Oct, 4 PM') });
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, T, at('17:10')), { open: false, text: nb('Opens Thursday, 12 PM') });
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('13:00')), { open: false, text: nb('Opens today, 3 PM') }, "Lahore Friday: Dr. Ali's dated row says 3 PM, not the old 12");
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('16:00')), { open: true, text: nb('Open now · until 9 PM') });
+  assert.deepEqual(branchStatus(H[ISB], ROWS, ISB, '2026-10-14', at('12:00')), { open: false, text: nb('Next open Mon 26 Oct') });
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-26', at('12:00')), { open: false, text: nb('No dates scheduled yet') });
 });
 
 test("Dr. Ali's whereabouts: now and next per branch", () => {
@@ -158,6 +172,6 @@ test('month grid starts on Monday', () => {
 test('visit runs carry per-day times when they differ', () => {
   const r = visitRuns(ROWS, ISB, '2026-10-06');
   assert.equal(r[0].label, 'Mon 12 Oct – Tue 13 Oct');
-  assert.equal(r[0].time, 'Mon 4 PM – 10 PM · Tue 2 PM – 8 PM');
-  assert.equal(visitRuns(ROWS, LHR, '2026-10-06')[0].time, 'Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM');
+  assert.equal(r[0].time, nb('Mon 4 PM – 10 PM · Tue 2 PM – 8 PM'));
+  assert.equal(visitRuns(ROWS, LHR, '2026-10-06')[0].time, nb('Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM'));
 });

@@ -29,6 +29,9 @@ const TABS = {
 const SEARCHABLE = ['financial/transactions', 'financial/summary', 'financial/methods', 'financial/procedures', 'financial/doctors', 'financial/pending', 'financial/advance', 'financial/void', 'financial/refunds', 'financial/discounts', 'patients/dues', 'hr/doctors'];
 const BY_MODE = ['financial/transactions', 'financial/summary'];
 const AS_OF_TODAY = ['financial/pending', 'financial/advance', 'patients/dues'];
+// Reports that always cover every branch: their loaders never pass the Branch filter, so the dropdown is hidden
+// on them and the printed caption says "All branches" whatever was picked on another tab.
+const ALL_BRANCHES = ['financial/procedures', 'financial/doctors', 'financial/advance', 'hr/doctors', 'hr/logins'];
 const METHOD_LABEL = { cash: 'Cash', card: 'Card', bank_transfer: 'Bank transfer', cheque: 'Cheque', other: 'Other' };
 const monthLabel = (m) => (m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '');
 const num = (v) => Number(v || 0).toLocaleString('en-PK');
@@ -334,7 +337,7 @@ export async function renderReports(root, params) {
   const caption = () => {
     const key = `${group}/${tab}`;
     const when = group === 'inventory' || AS_OF_TODAY.includes(key) ? `as of ${shortDate(today)}` : `${shortDate(from.value)} – ${shortDate(to.value)}`;
-    const parts = [groups.find((g) => g[0] === group)?.[1], TABS[group].find((t) => t[0] === tab)?.[1], when, branch.value ? branchName(Number(branch.value)) : 'All branches'];
+    const parts = [groups.find((g) => g[0] === group)?.[1], TABS[group].find((t) => t[0] === tab)?.[1], when, branch.value && !ALL_BRANCHES.includes(key) ? branchName(Number(branch.value)) : 'All branches'];
     if (BY_MODE.includes(key) && method.value) parts.push(METHOD_LABEL[method.value]);
     if (SEARCHABLE.includes(key) && q()) parts.push(`Search: "${search.value.trim()}"`);
     return h('p', { class: 'report-caption print-only' }, parts.filter(Boolean).join(' · '));
@@ -367,7 +370,7 @@ export async function renderReports(root, params) {
     const noDates = group === 'inventory';
     mount(filters,
       noDates ? null : h('label', { class: 'inline' }, 'From ', from), noDates ? null : h('label', { class: 'inline' }, 'To ', to),
-      branch,
+      ALL_BRANCHES.includes(`${group}/${tab}`) ? null : branch,
       BY_MODE.includes(`${group}/${tab}`) ? method : null,
       SEARCHABLE.includes(`${group}/${tab}`) ? search : null,
       h('button', { class: 'btn btn-small btn-primary', onclick: load }, 'Search'));

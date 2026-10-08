@@ -700,9 +700,13 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 }
 .drawer-scrim[hidden] { display: none !important; }
 
-/* Staff shell: the full top bar needs about 1180px (menus, search box and user menu side by side);
-   below that the menus move into the drawer. shell.js uses the same 1180px in matchMedia. */
-@media (max-width: 1179.98px) {
+/* Staff shell: the full top bar needs about 1180px at the default text size (menus, search box and user
+   menu side by side); below that the menus move into the drawer. The limit is in em, so it grows with the
+   browser's text-size setting (1475px at 125%, 1770px at 150%) and the bar never overflows sideways.
+   shell.js uses the same 73.75em in matchMedia: (min-width: 73.75em) is the top bar, and this is exactly its
+   complement. "not all and (min-width: ...)" rather than (max-width: 73.7499em), because browsers round
+   lengths to 1/64px, so that value equals 73.75em and both modes would apply at exactly 1180px. */
+@media not all and (min-width: 73.75em) {
   .app { grid-template-columns: 1fr; }
   /* The drawer opens below the top bar, so the menu button stays visible and on top. Closed, it is
      visibility:hidden, so its links leave the tab order. */
@@ -871,7 +875,7 @@ table.invoice-lines input { min-width: 0; }
 .mx-body { margin: 0 0 var(--space-4); max-width: 52ch; font-size: var(--fs-md); line-height: 1.75; color: var(--text-muted); text-wrap: pretty; }
 .mx-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-6); margin-top: var(--space-6); }
 .mx-btn {
-  display: inline-flex; align-items: center; justify-content: center; min-height: 3.25rem; padding: var(--space-2) var(--space-7);
+  display: inline-flex; align-items: center; justify-content: center; min-height: 3.25rem; max-width: 100%; padding: var(--space-2) clamp(var(--space-4), 8vw, var(--space-7));
   border-radius: var(--radius-m); background: var(--surface-inverse); color: var(--on-dark);
   font-size: var(--fs-base); font-weight: 600; text-align: center; text-decoration: none; transition: background-color .15s;
 }
@@ -889,12 +893,18 @@ table.invoice-lines input { min-width: 0; }
 }
 .mx-rating b { font-family: var(--font-display); font-size: var(--fs-2xl); font-weight: 600; line-height: 1; color: var(--aubergine-deep); }
 .mx-rating:hover > span:not(.mx-stars):not(.sr-only) { color: var(--aubergine-deep); text-decoration: underline; }
-/* Stars are aria-hidden: the number and the text beside them say the same thing. Filled stars use
-   gold-ink (4.7:1 on ivory) and empty ones the pale warm line, so full and empty differ in lightness, not only hue. */
+/* Stars are aria-hidden: the number and the text beside them say the same thing. A full star is solid
+   gold-ink (4.7:1 on ivory); an empty one is only an outline in --control-border (3.7:1), and a half star is
+   solid on its left half, so the three states differ in shape and not just in hue. The outline is the star
+   itself with a smaller ivory star (::after) cut out of its middle. padding:0 because an empty star carries
+   the class "empty", which the empty-state rule (.empty) would otherwise pad. */
 .mx-stars { display: inline-flex; gap: 3px; }
-.mx-stars i { width: .875rem; height: .875rem; background: var(--warm-line-strong); clip-path: polygon(50% 0, 61.8% 35.4%, 100% 35.4%, 69.1% 57.3%, 80.9% 92.7%, 50% 70.8%, 19.1% 92.7%, 30.9% 57.3%, 0 35.4%, 38.2% 35.4%); }
+.mx-stars i { position: relative; width: .875rem; height: .875rem; padding: 0; background: var(--control-border); clip-path: polygon(50% 0, 61.8% 35.4%, 100% 35.4%, 69.1% 57.3%, 80.9% 92.7%, 50% 70.8%, 19.1% 92.7%, 30.9% 57.3%, 0 35.4%, 38.2% 35.4%); }
+.mx-stars i::after { content: ''; position: absolute; inset: 0; background: var(--ivory); clip-path: polygon(50% 24.7%, 56.5% 44.2%, 77.5% 44.2%, 60.5% 56.3%, 67% 75.7%, 50% 63.7%, 33% 75.7%, 39.5% 56.3%, 22.5% 44.2%, 43.5% 44.2%); }
 .mx-stars i.full { background: var(--gold-ink); }
-.mx-stars i.half { background: linear-gradient(90deg, var(--gold-ink) 50%, var(--warm-line-strong) 50%); }
+.mx-stars i.full::after { display: none; }
+.mx-stars i.half { background: linear-gradient(90deg, var(--gold-ink) 50%, var(--control-border) 50%); }
+.mx-stars i.half::after { background: linear-gradient(90deg, transparent 50%, var(--ivory) 50%); }
 @media (max-width: 860px) {
   .mx-inner { grid-template-columns: 1fr; gap: 3.5rem; } /* more than the block's overhang under the photo */
   .mx-photo { width: min(430px, 84%); justify-self: end; }
@@ -940,7 +950,8 @@ table.invoice-lines input { min-width: 0; }
 .sx-foot p { margin: 0; display: flex; align-items: center; gap: var(--space-3); font-size: var(--fs-ui); color: var(--on-dark-muted); }
 .sx-foot p .ico { color: var(--gold); }
 .sx-chips { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; font-size: var(--fs-sm); color: var(--on-dark-subtle); }
-.sx-chip { padding: var(--space-2) var(--space-4); border-radius: var(--radius-pill); border: 1px solid var(--on-dark-line-mid); color: var(--on-dark); white-space: nowrap; }
+/* A chip takes its one-line width when it fits; at 320px with 200% text it wraps inside the column instead of widening the page. */
+.sx-chip { max-width: 100%; padding: var(--space-2) var(--space-4); border-radius: var(--radius-pill); border: 1px solid var(--on-dark-line-mid); color: var(--on-dark); }
 
 .cx { background: var(--ivory); }
 .cx-inner {
@@ -983,7 +994,7 @@ table.invoice-lines input { min-width: 0; }
    "10:30 AM - 10:30 PM". Preferred: the rows take their columns from the timeline grid (subgrid), so the
    time column is as wide as the longest time in that card, whatever the text size. */
 .cx-day { flex: 0 0 auto; min-width: 2.25rem; font-size: var(--fs-sm); font-weight: 600; color: var(--text-muted); }
-.cx-time { flex: 0 0 auto; min-width: 8rem; text-align: right; font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; }
+.cx-time { flex: 0 0 auto; min-width: 8.25rem; text-align: right; font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; }
 @supports (grid-template-columns: subgrid) {
   .cx-timeline { grid-template-columns: max-content minmax(3rem, 1fr) max-content; column-gap: var(--space-3); align-items: center; }
   .cx-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
@@ -1048,6 +1059,9 @@ table.invoice-lines input { min-width: 0; }
     .cx-track, .cx-track-wrap { grid-column: 1 / -1; grid-row: 2; }
     .cx-ticks .cx-day, .cx-ticks .cx-time { display: none; }
     .cx-ticks .cx-track-wrap { grid-row: 1; }
+    /* The tick row now spans the whole card, so the last label ("9 PM") would hang over its edge and be trimmed.
+       Its left offset is set inline from the hour, so !important is needed to right-align it instead. */
+    .cx-ticks .cx-track-wrap span:last-child { left: auto !important; right: 0; }
   }
 }
 
@@ -1157,8 +1171,10 @@ table.invoice-lines input { min-width: 0; }
   .badge, .status-chip, .person, .cx-status, .sx-chip, .sx-today { border: 1px solid CanvasText; }
   .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn { border: 1px solid ButtonText; }
   .mx-stars i { forced-color-adjust: none; background: GrayText; }
+  .mx-stars i::after { background: Canvas; }
   .mx-stars i.full { background: Highlight; }
   .mx-stars i.half { background: linear-gradient(90deg, Highlight 50%, GrayText 50%); }
+  .mx-stars i.half::after { background: linear-gradient(90deg, transparent 50%, Canvas 50%); }
   .modal, .menu-list, .search-results, .suggestions, .combobox [role="listbox"], .toast { border: 1px solid CanvasText; }
   .sidebar.open, body.drawer-open .sidebar { border-right: 1px solid CanvasText; }
   .stars [aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
