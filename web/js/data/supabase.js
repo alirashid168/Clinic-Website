@@ -19,7 +19,8 @@ const SDK_URL = `https://cdn.jsdelivr.net/npm/@supabase/supabase-js@${SDK_VERSIO
 const SDK_TIMEOUT_MS = 8000; // per attempt
 const READ_TIMEOUT_MS = 20000; // any read (GET) from the database or storage
 // Supabase image transformations need a paid plan. Until CONFIG.IMAGE_TRANSFORMS is
-// set to true, thumbnails and gallery images are the original files.
+// set to true, gallery images are the original files, and a photo's thumbnail is the small
+// copy saved with it at upload (photos.thumb_path) or, for older photos, the original.
 const IMAGE_TRANSFORMS = !!CONFIG.IMAGE_TRANSFORMS;
 const SIGNED_URL_TTL = 3600; // seconds
 const PAGE = 1000; // Supabase's default "max rows" per request
@@ -226,6 +227,21 @@ export function summarizeVisits(rows) {
   return { totals: avg(totals), byDay: [...days.values()].map(avg).sort(byDayThenBranch), waitByBranch: [...waits.values()].map(avg).sort((a, b) => b.waited - a.waited) };
 }
 
+/**
+ * Where a photo's small copy is stored: next to the photo in a "thumbs" folder, same base name, always .jpg
+ * ("<patient>/<raw|edited>/<file>.png" -> "<patient>/<raw|edited>/thumbs/<file>.jpg"). The first two folders stay the same,
+ * so the storage policies that decide who may read the photo (patient id, raw or edited) decide the same for its copy.
+ */
+export function thumbPathFor(path) {
+  const slash = path.lastIndexOf('/') + 1;
+  return `${path.slice(0, slash)}thumbs/${path.slice(slash).replace(/\.[^.]*$/, '')}.jpg`;
+}
+/** PostgREST (PGRST204) or Postgres (42703) saying photos has no thumb_path column yet: the audit migration has not been applied. */
+export function isMissingThumbColumn(error) {
+  const msg = String(error?.message || '');
+  return /thumb_path/.test(msg) && (error?.code === 'PGRST204' || error?.code === '42703' || /could not find|does not exist/i.test(msg));
+}
+
 const STOP_WORDS = ['PHOTO MONTH', 'Overrun', 'Dues checkpoint', 'past Month 7'];
 const alertLevel = (text) => (STOP_WORDS.some((w) => text.includes(w)) ? 'stop' : text.startsWith('Remind') || text.startsWith('Target') ? 'info' : 'warning');
 
@@ -340,6 +356,23 @@ export async function createSupabaseAdapter() {
     const rows = check(await store.createSignedUrls(list, expiresIn));
     for (const r of rows || []) if (r?.signedUrl && !r.error) out.set(r.path, r.signedUrl);
     return out;
+  }
+
+  // Set the first time saving a photo row says photos has no thumb_path column (audit migration not applied yet).
+  let photosLackThumbPath = false;
+
+  /**
+   * Stores a photo's small JPEG copy at thumbPathFor(path) and returns that path, or null when it could not be stored
+   * (never throws: the photo itself must not fail over its thumbnail). The file is never overwritten (no UPDATE policy
+   * exists on storage.objects): "already exists" means an earlier attempt of the same upload stored it.
+   */
+  async function storeThumbnail(path, blob) {
+    const thumbPath = thumbPathFor(path);
+    try {
+      const { error } = await sb.storage.from('clinic-photos').upload(thumbPath, blob, { contentType: 'image/jpeg', upsert: false });
+      const duplicate = error && (String(error.statusCode || error.status) === '409' || /already exists|duplicate/i.test(error.message || ''));
+      return !error || duplicate ? thumbPath : null;
+    } catch { return null; }
   }
 
   /**
@@ -604,9 +637,10 @@ export async function createSupabaseAdapter() {
       if (data?.error) throw new Error(data.error);
     },
     /**
-     * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (240px when
-     * IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); documents carry url and url_expires_at. Signed in one batch per bucket.
-     * Re-sign an expired link with signedUrls([storage_path]) (documents: { bucket: 'patient-documents' }).
+     * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (the stored thumbnail
+     * thumb_path when the photo has one, else 240px when IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms);
+     * documents carry url and url_expires_at. Signed in one batch per bucket.
+     * Re-sign an expired link with signedUrls([storage_path]) (a photo's thumbnail: [thumb_path]; documents: { bucket: 'patient-documents' }).
      */
     async getPatient(id) {
       const signed = (rows, opts) => signedUrls(rows.map((r) => r.storage_path), opts).catch(() => new Map());
@@ -616,11 +650,17 @@ export async function createSupabaseAdapter() {
         sb.from('invoices').select('*, items:invoice_items(*)').eq('patient_id', id).order('issue_date', { ascending: false }).then(check),
         sb.from('payments').select('*').eq('patient_id', id).order('received_at', { ascending: false }).then(check),
         sb.from('photos').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).then(check).then(async (rows) => {
-          const [full, thumbs] = await Promise.all([signed(rows), IMAGE_TRANSFORMS ? signed(rows, { width: 240 }) : null]);
+          // Originals and stored thumbnails (thumb_path) are signed together, in ONE createSignedUrls call. A file this role
+          // may not read just gets no link (the photo stays in the list); only links that were signed are ever used.
+          const [urls, resized] = await Promise.all([
+            signedUrls(rows.flatMap((r) => [r.storage_path, r.thumb_path])).catch(() => new Map()),
+            IMAGE_TRANSFORMS ? signed(rows.filter((r) => !r.thumb_path), { width: 240 }) : null,
+          ]);
           const expires = Date.now() + SIGNED_URL_TTL * 1000;
           for (const ph of rows) {
-            ph.url = full.get(ph.storage_path) || null;
-            ph.thumb_url = thumbs?.get(ph.storage_path) || ph.url;
+            ph.url = urls.get(ph.storage_path) || null;
+            // The stored thumbnail, else (image transformations on) a resized original, else the original.
+            ph.thumb_url = urls.get(ph.thumb_path) || resized?.get(ph.storage_path) || ph.url;
             ph.url_expires_at = expires;
           }
           return rows;
@@ -711,7 +751,7 @@ export async function createSupabaseAdapter() {
      * Pass { idempotencyKey } (one crypto.randomUUID() per file, kept across retries): the file then has a fixed
      * storage path, so pressing Save again after a failure neither uploads it twice nor records it twice.
      */
-    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false, idempotencyKey = null }, opts = {}) {
+    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false, thumb = null, idempotencyKey = null }, opts = {}) {
       const key = opts.idempotencyKey || idempotencyKey || null;
       const prior = key ? partial.get('photo:' + key) : null;
       if (prior?.row) return prior.row;
@@ -729,10 +769,26 @@ export async function createSupabaseAdapter() {
           if (existing) { partial.set('photo:' + key, { path, uploaded: true, row: existing }); return existing; }
         }
       }
-      const row = check(await sb.from('photos').insert({
+      // The small copy for the photo grids ({folder}/thumbs/{name}.jpg), stored before the row so the row can name it.
+      // A failed copy never fails the photo: the grids then show the original. While photos.thumb_path does not exist
+      // (the audit migration is not applied) no copy is stored, since nothing could point to it.
+      let thumbPath = prior?.thumbPath || null;
+      if (thumb && !thumbPath && !photosLackThumbPath) {
+        thumbPath = await storeThumbnail(path, thumb);
+        if (key && thumbPath) partial.set('photo:' + key, { path, uploaded: true, thumbPath });
+      }
+      const fields = {
         patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, view_label: viewLabel || null,
         storage_path: path, kind, public_ok: kind === 'edited' && !!publicOk, uploaded_by: await userId(),
-      }).select().single());
+      };
+      const insertRow = (extra) => sb.from('photos').insert({ ...fields, ...extra }).select().single();
+      const withThumb = !!thumbPath && !photosLackThumbPath;
+      let res = await insertRow(withThumb ? { thumb_path: thumbPath } : null);
+      if (withThumb && res.error && isMissingThumbColumn(res.error)) {
+        photosLackThumbPath = true; // remembered until the page is reloaded, so later uploads neither store a copy nor retry
+        res = await insertRow(null);
+      }
+      const row = check(res);
       if (key) partial.set('photo:' + key, { path, uploaded: true, row });
       return row;
     },

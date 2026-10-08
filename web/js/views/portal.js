@@ -2,6 +2,7 @@
 // "see Dr. Ali" message, ratings and the complaint button.
 import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors } from '../ui/dom.js';
 import { state, branchName } from '../state.js';
+import { signThumbs } from '../ui/photos.js';
 
 // Invoice printing and installment tables live with the staff invoice screens;
 // they load only when a patient has a plan or opens an invoice.
@@ -57,28 +58,31 @@ export async function renderPortalPreview(root, patientId) {
 }
 
 /**
- * Small thumbnails for the photo grid. The data layer normally signs them with the record (thumb_url, one batch);
- * if it did not, sign the missing ones here in one batched signedUrls() call. Without signedUrls, the full-size url stays.
+ * Small thumbnails for the photo grid. The data layer normally signs them with the record (thumb_url, one batch: the stored
+ * small copy when the photo has one); if it did not, sign the missing ones here (signThumbs). Without signedUrls, the full-size url stays.
  */
 async function addThumbnails(d, photos) {
   const need = photos.filter((ph) => !ph.thumb_url && ph.storage_path);
   if (!need.length || typeof d.signedUrls !== 'function') return;
   try {
-    const thumbs = await d.signedUrls(need.map((ph) => ph.storage_path), { width: 240 });
-    for (const ph of need) ph.thumb_url = thumbs?.get(ph.storage_path) || null;
+    const thumbs = await signThumbs(d, need, 240);
+    for (const ph of need) ph.thumb_url = thumbs.get(ph.storage_path) || null;
   } catch { /* keep the full-size links that came with the record */ }
 }
 
 /** Signed links expire after an hour: a thumbnail that fails, or a full-size link that has expired, is signed again. */
 function photoImg(d, ph) {
   const canSign = ph.storage_path && typeof d.signedUrls === 'function';
-  let retried = false;
+  // First failure: sign the thumbnail again (it may have expired). Second: show the full-size photo instead, as the staff grid does.
+  let failures = 0;
   const img = h('img', {
     src: ph.thumb_url || ph.url || '', alt: ph.view_label || 'Treatment photo', loading: 'lazy', decoding: 'async',
     onerror: async () => {
-      if (retried || !canSign) return;
-      retried = true;
-      try { const url = (await d.signedUrls([ph.storage_path], { width: 240 })).get(ph.storage_path); if (url) img.src = url; } catch { /* leave the broken image */ }
+      failures += 1;
+      if (failures === 1 && canSign) {
+        try { const url = (await signThumbs(d, [ph], 240)).get(ph.storage_path); if (url && url !== img.src) { img.src = url; return; } } catch { /* fall through to the original */ }
+      }
+      if (failures <= 2 && ph.url && img.src !== ph.url) img.src = ph.url;
     },
   });
   if (!ph.url) return img;

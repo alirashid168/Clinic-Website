@@ -12,7 +12,7 @@ import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '.
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
 import { todayISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
-import { summarizePayments, summarizeVisits } from './supabase.js';
+import { summarizePayments, summarizeVisits, thumbPathFor } from './supabase.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -336,11 +336,12 @@ export function createDemoAdapter() {
     async settings() { return clone(db.settings); },
     async schedule() { return clone(db.schedule); },
     async publicCases({ limit = 60 } = {}) { return clone(db.photos.filter((p) => p.public_ok && p.kind === 'edited').slice(0, limit).map((p) => ({ ...p, full_url: p.url, srcset: null }))); },
-    // Same shape as the live adapter: Map(storage path -> url). Demo files carry their url already.
+    // Same shape as the live adapter: Map(storage path -> url). Demo files carry their url already (a photo's thumb_path: its thumb_url).
     async signedUrls(paths) {
       const out = new Map();
       for (const path of paths || []) {
-        const row = db.photos.find((x) => x.storage_path === path) || db.documents.find((x) => x.storage_path === path);
+        const small = path && db.photos.find((x) => x.thumb_path === path);
+        const row = small ? { url: small.thumb_url } : db.photos.find((x) => x.storage_path === path) || db.documents.find((x) => x.storage_path === path);
         if (row?.url) out.set(path, row.url);
       }
       return out;
@@ -495,14 +496,18 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ photos
-    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false, idempotencyKey = null }, opts = {}) {
+    async uploadPhoto({ patientId, visitId, file, viewLabel, branchId, kind = 'raw', publicOk = false, thumb = null, idempotencyKey = null }, opts = {}) {
       need('photos.upload');
       const key = opts.idempotencyKey || idempotencyKey;
       const prior = key && db.photos.find((x) => x.id === saved.get('photo:' + key));
       if (prior) return clone(prior);
-      const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+      const readUrl = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+      const dataUrl = await readUrl(file);
+      const thumbUrl = thumb ? await readUrl(thumb).catch(() => null) : null; // the small copy, as the live site stores one beside the photo
+      const storagePath = `demo/${uid()}`;
       const ph = { id: uid(), patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, taken_on: todayISO(), kind,
-        view_label: viewLabel || null, url: dataUrl, storage_path: `demo/${uid()}`, public_ok: kind === 'edited' && !!publicOk, created_at: new Date().toISOString() };
+        view_label: viewLabel || null, url: dataUrl, storage_path: storagePath, thumb_path: thumbUrl ? thumbPathFor(storagePath) : null, thumb_url: thumbUrl,
+        public_ok: kind === 'edited' && !!publicOk, created_at: new Date().toISOString() };
       db.photos.push(ph);
       if (key) saved.set('photo:' + key, ph.id);
       if (visitId) { const v = db.visits.find((x) => x.id === visitId); if (v) v.photos_uploaded = true; }

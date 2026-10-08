@@ -1,7 +1,8 @@
 -- =============================================================================
 -- 2026-10-07 audit fixes: report totals in SQL, one-call invoice and
--- installment-plan saves, idempotency keys for retried saves, and a void
--- reason that cannot be blank.
+-- installment-plan saves, idempotency keys for retried saves, a void
+-- reason that cannot be blank, and a place to record each photo's small copy
+-- (photos.thumb_path).
 --
 -- HOW TO APPLY
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
@@ -16,6 +17,10 @@
 --   added up in the browser from paged rows, and saves made in several steps.
 --   Applying this file makes totals exact for any date range and makes invoice
 --   and plan saves all-or-nothing and safe to retry.
+--   The same goes for photos.thumb_path (section 8): until it exists the site saves photos
+--   without a small copy (PostgREST answers PGRST204 / Postgres 42703 for the column) and
+--   the photo grids show the original; once it exists new uploads keep a ~320 px copy beside
+--   the photo and the grids load that instead. Photos uploaded before stay as they are.
 --
 -- SECURITY
 --   Every function except the one rule replaced in section 7 (the existing invoice trigger,
@@ -23,6 +28,10 @@
 --   existing row-level security policies decide what it can read and write,
 --   exactly as for the requests the website already makes. A total only adds up
 --   rows that person could already download. Only signed-in users may call them.
+--   The small copies need no storage policy of their own: they are stored at
+--   <patient_id>/<raw|edited>/thumbs/<file>.jpg, and the policies on clinic-photos look only at
+--   the first two folders (patient id; raw or edited), so a copy is readable by exactly the
+--   people who can read its photo.
 --
 -- RETRIES
 --   A save carries a key made by the browser when the form opened. The same key
@@ -60,6 +69,7 @@
 --   drop function if exists public.save_invoice(uuid, jsonb, jsonb);
 --   drop function if exists public.save_installment_plan(uuid, jsonb, jsonb);
 --   drop table if exists public.idempotency_keys;
+--   alter table public.photos drop column if exists thumb_path;   -- the copies in storage stay; the site stops using them
 -- =============================================================================
 
 begin;
@@ -431,6 +441,18 @@ begin
   end if;
   return new;
 end $$;
+
+-- -----------------------------------------------------------------------------
+-- 8. photos.thumb_path: the website saves a small JPEG copy (about 320 px on the
+--    long edge) beside every photo it uploads, so the photo grids load a few KB
+--    instead of the original's megabytes. This column holds that copy's path in
+--    the clinic-photos bucket. NULL (every photo uploaded before this, and any
+--    whose copy could not be made, e.g. a HEIC file on a desktop browser) means
+--    "show the original", exactly as before.
+-- -----------------------------------------------------------------------------
+alter table public.photos add column if not exists thumb_path text;
+comment on column public.photos.thumb_path is
+  'Path (bucket clinic-photos) of the small JPEG copy of this photo, made by the browser at upload: <patient_id>/<raw|edited>/thumbs/<file>.jpg. NULL = no copy; the original is shown instead.';
 
 -- -----------------------------------------------------------------------------
 -- Only signed-in users may call these (row-level security still applies inside).

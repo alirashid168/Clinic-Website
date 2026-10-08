@@ -1,6 +1,7 @@
 -- The audit migration (20261007002000_audit_fixes.sql): report totals (payments_summary, opd_summary, total_dues),
 -- the one-call invoice and plan saves with their idempotency keys, row-level security inside all of them, and the
--- statements the website falls back to while those functions are not installed, and running the migration a second time.
+-- statements the website falls back to while those functions are not installed, photos.thumb_path and who can read a
+-- thumbnail in storage, and running the migration a second time.
 -- (Voiding needs a reason: 22_void_reason_test.sql.)
 \set ON_ERROR_STOP 1
 \set admin  '''00000000-0000-0000-0000-000000002300'''
@@ -388,6 +389,45 @@ select pg_temp.check(not has_function_privilege('anon', 'public.invoice_before_w
 select pg_temp.check(not has_function_privilege('anon', 'public.save_invoice(uuid, jsonb, jsonb)', 'execute') and has_function_privilege('authenticated', 'public.save_invoice(uuid, jsonb, jsonb)', 'execute'),
   'only signed-in users may call save_invoice');
 select pg_temp.check((select relrowsecurity from pg_class where oid = 'public.idempotency_keys'::regclass), 'idempotency_keys has row-level security on');
+
+-- ================================================================= photos.thumb_path (the small copy of a photo) and who can read it
+select pg_temp.check((select data_type = 'text' and is_nullable = 'YES' from information_schema.columns
+    where table_schema = 'public' and table_name = 'photos' and column_name = 'thumb_path'),
+  'photos.thumb_path exists and is nullable text (photos uploaded before keep NULL and show the original)');
+select pg_temp.check(col_description('public.photos'::regclass, (select attnum from pg_attribute where attrelid = 'public.photos'::regclass and attname = 'thumb_path')) like '%thumbs%',
+  'photos.thumb_path has a comment saying what it holds');
+-- A copy is stored at <patient>/<raw|edited>/thumbs/<file>.jpg. The storage policies read only the first two folders, so it
+-- must be readable by exactly the people who can read its photo, with no new policy.
+insert into storage.objects (bucket_id, name) values
+  ('clinic-photos', :pat1 || '/edited/2001-04-01_Front_aa.jpg'), ('clinic-photos', :pat1 || '/edited/thumbs/2001-04-01_Front_aa.jpg'),
+  ('clinic-photos', :pat1 || '/raw/2001-04-01_Front_bb.jpg'),    ('clinic-photos', :pat1 || '/raw/thumbs/2001-04-01_Front_bb.jpg'),
+  ('clinic-photos', :pat2 || '/edited/2001-04-01_Front_cc.jpg'), ('clinic-photos', :pat2 || '/edited/thumbs/2001-04-01_Front_cc.jpg');
+select pg_temp.act_as(:portal1);
+set role authenticated;
+select pg_temp.check((select count(*) from storage.objects where name like '%2001-04-01%') = 2
+    and (select count(*) from storage.objects where name = (current_setting('test.pat1') || '/edited/thumbs/2001-04-01_Front_aa.jpg')) = 1,
+  'a patient reads their own edited photo and its thumbnail, and nothing else: not their raw ones, not another patient''s');
+reset role;
+select pg_temp.act_as(:fd);
+set role authenticated;
+select pg_temp.check((select count(*) from storage.objects where name like '%/edited/%2001-04-01%') = 4
+    and (select count(*) from storage.objects where name like '%/raw/%2001-04-01%') = 0,
+  'staff who may see patient profiles but not raw photos read every edited photo and thumbnail, and no raw photo or raw thumbnail');
+select pg_temp.expect_error(format($f$insert into storage.objects (bucket_id, name) values ('clinic-photos', %L)$f$, current_setting('test.pat1') || '/edited/thumbs/2001-04-01_Front_dd.jpg'),
+  'row-level security', 'and without photos.upload they cannot store a thumbnail either');
+reset role;
+select pg_temp.act_as(:doc);
+set role authenticated;
+select pg_temp.check((select count(*) from storage.objects where name like '%2001-04-01%') = 6, 'staff with raw-photo access read all six files, raw thumbnails included');
+insert into storage.objects (bucket_id, name) values ('clinic-photos', current_setting('test.pat1') || '/raw/thumbs/2001-04-01_Front_ee.jpg');
+insert into public.photos (patient_id, kind, storage_path, thumb_path)
+  values (:pat1, 'raw', current_setting('test.pat1') || '/raw/2001-04-01_Front_ee.png', current_setting('test.pat1') || '/raw/thumbs/2001-04-01_Front_ee.jpg');
+select pg_temp.check((select thumb_path from public.photos where storage_path like '%2001-04-01_Front_ee.png') like '%/raw/thumbs/2001-04-01_Front_ee.jpg',
+  'a doctor (photos.upload) stores the thumbnail and saves the photo row with its thumb_path');
+insert into public.photos (patient_id, kind, storage_path) values (:pat1, 'raw', current_setting('test.pat1') || '/raw/2001-04-01_Front_ff.jpg');
+select pg_temp.check((select thumb_path is null from public.photos where storage_path like '%2001-04-01_Front_ff.jpg'),
+  'and a photo saved without a copy (an old photo, or a file the browser could not shrink) simply has no thumb_path');
+reset role;
 rollback;
 
 -- ================================================================= running the migration a second time
@@ -440,6 +480,10 @@ begin
     raise exception 'TEST FAILED: after a second run there is not exactly one of each new function';
   end if;
   raise notice 'ok - second run: still one of each of the five functions';
+  if (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'photos' and column_name = 'thumb_path' and data_type = 'text') <> 1 then
+    raise exception 'TEST FAILED: after a second run photos does not have exactly one text column thumb_path';
+  end if;
+  raise notice 'ok - second run: photos.thumb_path is still there, once';
   if (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
         and proname in ('save_invoice', 'save_installment_plan', 'payments_summary', 'opd_summary', 'total_dues') and not prosecdef) <> 5 then
     raise exception 'TEST FAILED: after a second run the five new functions are not all SECURITY INVOKER';

@@ -1,6 +1,7 @@
 // Patients: search list and full patient profile.
 import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, busy, srOnly, localISO, addMonthsISO, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
 import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
+import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt } from './invoice.js';
 
@@ -235,8 +236,8 @@ export async function renderPatient(root, id) {
     } },
   ], { destructive: true });
 
-  // Photos: getPatient already signed every photo with the record (thumb_url, url, url_expires_at), so the
-  // grid shows at once. A signed link expires after an hour: an image that fails to load is signed again once,
+  // Photos: getPatient already signed every photo with the record (thumb_url = the stored small copy when the photo has one,
+  // url, url_expires_at), so the grid shows at once. A signed link expires after an hour: an image that fails to load is signed again once,
   // and a full-size link clicked near its expiry is signed again first (freshLinkOnClick).
   const signedAt = Date.now();
   const photoItems = p.photos.map((ph) => {
@@ -247,8 +248,8 @@ export async function renderPatient(root, id) {
       if (img.dataset.resigned || !d.signedUrls) return;
       img.dataset.resigned = '1';
       try {
-        const [thumb, full] = await Promise.all([d.signedUrls([ph.storage_path], { width: THUMB_WIDTH }), d.signedUrls([ph.storage_path])]);
-        const t = thumb?.get?.(ph.storage_path); const f = full?.get?.(ph.storage_path);
+        const [thumb, full] = await Promise.all([signThumbs(d, [ph], THUMB_WIDTH), d.signedUrls([ph.storage_path])]);
+        const t = thumb.get(ph.storage_path); const f = full?.get?.(ph.storage_path);
         if (f) { ph.url = link.href = f; ph.url_expires_at = Date.now() + SIGNED_FOR_MS; }
         if (t || f) img.src = t || f;
       } catch { /* the broken image stays; reloading the page signs everything again */ }
@@ -259,12 +260,11 @@ export async function renderPatient(root, id) {
   const loadMissingLinks = async () => {
     const missing = photoItems.filter((x) => !x.ph.url && !x.ph.thumb_url && x.ph.storage_path);
     if (!missing.length || !d.signedUrls) return;
-    const paths = missing.map((x) => x.ph.storage_path);
-    const [thumbs, full] = await Promise.all([d.signedUrls(paths, { width: THUMB_WIDTH }).catch(() => null), d.signedUrls(paths).catch(() => null)]);
+    const [thumbs, full] = await Promise.all([signThumbs(d, missing.map((x) => x.ph), THUMB_WIDTH), d.signedUrls(missing.map((x) => x.ph.storage_path)).catch(() => null)]);
     for (const x of missing) {
       const f = full?.get?.(x.ph.storage_path);
       if (f) { x.ph.url = x.link.href = f; x.ph.url_expires_at = Date.now() + SIGNED_FOR_MS; }
-      const src = thumbs?.get?.(x.ph.storage_path) || f;
+      const src = thumbs.get(x.ph.storage_path) || f;
       if (src) x.img.src = src;
     }
   };

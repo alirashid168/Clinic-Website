@@ -2,6 +2,7 @@
 // form, flag buttons, photo upload, braces guidance.
 import { h, mount, modal, field, select, toast, friendlyError, rupees, announce, showFormErrors, clearFieldErrors, localISO } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId } from '../../state.js';
+import { makeThumbnail } from '../../ui/photos.js';
 
 /**
  * The notice for a list the server cut off (the data layer sets rows.truncated and rows.cap), so a
@@ -280,7 +281,10 @@ export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
           if (done.has(file)) continue;
           if (!keys.has(file)) keys.set(file, newKey());
           const upload = isEdited && view.value !== 'X-ray / OPG' ? await shrinkPhoto(file) : file;
-          await state.data.uploadPhoto({ patientId: patient.id, visitId, branchId, file: upload, viewLabel: list.length > 1 ? `${view.value} ${i + 1}` : view.value,
+          // A small copy (320 px) is saved with the photo for the photo grids; null (the browser cannot read this file, e.g. HEIC on a
+          // desktop) just means no copy: the photo is saved all the same.
+          const thumb = await makeThumbnail(upload);
+          await state.data.uploadPhoto({ patientId: patient.id, visitId, branchId, file: upload, thumb, viewLabel: list.length > 1 ? `${view.value} ${i + 1}` : view.value,
             kind: isEdited ? 'edited' : 'raw', publicOk: isEdited && publicOk.checked && patient.photo_consent_public, idempotencyKey: keys.get(file) });
           done.add(file);
         }
