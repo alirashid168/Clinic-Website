@@ -223,7 +223,7 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
         h('section', { class: 'panel' },
           h('h2', {}, 'Invoices and payments'),
           issued.length ? h('table', { class: 'list' },
-            h('thead', {}, h('tr', {}, h('th', {}, 'Invoice'), h('th', {}, 'Date'), h('th', { class: 'right' }, 'Amount'), h('th', {}))),
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Invoice'), h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col', class: 'right' }, 'Amount'), h('th', { scope: 'col' }, srOnly('Actions')))),
             h('tbody', {}, issued.map((i) => h('tr', {},
               h('td', {}, i.invoice_no), h('td', {}, shortDate(i.issue_date)), h('td', { class: 'right' }, rupees(i.total)),
               h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => viewInvoice(i) }, 'View', srOnly(` invoice ${i.invoice_no}`))))))) : empty('No invoices yet.'),

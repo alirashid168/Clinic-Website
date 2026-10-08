@@ -1,4 +1,3 @@
-// GENERATED from src/lib by scripts/build-lib.sh. Edit the .ts file, not this one.
 // Reading the Aaj ki List Google Sheet (downloaded as one .xlsx with a tab per
 // branch) and turning every day's rows into visits for the website's
 // import_aaj_sheet() function. Pure functions, no DOM, so the rules can be

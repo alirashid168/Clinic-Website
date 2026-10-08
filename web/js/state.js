@@ -3,8 +3,9 @@
 //
 // Loading starts as soon as this file runs. `state.ready` resolves when it is
 // done and never rejects: if the data layer or the public lists fail to load,
-// `state.dataError` holds the error and the lists stay empty, so the public
-// pages can still show their own wording and a way to contact the clinic.
+// or the whole start-up takes longer than START_DEADLINE_MS, `state.dataError`
+// holds the error and the lists stay empty, so the public pages can still show
+// their own wording and a way to contact the clinic.
 import { getData } from './data/index.js';
 
 export const state = {
@@ -15,11 +16,28 @@ export const state = {
   ref: { branches: [], cities: [], clinicians: [], treatments: [], categories: [], settings: {} },
 };
 
+// Each read gives up by itself (20 s in the data layer), but loading the library and then the
+// lists one after the other could still add up to a minute of "Loading…". This is the limit for
+// all of it together.
+const START_DEADLINE_MS = 20000;
+
 let readyPromise;
+let timedOut = false;
 
 /** Starts loading (once) and returns state.ready. */
 export function init() {
-  if (!readyPromise) readyPromise = start();
+  if (!readyPromise) {
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        state.dataError = new Error('TIMEOUT: the clinic system took too long to answer');
+        console.error(state.dataError);
+        resolve();
+      }, START_DEADLINE_MS);
+    });
+    readyPromise = Promise.race([start(), deadline]).finally(() => clearTimeout(timer));
+  }
   return readyPromise;
 }
 
@@ -28,9 +46,11 @@ async function start() {
     state.data = await getData();
     // Who is logged in and the public lists load side by side.
     const [session, ref] = await Promise.allSettled([state.data.getSession(), loadPublicRef()]);
+    if (timedOut) return; // the pages have already been told the system is not available
     state.session = session.status === 'fulfilled' ? session.value : null;
     if (ref.status === 'rejected') throw ref.reason;
   } catch (e) {
+    if (timedOut) return;
     console.error(e);
     state.dataError = e instanceof Error ? e : new Error(String(e));
   }

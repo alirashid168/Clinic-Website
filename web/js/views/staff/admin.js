@@ -27,7 +27,9 @@ export async function renderAdmin(root, params) {
     isAdmin() && ['duplicates', 'Duplicate patients'],
     can('audit.view') && ['audit', 'Audit log'],
   ].filter(Boolean);
-  let tab = params.get('tab') || available[0]?.[0];
+  // An old link or a tab this person may not use falls back to the first tab, the same one tabs() selects.
+  const want = params.get('tab');
+  let tab = available.some(([k]) => k === want) ? want : available[0]?.[0];
   const strip = tabbed('Admin sections', available, tab, (k) => { tab = k; history.replaceState(null, '', `#/staff/admin?tab=${k}`); draw(); });
   const body = strip.panel;
   let drawing = 0;
@@ -124,7 +126,7 @@ async function staff(root, redraw) {
         try {
           await d.updateStaffLogin(s.id, { email: nextEmail, password: password || null });
           const parts = [nextEmail !== s.email ? `Login is now ${nextEmail}` : null, password ? `Password: ${password}` : null].filter(Boolean);
-          toast(`Saved. ${parts.join(' · ')}`, 'ok', password ? 15000 : 5000); redraw();
+          toast(`Saved. ${parts.join(' · ')}`, 'ok', password ? 15000 : 5000); await redraw();
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
@@ -162,7 +164,7 @@ async function staff(root, redraw) {
         if (errors.length) { showFormErrors(body, errors); return false; }
         try {
           await d.createStaff({ full_name: name.value.trim(), email: login, role: role.value, branch_ids, restrict_to_branches: branch_ids.length > 0, home_branch_id: branch_ids[0] || null, clinician_id: doctor.value || null, ...(password ? { password } : {}) });
-          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000); redraw();
+          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000); await redraw();
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
@@ -189,7 +191,7 @@ async function staff(root, redraw) {
   const switchOff = (s) => modal(`Switch off ${s.full_name}'s account?`,
     h('p', {}, `${s.full_name} will be logged out and lose access to everything immediately. You can switch the account back on later.`), [
       { label: 'Cancel' },
-      { label: `Switch off ${s.full_name}`, danger: true, onClick: async () => { try { await d.deactivateStaff(s.id); toast('Account switched off.', 'ok'); redraw(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
+      { label: `Switch off ${s.full_name}`, danger: true, onClick: async () => { try { await d.deactivateStaff(s.id); toast('Account switched off.', 'ok'); await redraw(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
     ], { destructive: true });
 
   mount(root, h('section', { class: 'panel' },
@@ -341,7 +343,7 @@ async function calendar(root, redraw) {
   const remove = (r) => h('td', { class: 'right' }, h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Remove ${describe(r)}`, onclick: () => modal('Remove from the calendar?',
     h('p', {}, `${describe(r)}. It disappears from the homepage straight away.`), [
       { label: 'Cancel' },
-      { label: 'Remove', danger: true, onClick: async () => { try { await d.deleteScheduleRow(r.id); toast('Removed from the calendar.', 'ok'); redraw(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
+      { label: 'Remove', danger: true, onClick: async () => { try { await d.deleteScheduleRow(r.id); toast('Removed from the calendar.', 'ok'); await redraw(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
     ], { destructive: true }) }, 'Remove'));
   const timeErrors = (from, to) => (!from.value ? [{ input: from, message: 'Choose a start time.' }] : to.value <= from.value ? [{ input: to, message: 'The end time must be after the start time.' }] : []);
   const weeklyForm = h('section', { class: 'panel' }, h('h2', {}, 'Add a weekly time (normal Karachi week)'),

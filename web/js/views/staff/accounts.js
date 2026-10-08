@@ -2,6 +2,7 @@
 // daily cash closing. The reports page lives in reports.js.
 import { h, mount, rupees, shortDate, toast, friendlyError, field, select, empty, todayISO, downloadCSV, modal, busy, tabs as tabStrip, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
 import { state, can, branchName, cityName, myBranches, defaultBranchId } from '../../state.js';
+import { capNote } from './common.js';
 
 /**
  * A tab strip (dom.js tabs()) and the tabpanel it controls, from [[key, label], ...].
@@ -12,11 +13,6 @@ export function tabbed(label, items, current, onChange) {
   return tabStrip({ label, items: items.map(([id, text]) => ({ id, label: text })), current, onChange });
 }
 
-/** A list the server cut off says so, so a partial total never reads as complete. */
-const capNote = (rows, what) => (rows?.truncated
-  ? h('div', { class: 'alert alert-warning', role: 'status' }, h('strong', {}, 'Incomplete: '), `showing the first ${rows.cap ?? rows.length} ${what}; totals may be incomplete.`)
-  : null);
-
 export async function renderAccounts(root, params) {
   const available = [
     can('finance.view') && ['pnl', 'Branch income vs expenses'],
@@ -24,7 +20,9 @@ export async function renderAccounts(root, params) {
     can('finance.view') && ['reports', 'Reports →'],
     (can('cash.close') || can('cash.verify')) && ['cash', 'Cash closing'],
   ].filter(Boolean);
-  let tab = params.get('tab') || available[0]?.[0];
+  // An old link or a tab this person may not use falls back to the first tab, the same one tabs() selects.
+  const want = params.get('tab');
+  let tab = available.some(([k]) => k === want) ? want : available[0]?.[0];
   const strip = tabbed('Accounts sections', available, tab, (k) => { tab = k; history.replaceState(null, '', `#/staff/accounts?tab=${k}`); draw(); });
   const body = strip.panel;
   async function draw() {

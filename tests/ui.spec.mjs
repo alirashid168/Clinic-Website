@@ -25,10 +25,18 @@ async function newPage(viewport = { width: 1366, height: 860 }) {
   page.setDefaultTimeout(15000);
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.(googleapis|gstatic)|ERR_|Failed to load resource/.test(m.text())) errors.push(`console: ${m.text()}`); });
+  // A refused or reset load from the site's own host would otherwise show up only as a 15 s timeout.
+  page.on('requestfailed', (r) => {
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(r.url()) && !/ERR_ABORTED/.test(r.failure()?.errorText || '')) errors.push(`requestfailed: ${r.url()} ${r.failure()?.errorText}`);
+  });
   return page;
 }
 async function step(name, fn) {
-  try { await fn(); passed++; console.log('ok -', name); } catch (e) { console.log('FAIL -', name, '\n   ', e.message.split('\n')[0]); process.exitCode = 1; }
+  try { await fn(); passed++; console.log('ok -', name); } catch (e) {
+    console.log('FAIL -', name, '\n   ', e.message.split('\n')[0]); process.exitCode = 1;
+    // Close any dialog the failed step left open, so it cannot block the next step.
+    for (const pg of browser.contexts().flatMap((c) => c.pages())) await pg.keyboard.press('Escape').catch(() => {});
+  }
 }
 const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: `${SHOTS}/${name}.png`, fullPage: false }); };
 async function loginAs(page, label) {
@@ -107,7 +115,7 @@ await step('top bar: patient search by name, Mr# and phone from any screen', asy
   await page.waitForSelector('table.sheet tbody tr');
 });
 await step('auto-save: editing treatment details shows saved state', async () => {
-  const input = page.locator('table.sheet tbody tr:has-text("Komal Test") input[aria-label="Treatment details"]');
+  const input = page.locator('table.sheet tbody tr:has-text("Komal Test") input[aria-label^="Treatment details"]');
   await input.fill('U L 018 PC refresh');
   await page.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
 });
@@ -138,10 +146,10 @@ await step('a Group 3 doctor is refused on a Group 1/2 month', async () => {
   const n = await rows.count();
   let tried = false;
   for (let i = 0; i < n; i++) {
-    const hint = await rows.nth(i).locator('.people .muted').textContent().catch(() => '');
-    if (hint && hint.startsWith('G1/2') || hint === 'G1 · check G1') {
+    const hint = await rows.nth(i).locator('.people .field-hint [aria-hidden="true"]').textContent({ timeout: 1000 }).catch(() => '');
+    if (hint.startsWith('G1/2') || hint === 'G1 · check G1') {
       await rows.nth(i).locator('.add-person').click();
-      await p2.click('.modal button:has-text("Dr. Haniya Siddiqui")');
+      await p2.click('.modal button:has-text("Dr. Nida (sample)")');
       await p2.waitForSelector('.toast-error');
       tried = true;
       await p2.keyboard.press('Escape');
@@ -153,7 +161,7 @@ await step('a Group 3 doctor is refused on a Group 1/2 month', async () => {
 await step('photo month cannot be completed without photos', async () => {
   const row = p2.locator('table.sheet tbody tr:has(.badge-photo)').first();
   if (await row.count()) {
-    await row.locator('select[aria-label="Status"]').selectOption('completed');
+    await row.locator('select[aria-label^="Status"]').selectOption('completed');
     await p2.waitForSelector('.toast-error');
   }
 });
@@ -165,8 +173,8 @@ await step('accountant: P&L, expense entry and cash verification', async () => {
   await p3.goto(BASE + '#/staff/accounts');
   await p3.waitForSelector('.tab');
   await p3.getByRole('tab', { name: 'Expenses', exact: true }).click();
-  await p3.locator('label:has-text("Category") select').selectOption({ label: 'Rent' });
-  await p3.fill('label:has-text("Amount") input', '120000');
+  await p3.getByLabel('Category').selectOption({ label: 'Rent' });
+  await p3.getByLabel('Amount').fill('120000');
   await p3.locator('input[aria-label="Receipt photo"]').setInputFiles({ name: 'rent-receipt.png', mimeType: 'image/png', buffer: Buffer.from('89504e470d0a1a0a', 'hex') });
   await p3.click('button:has-text("Save expense")');
   await p3.waitForSelector('.toast:has-text("Expense")');
@@ -253,10 +261,10 @@ await step('Dr. Ali creates a staff login with a password, then changes its emai
   assert.match(pw, /^[A-Z][a-z]{4}-\d{4}$/);
   await m.getByRole('button', { name: 'Create account' }).click();
   await p7.waitForSelector('td:text("test.reception@dralirashid.com")');
-  await p7.locator('tr', { hasText: 'test.reception@dralirashid.com' }).getByRole('button', { name: 'Login details' }).click();
+  await p7.locator('tr', { hasText: 'test.reception@dralirashid.com' }).getByRole('button', { name: /^Login and password/ }).click();
   const lm = p7.locator('.modal');
   await lm.locator('input[type=email]').fill('dha.reception@dralirashid.com');
-  await lm.getByText('Also give a new password').click();
+  await lm.getByLabel(/Set a new password/).check();
   await lm.getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('td:text("dha.reception@dralirashid.com")');
   assert.equal(await p7.locator('td:text("test.reception@dralirashid.com")').count(), 0);
@@ -294,8 +302,8 @@ await step('Dr. Ali imports an Aaj ki List tab: branch and date chosen, visits w
   await p7.waitForSelector('h2:text("4. Aaj ki List history")');
   const csv = [
     "Tt Mr #,Tt Patient Name,Monthly,Tt Treatment,Token No,Waiting,Group,Doctor's Name,Tt Treatment Details,P.P,Healthwire,Tt Contact No,Reminder Status",
-    '9811,Areeba Siddiqui,4,Monthly,3,Completed,,"Dr. Komal Rubab, Hira Anis",U L 016 Pc refresh,,Done,,',
-    ',Hamza Qureshi,8,Monthly,4,Completed,Group 3,Dr Hameeda,U L 018,,,,Called',
+    '9811,Areeba Siddiqui,4,Monthly,3,Completed,,"Dr. Hina (sample), Assistant Uzma (sample)",U L 016 Pc refresh,,Done,,',
+    ',Hamza Qureshi,8,Monthly,4,Completed,Group 3,Dr Nida,U L 018,,,,Called',
     ',Nobody Here At All,,Checkup,5,Completed,,Dr. Nobody Listed,,,,,',
     ''].join('\n');
   const aaj = p7.locator('section.panel:has(h2:text("4. Aaj ki List history")) input[type=file]');
@@ -327,8 +335,8 @@ await step('Dr. Ali adds a treatment on the Clinic setup page and it reaches the
   assert.ok((await p7.locator('h2:text("Branches")').count()) && (await p7.locator('h2:text("Doctors and assistants")').count()));
   await p7.locator('section', { hasText: 'Treatments' }).getByRole('button', { name: 'New treatment' }).click();
   const m = p7.locator('.modal');
-  await m.locator('label:has-text("Name") input').fill('Night guard');
-  await m.locator('label:has-text("Default price") input').fill('15000');
+  await m.getByLabel('Name').fill('Night guard');
+  await m.getByLabel('Default price').fill('15000');
   await m.getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('.toast:has-text("Saved")');
   await p7.waitForSelector('td:text("Night guard")');
@@ -374,18 +382,18 @@ await step('installment plan: set up on the patient page, overdue shows for the 
   await p7.waitForSelector('h3:text("Installment plan")');
   await p7.getByRole('button', { name: /Set up a plan|New plan/ }).click();
   const m = p7.locator('.modal');
-  await m.locator('label:has-text("Total to pay") input').fill('60000');
-  await m.locator('label:has-text("Number of installments") input').fill('3');
+  await m.getByLabel('Total to pay').fill('60000');
+  await m.getByLabel('Number of installments').fill('3');
   const past = new Date(); past.setMonth(past.getMonth() - 2);
-  await m.locator('label:has-text("First installment due") input').fill(past.toISOString().slice(0, 10));
-  await m.locator('label:has-text("First installment due") input').dispatchEvent('change');
-  await m.locator('label:has-text("Count payments from") input').fill(past.toISOString().slice(0, 10));
+  await m.getByLabel('First installment due').fill(past.toISOString().slice(0, 10));
+  await m.getByLabel('First installment due').dispatchEvent('change');
+  await m.getByLabel('Count payments from').fill(past.toISOString().slice(0, 10));
   await m.getByRole('button', { name: 'Save plan' }).click();
   await p7.waitForSelector('.toast:has-text("Installment plan saved")');
   await p7.waitForSelector('.badge:has-text("Overdue")');
   // Take a payment against the oldest unpaid invoice: the form offers the invoice list.
   await p7.getByRole('button', { name: 'Take payment' }).click();
-  await p7.waitForSelector('.modal label:has-text("For invoice") select');
+  await p7.locator('.modal').getByLabel('For invoice').waitFor();
   await p7.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
   await p7.goto(BASE + '#/staff/coordinator?tab=reminders');
   await p7.waitForSelector('h2:text("Installments due")');
@@ -399,7 +407,7 @@ await step('braces off → retainer case with a next check date', async () => {
   await p7.click('table.list tbody tr:has(.badge:has-text("Braces")) a');
   await p7.waitForSelector('h2:has-text("Braces")');
   await p7.getByRole('button', { name: 'Edit case' }).click();
-  await p7.locator('.modal label:has-text("Case status") select').selectOption('debonded');
+  await p7.locator('.modal').getByLabel('Case status').selectOption('debonded');
   await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('.modal:has-text("start the retainer case")');
   await p7.locator('.modal').getByRole('button', { name: 'Start retainer case' }).click();
@@ -407,7 +415,7 @@ await step('braces off → retainer case with a next check date', async () => {
   await p7.waitForSelector('h2:text("Retainers")');
   await p7.goto(BASE + '#/staff/coordinator?tab=retainers');
   await p7.waitForSelector('th:text("Next check")');
-  assert.ok(await p7.locator('input[aria-label="Next check"]').count());
+  assert.ok(await p7.locator('input[aria-label^="Next check"]').count());
 });
 
 await step('medical history is saved and shown on the patient page', async () => {
@@ -417,7 +425,7 @@ await step('medical history is saved and shown on the patient page', async () =>
   await p7.waitForSelector('h2:has-text("Money")');
   await p7.getByRole('button', { name: 'Edit', exact: true }).click();
   await p7.locator('.modal label:has-text("Diabetes") input').check();
-  await p7.locator('.modal label:has-text("Allergies") input').fill('penicillin');
+  await p7.locator('.modal').getByLabel('Allergies').fill('penicillin');
   await p7.locator('.modal label:has-text("Treatment consent form signed") input').check();
   await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('.toast:has-text("Saved")');
@@ -444,7 +452,7 @@ await step('stock: receive and use items, low-stock warning', async () => {
   assert.ok(await p7.locator('.reorder-list h2:has-text("Reorder list")').count(), 'reorder list for the supplier');
   assert.ok(await p7.locator('.reorder-list button:has-text("Download for the supplier")').count());
   await p7.locator('.reorder-list ~ section tr', { hasText: '014 NiTi wire' }).getByRole('button', { name: '+ Received' }).click();
-  await p7.locator('.modal label:has-text("Quantity") input').fill('20');
+  await p7.locator('.modal').getByLabel('Quantity').fill('20');
   await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
   await p7.waitForSelector('.toast:has-text("Stock updated")');
   await p7.waitForSelector('tr:has-text("014 NiTi wire") td:has-text("23 pcs")');
@@ -471,9 +479,9 @@ await step('duplicate patients: a second record with the same phone is found and
   await p7.goto(BASE + '#/staff/patients');
   await p7.getByRole('button', { name: 'New patient' }).click();
   const m = p7.locator('.modal');
-  await m.locator('label:has-text("Full name") input').fill('Duplicate Test Person');
-  await m.locator('label:has-text("Phone number") input').fill('03010734521');
-  await m.locator('label:has-text("Phone number") input').press('Tab');
+  await m.getByLabel('Full name').fill('Duplicate Test Person');
+  await m.getByLabel('Phone number').fill('03010734521');
+  await m.getByLabel('Phone number').press('Tab');
   await p7.waitForSelector('.modal .alert-warning:has-text("Possible existing patient")');
   await m.getByRole('button', { name: 'Create patient' }).click();
   await p7.waitForSelector('.toast:has-text("registered as Mr#")');
@@ -482,6 +490,7 @@ await step('duplicate patients: a second record with the same phone is found and
   const group = p7.locator('section.panel', { hasText: '03010734521' });
   assert.ok(await group.locator('td:has-text("Duplicate Test Person")').count());
   await group.getByRole('button', { name: 'Merge into the ticked one' }).click();
+  await p7.locator('.modal').getByLabel('I have compared these records').check();
   await p7.locator('.modal').getByRole('button', { name: /^Merge 1 into Mr#/ }).click();
   await p7.waitForSelector('.toast:has-text("Merged:")');
   assert.equal(await p7.locator('h2:has-text("03010734521")').count(), 0);
@@ -519,7 +528,7 @@ await step('sheet filters (doctor, dues, find) and quick-tap treatment details',
   await p7.locator('.modal button:has-text("018")').click();
   await p7.locator('.modal button:has-text("PC")').first().click();
   await p7.locator('.modal').getByRole('button', { name: 'Done' }).click();
-  const v = await p7.locator('table.sheet tbody tr').first().locator('input[aria-label="Treatment details"]').inputValue();
+  const v = await p7.locator('table.sheet tbody tr').first().locator('input[aria-label^="Treatment details"]').inputValue();
   assert.match(v, /018 PC$/);
 });
 
@@ -536,21 +545,21 @@ await step('payment receipt opens from the patient record; WhatsApp link next to
   await p7.locator('.modal .modal-actions').getByRole('button', { name: 'Close' }).click();
 });
 
-await step('complaint linked to a doctor shows on that doctor\'s own dashboard with the 60/40 share', async () => {
+await step('complaint linked to a doctor shows on that doctor\'s own dashboard with their share', async () => {
   await p7.goto(BASE + '#/staff/complaints');
   await p7.waitForSelector('table.list tbody tr');
   await p7.locator('table.list tbody tr').first().locator('button.link-btn').click();
   await p7.waitForSelector('.modal select[aria-label="About which doctor"]');
-  await p7.locator('.modal select[aria-label="About which doctor"]').selectOption({ label: 'Dr. Komal Rubab' });
+  await p7.locator('.modal select[aria-label="About which doctor"]').selectOption({ label: 'Dr. Hina (sample)' });
   await p7.waitForSelector('.toast:has-text("Saved")');
   await p7.keyboard.press('Escape');
   const pd = await newPage();
-  await loginAs(pd, 'Dr. Samrah Khan');
+  await loginAs(pd, 'Dr. Bushra');
   await pd.goto(BASE + '#/staff/log');
   await pd.waitForSelector('.stat:has-text("Own patients (brought in)")');
   const text = await pd.locator('main').innerText();
   assert.match(text, /Own patients \(brought in\)/);
-  assert.match(text, /Your share \(40% of own patients paid\)/);
+  assert.match(text, /Your share \(30% of own patients paid\)/);
   assert.match(text, /Complaints about your work/);
   await shot(pd, '13-doctor-dashboard');
   await pd.close();

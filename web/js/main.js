@@ -57,7 +57,8 @@ function focusHeading(view, el = view.querySelector('h1')) {
 }
 
 // Public views mount their static part before their first await, so the
-// heading usually exists at once; otherwise it is focused when the render ends.
+// heading usually exists at once; otherwise it is focused when the render ends
+// (and a view that ended up with no h1 at all gets its main region focused instead).
 async function show(gen, view, first, render, section) {
   const pending = render();
   if (!first && !section) focusHeading(view);
@@ -70,7 +71,7 @@ async function show(gen, view, first, render, section) {
       focusHeading(view, target.querySelector('h2, h3') || target);
     }
   } else if (!first) {
-    focusHeading(view);
+    focusHeading(view, view.querySelector('h1') || view.querySelector('main'));
   }
 }
 
@@ -149,7 +150,10 @@ async function route() {
       if ((signingOut ? null : state.session)?.kind !== 'staff') { returnTo = { hash: location.hash }; return go('#/login/staff'); }
       const { renderStaff } = await import('./views/staff/shell.js');
       if (!current()) return;
-      return await show(gen, view, first, () => renderStaff(view, parts.slice(1).join('/') || 'today', params, signOut));
+      await show(gen, view, first, () => renderStaff(view, parts.slice(1).join('/') || 'today', params, signOut));
+      // The staff lists are loaded now, including the idle limit: count down from the new limit straight away.
+      if (current() && !warning && idleApplies()) scheduleIdle();
+      return;
     }
 
     setMeta(HOME_TITLE);
@@ -233,7 +237,8 @@ function waitingMessage(left) {
 
 // { remote: true }: the login already ended in another tab, so there is nothing to send or to end here.
 // { local: true }: end only this computer's login (the data layer keeps other computers on a shared login signed in).
-async function signOut({ remote = false, local = false } = {}) {
+// { notice }: a message to show after logging out, along with the one about waiting Aaj ki List edits.
+async function signOut({ remote = false, local = false, notice = '' } = {}) {
   if (signingOut) return;
   signingOut = true;
   stopIdle();
@@ -251,16 +256,40 @@ async function signOut({ remote = false, local = false } = {}) {
   } catch (e) {
     console.error(e);
   }
+  // The data layer answers false when the server never confirmed (hung or offline) and only this computer's
+  // stored login was removed. (An adapter that answers nothing is taken as confirmed.)
+  let confirmed = true;
   if (!remote) {
-    try { await state.data?.signOut(local ? { scope: 'local' } : undefined); } catch (e) { console.error(e); }
+    try { confirmed = (await state.data?.signOut(local ? { scope: 'local' } : undefined)) !== false; } catch (e) { console.error(e); confirmed = false; }
   }
   state.session = null;
-  signingOut = false;
   clearMessages(); // anything that arrived while the edits were being sent
+  const notices = [{ message: waitingMessage(left), ms: 12000 }, { message: notice, ms: 10000 }].filter((n) => n.message);
+  // Offline there is nothing hung to clear, and a reload would only show the browser's "no internet" page.
+  if (!confirmed && navigator.onLine !== false) return reloadAfterLogout(notices); // signingOut stays true: nothing else runs in this page
+  signingOut = false;
   if (location.hash.replace(/^#\/?/, '')) location.hash = '#/';
   else route();
-  const waiting = waitingMessage(left);
-  if (waiting) toast(waiting, 'info', 12000);
+  for (const n of notices) toast(n.message, 'info', n.ms);
+}
+
+// A logout the server never confirmed (it hung) leaves the old auth client in memory: a refresh request that
+// was already on its way could still save the login again, and the hung logout request could hold its lock
+// against the next sign-in. A full page load drops all of that. The messages for the person, and where an
+// idle logout should take them back to, wait in sessionStorage (this tab only) and are picked up on the new page.
+const AFTER_RELOAD_KEY = 'after-logout';
+
+function reloadAfterLogout(notices) {
+  try { sessionStorage.setItem(AFTER_RELOAD_KEY, JSON.stringify({ notices, returnTo })); } catch { /* storage blocked: the messages are lost, the logout still stands */ }
+  location.replace('/');
+}
+
+function showMessagesFromBeforeReload() {
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(AFTER_RELOAD_KEY) || 'null'); sessionStorage.removeItem(AFTER_RELOAD_KEY); } catch { return; }
+  const back = saved?.returnTo; // only an idle logout's, which belongs to one person (staffId)
+  if (typeof back?.hash === 'string' && back.hash.startsWith('#/staff') && back.staffId) returnTo = { hash: back.hash, staffId: back.staffId };
+  for (const n of Array.isArray(saved?.notices) ? saved.notices : []) if (typeof n?.message === 'string') toast(n.message, 'info', Number(n.ms) || 10000);
 }
 
 // ---------------------------------------------------------------- idle logout
@@ -363,8 +392,7 @@ async function idleSignOut() {
   const minutes = Math.max(1, Math.round(idleLimitMs() / 60000));
   if (location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId: state.session?.staff?.id };
   // Only this computer's login ends: the same shared login may be in use on another computer.
-  await signOut({ local: true });
-  toast(`You were logged out because there was no activity for ${minutes} minute${minutes === 1 ? '' : 's'}.`, 'info', 10000);
+  await signOut({ local: true, notice: `You were logged out because there was no activity for ${minutes} minute${minutes === 1 ? '' : 's'}.` });
 }
 
 // The login ended in another tab (logged out there, or the session expired): leave the same way
@@ -372,8 +400,7 @@ async function idleSignOut() {
 async function endedElsewhere() {
   const staffId = state.session?.staff?.id;
   if (staffId && location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId };
-  await signOut({ remote: true });
-  toast('You were logged out. Your login ended in another tab or window, or it expired. Please log in again.', 'info', 10000);
+  await signOut({ remote: true, notice: 'You were logged out. Your login ended in another tab or window, or it expired. Please log in again.' });
 }
 
 // 'app:activity' is sent by long jobs (an import running for an hour) so they are not cut off mid-way.
@@ -391,6 +418,16 @@ document.getElementById('skip-link')?.addEventListener('click', (e) => {
   target.focus();
 });
 
+// Safety net: a failure no handler caught (an inline save without its own try/catch) still tells the
+// person, instead of a button that seems to do nothing. Visitors and patients never see database wording.
+window.addEventListener('unhandledrejection', (e) => {
+  e.preventDefault(); // logged below instead of by the browser
+  console.error(e.reason);
+  if (e.reason?.name === 'AbortError') return; // a request that was cancelled on purpose
+  toast(friendlyError(e.reason, { audience: state.session?.kind === 'staff' ? 'staff' : 'public' }), 'error');
+});
+
+showMessagesFromBeforeReload();
 window.addEventListener('hashchange', route);
 route();
 

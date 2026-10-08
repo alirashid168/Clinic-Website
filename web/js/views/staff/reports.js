@@ -61,7 +61,7 @@ const sumBy = (rows, keys, fields) => {
 export async function renderReports(root, params) {
   const d = state.data;
   const groups = GROUPS.filter((g) => g[2]());
-  if (!groups.length) { mount(root, empty('No reports are available for your account.')); return; }
+  if (!groups.length) { mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Reports')), empty('No reports are available for your account.')); return; }
   let group = groups.some((g) => g[0] === params.get('group')) ? params.get('group') : groups[0][0];
   let tab = (TABS[group].find((t) => t[0] === params.get('tab')) || TABS[group][0])[0];
   const today = todayISO();

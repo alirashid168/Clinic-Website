@@ -67,9 +67,19 @@ export async function renderPatients(root, params) {
 
 export async function renderPatient(root, id) {
   const d = state.data;
-  const reload = () => renderPatient(root, id);
+  // Dialogs wait for this before they close, so focus lands on the redrawn page. It never rejects: the save has
+  // already happened, and a failed redraw must not turn it into an error that leaves the dialog open to be saved twice.
+  const reload = async () => {
+    try { await renderPatient(root, id); } catch (err) { console.error(err); toast('Saved, but this page could not refresh itself. Reload the page to see the latest.', 'error'); }
+  };
   let p;
-  try { p = await d.getPatient(id); } catch (e) { mount(root, empty(friendlyError(e))); return; }
+  try { p = await d.getPatient(id); } catch (e) {
+    // Every page has one h1, the error state too. PGRST116 is "no row for this id".
+    const missing = e?.code === 'PGRST116' || /not found/i.test(e?.message || '');
+    mount(root, h('div', { class: 'page-head' }, h('h1', {}, missing ? 'Patient not found' : 'Patient record')),
+      empty(missing ? 'This patient record could not be found. The link may be wrong, or the record may have been removed.' : friendlyError(e), h('a', { class: 'btn', href: '#/staff/patients' }, '← Patients')));
+    return;
+  }
   const g = p.braces_case ? await d.bracesGuidance(id).catch(() => null) : null;
   const bc = p.braces_case;
   const balances = Object.fromEntries(invoiceBalances(p.invoices, p.payments).map((i) => [i.id, i]));
@@ -91,16 +101,16 @@ export async function renderPatient(root, id) {
       h('div', { class: 'form-grid', style: { marginTop: '8px' } }, field('Case status', off), offWrap)), [
       { label: 'Cancel' },
       { label: 'Save', primary: true, onClick: async () => {
+        const changes = { extraction_plan: plan.value, extractions_done: done.checked, treatment_plan_by_dr_ali: aliPlan.value || null, kit_name: kit.value || null,
+          total_fee: fee.value ? Number(fee.value) : null,
+          extraction_decided_at: plan.value !== 'undecided' && bc.extraction_plan === 'undecided' ? localISO() : bc.extraction_decided_at || null };
+        if (off.value !== 'active') { changes.status = off.value; changes.debond_date = offDate.value || localISO(); }
         try {
-          const changes = { extraction_plan: plan.value, extractions_done: done.checked, treatment_plan_by_dr_ali: aliPlan.value || null, kit_name: kit.value || null,
-            total_fee: fee.value ? Number(fee.value) : null,
-            extraction_decided_at: plan.value !== 'undecided' && bc.extraction_plan === 'undecided' ? localISO() : bc.extraction_decided_at || null };
-          if (off.value !== 'active') { changes.status = off.value; changes.debond_date = offDate.value || localISO(); }
           await d.updateBracesCase(bc.id, changes);
           toast('Braces case saved.', 'ok');
-          if (off.value === 'debonded') startRetainerAfterBraces(bc, changes.debond_date);
-          else reload();
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        if (off.value === 'debonded') startRetainerAfterBraces(bc, changes.debond_date);
+        else await reload();
       } },
     ]);
   };
@@ -132,7 +142,8 @@ export async function renderPatient(root, id) {
     modal('Start braces case', h('div', {}, field('Bonding date', start), field('Kit', kit), field('Total fee', fee)), [
       { label: 'Cancel' },
       { label: 'Start case', primary: true, onClick: async () => {
-        try { await d.startBracesCase(id, { start_date: start.value, kit_name: kit.value, total_fee: fee.value }); toast('Braces case started. Month 1 is next.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.startBracesCase(id, { start_date: start.value, kit_name: kit.value, total_fee: fee.value }); toast('Braces case started. Month 1 is next.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        await reload();
       } },
     ]);
   };
@@ -175,7 +186,8 @@ export async function renderPatient(root, id) {
         if (treatConsent.checked && !p.treatment_consent_at) changes.treatment_consent_at = new Date().toISOString();
         if (!treatConsent.checked && p.treatment_consent_at) changes.treatment_consent_at = null;
         if (mr && mr.value.trim() !== p.mr_number) changes.mr_number = mr.value.trim();
-        try { await d.updatePatient(id, changes); toast('Saved.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.updatePatient(id, changes); toast('Saved.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        await reload();
       } },
     ]);
   };
@@ -184,7 +196,8 @@ export async function renderPatient(root, id) {
   const clearFlag = () => modal('Clear this flag?', h('p', {}, `${p.full_name} will no longer be marked for their next appointment with Dr. Ali Rashid. Staff can flag them again at any time.`), [
     { label: 'Cancel' },
     { label: 'Clear flag', primary: true, onClick: async () => {
-      try { await d.clearFlag(p.flag.id, 'Seen by Dr. Ali'); toast('Flag cleared.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      try { await d.clearFlag(p.flag.id, 'Seen by Dr. Ali'); toast('Flag cleared.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      await reload();
     } },
   ]);
 
@@ -198,14 +211,18 @@ export async function renderPatient(root, id) {
       { label: 'Void invoice', danger: true, onClick: async () => {
         const why = reason.value.trim();
         if (!why) return showFormErrors(body, [{ input: reason, message: 'Write why this invoice is being voided.' }]);
-        try { await d.voidInvoice(i.id, why); toast('Invoice voided.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.voidInvoice(i.id, why); toast('Invoice voided.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        await reload();
       } },
     ], { destructive: true, initialFocus: reason });
   };
 
   const removePlan = (plan) => modal('Remove this plan?', h('p', {}, 'The payments stay; only the schedule is removed.'), [
     { label: 'Keep' },
-    { label: 'Remove plan', danger: true, onClick: async () => { try { await d.deletePaymentPlan(plan.id); toast('Plan removed.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
+    { label: 'Remove plan', danger: true, onClick: async () => {
+      try { await d.deletePaymentPlan(plan.id); toast('Plan removed.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      await reload();
+    } },
   ], { destructive: true });
 
   // Photos: getPatient already signed every photo with the record (thumb_url, url, url_expires_at), so the
@@ -242,7 +259,8 @@ export async function renderPatient(root, id) {
     }
   };
 
-  // Documents carry no expiry field: their links were signed with the record, so they run out an hour after it loaded.
+  // Documents carry url_expires_at like photos (getPatient sets it). signedAt only covers an adapter that sets none:
+  // those links were signed with the record, so they run out an hour after it loaded.
   const documentLink = (doc) => {
     const link = h('a', { class: 'btn btn-small', href: doc.url, target: '_blank', rel: 'noopener', 'aria-label': `Open ${doc.title || 'document'} (opens in a new tab)` }, 'Open');
     doc.url_expires_at ??= signedAt + SIGNED_FOR_MS;
@@ -271,7 +289,7 @@ export async function renderPatient(root, id) {
         h('a', { class: 'btn', href: `#/staff/patient/${id}/portal`, title: 'See this record the way the patient sees it in their account' }, 'View as patient'),
         can('portal.invite') && !p.portal_user_id ? h('button', { class: 'btn', onclick: busy(async () => {
           if (!p.email) { toast("Add the patient's email first (Edit), then invite them."); return; }
-          await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); reload();
+          await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); await reload();
         }) }, 'Invite to patient portal') : null,
         can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(p, { onDone: reload }) }, 'Upload photos') : null,
         can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,

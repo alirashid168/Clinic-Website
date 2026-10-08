@@ -14,6 +14,32 @@ export const TEMPLATES = {
 /** The Karachi calendar day of a timestamp (a payment at 1 AM PKT belongs to that day, not the UTC day before). */
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 
+// A save is one request. When the connection drops or it times out, the request may still have been committed:
+// it is the answer that was lost. Same patterns as friendlyError() in dom.js.
+const ANSWER_LOST = /Failed to fetch|NetworkError|Load failed|network (error|request failed)|\bTIMEOUT:|\btimed out\b|did not respond/i;
+const isMismatch = (e) => e?.code === 'IDEMPOTENCY_MISMATCH' || /IDEMPOTENCY_MISMATCH/.test(e?.message || '');
+
+/**
+ * What to tell staff when saving an invoice or a plan fails (`what` is "invoices" or "plans"). { stuck: true } means
+ * this form's key is used up: the earlier attempt saved something different, and Save would keep refusing.
+ */
+function saveFailure(e, what) {
+  if (isMismatch(e)) {
+    const said = friendlyError(e);
+    return { stuck: true, text: `${said.charAt(0).toUpperCase()}${said.slice(1)} Close this form, check the patient record, then start again.` };
+  }
+  if (ANSWER_LOST.test(e?.message || String(e))) return { text: `This may or may not have been saved. Check the patient's ${what} before saving again.` };
+  return { text: friendlyError(e) };
+}
+
+/**
+ * Runs the caller's refresh after a save and waits for it, so the dialog closes onto the redrawn page. The save has
+ * happened, so a refresh that fails must not leave the form open to be saved a second time.
+ */
+async function afterSave(onDone, ...args) {
+  try { await onDone?.(...args); } catch (err) { console.error(err); toast('Saved, but the page could not refresh itself. Reload it to see the latest.', 'error'); }
+}
+
 /**
  * Prints one sheet. body.printing tells the print stylesheet to print only the
  * .print-area; the class comes off again after the print dialog closes.
@@ -117,9 +143,11 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
       can('discount.give') ? field('Discount reason', reason, 'Needed when there is a discount.') : null),
     h('p', {}, totalEl));
 
+  let stuck = null; // the message of an IDEMPOTENCY_MISMATCH: this form's key is used up, so Save is refused until a new form is opened
   modal(`New invoice · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Save invoice', primary: true, onClick: async () => {
+      if (stuck) { toast(stuck, 'error', 10000); return false; }
       clearFieldErrors(body);
       const errors = [];
       const filled = lines.filter((l) => l.desc.value.trim());
@@ -137,13 +165,19 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
       if (off > 0 && !reason.value.trim()) errors.push({ input: reason, message: 'Write a reason for the discount.' });
       if (errors.length) { showFormErrors(body, errors); return false; }
       const items = filled.map((l) => ({ description: l.desc.value.trim(), quantity: qtyOf(l), unit_price: Number(l.price.value) }));
+      let inv;
       try {
         const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items, discount_amount: off, discount_reason: reason.value.trim() || null, visit_id: visitId || null };
         // The key goes in the options argument (data contract); it is also on the payload for adapters that read it there.
-        const inv = await state.data.createInvoice({ ...payload, idempotencyKey }, { idempotencyKey });
-        toast(inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`, 'ok');
-        onDone?.(inv);
-      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        inv = await state.data.createInvoice({ ...payload, idempotencyKey }, { idempotencyKey });
+      } catch (e) {
+        const { text, stuck: spent } = saveFailure(e, 'invoices');
+        if (spent) stuck = text;
+        toast(text, 'error', 10000);
+        return false;
+      }
+      toast(inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`, 'ok');
+      await afterSave(onDone, inv);
     } },
   ]);
 }
@@ -191,9 +225,9 @@ export async function paymentModal(patient, { branchId, dues, invoices, payments
       if (!(value > 0)) { showFormErrors(body, [{ input: amount, message: 'Enter an amount above zero.' }]); return false; }
       try {
         await state.data.recordPayment({ patient_id: patient.id, branch_id: Number(branchSel.value), amount: refund?.checked ? -value : value, method: method.value, invoice_id: invoiceSel.value || null, notes: notes.value || null });
-        toast(refund?.checked ? 'Refund recorded.' : `Payment of ${rupees(value)} saved.`, 'ok');
-        onDone?.();
       } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      toast(refund?.checked ? 'Refund recorded.' : `Payment of ${rupees(value)} saved.`, 'ok');
+      await afterSave(onDone);
     } },
   ]);
 }
@@ -293,9 +327,11 @@ export function installmentPlanModal(patient, { totalFee, bracesCaseId, onDone }
     h('div', { class: 'form-grid' }, field('Total to pay (Rs)', total, null, { required: true }), field('Number of installments', count), field('First installment due', firstDue, null, { required: true }), field('Then', every), field('Count payments from', startsOn, 'Usually the bonding date.')),
     field('Notes', notes),
     preview);
+  let stuck = null; // the message of an IDEMPOTENCY_MISMATCH: this form's key is used up, so Save is refused until a new form is opened
   modal(`Installment plan · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Save plan', primary: true, onClick: async () => {
+      if (stuck) { toast(stuck, 'error', 10000); return false; }
       clearFieldErrors(body);
       const t = Number(total.value);
       const errors = [];
@@ -311,9 +347,14 @@ export function installmentPlanModal(patient, { totalFee, bracesCaseId, onDone }
         const payload = { patient_id: patient.id, braces_case_id: bracesCaseId || null, total_fee: t, starts_on: startsOn.value, notes: notes.value.trim() || null, installments: rows };
         // The key goes in the options argument (data contract); it is also on the payload for adapters that read it there.
         await state.data.savePaymentPlan({ ...payload, idempotencyKey }, { idempotencyKey });
-        toast('Installment plan saved.', 'ok');
-        onDone?.();
-      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } catch (e) {
+        const { text, stuck: spent } = saveFailure(e, 'plans');
+        if (spent) stuck = text;
+        toast(text, 'error', 10000);
+        return false;
+      }
+      toast('Installment plan saved.', 'ok');
+      await afterSave(onDone);
     } },
   ]);
 }

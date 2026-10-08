@@ -8,7 +8,7 @@
 // and fall back to adding up rows in the browser while that file is not applied.
 
 import { CONFIG } from '../config.js';
-import { todayISO } from '../ui/dom.js';
+import { todayISO, addDaysISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
@@ -25,6 +25,7 @@ const SIGNED_URL_TTL = 3600; // seconds
 const PAGE = 1000; // Supabase's default "max rows" per request
 const ID_CHUNK = 100; // ids per ".in()" request, so URLs stay short
 const CACHE_MS = 5 * 60 * 1000; // public schedule and gallery
+const FINISHED_LISTED_DAYS = 90; // coordinator lists: finished lab cases stay listed this long after their last change
 
 const plainError = (message, code) => Object.assign(new Error(message), code ? { code } : {});
 /** The error of save_invoice / save_installment_plan when a retried key carries different details (same wording, for the fallback path). */
@@ -687,7 +688,8 @@ export async function createSupabaseAdapter() {
       return check(await sb.from('payments').insert({ patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() }).select().single());
     },
     async voidInvoice(id, reason) {
-      check(await sb.from('invoices').update({ status: 'void', void_reason: reason }).eq('id', id));
+      // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
+      check(await sb.from('invoices').update({ status: 'void', void_reason: reason?.trim() || null }).eq('id', id));
     },
     // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
     async patientBilling(patientId) {
@@ -768,25 +770,32 @@ export async function createSupabaseAdapter() {
     },
     async setComplaintStatus(id, status) {
       const patch = { status };
+      // Resolving stamps who and when; moving it to any other status (Reopen) clears the stamp so the old date does not linger.
       if (status === 'resolved') { patch.resolved_at = new Date().toISOString(); patch.resolved_by = await userId(); }
+      else { patch.resolved_at = null; patch.resolved_by = null; }
       check(await sb.from('complaints').update(patch).eq('id', id));
     },
     async linkComplaintDoctor(id, clinicianId) { check(await sb.from('complaints').update({ clinician_id: clinicianId || null }).eq('id', id)); },
 
     // ------------------------------------------------------------ coordinator (capped lists: .truncated / .cap)
-    async labCases() { return attachPatients(capped(check(await sb.from('lab_cases').select('*').order('sent_date', { ascending: false }).limit(301)), 300)); },
+    // The three lists below leave out what is finished (old ones), so the cap is rarely reached.
+    // Lab work: open statuses (sent, received, returned to the lab) always; fitted or cancelled only while recently changed.
+    async labCases() {
+      const since = addDaysISO(todayISO(), -FINISHED_LISTED_DAYS);
+      return attachPatients(capped(check(await sb.from('lab_cases').select('*').or(`status.in.(sent,received,returned),updated_at.gte.${since}`).order('sent_date', { ascending: false }).limit(301)), 300));
+    },
     async saveLabCase(row) {
       const { patient, ...data } = row;
       if (data.id) check(await sb.from('lab_cases').update(data).eq('id', data.id));
       else check(await sb.from('lab_cases').insert({ ...data, created_by: await userId() }));
     },
-    async retainerCases() { return attachPatients(capped(check(await sb.from('retainer_cases').select('*').order('created_at', { ascending: false }).limit(301)), 300)); },
+    async retainerCases() { return attachPatients(capped(check(await sb.from('retainer_cases').select('*').neq('stage', 'closed').order('created_at', { ascending: false }).limit(301)), 300)); },
     async saveRetainerCase(row) {
       const { patient, ...data } = row;
       if (data.id) check(await sb.from('retainer_cases').update(data).eq('id', data.id));
       else check(await sb.from('retainer_cases').insert({ ...data, created_by: await userId() }));
     },
-    async reminders() { return attachPatients(capped(check(await sb.from('reminders').select('*').neq('status', 'done').order('due_date').limit(501)), 500)); },
+    async reminders() { return attachPatients(capped(check(await sb.from('reminders').select('*').not('status', 'in', '(done,cancelled)').order('due_date').limit(501)), 500)); },
     async saveReminder(row) {
       const { patient, ...data } = row;
       if (data.id) check(await sb.from('reminders').update(data).eq('id', data.id));

@@ -546,9 +546,10 @@ export function setFieldError(input, message) {
   }
   err.textContent = message;
   if (!err.isConnected) {
-    // Inside field(): straight after the input (or its wrapper), before the hint.
+    // Inside field(): straight after the input (or its wrapper), before the hint. Without a .field wrapper,
+    // after the control, or after its label when it sits inside one (an error must not become part of the label's name).
     const wrap = control.closest('.field');
-    const anchor = (wrap && [...wrap.children].find((c) => c.contains(control))) || input;
+    const anchor = (wrap && [...wrap.children].find((c) => c.contains(control))) || control.closest('label') || input;
     anchor.after(err);
   }
   control.setAttribute('aria-invalid', 'true');

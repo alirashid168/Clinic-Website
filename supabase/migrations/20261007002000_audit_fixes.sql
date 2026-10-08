@@ -1,6 +1,7 @@
 -- =============================================================================
 -- 2026-10-07 audit fixes: report totals in SQL, one-call invoice and
--- installment-plan saves, and idempotency keys for retried saves.
+-- installment-plan saves, idempotency keys for retried saves, and a void
+-- reason that cannot be blank.
 --
 -- HOW TO APPLY
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
@@ -17,7 +18,8 @@
 --   and plan saves all-or-nothing and safe to retry.
 --
 -- SECURITY
---   Every function is SECURITY INVOKER: it runs as the signed-in person, so the
+--   Every function except the one rule replaced in section 7 (the existing invoice trigger,
+--   which stays SECURITY DEFINER as it was) is SECURITY INVOKER: it runs as the signed-in person, so the
 --   existing row-level security policies decide what it can read and write,
 --   exactly as for the requests the website already makes. A total only adds up
 --   rows that person could already download. Only signed-in users may call them.
@@ -50,6 +52,8 @@
 --   and method/status are compared as text, so enum or text columns both work.
 --
 -- TO UNDO
+--   (section 7 only replaces invoice_before_write(); to undo it, run that function again from
+--   20261005000200_rules_and_functions.sql, where the void check is `new.void_reason is null`)
 --   drop function if exists public.payments_summary(date, date, bigint, text);
 --   drop function if exists public.opd_summary(date, date, bigint);
 --   drop function if exists public.total_dues();
@@ -367,6 +371,62 @@ set search_path = public
 as $$
   select coalesce(sum(b.dues), 0) from public.patient_balances b where b.dues > 0;
 $$;
+
+-- -----------------------------------------------------------------------------
+-- 7. A void needs a real reason. The rule (invoice_before_write) only refused a NULL
+--    void_reason, so an empty or all-blank text voided an invoice with no reason on record.
+--    This is that same function, unchanged except the void check at the end: NULL, '' and
+--    text of only spaces/tabs/line breaks are all refused. (The website already sends NULL
+--    for a blank reason.) It is the existing SECURITY DEFINER trigger function, so its
+--    owner and the "nobody can call it directly" grants from 20261005000700 stay as they are.
+-- -----------------------------------------------------------------------------
+create or replace function public.invoice_before_write()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_role public.staff_role;
+  v_cap  public.discount_caps;
+  v_pct  numeric;
+  v_over boolean := false;
+begin
+  if tg_op = 'INSERT' then
+    if new.invoice_no is null or new.invoice_no = '' then
+      new.invoice_no := 'INV-' || to_char(new.issue_date, 'YYYY') || '-'
+                        || lpad(nextval('public.invoice_number_seq')::text, 6, '0');
+    end if;
+    if auth.uid() is not null then new.created_by := auth.uid(); end if;
+    if new.template_key is null then
+      select key into new.template_key from public.invoice_templates where is_default limit 1;
+    end if;
+  end if;
+
+  -- Discount cap check for the person making the change.
+  if new.discount_amount > 0 and new.discount_approved_by is null
+     and (tg_op = 'INSERT' or new.discount_amount is distinct from old.discount_amount
+          or new.subtotal is distinct from old.subtotal) then
+    v_role := public.current_staff_role();
+    if v_role is not null and v_role <> 'admin' then
+      select * into v_cap from public.discount_caps where role = v_role;
+      v_pct := case when new.subtotal > 0 then new.discount_amount * 100 / new.subtotal else 100 end;
+      if not found then
+        v_over := true;              -- no cap configured = needs approval
+      else
+        v_over := (v_cap.max_percent is not null and v_pct > v_cap.max_percent)
+               or (v_cap.max_amount is not null and new.discount_amount > v_cap.max_amount);
+      end if;
+      if v_over and not public.has_perm('discount.approve') then
+        new.status := 'pending_approval';
+      end if;
+    end if;
+  end if;
+
+  if new.status = 'void' and (tg_op = 'INSERT' or old.status <> 'void')
+     and coalesce(btrim(new.void_reason, E' \t\r\n'), '') = '' then
+    raise exception 'A reason is required to void an invoice';
+  end if;
+  return new;
+end $$;
 
 -- -----------------------------------------------------------------------------
 -- Only signed-in users may call these (row-level security still applies inside).

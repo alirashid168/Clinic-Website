@@ -230,6 +230,7 @@ p { margin: 0 0 .8em; }
 .skip-link:focus, .skip-link:focus-visible { transform: none; outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 .muted { color: var(--text-muted); }
 .nowrap { white-space: nowrap; }
+.print-only { display: none; } /* on paper only: the print rules at the end show it inside .print-area */
 .right { text-align: right; }
 .status-ok { color: var(--status-ok-text); }
 .status-warn { color: var(--status-warn-text); }
@@ -318,6 +319,9 @@ input[type="checkbox"], input[type="radio"] { width: 1.25rem; height: 1.25rem; m
 fieldset.panel { margin: 0; min-width: 0; }
 fieldset.panel + fieldset.panel { margin-top: var(--space-4); }
 fieldset.panel > legend { padding: 0 var(--space-2); font-size: var(--fs-base); font-weight: 700; color: var(--text); }
+/* A group inside a form with no frame; its legend is set like a field label. */
+fieldset.fieldset-plain { margin: var(--space-2) 0 0; padding: 0; border: 0; min-width: 0; }
+fieldset.fieldset-plain > legend { padding: 0; margin-bottom: .375rem; font-size: var(--fs-sm); font-weight: 600; color: var(--text-muted); }
 /* Safety net for tables that have no .table-scroll wrapper: the panel scrolls, not the page. */
 .panel:has(> table.list):not(:has(.suggestions, [role="listbox"])) { position: relative; overflow-x: auto; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
@@ -558,17 +562,6 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .footer-links { display: flex; justify-content: center; gap: 0 var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-2); }
 .footer-links a { display: inline-flex; align-items: center; min-height: var(--target); padding: 0 var(--space-1); color: var(--text-accent); font-weight: 600; }
 
-/* Trust strip: items grow to fill each row, so any item count leaves no empty grey cell. */
-.trust { display: flex; flex-wrap: wrap; gap: 1px; margin: 0; padding: 0; list-style: none; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius-l); overflow: hidden; }
-.trust > * { flex: 1 1 9rem; margin: 0; background: var(--surface); padding: var(--space-5) var(--space-4); display: grid; gap: 2px; align-content: start; }
-.trust b { font-size: var(--fs-section); color: var(--text-accent); letter-spacing: -.02em; }
-.trust span { color: var(--text-muted); font-size: var(--fs-sm); }
-
-.about { background: var(--gold-soft); border-radius: var(--radius-l); padding: clamp(var(--space-5), 4vw, 2.25rem); }
-.about h2 { margin-bottom: var(--space-3); }
-.about p { max-width: 66ch; }
-.about-actions { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-top: var(--space-4); }
-
 .wa-float {
   position: fixed; right: max(var(--space-4), env(safe-area-inset-right)); bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px)); z-index: var(--z-fab);
   display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: 48px;
@@ -599,6 +592,9 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .login-wrap { min-height: 100svh; display: grid; place-items: center; padding: var(--space-6) var(--space-4); background: linear-gradient(180deg, var(--aubergine-deep), var(--aubergine)); }
 .login-card { background: var(--surface); border-radius: var(--radius-l); padding: var(--space-6); width: min(440px, 100%); box-shadow: 0 30px 80px rgba(var(--shadow-base), .35); }
 .login-card h1 { font-size: var(--fs-2xl); }
+/* The back link and the staff/patient switch are plain text links: give them a 44px-tall target.
+   The gap stands in for the space after the arrow, which a flex container would otherwise drop. */
+.login-card .login-link, .login-card p > a:not(.btn) { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--target); }
 .demo-accounts { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
 .demo-accounts button { justify-content: space-between; text-align: left; }
 .offline-banner { background: var(--warn-inverse-bg); color: var(--warn-inverse-text); padding: var(--space-2) var(--space-4); font-size: var(--fs-ui); text-align: center; }
@@ -678,14 +674,19 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .topsearch input::placeholder { color: var(--on-dark-placeholder); }
 .topsearch input:focus { background: var(--on-dark-input-focus); }
 .topsearch .search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); font-size: var(--fs-sm); pointer-events: none; }
-.search-results { position: absolute; top: calc(100% + 6px); left: auto; right: 0; width: max(100%, 460px); z-index: var(--z-menu); padding: 6px; max-height: 70vh; max-height: 70dvh; overflow: auto; border-radius: var(--radius-s); background: var(--surface); color: var(--text); box-shadow: var(--shadow-md); color-scheme: light; }
+.search-results { position: absolute; top: calc(100% + 6px); left: auto; right: 0; width: max(100%, min(540px, calc(100vw - 32px))); z-index: var(--z-menu); padding: 6px; max-height: 70vh; max-height: 70dvh; overflow: auto; border-radius: var(--radius-s); background: var(--surface); color: var(--text); box-shadow: var(--shadow-md); color-scheme: light; }
 .search-results[hidden] { display: none; }
 .search-results a { display: flex; gap: var(--space-3); align-items: center; min-height: var(--target); padding: var(--space-2) var(--space-3); border-radius: var(--radius-s); text-decoration: none; color: var(--text); font-size: var(--fs-ui); white-space: nowrap; }
-.search-results a strong { overflow: hidden; text-overflow: ellipsis; }
+/* One row: Mr#, name, "phone · branch", dues badge. The name keeps its full width (up to 14rem, then an
+   ellipsis; the full name is in its title) and the phone/branch text is what gives way, so a dues badge
+   never squeezes the name down to a few pixels. */
+.search-results a strong { flex: 0 0 auto; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
 .search-results a:hover, .search-results a:focus { background: var(--surface-sunken); }
 .search-results a:focus-visible { outline-offset: -3px; }
 .search-results .mr { color: var(--text-muted); font-size: var(--fs-xs); min-width: 4.5rem; }
 .search-results .muted { font-size: var(--fs-xs); margin-left: auto; text-align: right; }
+.search-results a .muted { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-results a .badge, .search-results a .mr { flex: none; }
 .menu-toggle { display: none; color: var(--on-dark-strong); font-size: var(--fs-xl); }
 .topbar .icon-btn:hover { background: var(--on-dark-hover); color: var(--on-dark-strong); }
 .topnav-layout { grid-template-columns: 1fr; }
@@ -721,6 +722,7 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   .topsearch { width: auto; min-width: 0; flex: 1 1 120px; }
   .search-results { position: fixed; left: 8px; right: 8px; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px)); width: auto; }
   .search-results a { white-space: normal; flex-wrap: wrap; }
+  .search-results a strong { max-width: 100%; } /* on a phone the row wraps, so a long name may use the full line */
   /* Keep the name for screen readers; show a person icon that has no text of its own. */
   .user-menu .user-name { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; max-width: none; }
   .user-menu > .nav-link::before {
@@ -746,7 +748,7 @@ table.sheet th {
 table.sheet td { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); padding: 0; vertical-align: middle; background: var(--surface); }
 table.sheet tr:hover td { background: var(--surface-hover); }
 table.sheet td.frozen, table.sheet th.frozen { position: sticky; left: 0; z-index: 1; }
-table.sheet th.frozen { z-index: 3; }
+table.sheet thead th.frozen { z-index: 3; } /* only the header corner: row headers (th.frozen in tbody) stay at 1, under it */
 table.sheet tbody th, table.sheet .row-head { top: auto; z-index: 1; padding: 0; background: var(--surface); color: inherit; font-weight: inherit; font-size: inherit; text-align: left; white-space: normal; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); box-shadow: 1px 0 0 var(--border-strong); }
 /* tbody only: the sticky header row keeps its accent background and white text on hover. */
 table.sheet tbody tr:hover th { background: var(--surface-hover); }
@@ -864,7 +866,7 @@ table.invoice-lines input { min-width: 0; }
 .mx-copy { min-width: 0; }
 .mx-name { margin: var(--space-5) 0 0; font-size: clamp(3.5rem, 7.6vw, 6.25rem); line-height: .88; letter-spacing: -.02em; color: var(--aubergine-deep); overflow-wrap: anywhere; }
 .mx-name span { display: block; }
-.mx-cred { margin: var(--space-5) 0 0; font-style: italic; font-size: clamp(1.3rem, 2vw, 1.6rem); line-height: 1.2; color: var(--gold-ink); }
+.mx-cred { margin: var(--space-5) 0 0; font-family: var(--font-display); font-weight: 500; font-style: italic; font-size: clamp(1.3rem, 2vw, 1.6rem); line-height: 1.2; color: var(--gold-ink); }
 .mx-rule { width: 4rem; height: 1px; margin: var(--space-7) 0 var(--space-6); background: var(--gold); }
 .mx-body { margin: 0 0 var(--space-4); max-width: 52ch; font-size: var(--fs-md); line-height: 1.75; color: var(--text-muted); text-wrap: pretty; }
 .mx-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-6); margin-top: var(--space-6); }
@@ -886,7 +888,7 @@ table.invoice-lines input { min-width: 0; }
   font-size: var(--fs-ui); color: var(--text-muted); text-decoration: none;
 }
 .mx-rating b { font-family: var(--font-display); font-size: var(--fs-2xl); font-weight: 600; line-height: 1; color: var(--aubergine-deep); }
-.mx-rating:hover span { color: var(--aubergine-deep); text-decoration: underline; }
+.mx-rating:hover > span:not(.mx-stars):not(.sr-only) { color: var(--aubergine-deep); text-decoration: underline; }
 /* Stars are aria-hidden: the number and the text beside them say the same thing. Filled stars use
    gold-ink (4.7:1 on ivory) and empty ones the pale warm line, so full and empty differ in lightness, not only hue. */
 .mx-stars { display: inline-flex; gap: 3px; }
@@ -1015,6 +1017,7 @@ table.invoice-lines input { min-width: 0; }
 .cx-trip { display: grid; gap: 2px; padding: var(--space-3) var(--space-4); border-radius: var(--radius-m); background: rgba(var(--on-dark-rgb), .07); border: 1px solid var(--on-dark-line); }
 .cx-trip b { font-size: var(--fs-base); font-weight: 600; color: var(--on-dark); }
 .cx-trip span { font-size: var(--fs-sm); color: var(--on-dark-muted); }
+.cx-trip-piece { white-space: nowrap; } /* one time range ("Fri 3 PM – 9 PM") never breaks inside; the line breaks between pieces */
 .cx-visit-main { padding: var(--space-6); display: grid; gap: var(--space-3); align-content: start; }
 .cx-cal { display: grid; gap: var(--space-3); }
 .cx-cal-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-1) var(--space-3); flex-wrap: wrap; }
@@ -1190,6 +1193,8 @@ table.invoice-lines input { min-width: 0; }
   body.printing, body:has(.modal-backdrop .print-area) { background: var(--enamel) !important; overflow: visible !important; }
   .print-area { position: static !important; margin: 0 !important; border: 0 !important; box-shadow: none !important; max-width: none !important; width: auto !important; padding: 0 !important; }
   .print-area .btn, .print-area button { display: none !important; }
+  .print-area .print-only { display: block !important; }
+  .report-caption { margin: 0 0 var(--space-3); font-size: var(--fs-ui); font-weight: 600; color: var(--text); } /* what the report covers (period, branch, search) */
   .print-area tr { break-inside: avoid; }
 
   /* Thermal template: the whole job uses the 80mm page. */

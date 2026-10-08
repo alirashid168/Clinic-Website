@@ -44,7 +44,7 @@ export async function renderDuplicates(root) {
       h('div', { class: 'panel-head' }, h('h2', {}, `${g.phone} · ${g.members} records`),
         h('button', { class: 'btn btn-small btn-primary', onclick: () => mergeGroup(g, g.patients.find((p) => p.id === keepId)) }, 'Merge into the ticked one')),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Keep'), h('th', {}, 'Mr#'), h('th', {}, 'Name'), h('th', {}, 'Registered'), h('th', {}, 'Branch'), h('th', { class: 'right' }, 'Visits'), h('th', { class: 'right' }, 'Invoices'), h('th', { class: 'right' }, 'Dues'), h('th', {}, 'Last visit'))),
+        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Keep'), h('th', { scope: 'col' }, 'Mr#'), h('th', { scope: 'col' }, 'Name'), h('th', { scope: 'col' }, 'Registered'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col', class: 'right' }, 'Visits'), h('th', { scope: 'col', class: 'right' }, 'Invoices'), h('th', { scope: 'col', class: 'right' }, 'Dues'), h('th', { scope: 'col' }, 'Last visit'))),
         h('tbody', {}, g.patients.map((p, i) => h('tr', {},
           h('td', {}, radios[i]),
           h('td', { class: 'mr' }, p.mr_number),

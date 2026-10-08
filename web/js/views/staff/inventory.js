@@ -23,7 +23,7 @@ export async function renderInventory(root, params) {
       { label: 'Add item', primary: true, onClick: async () => {
         clearFieldErrors(body);
         if (name.value.trim().length < 2) { showFormErrors(body, [{ input: name, message: 'Write the item name.' }]); return false; }
-        try { await d.saveInventoryItem({ name: name.value.trim(), category: category.value, unit: unit.value.trim() || 'pcs', supplier: supplier.value.trim() || null }); toast('Item added.', 'ok'); load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.saveInventoryItem({ name: name.value.trim(), category: category.value, unit: unit.value.trim() || 'pcs', supplier: supplier.value.trim() || null }); toast('Item added.', 'ok'); await load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
   };
@@ -50,7 +50,7 @@ export async function renderInventory(root, params) {
         if (raw === '' || !Number.isInteger(n) || n < minQty()) { showFormErrors(body, [{ input: qty, message: why.value === 'adjustment' ? 'Enter the counted quantity (0 or more).' : 'Enter the quantity (1 or more).' }]); return false; }
         const change = why.value === 'received' ? n : why.value === 'adjustment' ? n - Number(stock?.quantity || 0) : -n;
         if (change === 0) { showFormErrors(body, [{ input: qty, message: `The count is already ${n}.` }]); return false; }
-        try { await d.moveStock({ branch_id: branchId, item_id: item.id, change, reason: note.value.trim() ? `${why.value}: ${note.value.trim()}` : why.value }); toast('Stock updated.', 'ok'); load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.moveStock({ branch_id: branchId, item_id: item.id, change, reason: note.value.trim() ? `${why.value}: ${note.value.trim()}` : why.value }); toast('Stock updated.', 'ok'); await load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
   };

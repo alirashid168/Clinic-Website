@@ -517,6 +517,9 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ billing
     async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
+      // The database refuses these (invoice_items.quantity > 0, invoices.discount_amount >= 0); an empty quantity still means 1.
+      if (items.some((it) => it.quantity != null && it.quantity !== '' && !(Number(it.quantity) > 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_quantity_check"');
+      if (Number(discount_amount) < 0) fail('new row for relation "invoices" violates check constraint "invoices_discount_amount_check"');
       const key = opts.idempotencyKey || idempotencyKey;
       const sig = JSON.stringify([patient_id, Number(branch_id), visit_id, Number(discount_amount) || 0, discount_reason, items.map((it) => [it.description, Number(it.quantity || 1), Number(it.unit_price)])]);
       const prior = key && db.invoices.find((i) => i.id === saved.get('invoice:' + key)?.id);
@@ -646,7 +649,7 @@ export function createDemoAdapter() {
     async setComplaintStatus(id, status) {
       need('complaints.view');
       const c = db.complaints.find((x) => x.id === id);
-      c.status = status; if (status === 'resolved') c.resolved_at = new Date().toISOString();
+      c.status = status; c.resolved_at = status === 'resolved' ? new Date().toISOString() : null; // Reopen clears the old date
     },
     async linkComplaintDoctor(id, clinicianId) { need('complaints.view'); const c = db.complaints.find((x) => x.id === id); if (c) c.clinician_id = clinicianId || null; },
     async doctorSummary(clinicianId, from, to) {
@@ -669,19 +672,25 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ coordinator
-    async labCases() { if (!can('lab.manage') && !can('patients.view')) return []; return db.lab_cases.map((l) => ({ ...clone(l), patient: clone(patient(l.patient_id)) })); },
+    // Like the live lists, these leave out what is finished: lab work that is fitted or cancelled (once 90 days old), closed retainers, done or cancelled reminders.
+    async labCases() {
+      if (!can('lab.manage') && !can('patients.view')) return [];
+      const since = daysAgo(90);
+      return db.lab_cases.filter((l) => ['sent', 'received', 'returned'].includes(l.status) || String(l.updated_at || l.sent_date).slice(0, 10) >= since)
+        .map((l) => ({ ...clone(l), patient: clone(patient(l.patient_id)) }));
+    },
     async saveLabCase(row) {
       need('lab.manage');
-      if (row.id) Object.assign(db.lab_cases.find((l) => l.id === row.id), row);
+      if (row.id) Object.assign(db.lab_cases.find((l) => l.id === row.id), row, { updated_at: new Date().toISOString() });
       else db.lab_cases.push({ ...row, id: uid(), sent_date: row.sent_date || todayISO(), status: row.status || 'sent' });
     },
-    async retainerCases() { return db.retainer_cases.map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) })); },
+    async retainerCases() { return db.retainer_cases.filter((r) => r.stage !== 'closed').map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) })); },
     async saveRetainerCase(row) {
       need('retainers.manage');
       if (row.id) Object.assign(db.retainer_cases.find((r) => r.id === row.id), row);
       else db.retainer_cases.push({ ...row, id: uid(), stage: row.stage || 'impression', impression_date: row.impression_date || todayISO() });
     },
-    async reminders() { need('reminders.manage'); return db.reminders.map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) })).sort((a, b) => a.due_date.localeCompare(b.due_date)); },
+    async reminders() { need('reminders.manage'); return db.reminders.filter((r) => r.status !== 'done' && r.status !== 'cancelled').map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) })).sort((a, b) => a.due_date.localeCompare(b.due_date)); },
     async saveReminder(row) {
       need('reminders.manage');
       if (row.id) Object.assign(db.reminders.find((r) => r.id === row.id), row);
@@ -880,7 +889,12 @@ export function createDemoAdapter() {
       else db.schedule.push({ ...row, id: uid() });
     },
     async deleteScheduleRow(id) { need('schedule.manage'); db.schedule = db.schedule.filter((r) => r.id !== id); },
-    async auditLog() { need('audit.view'); return clone(db.audit.slice(0, 200)); },
+    async auditLog() {
+      need('audit.view');
+      const rows = clone(db.audit.slice(0, 200));
+      if (db.audit.length > 200) { rows.truncated = true; rows.cap = 200; } // same notice as the live list
+      return rows;
+    },
     async dashboard(date) {
       const day = date || todayISO();
       return db.branches.map((b) => {

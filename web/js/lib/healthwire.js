@@ -1,4 +1,3 @@
-// GENERATED from src/lib by scripts/build-lib.sh. Edit the .ts file, not this one.
 // Reading Healthwire's export files and turning them into rows for the
 // website's import_healthwire() function. Pure functions, no DOM, so the
 // rules can be tested in Node (tests/healthwire.test.mjs).

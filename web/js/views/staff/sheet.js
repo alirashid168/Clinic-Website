@@ -9,7 +9,10 @@ import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '.
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
 
-const NETWORK = /Failed to fetch|NetworkError|network|timeout|Load failed/i;
+// Lost connection only. A database "statement timeout" is the server refusing a slow query, not an outage:
+// queueing and retrying it would never succeed. The app's own "TIMEOUT:" (a read that gave up) and "did not
+// respond" (the online services never answered) count; so does Safari's "The network connection was lost."
+const NETWORK = /Failed to fetch|NetworkError|\bnetwork (error|request failed|connection)|Load failed|\bTIMEOUT:|\btimed out\b|did not respond/i;
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = { treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes' };
 
@@ -70,7 +73,9 @@ function getQueue() {
     onState: (s, pending) => { if (queue === q) showSaveState(s, pending); },
     // Say which patient and cell could not be saved; the list at the top has Try again and Discard.
     onFailed: (detail) => {
-      if (queue !== q) return;
+      // Not after logout (a send still in flight must not toast a patient's note on the home page). q.disposed is
+      // no use here: it is also true for the deliberate "signed out" note for an edit typed on a stale list.
+      if (queue !== q || currentUser() !== uid) return;
       toast(`Not saved: ${describeEdit(detail.edit)}. ${errorText(detail.error)} Use "Try again" at the top of the Aaj ki List.`, 'error', 12000);
     },
   });
@@ -332,15 +337,6 @@ export async function renderSheet(root, params, signal) {
     });
   }
 
-  // Visit rows carry only some of the patient's columns. If this one has no photo-consent flag,
-  // read it from the patient's record, so "may be shown on the website" is not locked for a patient
-  // who has consented. (Without access to the record, it stays locked, as before.)
-  async function withPhotoConsent(patient) {
-    if (typeof patient.photo_consent_public === 'boolean') return patient;
-    const full = await d.getPatient(patient.id).catch(() => null);
-    return { ...patient, photo_consent_public: !!full?.photo_consent_public };
-  }
-
   async function openRow(row) {
     let g = row.braces_month ? await d.bracesGuidance(row.patient_id).catch(() => null) : null;
     // Guidance is for this row's month (a completed visit is no longer the "next" month).
@@ -352,12 +348,8 @@ export async function renderSheet(root, params, signal) {
         rule_confirmed: local.rule.confirmed && !local.beyondProtocol, alerts: local.alerts };
     }
     let dialog = null;
-    let opening = false; // a double click must not open two upload dialogs
-    const uploadPhotos = async () => {
-      if (opening) return;
-      opening = true;
-      try { photoUploadModal(await withPhotoConsent(row.patient), { visitId: row.id, branchId: row.branch_id, onDone: load }); } finally { opening = false; }
-    };
+    // (Both data adapters put the patient's photo_consent_public on every visit row, so the dialog needs no extra fetch.)
+    const uploadPhotos = () => photoUploadModal(row.patient, { visitId: row.id, branchId: row.branch_id, onDone: load });
     const actions = [
       can('photos.upload') ? h('button', { class: 'btn', onclick: uploadPhotos }, 'Upload photos') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone: load }) }, 'New invoice') : null,

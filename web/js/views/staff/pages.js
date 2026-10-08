@@ -2,15 +2,11 @@
 // Dr. Ali review list, complaints inbox, doctor daily log.
 import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly, showFormErrors } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName, myBranches, defaultBranchId, clinicianName } from '../../state.js';
-import { duesBadge, aliBadge, STATUS_LABELS } from './common.js';
+import { duesBadge, aliBadge, capNote, STATUS_LABELS } from './common.js';
 import { printReceipt } from './invoice.js';
 
 /** The Karachi calendar day of a timestamp (not the UTC day, which is a day behind before 5 AM). */
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
-/** A list the server cut off says so, so a partial count or total never reads as complete. */
-const capNote = (rows, what) => (rows?.truncated
-  ? h('div', { class: 'alert alert-warning', role: 'status' }, h('strong', {}, 'Incomplete: '), `showing the first ${rows.cap ?? rows.length} ${what}; totals may be incomplete.`)
-  : null);
 
 // ---------------------------------------------------------------- today
 export async function renderDashboard(root) {
@@ -112,7 +108,8 @@ export async function renderBilling(root) {
     h('p', {}, approve ? `${what(r)}. The invoice is issued with the discount.` : `${what(r)}. The invoice is issued at the full price of ${rupees(r.invoice?.subtotal)}.`), [
       { label: 'Cancel' },
       { label: approve ? 'Approve discount' : 'Reject discount', primary: approve, danger: !approve, onClick: async () => {
-        try { await d.decideDiscount(r.id, approve); toast(approve ? 'Discount approved.' : 'Discount rejected. Invoice issued at full price.', 'ok'); renderBilling(root); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.decideDiscount(r.id, approve); toast(approve ? 'Discount approved.' : 'Discount rejected. Invoice issued at full price.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        await renderBilling(root); // redrawn before this dialog closes, so focus can return to the page
       } },
     ], { destructive: !approve });
   mount(root,
@@ -151,7 +148,8 @@ export async function renderReview(root) {
     modal('Clear this flag?', h('p', {}, `${who} leaves Dr. Ali's list. Staff can flag them again at any time.`), [
       { label: 'Cancel' },
       { label: 'Clear flag', primary: true, onClick: async () => {
-        try { await d.clearFlag(r.flag_id, 'Seen by Dr. Ali'); toast('Flag cleared.', 'ok'); renderReview(root); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.clearFlag(r.flag_id, 'Seen by Dr. Ali'); toast('Flag cleared.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        await renderReview(root); // redrawn before this dialog closes, so focus can return to the page
       } },
     ]);
   };
