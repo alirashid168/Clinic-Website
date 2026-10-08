@@ -170,6 +170,57 @@ async function staff(root, redraw) {
     ]);
   };
 
+  // Branch names for the table and the toast. A switched-off branch is not in the loaded list, so it is counted, never shown as a blank.
+  const branchList = (ids) => {
+    const known = ids.map(branchName).filter(Boolean);
+    const off = ids.length - known.length;
+    return [...known, ...(off ? [`${off} switched-off branch${off > 1 ? 'es' : ''}`] : [])].join(', ');
+  };
+
+  // Which branches an existing account works at; nothing ticked means all branches, as on the create form.
+  const branchAccess = (s) => {
+    const restricted = !!s.restrict_to_branches;
+    const current = restricted ? (s.branch_ids || []).map(Number) : [];
+    // Switched-off branches are not offered here, but the account keeps them: a save must never quietly drop one.
+    const kept = current.filter((id) => !state.ref.branches.some((b) => b.id === id));
+    const boxes = state.ref.branches.map((b) => ({ b, box: h('input', { type: 'checkbox', checked: current.includes(b.id) }) }));
+    const all = h('input', { type: 'checkbox', checked: !restricted });
+    const sure = h('input', { type: 'checkbox' });
+    const sureRow = h('label', { class: 'inline', style: { display: 'none' } }, sure, `Yes, ${s.full_name} may see every branch`);
+    const keptRow = kept.length ? h('p', { class: 'muted' }, `Also kept: ${branchList(kept)}. Those branches are switched off, so they are not shown here.`) : null;
+    // Taking a limit away is asked about; every other change is not. "All branches" lets go of a switched-off branch too, so it is no longer "kept".
+    const refresh = () => {
+      const asking = restricted && all.checked; sureRow.style.display = asking ? '' : 'none'; if (!asking) sure.checked = false;
+      if (keptRow) keptRow.style.display = all.checked ? 'none' : '';
+    };
+    // "All branches" and the single branches exclude each other. Clearing the last tick falls back to All,
+    // unless the account still has a switched-off branch: then it stays limited to that one.
+    const sync = () => { all.checked = !boxes.some((x) => x.box.checked) && !kept.length; refresh(); };
+    // Ticking All is an explicit choice, so it stands (sync would undo it while a switched-off branch is kept). Unticking All falls back through sync.
+    all.addEventListener('change', () => { if (all.checked) { boxes.forEach((x) => { x.box.checked = false; }); refresh(); } else sync(); });
+    boxes.forEach((x) => x.box.addEventListener('change', sync));
+    const body = h('div', {},
+      h('p', { class: 'muted' }, `Pick the branches ${s.full_name} works at. They will only see and work on the Aaj ki List, invoices and payments of these branches; patient records are shared by every branch. Choose "All branches" to remove the limit.`),
+      restricted && !current.length ? h('p', { class: 'alert alert-warning' }, `${s.full_name} is limited to no branch at all, so cannot open any patient list. Pick their branches, or "All branches".`) : null,
+      h('fieldset', { class: 'fieldset-plain' }, h('legend', {}, 'Branches'),
+        h('div', { class: 'inline' }, h('label', { class: 'inline' }, all, 'All branches'), boxes.map(({ b, box }) => h('label', { class: 'inline' }, box, b.name)))),
+      keptRow,
+      sureRow);
+    modal(`Branches · ${s.full_name}`, body, [
+      { label: 'Cancel' },
+      { label: 'Save', primary: true, onClick: async () => {
+        clearFieldErrors(body);
+        const ids = all.checked ? [] : [...boxes.filter((x) => x.box.checked).map((x) => x.b.id), ...kept];
+        if (restricted === !all.checked && ids.length === current.length && ids.every((id) => current.includes(id))) { toast('Nothing changed.'); return false; }
+        if (restricted && all.checked && !sure.checked) { showFormErrors(body, [{ input: sure, message: `Tick the box to let ${s.full_name} see every branch.` }]); return false; }
+        try {
+          await d.updateStaffBranches(s.id, ids);
+          toast(`Saved. ${s.full_name}: ${ids.length ? branchList(ids) : 'all branches'}.`, 'ok'); await redraw();
+        } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } },
+    ]);
+  };
+
   const personal = (s) => {
     const mine = overrides[s.id] || {};
     modal(`Personal access · ${s.full_name}`, h('div', {},
@@ -203,11 +254,13 @@ async function staff(root, redraw) {
         // Switched-off accounts say so in words; they are not dimmed, so they stay readable.
         h('td', {}, s.full_name, s.active ? null : [' ', h('span', { class: 'badge badge-inactive' }, 'Switched off')]),
         h('td', {}, s.email), h('td', {}, ROLE_LABELS[s.role]),
-        h('td', {}, s.restrict_to_branches ? s.branch_ids.map(branchName).join(', ') : 'All'),
+        h('td', {}, !s.restrict_to_branches ? 'All' : s.branch_ids?.length ? branchList(s.branch_ids.map(Number)) : 'None (locked out)'),
         logins ? h('td', { class: 'nowrap muted' }, lastLogin(s.id)) : null,
         h('td', {}, s.role !== 'admin' && Object.keys(overrides[s.id] || {}).length ? h('span', { class: 'badge badge-warn' }, 'Personal changes') : null),
         h('td', { class: 'right nowrap' },
           s.role !== 'admin' ? h('button', { class: 'btn btn-small', 'aria-label': `Personal access, ${s.full_name}`, onclick: () => personal(s) }, 'Personal access') : null, ' ',
+          // Not on an admin row (admin always has every branch) nor on your own row (the database refuses a non-admin changing their own branches).
+          s.role !== 'admin' && s.id !== state.session?.staff?.id ? h('button', { class: 'btn btn-small', 'aria-label': `Branches, ${s.full_name}`, onclick: () => branchAccess(s) }, 'Branches') : null, ' ',
           s.active && (s.role !== 'admin' || isAdmin()) ? h('button', { class: 'btn btn-small', 'aria-label': `Login and password, ${s.full_name}`, onclick: () => loginDetails(s) }, 'Login and password') : null, ' ',
           s.role === 'admin' ? null : s.active
             ? h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Switch off ${s.full_name}`, onclick: () => switchOff(s) }, 'Switch off')

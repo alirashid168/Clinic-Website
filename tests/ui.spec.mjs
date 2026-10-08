@@ -272,6 +272,180 @@ await step('Dr. Ali creates a staff login with a password, then changes its emai
   assert.ok(await p7.locator('tr:has-text("Dr. Ali Rashid") td:has-text("Never")').count() === 0, "Dr. Ali's own login is recorded");
   await shot(p7, '11-staff-accounts');
 });
+// The Branches dialog on Admin → Staff accounts. dha.reception (made above) starts with no limit, so it shows All.
+const branchLogin = 'dha.reception@dralirashid.com';
+const branchesCell = (page, login) => page.locator('tr', { hasText: login }).locator('td').nth(3);
+const openBranches = async (page, login) => { await page.locator('tr', { hasText: login }).getByRole('button', { name: /^Branches/ }).click(); return page.locator('.modal'); };
+// Switch the DHA branch off (or on) in Clinic setup, then come back to Staff accounts.
+const switchDha = async (open) => {
+  await p7.goto(BASE + '#/staff/admin?tab=setup');
+  await p7.waitForSelector('h2:text("Treatments")');
+  await p7.getByRole('button', { name: 'Edit DHA Karachi', exact: true }).click();
+  const bm = p7.locator('.modal');
+  const box = bm.getByLabel('Open (shown on the website)');
+  if (open) await box.check(); else await box.uncheck();
+  await bm.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.toast:has-text("Saved")');
+  await p7.goto(BASE + '#/staff/admin?tab=staff');
+  await p7.waitForSelector(`tr:has-text("${branchLogin}")`);
+};
+await step('Dr. Ali changes the branches a staff member works at, and is asked before a limit is lifted', async () => {
+  await p7.goto(BASE + '#/staff/admin?tab=staff');
+  assert.equal(await p7.locator('tr', { hasText: 'Dr. Ali Rashid' }).getByRole('button', { name: /^Branches/ }).count(), 0, "no Branches button on the admin's own row");
+  // An account with no limit starts on All branches; ticking branches clears it.
+  let m = await openBranches(p7, branchLogin);
+  assert.ok(await m.getByLabel('All branches', { exact: true }).isChecked(), 'no limit starts on All branches');
+  // The dialog says what a limit really covers: the Aaj ki List, invoices and payments, not patient records.
+  const intro = await m.innerText();
+  assert.match(intro, /Aaj ki List, invoices and payments of these branches/);
+  assert.match(intro, /patient records are shared by every branch/);
+  assert.doesNotMatch(intro, /enter patients/, 'it must not promise that patients are hidden');
+  await m.getByLabel('DHA Karachi', { exact: true }).check();
+  await m.getByLabel('Islamabad', { exact: true }).check();
+  assert.ok(!(await m.getByLabel('All branches', { exact: true }).isChecked()), 'ticking a branch clears All');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("DHA Karachi, Islamabad")`);
+  // Reopened, the dialog is ticked from the saved account.
+  m = await openBranches(p7, branchLogin);
+  assert.ok(await m.getByLabel('DHA Karachi', { exact: true }).isChecked() && await m.getByLabel('Islamabad', { exact: true }).isChecked(), 'ticked from the saved branches');
+  assert.ok(!(await m.getByLabel('Gulshan (RJ Mall)', { exact: true }).isChecked()), 'other branches stay unticked');
+  // Unticking the last branch means every branch again. That lifts a limit, so Save asks for a tick first.
+  const sure = m.getByLabel(/may see every branch/);
+  assert.ok(!(await sure.isVisible()), 'no question while the account stays limited');
+  await m.getByLabel('DHA Karachi', { exact: true }).uncheck();
+  await m.getByLabel('Islamabad', { exact: true }).uncheck();
+  assert.ok(await m.getByLabel('All branches', { exact: true }).isChecked(), 'clearing the last branch falls back to All');
+  assert.ok(await sure.isVisible(), 'lifting the limit asks for a tick');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.locator('[data-field-error]').waitFor();
+  assert.ok(await m.isVisible(), 'the dialog stays open until the tick is given');
+  assert.equal((await branchesCell(p7, branchLogin).textContent()).trim(), 'DHA Karachi, Islamabad', 'nothing saved without the tick');
+  await sure.check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("All")`);
+  // Setting a limit on an account that had none is never asked about.
+  m = await openBranches(p7, branchLogin);
+  await m.getByLabel('Gulshan (RJ Mall)', { exact: true }).check();
+  assert.ok(!(await sure.isVisible()), 'no question when a limit is set');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("Gulshan (RJ Mall)")`);
+});
+await step('A switched-off branch is kept when branches are saved, and Save alone cannot lift the limit', async () => {
+  // dha.reception works at Gulshan only (set above). Move them to DHA only, then switch DHA off in Clinic setup.
+  let m = await openBranches(p7, branchLogin);
+  await m.getByLabel('DHA Karachi', { exact: true }).check();
+  await m.getByLabel('Gulshan (RJ Mall)', { exact: true }).uncheck();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("DHA Karachi")`);
+  await switchDha(false);
+  assert.equal((await branchesCell(p7, branchLogin).textContent()).trim(), '1 switched-off branch', 'a switched-off branch is counted, not left blank');
+  m = await openBranches(p7, branchLogin);
+  assert.ok(!(await m.getByLabel('All branches', { exact: true }).isChecked()), 'an account limited to a switched-off branch is not shown as All');
+  assert.equal(await m.getByLabel('DHA Karachi', { exact: true }).count(), 0, 'a switched-off branch is not offered');
+  assert.match(await m.innerText(), /Also kept: 1 switched-off branch/);
+  // Pressing Save without a change must not turn the account into All branches.
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.toast:has-text("Nothing changed")');
+  assert.ok(await m.isVisible(), 'the dialog stays open');
+  // Adding a branch keeps the switched-off one.
+  await m.getByLabel('Islamabad', { exact: true }).check();
+  assert.ok(!(await m.getByLabel('All branches', { exact: true }).isChecked()));
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("Islamabad, 1 switched-off branch")`);
+  // Switch DHA back on: the kept branch is shown by name again. Then put the account back to All.
+  await switchDha(true);
+  assert.equal((await branchesCell(p7, branchLogin).textContent()).trim(), 'Islamabad, DHA Karachi');
+  m = await openBranches(p7, branchLogin);
+  await m.getByLabel('All branches', { exact: true }).check();
+  await m.getByLabel(/may see every branch/).check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("All")`);
+});
+await step('"All branches" can be chosen for an account that still has a switched-off branch', async () => {
+  // dha.reception is on All (end of the step above). Limit them to DHA, switch DHA off, then choose All branches.
+  let m = await openBranches(p7, branchLogin);
+  await m.getByLabel('DHA Karachi', { exact: true }).check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("DHA Karachi")`);
+  await switchDha(false);
+  m = await openBranches(p7, branchLogin);
+  const allBox = m.getByLabel('All branches', { exact: true });
+  const sure = m.getByLabel(/may see every branch/);
+  const keptNote = m.getByText(/Also kept: 1 switched-off branch/);
+  assert.ok(!(await allBox.isChecked()) && await keptNote.isVisible(), 'limited to a switched-off branch: All is off and the kept note shows');
+  // Clearing the last tick keeps the limit (nothing else to fall back to), as before.
+  await m.getByLabel('Islamabad', { exact: true }).check();
+  await m.getByLabel('Islamabad', { exact: true }).uncheck();
+  assert.ok(!(await allBox.isChecked()), 'a switched-off branch is kept: clearing the last tick does not turn All on');
+  // An explicit tick on All stands: it used to clear itself again straight away.
+  await allBox.check();
+  assert.ok(await allBox.isChecked(), 'All branches stays ticked');
+  assert.ok(await sure.isVisible(), 'lifting the limit still asks');
+  assert.ok(!(await keptNote.isVisible()), 'the kept note goes while All is chosen');
+  // Changing their mind: a branch tick takes All off again and brings the note back.
+  await m.getByLabel('Islamabad', { exact: true }).check();
+  assert.ok(!(await allBox.isChecked()) && await keptNote.isVisible() && !(await sure.isVisible()), 'ticking a branch undoes All');
+  await m.getByLabel('Islamabad', { exact: true }).uncheck();
+  await allBox.check();
+  // Save alone does not lift the limit; the tick does, and the switched-off branch is let go with it.
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.locator('[data-field-error]').waitFor();
+  assert.equal((await branchesCell(p7, branchLogin).textContent()).trim(), '1 switched-off branch', 'nothing saved without the tick');
+  await sure.check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("All")`);
+  await switchDha(true);
+  assert.equal((await branchesCell(p7, branchLogin).textContent()).trim(), 'All', 'the account is on All, with no limit left behind');
+});
+await step('An account limited to no branch is shown as locked out and can be repaired from the dialog', async () => {
+  // The branches form cannot make this; a mistyped SQL fix can. Create one directly through the demo data layer.
+  await p7.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.createStaff({ full_name: 'Locked Out Test', email: 'locked.out@dralirashid.com', role: 'front_desk', branch_ids: [], restrict_to_branches: true });
+  });
+  await p7.goto(BASE + '#/staff/admin?tab=access');
+  await p7.goto(BASE + '#/staff/admin?tab=staff');
+  const login = 'locked.out@dralirashid.com';
+  await p7.waitForSelector(`tr:has-text("${login}")`);
+  assert.equal((await branchesCell(p7, login).textContent()).trim(), 'None (locked out)');
+  const m = await openBranches(p7, login);
+  assert.match(await m.innerText(), /cannot open any patient list/);
+  assert.ok(!(await m.getByLabel('All branches', { exact: true }).isChecked()), 'not shown as All');
+  // Save alone changes nothing: it must not quietly give every branch.
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector('.toast:has-text("Nothing changed")');
+  assert.equal((await branchesCell(p7, login).textContent()).trim(), 'None (locked out)');
+  await m.getByLabel('Gulshan (RJ Mall)', { exact: true }).check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await p7.waitForSelector(`tr:has-text("${login}") td:text-is("Gulshan (RJ Mall)")`);
+});
+await step('A user manager has no Branches button on their own row, and the data layer refuses it too', async () => {
+  // Give the sample coordinator the "manage staff accounts" permission for this person only, then sign in as them.
+  const setManage = (on) => p7.evaluate(async (v) => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-coord', 'users.manage', v); }, on);
+  const logOut = async () => { await p7.getByRole('button', { name: 'Try another role' }).click(); await p7.waitForSelector('.door'); };
+  await setManage(true);
+  try {
+    await logOut();
+    await loginAs(p7, 'Clinic coordinator');
+    await p7.goto(BASE + '#/staff/admin?tab=staff');
+    await p7.waitForSelector('tr:has-text("Clinic coordinator (sample)")');
+    const branchButtons = (name) => p7.locator('tr', { hasText: name }).getByRole('button', { name: /^Branches/ }).count();
+    assert.equal(await branchButtons('Clinic coordinator (sample)'), 0, 'not on their own row');
+    assert.equal(await branchButtons('Dr. Ali Rashid'), 0, 'not on the admin row');
+    assert.equal(await branchButtons('Front desk (Gulshan)'), 1, "still on other people's rows");
+    const tryChange = (id) => p7.evaluate(async (who) => {
+      const { state } = await import('/js/state.js');
+      try { await state.data.updateStaffBranches(who, [1]); return 'saved'; } catch (e) { return e.message; }
+    }, id);
+    assert.match(await tryChange('s-coord'), /cannot change your own/);
+    assert.match(await tryChange('s-admin'), /Only admin/);
+  } finally {
+    // Pass or fail, the steps after this one need Dr. Ali signed in and the coordinator back to normal.
+    if (await p7.getByRole('button', { name: 'Try another role' }).count()) await logOut();
+    await loginAs(p7, 'Dr. Ali Rashid');
+    await setManage(null);
+  }
+});
 await step('Admin → Audit log lists sign-ins', async () => {
   await p7.goto(BASE + '#/staff/admin?tab=audit');
   await p7.waitForSelector('h2:text("Logins")');
