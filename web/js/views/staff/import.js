@@ -268,7 +268,7 @@ export async function renderImport(root) {
           r.dateMode === 'none' || r.dateMode === 'fixed' ? field('These rows are for', dateIn, 'The tab carries no dates: it is today\'s list, so tell the import which day it is for.') : null,
           r.headers.length ? h('details', { style: { marginTop: '8px' } }, h('summary', {}, 'Columns read'), h('div', { class: 'stack', style: { gap: '4px', marginTop: '6px' } }, colSelects)) : null,
           preview.length ? h('div', { class: 'table-scroll', style: { marginTop: '8px' } }, h('table', { class: 'list' },
-            h('thead', {}, h('tr', {}, ['Date', 'Mr#', 'Name', 'Month', 'Treatment', 'Token', "Doctor's name", 'Details'].map((x) => h('th', {}, x)))),
+            h('thead', {}, h('tr', {}, ['Date', 'Mr#', 'Name', 'Month', 'Treatment', 'Token', "Doctor's name", 'Details'].map((x) => h('th', { scope: 'col' }, x)))),
             h('tbody', {}, preview.map((row) => h('tr', {}, h('td', { class: 'nowrap' }, row.date ? shortDate(row.date) : '—'), h('td', {}, row.mr || ''), h('td', {}, row.name), h('td', {}, row.month || ''),
               h('td', {}, row.treatment || ''), h('td', {}, row.token || ''), h('td', {}, row.people.join(', ')), h('td', {}, row.details || '')))))) : null);
       };
@@ -298,7 +298,7 @@ export async function renderImport(root) {
               h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`aaj-ki-list-unmatched-${todayISO()}.csv`, un.map((u) => ({ name: u.name, mr: u.mr || '', phone: u.phone || '', rows: u.rows, first: u.first, last: u.last, tab: u.tab }))) }, 'Download the list')) : null,
             h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/patients' }, 'Open Patients →'), ' · ', h('a', { href: '#/staff/reports?group=financial' }, 'Reports →'))),
             un.length ? h('div', { class: 'table-scroll', style: { marginTop: '8px' } }, h('table', { class: 'list' },
-              h('thead', {}, h('tr', {}, h('th', {}, 'Name on the sheet'), h('th', {}, 'Mr#'), h('th', {}, 'Phone'), h('th', { class: 'right' }, 'Rows'), h('th', {}, 'First'), h('th', {}, 'Last'), h('th', {}, 'Tab'))),
+              h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Name on the sheet'), h('th', { scope: 'col' }, 'Mr#'), h('th', { scope: 'col' }, 'Phone'), h('th', { scope: 'col', class: 'right' }, 'Rows'), h('th', { scope: 'col' }, 'First'), h('th', { scope: 'col' }, 'Last'), h('th', { scope: 'col' }, 'Tab'))),
               h('tbody', {}, un.slice(0, 50).map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.mr || ''), h('td', {}, u.phone || ''), h('td', { class: 'right' }, u.rows), h('td', { class: 'nowrap' }, shortDate(u.first)), h('td', { class: 'nowrap' }, shortDate(u.last)), h('td', {}, u.tab || '')))))) : null);
           toast('Aaj ki List imported.', 'ok');
         } catch (e) { btn.disabled = false; progress.textContent = ''; toast(friendlyError(e), 'error', 8000); }

@@ -20,6 +20,7 @@ export const CONTACT = { phone: '+92 310 0000464', whatsapp: '923100000464', tel
 export const PRICES_APPROVED = false;
 
 // TO CONFIRM: carried over from the old website. Update by hand from the Google listing.
+// The only place the review count is written (the rating line in the Meet section reads it).
 export const GOOGLE_REVIEWS = '140+';
 
 export const VISITOR = {
@@ -51,18 +52,22 @@ export const VISITOR = {
 
 // Homepage wording carried over from the old dralirashid.com website.
 export const HOME = {
-  trust: (f) => [
-    { big: '2017', small: 'founded 17 September 2017' },
-    f.count ? { big: String(f.count), small: `${f.count === 1 ? 'clinic' : 'clinics'} in ${f.cities}` } : null,
-    { big: GOOGLE_REVIEWS, small: 'Google reviews' },
-    { big: 'BDS', small: 'Baqai University' },
-    { big: 'In-house', small: 'retainer lab' },
-  ].filter(Boolean),
-  aboutTitle: 'Meet Dr. Ali Rashid',
-  about: (f) => [
-    `Dr. Ali Rashid (BDS, Baqai University) founded the clinic on 17 September 2017 and leads a team of dentists across ${f.count ? `${clinics(f.count)} in ${f.cities}` : 'our clinics'}, focused on braces, smile makeovers, veneers and everyday dentistry.`,
-    'Every braces patient follows the same month-by-month plan at every branch, with senior doctors at the key months and progress photos you can see in your own patient account.',
-  ],
+  // "Meet Dr. Ali" section on the homepage (it replaces the earlier trust strip and "about" box).
+  meet: {
+    role: 'Founder and lead dentist',
+    name: ['Dr. Ali', 'Rashid'],
+    credential: 'BDS, Baqai University',
+    body: (f) => [
+      `Dr. Ali Rashid leads a team of dentists across ${f.count ? `${clinics(f.count)} in ${f.cities}` : 'our clinics'}. His work centres on braces, smile makeovers and veneers, and on the moment a patient first sees their finished smile.`,
+      'Every braces patient follows the same month-by-month plan at every branch, with senior doctors at the months that matter most. Your progress photos, X-rays and invoices are kept in your own patient account.',
+    ],
+    photo: 'img/dr-ali.jpg',
+    photoWidth: 682,
+    photoHeight: 909,
+    photoAlt: 'Dr. Ali Rashid in clinic scrubs, smiling with his arms crossed',
+  },
+  // TO CONFIRM: the 4.5 score. The review count is GOOGLE_REVIEWS above, so there is one place to update it.
+  rating: { score: 4.5, text: `on Google from ${GOOGLE_REVIEWS} reviews` },
   // TO CONFIRM: a general Google Maps search. Replace with the clinic's Google Business listing link(s).
   reviewsUrl: 'https://www.google.com/maps/search/?api=1&query=Dr.+Ali+Rashid%27s+Dental+Clinic',
   social: [

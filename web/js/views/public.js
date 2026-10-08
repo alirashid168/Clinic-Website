@@ -1,7 +1,7 @@
-// Public website: home (hero smile card + three doors + Dr. Ali's week and the
-// clinics) and the visitor page. The parts that need no data render at once;
-// the schedule, results and clinic cards fill in when the database answers.
-import { h, mount, srOnly, extLink } from '../ui/dom.js';
+// Public website: home (hero smile card + three doors + Meet Dr. Ali + his week
+// and the clinics) and the visitor page. The parts that need no data render at
+// once; the schedule, results and clinic cards fill in when the database answers.
+import { h, mount, srOnly, extLink, announce } from '../ui/dom.js';
 import { state } from '../state.js';
 import { VISITOR, HOME, CONTACT, PRICES_APPROVED } from '../content.js';
 import { aliWeekSection, clinicsSection, clinicFacts } from './schedule.js';
@@ -79,14 +79,45 @@ function footer() {
     `© ${new Date().getFullYear()} ${CONFIG.CLINIC_NAME}`);
 }
 
-function trustStrip(f) {
-  return h('ul', { class: 'trust' }, HOME.trust(f).map((t) => h('li', {}, h('b', {}, t.big), ' ', h('span', {}, t.small))));
+// "Meet Dr. Ali": his portrait over a night-coloured block, his name set large beside it.
+function stars(score) {
+  return h('span', { class: 'mx-stars', 'aria-hidden': 'true' }, [1, 2, 3, 4, 5].map((i) =>
+    h('i', { class: score >= i ? 'full' : score >= i - 0.5 ? 'half' : 'empty' })));
 }
 
-/** Alt text from the photo's label when it is a real description, not a camera file name. */
+/** The section is built once; fill(f) writes the wording that quotes clinic facts, so the photo is never rebuilt. */
+function meetSection() {
+  const m = HOME.meet;
+  const body = m.body({}).map(() => h('p', { class: 'mx-body' }));
+  return {
+    fill: (f) => m.body(f).forEach((text, i) => { body[i].textContent = text; }),
+    el: h('section', { class: 'mx', id: 'meet', 'aria-labelledby': 'mx-title' },
+      h('div', { class: 'mx-inner' },
+        h('figure', { class: 'mx-photo' },
+          h('img', { src: m.photo, alt: m.photoAlt, width: m.photoWidth, height: m.photoHeight, loading: 'lazy', decoding: 'async' })),
+        h('div', { class: 'mx-copy' },
+          h('span', { class: 'eyebrow dark' }, m.role),
+          h('h2', { class: 'display mx-name', id: 'mx-title' }, h('span', {}, m.name[0]), ' ', h('span', {}, m.name[1])),
+          h('p', { class: 'display mx-cred' }, m.credential),
+          h('div', { class: 'mx-rule', 'aria-hidden': 'true' }),
+          body,
+          h('div', { class: 'mx-actions' },
+            waLink('Hi, I would like to book a free consultation.', 'Book a free consultation', 'mx-btn'),
+            h('a', { class: 'mx-link', href: '#/visitor' }, PRICES_APPROVED ? 'Braces options and prices' : 'Braces options')),
+          extLink(HOME.reviewsUrl, [stars(HOME.rating.score), h('b', {}, String(HOME.rating.score)), h('span', {}, HOME.rating.text)], { class: 'mx-rating' })))),
+  };
+}
+
+/**
+ * Alt text from the photo's label when it is a real description. Published photos are named
+ * "YYYY-MM-DD_label_xxxxxxxx.jpg" (publishPhoto in data/supabase.js): the date and the hash are not a
+ * description, and neither is the "case" placeholder or a camera file name.
+ */
 function caseAlt(c, i) {
-  const label = String(c.view_label || '').replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ').trim();
-  return /[a-z]{3}/i.test(label) && !/^(img|dsc|pxl|photo|image)\s*\d+$/i.test(label) ? `Before and after: ${label}` : `Before and after result ${i + 1}`;
+  const base = String(c.view_label || '').replace(/\.[a-z0-9]+$/i, '');
+  const named = base.match(/^\d{4}-\d{2}-\d{2}_(.*)_[0-9a-f]{8}$/i);
+  const label = (named ? named[1] : base).replace(/[-_]+/g, ' ').trim();
+  return /[a-z]{3}/i.test(label) && !/^(case|img|dsc|pxl|photo|image)\s*\d*$/i.test(label) ? `Before and after: ${label}` : `Before and after result ${i + 1}`;
 }
 
 /** Only when there are photos to show: no empty "Results" section. */
@@ -101,20 +132,25 @@ function resultsSection(cases, { limit, reviews } = {}) {
 }
 
 // ---------------------------------------------------------------- data
-// The schedule and results photos, fetched once and shared by every visit to
-// Home and Treatments for a few minutes. A failed fetch is not kept.
-const CACHE_MS = 5 * 60 * 1000;
-let cached = null;
+// The schedule and results photos. No cache here: the data layer already keeps both for a few minutes and
+// forgets them when staff save a schedule row or publish a photo, so a second cache would show old times.
+// A failed fetch is handled apart: the schedule becomes null (so it never reads as "Dr. Ali is not coming")
+// and the photos an empty list.
 function publicData() {
-  if (cached && Date.now() - cached.at < CACHE_MS) return cached.promise;
   const settle = (p) => Promise.resolve().then(() => p()).then((value) => ({ value }), (error) => ({ error }));
-  const promise = Promise.all([settle(() => state.data.schedule()), settle(() => state.data.publicCases())]).then(([schedule, cases]) => {
-    if ((schedule.error || cases.error) && cached?.promise === promise) cached = null;
+  return Promise.all([settle(() => state.data.schedule()), settle(() => state.data.publicCases())]).then(([schedule, cases]) => {
     if (schedule.error) console.error(schedule.error);
     return { schedule: schedule.error ? null : schedule.value || [], cases: cases.error ? [] : cases.value || [] };
   });
-  cached = { at: Date.now(), promise };
-  return promise;
+}
+
+/** A place in the page for something that may or may not exist (the Results section) and can be filled again after a retry. */
+function optionalSlot() {
+  let node = document.createComment('results');
+  return {
+    get node() { return node; },
+    set(el) { const next = el || document.createComment('results'); node.replaceWith(next); node = next; },
+  };
 }
 
 const loadingBlock = () => h('div', { class: 'public-main' }, h('p', { class: 'empty' }, 'Loading clinic times…'));
@@ -133,9 +169,12 @@ function fallbackBlock() {
 
 /**
  * Waits for the app to start, then fills `slot` with the data sections.
+ * `onData(data, retried)` runs after every successful fill, the first one and each "Try again", so everything that
+ * depends on the data (the Results photos) is redrawn together with the sections. `focus` is the heading to move to
+ * after a retry: the button that was pressed is gone, so without this focus would fall back to the top of the page.
  * Returns the public data, or null when the database could not be reached.
  */
-async function fillData(slot, sections) {
+async function fillData(slot, sections, { onData, focus } = {}) {
   slot.setAttribute('aria-busy', 'true');
   await state.ready;
   if (state.dataError || !state.data) {
@@ -143,27 +182,29 @@ async function fillData(slot, sections) {
     slot.removeAttribute('aria-busy');
     return null;
   }
-  const data = await publicData();
-  const retry = () => fillData(slot, sections);
-  mount(slot, sections(data, data.schedule ? undefined : retry));
-  slot.removeAttribute('aria-busy');
-  return data;
+  const load = async (retried) => {
+    slot.setAttribute('aria-busy', 'true');
+    const data = await publicData();
+    mount(slot, sections(data, data.schedule ? undefined : () => load(true)));
+    slot.removeAttribute('aria-busy');
+    onData?.(data, retried);
+    if (retried && slot.isConnected) { // not when the visitor has already left the page
+      // Loaded: the new heading. Failed again: the new "Try again" button. Either way say so, since the old button is gone.
+      const target = data.schedule ? slot.querySelector(focus) : slot.querySelector('.public-fallback button');
+      if (target) { if (data.schedule) target.setAttribute('tabindex', '-1'); target.focus(); }
+      announce(data.schedule ? "Dr. Ali's schedule has loaded." : 'The schedule still could not load.');
+    }
+    return data;
+  };
+  return load(false);
 }
 
 // ---------------------------------------------------------------- pages
 export async function renderHome(root) {
-  const trust = h('section', {});
-  const about = h('section', { class: 'about' });
-  const fillFacts = () => {
-    const f = clinicFacts();
-    mount(trust, trustStrip(f));
-    mount(about, h('div', {}, h('h2', {}, HOME.aboutTitle), HOME.about(f).map((p) => h('p', {}, p)),
-      h('div', { class: 'about-actions' },
-        waLink('Hi, I would like to book a free consultation.', 'Book a free consultation', 'btn btn-primary'),
-        h('a', { class: 'btn', href: '#/visitor' }, PRICES_APPROVED ? 'Braces options and prices' : 'Braces options'))));
-  };
+  const meet = meetSection();
+  const fillFacts = () => meet.fill(clinicFacts());
   fillFacts();
-  const resultsSlot = document.createComment('results');
+  const results = optionalSlot();
   const dataSlot = h('div', {}, loadingBlock());
   root.classList.add('has-fab');
   mount(root,
@@ -179,25 +220,29 @@ export async function renderHome(root) {
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))),
         h('p', { class: 'hero-demo' }, 'New here? ', h('a', { href: '#/patient/demo' }, 'See a sample patient account'), ' to find out what you get.'))),
     h('main', { id: 'main' },
-      h('div', { class: 'public-main' }, trust, about, resultsSlot),
+      meet.el,
+      results.node,
       dataSlot),
     footer(),
     waFloat());
 
-  const data = await fillData(dataSlot, ({ schedule }, onRetry) => [
+  await fillData(dataSlot, ({ schedule }, onRetry) => [
     aliWeekSection(schedule, whatsappLink, { onRetry }),
-    clinicsSection(schedule, whatsappLink)]);
-  if (!data) return;
-  fillFacts();
-  const results = resultsSection(data.cases, { limit: 6, reviews: true });
-  if (results) resultsSlot.replaceWith(results);
+    clinicsSection(schedule, whatsappLink)], {
+    focus: '#dr-ali h2',
+    onData: (data, retried) => {
+      if (!retried) fillFacts(); // the clinic facts are known now; a retry does not change them
+      const section = resultsSection(data.cases, { limit: 6, reviews: true });
+      results.set(section ? h('div', { class: 'public-main' }, section) : null);
+    },
+  });
 }
 
 export async function renderVisitor(root) {
   const benefits = h('div', { class: 'benefits' });
   const fillBenefits = () => mount(benefits, VISITOR.benefits(clinicFacts()).map((b) => h('div', { class: 'benefit' }, h('h3', {}, b.title), h('p', { class: 'muted' }, b.body))));
   fillBenefits();
-  const resultsSlot = document.createComment('results');
+  const results = optionalSlot();
   const dataSlot = h('div', {}, loadingBlock());
   root.classList.add('has-fab');
   mount(root,
@@ -214,7 +259,7 @@ export async function renderVisitor(root) {
           h('div', { class: 'braces-types' }, VISITOR.braces.map((b) =>
             h('div', { class: 'brace-card' }, h('h3', {}, b.name), h('span', { class: 'price' }, PRICES_APPROVED ? b.price : VISITOR.priceHidden), h('p', { class: 'muted' }, b.body)))),
           h('p', { class: 'muted', style: { marginTop: '12px' } }, PRICES_APPROVED ? VISITOR.bracesNote : VISITOR.bracesNoteUnpriced)),
-        resultsSlot,
+        results.node,
         h('section', {},
           h('div', { class: 'section-title' }, h('h2', {}, 'Other treatments')),
           h('p', {}, VISITOR.otherTreatments.join(', ') + '.')),
@@ -226,9 +271,11 @@ export async function renderVisitor(root) {
     footer(),
     waFloat());
 
-  const data = await fillData(dataSlot, ({ schedule }, onRetry) => clinicsSection(schedule, whatsappLink, { onRetry }));
-  if (!data) return;
-  fillBenefits();
-  const results = resultsSection(data.cases);
-  if (results) resultsSlot.replaceWith(results);
+  await fillData(dataSlot, ({ schedule }, onRetry) => clinicsSection(schedule, whatsappLink, { onRetry }), {
+    focus: '#branches h2',
+    onData: (data, retried) => {
+      if (!retried) fillBenefits();
+      results.set(resultsSection(data.cases));
+    },
+  });
 }

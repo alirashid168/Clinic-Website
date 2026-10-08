@@ -259,7 +259,7 @@ async function settings(root) {
     const sync = () => { week.hidden = mode.value !== 'weekly'; visitNote.hidden = mode.value !== 'visits'; };
     mode.addEventListener('change', sync);
     sync();
-    return { b, cur, mode, days, el: h('fieldset', { class: 'panel' }, h('legend', { style: { fontWeight: 700, padding: '0 6px' } }, b.name),
+    return { b, cur, mode, days, el: h('fieldset', { class: 'panel' }, h('legend', {}, b.name),
       field('Opening pattern', mode), week, visitNote, h('p', { class: 'muted' }, 'Leave both times empty on a closed day.')) };
   });
   const collectHours = () => {
@@ -403,10 +403,13 @@ async function audit(root) {
   mount(root,
     logins ? h('section', { class: 'panel' }, h('h2', {}, 'Logins'),
       h('p', { class: 'muted' }, 'Every sign-in to the staff system and the patient portal. The last-login time on Staff accounts comes from the login system itself.'),
+      logins.events?.length > 100 ? h('p', { class: 'muted' }, `Showing the latest 100 of ${logins.events.length} sign-ins.`) : null,
       logins.events?.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'When'), h('th', { scope: 'col' }, 'Who'), h('th', { scope: 'col' }, 'Device'))),
         h('tbody', {}, logins.events.slice(0, 100).map((e) => h('tr', {}, h('td', { class: 'nowrap' }, when(e.at)), h('td', {}, e.name || '', e.role ? h('span', { class: 'muted' }, ` · ${ROLE_LABELS[e.role] || e.role}`) : e.kind === 'patient' ? h('span', { class: 'muted' }, ' · patient') : null), h('td', {}, device(e.user_agent))))))) : empty('No sign-ins recorded yet.')) : null,
     h('section', { class: 'panel' }, h('h2', {}, 'Recent changes'),
+    // The list is cut at its cap (newest first): say so, or an empty search for an older change reads as "it never happened".
+    rows.truncated ? h('div', { class: 'alert alert-warning', role: 'status' }, `Showing the latest ${rows.cap ?? rows.length} changes. Older changes are not shown here.`) : null,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'When'), h('th', { scope: 'col' }, 'Who'), h('th', { scope: 'col' }, 'What'), h('th', { scope: 'col' }, 'Change'))),
       h('tbody', {}, rows.map((r) => h('tr', {},

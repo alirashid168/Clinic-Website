@@ -1,6 +1,6 @@
 // Smaller staff screens: today dashboard, queue board, billing desk,
 // Dr. Ali review list, complaints inbox, doctor daily log.
-import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly, showFormErrors } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName, myBranches, defaultBranchId, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, STATUS_LABELS } from './common.js';
 import { printReceipt } from './invoice.js';
@@ -54,13 +54,16 @@ export async function renderDashboard(root) {
 }
 
 // ---------------------------------------------------------------- queue
-export async function renderQueue(root, params) {
+export async function renderQueue(root, params, signal) {
   const d = state.data;
   let branchId = Number(params.get('branch')) || defaultBranchId();
   const board = h('div', { class: 'queue' });
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId, { onchange: (e) => { branchId = Number(e.target.value); load(); } });
+  let newest = 0;
   async function load() {
+    const mine = ++newest; // a slow answer for the branch just left must not overwrite the one on screen
     const rows = await d.listVisits({ branchId, date: todayISO() }).catch((e) => { toast(friendlyError(e), 'error'); return []; });
+    if (mine !== newest || signal?.aborted) return;
     const col = (status, title) => {
       const items = rows.filter((r) => r.status === status);
       return h('div', { class: 'queue-col' }, h('h3', {}, title, h('span', { class: 'muted' }, items.length)),
@@ -78,16 +81,20 @@ export async function renderQueue(root, params) {
       h('label', { class: 'inline' }, 'Branch ', branchSel)),
     board);
   await load();
+  if (signal?.aborted) return;
   // Live: redraw the moment a visit at this branch changes. The timed check is only a safety net:
   // every 15 s without live updates, every minute with them, and never while the tab is hidden.
-  let stopLive = null; let liveTimer = null;
-  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId, () => { clearTimeout(liveTimer); liveTimer = setTimeout(load, 300); }) : null; };
+  // Leaving the page (the shell aborts `signal`) stops the timer and the realtime subscription.
+  let stopLive = null; let liveTimer = null; let t = null;
+  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId, () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!document.hidden) load(); }, 300); }) : null; };
+  const stop = () => { clearInterval(t); clearTimeout(liveTimer); stopLive?.(); stopLive = null; document.removeEventListener('visibilitychange', onVisible); };
+  const refresh = () => { if (signal?.aborted || !board.isConnected) stop(); else if (!document.hidden) load(); };
+  const onVisible = refresh; // coming back to the tab redraws at once
   branchSel.addEventListener('change', listen);
-  listen();
-  const stop = () => { clearInterval(t); stopLive?.(); document.removeEventListener('visibilitychange', onVisible); };
-  const onVisible = () => { if (!document.body.contains(board)) stop(); else if (!document.hidden) load(); };
   document.addEventListener('visibilitychange', onVisible);
-  const t = setInterval(() => { if (!document.body.contains(board)) stop(); else if (!document.hidden) load(); }, d.subscribeVisits ? 60000 : 15000);
+  signal?.addEventListener('abort', stop, { once: true });
+  listen();
+  t = setInterval(refresh, d.subscribeVisits ? 60000 : 15000);
 }
 
 // ---------------------------------------------------------------- billing desk
@@ -170,20 +177,38 @@ export async function renderComplaints(root) {
     const internal = h('input', { type: 'checkbox' });
     const doctorSel = select([{ value: '', label: 'Not about a doctor' }, ...state.ref.clinicians.filter((x) => x.is_doctor).map((x) => ({ value: x.id, label: x.display_name }))], c.clinician_id || '', { 'aria-label': 'About which doctor' });
     doctorSel.onchange = async () => { try { await d.linkComplaintDoctor(c.id, doctorSel.value || null); c.clinician_id = doctorSel.value || null; toast('Saved.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); } };
-    modal(c.subject, h('div', {},
+    const body = h('div', {},
       h('p', {}, h('strong', {}, c.patient?.full_name), ` · Mr# ${c.patient?.mr_number || ''}${c.patient?.phone ? ' · ' + c.patient.phone : ''}`),
       h('p', { class: 'muted' }, `${shortDate(dayOf(c.created_at))} · ${branchName(c.branch_id)}`),
       h('div', { class: 'panel', style: { background: 'var(--porcelain)' } }, c.body),
       (c.messages || []).map((m) => h('div', { class: ['alert', m.internal_note ? 'alert-warning' : 'alert-info'], style: { marginTop: '8px' } },
         h('strong', {}, m.internal_note ? 'Internal note' : 'Reply'), m.author ? ` · ${m.author}` : '', h('div', {}, m.body))),
-      h('div', { style: { marginTop: '12px' } }, field('Reply', reply), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)')),
-      h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.'))), [
-      { label: 'Mark resolved', onClick: async () => {
-        try { await d.setComplaintStatus(c.id, 'resolved'); toast('Marked resolved.', 'ok'); renderComplaints(root); } catch (e) { toast(friendlyError(e), 'error'); return false; }
-      } },
+      h('div', { style: { marginTop: '12px' } }, field('Reply', reply, null, { required: true }), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)')),
+      h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.')));
+    // Closing a complaint tells the patient it is done, so it asks first; the complaint dialog stays open underneath until that is confirmed.
+    const confirmResolve = () => {
+      modal('Mark this complaint resolved?', h('p', {}, `${c.patient?.full_name || 'The patient'} will see it as resolved. You can reopen it afterwards.`), [
+        { label: 'Cancel' },
+        { label: 'Mark resolved', primary: true, onClick: async () => {
+          try { await d.setComplaintStatus(c.id, 'resolved'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+          toast('Marked resolved.', 'ok');
+          dlg.close();
+          await renderComplaints(root); // the list is redrawn before this dialog closes, so focus can return to the page
+        } },
+      ]);
+      return false;
+    };
+    // A resolved complaint offers Reopen instead: Mark resolved again would only overwrite who resolved it and when.
+    const reopen = async () => {
+      try { await d.setComplaintStatus(c.id, 'in_progress'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      toast('Reopened.', 'ok');
+      await renderComplaints(root);
+    };
+    const dlg = modal(c.subject, body, [
+      c.status === 'resolved' ? { label: 'Reopen', onClick: reopen } : { label: 'Mark resolved', onClick: confirmResolve },
       { label: 'Send', primary: true, onClick: async () => {
-        if (!reply.value.trim()) { toast('Write a reply first.'); return false; }
-        try { await d.replyComplaint(c.id, reply.value.trim(), internal.checked); toast('Saved.', 'ok'); renderComplaints(root); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        if (!reply.value.trim()) return showFormErrors(body, [{ input: reply, message: 'Write a reply first.' }]);
+        try { await d.replyComplaint(c.id, reply.value.trim(), internal.checked); toast('Saved.', 'ok'); await renderComplaints(root); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
   };
@@ -203,16 +228,22 @@ export async function renderComplaints(root) {
 export async function renderDoctorLog(root, params) {
   const d = state.data;
   const mine = await d.myClinicianId();
-  let clinicianId = params.get('doctor') || mine;
+  const doctors = state.ref.clinicians.filter((c) => c.is_doctor);
+  const viewAll = can('doctor_log.view_all');
+  // Someone who may see every doctor but has no clinician record of their own starts on the first doctor, not on an error.
+  let clinicianId = params.get('doctor') || mine || (viewAll ? doctors[0]?.id : null) || null;
   const from = h('input', { type: 'date', value: params.get('from') || todayISO().slice(0, 8) + '01' });
   const to = h('input', { type: 'date', value: params.get('to') || todayISO() });
-  const doctors = state.ref.clinicians.filter((c) => c.is_doctor);
-  const who = can('doctor_log.view_all') ? select(doctors.map((c) => ({ value: c.id, label: c.display_name })), clinicianId, { onchange: (e) => { clinicianId = e.target.value; load(); } }) : null;
+  const subtitle = h('p', {}, clinicianName(clinicianId) || '');
+  const who = viewAll ? select(doctors.map((c) => ({ value: c.id, label: c.display_name })), clinicianId, { onchange: (e) => { clinicianId = e.target.value; subtitle.textContent = clinicianName(clinicianId) || ''; load(); } }) : null;
   const out = h('div', {});
+  let newest = 0;
   async function load() {
-    if (!clinicianId) { mount(out, empty('Your login is not linked to a doctor yet. Ask Dr. Ali to link it.')); return; }
+    const seq = ++newest; // a slow answer for the doctor just left must not overwrite the one on screen
+    if (!clinicianId) { mount(out, empty(viewAll ? 'No doctors set up yet.' : 'Your login is not linked to a doctor yet. Ask Dr. Ali to link it.')); return; }
     try {
       const [rows, sum] = await Promise.all([d.doctorLog({ clinicianId, from: from.value, to: to.value }), d.doctorSummary(clinicianId, from.value, to.value).catch(() => null)]);
+      if (seq !== newest) return;
       const days = [...new Set(rows.map((r) => r.visit_date))];
       const complaints = sum?.complaints || [];
       mount(out,
@@ -239,12 +270,12 @@ export async function renderDoctorLog(root, params) {
             h('td', { class: 'nowrap' }, shortDate(r.visit_date)), h('td', {}, r.patient.full_name, h('div', { class: 'muted' }, `Mr# ${r.patient.mr_number}`)),
             h('td', {}, branchName(r.branch_id)), h('td', {}, [r.treatment_label, r.braces_month ? `M${r.braces_month}` : null].filter(Boolean).join(' · ')),
             h('td', {}, r.role === 'checker' ? 'Checked' : r.role === 'assistant' ? 'Assisted' : 'Treated'), h('td', {}, r.details_text || ''))))))) : empty('No completed visits in this period.'));
-    } catch (e) { mount(out, empty(friendlyError(e))); }
+    } catch (e) { if (seq === newest) mount(out, empty(friendlyError(e))); }
   }
   from.addEventListener('change', load);
   to.addEventListener('change', load);
   mount(root,
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Doctor daily log'), h('p', {}, clinicianName(clinicianId) || '')),
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Doctor daily log'), subtitle),
       h('div', { class: 'inline' }, who ? h('label', { class: 'inline' }, 'Doctor ', who) : null, h('label', { class: 'inline' }, 'From ', from), h('label', { class: 'inline' }, 'To ', to))),
     out);
   load();

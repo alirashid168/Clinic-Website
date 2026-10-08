@@ -256,7 +256,9 @@ export function clinicsSection(schedule, whatsappLink, { onRetry } = {}) {
     // Without the schedule we cannot know the visit dates, so say so rather than "No dates scheduled yet".
     const st = c.failed ? null : branchStatus(hrs, c.schedule, b.id, c.today, c.now);
     const runs = visitRuns(c.schedule, b.id, c.today);
-    const trip = (r, hidden) => h('div', { class: hidden ? 'sr-only' : 'cx-trip', role: 'listitem' }, h('b', {}, r.label), hidden ? ', ' : null, h('span', {}, r.time));
+    // The times come as pieces ("Fri 3 PM – 9 PM"): each piece stays whole on a phone, the line may break between pieces.
+    const pieces = (r) => r.parts.map((part, i) => [i ? ' · ' : null, h('span', { class: 'cx-trip-piece' }, part)]);
+    const trip = (r, hidden) => h('div', { class: hidden ? 'sr-only' : 'cx-trip', role: 'listitem' }, h('b', {}, r.label), hidden ? ', ' : null, h('span', {}, pieces(r)));
     return h('article', { class: 'cx-card cx-visit' },
       h('div', { class: 'cx-visit-side' },
         cardHead(b, cityOf(b), st, true),

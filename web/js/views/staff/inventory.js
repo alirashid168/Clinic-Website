@@ -31,6 +31,11 @@ export async function renderInventory(root, params) {
   const move = (item, stock, reason) => {
     const qty = h('input', { type: 'number', min: 1, step: 1, value: 1 });
     const why = select(Object.entries(REASONS).map(([value, label]) => ({ value, label })), reason);
+    // A count may find none left, so a count correction accepts 0; every other move needs at least 1.
+    const minQty = () => (why.value === 'adjustment' ? 0 : 1);
+    const syncMin = () => { qty.min = minQty(); };
+    why.addEventListener('change', syncMin);
+    syncMin();
     const note = h('input', { placeholder: 'Optional note (batch, patient, reason)' });
     const body = h('div', {},
       h('p', { class: 'muted' }, `In stock now: ${Number(stock?.quantity || 0)} ${item.unit}`),
@@ -39,8 +44,10 @@ export async function renderInventory(root, params) {
       { label: 'Cancel' },
       { label: 'Save', primary: true, onClick: async () => {
         clearFieldErrors(body);
-        const n = Number(qty.value);
-        if (!(n > 0)) { showFormErrors(body, [{ input: qty, message: 'Enter the quantity.' }]); return false; }
+        // An empty box is not a count of 0 (Number('') is 0), so it is checked first.
+        const raw = qty.value.trim();
+        const n = Number(raw);
+        if (raw === '' || !Number.isInteger(n) || n < minQty()) { showFormErrors(body, [{ input: qty, message: why.value === 'adjustment' ? 'Enter the counted quantity (0 or more).' : 'Enter the quantity (1 or more).' }]); return false; }
         const change = why.value === 'received' ? n : why.value === 'adjustment' ? n - Number(stock?.quantity || 0) : -n;
         if (change === 0) { showFormErrors(body, [{ input: qty, message: `The count is already ${n}.` }]); return false; }
         try { await d.moveStock({ branch_id: branchId, item_id: item.id, change, reason: note.value.trim() ? `${why.value}: ${note.value.trim()}` : why.value }); toast('Stock updated.', 'ok'); load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }

@@ -1,7 +1,4 @@
 // GENERATED from src/lib by scripts/build-lib.sh. Edit the .ts file, not this one.
-// NOTE (2026-10-07 audit fixes): edited directly in this mirror because src/lib is not part of it.
-// Port these changes back to src/lib/hours.ts before the next build, or they will be overwritten.
-//
 // Branch opening hours and Dr. Ali's dated calendar.
 //
 // Two separate things, on purpose:
@@ -89,7 +86,11 @@ export function aliSlotsAt(rows, branchId, date) {
     return slotsOn(rows, date).slots.filter((s) => s.branch_id === branchId);
 }
 // ---------------------------------------------------------------- branch cards
-/** Upcoming visit dates of a branch (days Dr. Ali is there), merged into runs of consecutive days. */
+/**
+ * Upcoming visit dates of a branch (days Dr. Ali is there), merged into runs of consecutive days.
+ * When the times differ inside a run, `time` groups the days that share one:
+ * "Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM", and `parts` holds those pieces.
+ */
 export function visitRuns(rows, branchId, today, horizon = 180) {
     const runs = [];
     for (let n = 0; n < horizon; n++) {
@@ -110,8 +111,23 @@ export function visitRuns(rows, branchId, today, horizon = 180) {
     return runs.map((r) => {
         const label = r.from === r.to ? dateLabel(r.from) : `${dateLabel(r.from)} – ${dateLabel(r.to)}`;
         const same = r.times.every((x) => x === r.times[0]);
-        const time = same ? r.times[0] : r.dates.map((d, i) => `${SHORT[dayKeyOf(d)]} ${r.times[i]}`).join(' · ');
-        return { from: r.from, to: r.to, text: `${label}, ${time}`, label, time };
+        let parts;
+        if (same)
+            parts = [r.times[0]];
+        else {
+            // Consecutive days with the same time become one piece: "Sat – Sun 12 PM – 9 PM".
+            const groups = [];
+            r.dates.forEach((d, i) => {
+                const g = groups[groups.length - 1];
+                if (g && g.time === r.times[i])
+                    g.last = d;
+                else
+                    groups.push({ first: d, last: d, time: r.times[i] });
+            });
+            parts = groups.map((g) => `${g.first === g.last ? SHORT[dayKeyOf(g.first)] : `${SHORT[dayKeyOf(g.first)]} – ${SHORT[dayKeyOf(g.last)]}`} ${g.time}`);
+        }
+        const time = parts.join(' · ');
+        return { from: r.from, to: r.to, text: `${label}, ${time}`, label, time, parts };
     });
 }
 // ---------------------------------------------------------------- live status

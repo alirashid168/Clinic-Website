@@ -141,16 +141,14 @@ async function expenses(root) {
     if (!category.value) errors.push({ input: category, message: 'Choose a category.' });
     if (!(Number(amount.value) > 0)) errors.push({ input: amount, message: 'Enter the amount.' });
     if (errors.length) { showFormErrors(formEl, errors); return; }
-    saveBtn.disabled = true;
-    try {
-      const saved = await d.addExpense({ expense_date: date.value, branch_id: branch.value || null, city_id: Number(city.value), category_id: Number(category.value), amount: Number(amount.value), paid_to: paidTo.value, method: method.value, notes: notes.value });
-      if (receipt.files[0] && saved?.id) { try { await d.uploadReceipt(saved.id, receipt.files[0]); } catch (err) { toast('Expense saved, but the receipt could not be uploaded: ' + friendlyError(err), 'error', 8000); } }
-      toast(`Expense of ${rupees(amount.value)} saved.`, 'ok');
-      amount.value = ''; paidTo.value = ''; notes.value = ''; receipt.value = '';
-      load();
-    } finally { saveBtn.disabled = false; }
+    const saved = await d.addExpense({ expense_date: date.value, branch_id: branch.value || null, city_id: Number(city.value), category_id: Number(category.value), amount: Number(amount.value), paid_to: paidTo.value, method: method.value, notes: notes.value });
+    if (receipt.files[0] && saved?.id) { try { await d.uploadReceipt(saved.id, receipt.files[0]); } catch (err) { toast('Expense saved, but the receipt could not be uploaded: ' + friendlyError(err), 'error', 8000); } }
+    toast(`Expense of ${rupees(amount.value)} saved.`, 'ok');
+    amount.value = ''; paidTo.value = ''; notes.value = ''; receipt.value = '';
+    await load();
   });
-  formEl.addEventListener('submit', (e) => { e.preventDefault(); saveExpense(e); });
+  // A submit event's currentTarget is the form; busy() should disable (and give focus back to) the Save button instead.
+  formEl.addEventListener('submit', (e) => { e.preventDefault(); saveExpense({ currentTarget: saveBtn }); });
   const form = can('expenses.manage') ? h('section', { class: 'panel' }, h('h2', {}, 'Add expense'), formEl) : null;
 
   monthInput.addEventListener('change', load);
@@ -167,13 +165,15 @@ async function cash(root) {
   const d = state.data;
   const branches = myBranches();
   const out = h('div', {});
+  let closingsHeading = null; // the page is redrawn after a closing or a verification: focus goes to the list, which still exists
+  let verified = false;
   const verify = (c) => modal('Verify this cash closing?',
     h('p', {}, `${branchName(c.branch_id)}, ${shortDate(c.closing_date)}: expected ${rupees(c.expected_cash)}, counted ${rupees(c.counted_cash)}${Number(c.difference) ? `, a difference of ${rupees(c.difference)}` : ', no difference'}.`), [
       { label: 'Cancel' },
       { label: 'Verify closing', primary: true, onClick: async () => {
-        try { await d.verifyClosing(c.id); toast('Verified.', 'ok'); load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.verifyClosing(c.id); toast('Verified.', 'ok'); await load(); verified = true; } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ]);
+    ], { onClose: () => { if (verified) { verified = false; closingsHeading?.focus(); } } });
   async function load() {
     const closings = await d.cashClosings().catch(() => []);
     const today = todayISO();
@@ -194,13 +194,15 @@ async function cash(root) {
           if (counted.value === '') { showFormErrors(panel, [{ input: counted, message: 'Enter the cash you counted.' }]); return; }
           const c = await d.closeCash(branch.value, today, Number(counted.value), notes.value);
           toast(Number(c.difference) === 0 ? 'Cash closed. It matches.' : `Cash closed. Difference ${rupees(c.difference)} sent to the accountant.`, Number(c.difference) === 0 ? 'ok' : 'error', 6000);
-          load();
+          await load();
+          closingsHeading?.focus();
         }) }, 'Close cash for today'));
       return panel;
     })() : null;
+    closingsHeading = h('h2', { tabindex: '-1' }, 'Recent closings');
     mount(out, closeForm,
       h('section', { class: 'panel' },
-        h('h2', {}, 'Recent closings'),
+        closingsHeading,
         capNote(closings, 'closings'),
         closings.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
           h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col', class: 'right' }, 'Expected'), h('th', { scope: 'col', class: 'right' }, 'Counted'), h('th', { scope: 'col', class: 'right' }, 'Difference'), h('th', { scope: 'col' }, 'Notes'), h('th', { scope: 'col' }, 'Verified'))),

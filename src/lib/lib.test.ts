@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { guidance, canTreat, canCheck, protocolFor, parseMonthCell, BRACES_PROTOCOL } from './protocol.ts';
 import { parseAmount, cleanLegacyName, parseTreatmentDetails, summariseDetails, matchClinician, splitPeople } from './legacy.ts';
 import { defaultGrid, hasPermission, discountNeedsApproval, PERMISSIONS } from './permissions.ts';
-import { AutosaveQueue, PermanentSaveError, type PendingEdit } from './autosave.ts';
+import { AutosaveQueue, PermanentSaveError, clearForUser, type PendingEdit, type SaveState } from './autosave.ts';
 
 // ---------------------------------------------------------------- protocol
 test('protocol table matches the Braces Treatment Module', () => {
@@ -157,7 +157,12 @@ test('discount caps', () => {
 // ---------------------------------------------------------------- autosave
 function memoryStore() {
   const data = new Map<string, string>();
-  return { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v), data };
+  return {
+    getItem: (k: string) => data.get(k) ?? null,
+    setItem: (k: string, v: string) => void data.set(k, v),
+    removeItem: (k: string) => void data.delete(k),
+    data,
+  };
 }
 function manualTimers() {
   const queue: Array<() => void> = [];
@@ -224,4 +229,208 @@ test('autosave retries network errors but drops permanent ones', async () => {
   await timers.runAll();
   assert.equal(q.failed.length, 1);
   assert.equal(q.failed[0].error, 'GROUP_NOT_ALLOWED');
+});
+
+const tick = () => new Promise<void>((r) => setImmediate(r));
+/** A promise the test settles by hand, to hold a send in flight. */
+function gate() {
+  let open!: () => void;
+  const wait = new Promise<void>((r) => { open = r; });
+  return { wait, open };
+}
+
+test('autosave: an edit typed while the same row is being sent is saved too, not merged into the send and lost', async () => {
+  const sent: PendingEdit[] = [];
+  const g = gate();
+  let first = true;
+  const timers = manualTimers();
+  const states: SaveState[] = [];
+  const q = new AutosaveQueue({
+    store: memoryStore(), ...timers, onState: (s) => states.push(s),
+    send: async (e) => {
+      sent.push(structuredClone(e));
+      if (first) { first = false; await g.wait; }
+    },
+  });
+  q.edit('visits', 'r1', 'treatment_label', 'Monthly');
+  const running = q.flush();
+  await tick();
+  assert.equal(sent.length, 1, 'the first edit is in flight');
+  q.edit('visits', 'r1', 'details_text', 'U L 018');
+  q.edit('visits', 'r1', 'notes', 'wire changed');
+  assert.notEqual(states.at(-1), 'saved', 'not reported as saved while edits wait');
+  g.open();
+  await running;
+  assert.equal(sent.length, 2, 'the later edits went out as their own save');
+  assert.deepEqual(sent[0].changes, { treatment_label: 'Monthly' });
+  assert.deepEqual(sent[1].changes, { details_text: 'U L 018', notes: 'wire changed' }, 'edits made meanwhile still merge with each other');
+  assert.equal(q.pendingCount, 0);
+  assert.equal(states.at(-1), 'saved');
+  q.dispose();
+});
+
+test('autosave: the sender gets a copy, so changing it cannot change the queue', async () => {
+  const timers = manualTimers();
+  const q = new AutosaveQueue({ store: memoryStore(), ...timers, send: async (e) => { e.changes.status = 'tampered'; } });
+  q.edit('visits', 'r1', 'status', 'completed');
+  await q.flush();
+  assert.equal(q.pendingCount, 0);
+  q.dispose();
+});
+
+test('autosave: stored edits belong to one person; edits from before logins existed, and old ones, are listed, not sent', async () => {
+  const store = memoryStore();
+  const old = Date.now() - 2 * 24 * 60 * 60 * 1000;
+  store.setItem('aaj', JSON.stringify([{ table: 'visits', rowId: 'legacy', changes: { notes: 'old' }, firstEditedAt: Date.now(), attempts: 0 }]));
+  store.setItem('aaj:alice', JSON.stringify([
+    { table: 'visits', rowId: 'stale', changes: { notes: 'two days ago' }, firstEditedAt: old, attempts: 0 },
+    { table: 'visits', rowId: 'fresh', changes: { notes: 'today' }, firstEditedAt: Date.now() - 1000, attempts: 0 },
+  ]));
+  const timers = manualTimers();
+  const sent: string[] = [];
+  const send = async (e: PendingEdit) => void sent.push(e.rowId);
+
+  const bob = new AutosaveQueue({ store, storageKey: 'aaj', userId: 'bob', send, ...timers });
+  assert.equal(bob.pendingCount, 0, "Bob does not get Alice's edits");
+  assert.equal(bob.failedCount, 1, 'the un-owned edit is listed for whoever opens the list first');
+  bob.dispose();
+  assert.equal(store.getItem('aaj'), null, 'the un-owned queue is removed once listed');
+
+  const alice = new AutosaveQueue({ store, storageKey: 'aaj', userId: 'alice', send, ...timers });
+  assert.equal(alice.pendingCount, 1);
+  assert.deepEqual(alice.failedEdits.map((f) => f.rowId), ['stale']);
+  assert.equal(JSON.parse(store.getItem('aaj:alice:failed')!).length, 1, 'failed list is kept on the device');
+  await alice.flush();
+  assert.deepEqual(sent, ['fresh'], 'only the recent edit is sent');
+  alice.dispose();
+});
+
+test('autosave: a failed save is reported with its row, can be retried, and is replaced by newer typing', async () => {
+  const store = memoryStore();
+  const timers = manualTimers();
+  const heard: Array<{ key: string; error: string; hasRetry: boolean }> = [];
+  const doc = new EventTarget();
+  (globalThis as { document?: unknown }).document = doc;
+  doc.addEventListener('app:save-failed', (ev) => {
+    const d = (ev as CustomEvent).detail;
+    heard.push({ key: d.key, error: d.error.message, hasRetry: typeof d.retry === 'function' });
+  });
+  let reject = true;
+  const sent: string[] = [];
+  const onFailed: string[] = [];
+  const q = new AutosaveQueue({
+    store, userId: 'u1', ...timers,
+    onFailed: (d) => onFailed.push(d.key),
+    send: async (e) => {
+      if (reject) throw new PermanentSaveError('DUES_HOLD: clear dues first');
+      sent.push(JSON.stringify(e.changes));
+    },
+  });
+  try {
+    q.edit('visits', 'r9', 'status', 'in_treatment');
+    await q.flush();
+    assert.deepEqual(heard, [{ key: 'visits:r9', error: 'DUES_HOLD: clear dues first', hasRetry: true }], 'document event');
+    assert.deepEqual(onFailed, ['visits:r9'], 'options.onFailed');
+    assert.equal(q.failedCount, 1);
+    assert.equal(q.pendingCount, 0);
+
+    reject = false;
+    q.retryFailed('visits:r9');
+    await q.flush();
+    assert.deepEqual(sent, ['{"status":"in_treatment"}']);
+    assert.equal(q.failedCount, 0);
+    assert.equal(store.getItem('clinic-autosave-v1:u1:failed'), null, 'failed key removed when empty');
+
+    reject = true;
+    q.edit('visits', 'r9', 'notes', 'a');
+    q.edit('visits', 'r9', 'status', 'completed');
+    await q.flush();
+    assert.equal(q.failedCount, 1);
+    reject = false;
+    q.edit('visits', 'r9', 'notes', 'b'); // typing the same field again replaces the failed value
+    assert.deepEqual(q.failedEdits[0].changes, { status: 'completed' });
+    q.discardFailed();
+    assert.equal(q.failedCount, 0);
+  } finally {
+    q.dispose();
+    delete (globalThis as { document?: unknown }).document;
+  }
+});
+
+test('clearForUser stops every queue, keeps unsent edits under their owner and counts them', async () => {
+  await clearForUser(); // start from a clean module state (earlier tests leave queues open)
+  const store = memoryStore();
+  const timers = manualTimers();
+  // One failed entry on the device already (an edit that waited more than a day before the list was opened).
+  store.setItem('clinic-autosave-v1:u1:failed', JSON.stringify([{ key: 'visits:c', edit: { table: 'visits', rowId: 'c', changes: { notes: 'z' }, firstEditedAt: 1 }, error: 'x', at: 1 }]));
+  const q = new AutosaveQueue({ store, userId: 'u1', ...timers, send: async () => { throw new Error('Failed to fetch'); } });
+  q.edit('visits', 'a', 'notes', 'x');
+  q.edit('visits', 'b', 'notes', 'y');
+  const detail = await clearForUser({ flush: true, timeoutMs: 200 });
+  assert.deepEqual(detail, { pending: 2, failed: 1 }, 'pending edits are sent at the next login, failed ones wait for Try again');
+  assert.equal(q.disposed, true);
+  assert.deepEqual(JSON.parse(store.getItem('clinic-autosave-v1:u1')!).map((e: PendingEdit) => e.rowId), ['a', 'b'], 'still on the device');
+
+  // A new session of the same person finds them again.
+  const next = new AutosaveQueue({ store, userId: 'u1', ...timers, send: async () => {} });
+  assert.equal(next.pendingCount, 2);
+  assert.deepEqual(await clearForUser(), { pending: 2, failed: 1 }, 'a new session of the same person finds the same edits');
+  const gone = new AutosaveQueue({ store, userId: 'u1', ...timers, send: async () => {} });
+  await clearForUser({ discard: true });
+  assert.equal(store.getItem('clinic-autosave-v1:u1'), null, 'discard: true deletes them');
+  assert.equal(gone.pendingCount, 0);
+
+  // After logout a late edit is refused, not saved under the next login.
+  const events: SaveState[] = [];
+  const late = new AutosaveQueue({ store, userId: 'u1', ...timers, send: async () => {}, onState: (s) => events.push(s) });
+  late.dispose();
+  late.edit('visits', 'a', 'notes', 'too late');
+  assert.equal(late.pendingCount, 0);
+  assert.equal(events.at(-1), 'error');
+});
+
+test('clearForUser({ flush: true }) waits for a save already in progress, and for what was typed behind it', async () => {
+  await clearForUser();
+  const store = memoryStore();
+  const timers = manualTimers();
+  const g = gate();
+  const sent: string[] = [];
+  const q = new AutosaveQueue({
+    store, userId: 'u1', ...timers,
+    send: async (e) => { sent.push(e.rowId); if (e.rowId === 'a') await g.wait; },
+  });
+  q.edit('visits', 'a', 'notes', 'one');
+  void q.flush(); // the timer-driven flush is mid-save
+  await tick();
+  q.edit('visits', 'b', 'notes', 'two'); // typed just before logout
+  let settled = false;
+  const closing = clearForUser({ flush: true, timeoutMs: 5000 }).then((r) => { settled = true; return r; });
+  await tick();
+  assert.equal(settled, false, 'logout waits while the save is in flight');
+  g.open();
+  assert.deepEqual(await closing, { pending: 0, failed: 0 });
+  assert.deepEqual(sent, ['a', 'b']);
+  assert.equal(store.getItem('clinic-autosave-v1:u1'), '[]');
+});
+
+test('clearForUser gives up on a save that hangs, and a failure that arrives after logout is kept, not announced', async () => {
+  await clearForUser();
+  const store = memoryStore();
+  const timers = manualTimers();
+  const g = gate();
+  const announced: string[] = [];
+  const q = new AutosaveQueue({
+    store, userId: 'u1', ...timers, onFailed: (d) => announced.push(d.key),
+    send: async () => { await g.wait; throw new PermanentSaveError('permission denied'); },
+  });
+  q.edit('visits', 'a', 'notes', 'one');
+  void q.flush();
+  await tick();
+  const left = await clearForUser({ flush: true, timeoutMs: 20 });
+  assert.deepEqual(left, { pending: 1, failed: 0 }, 'did not wait forever');
+  g.open();
+  await tick();
+  await tick();
+  assert.deepEqual(announced, [], 'no message for a person who has logged out');
+  assert.deepEqual(JSON.parse(store.getItem('clinic-autosave-v1:u1:failed')!).map((f: { key: string }) => f.key), ['visits:a'], 'kept for their next login');
 });

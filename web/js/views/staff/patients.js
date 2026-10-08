@@ -1,5 +1,5 @@
 // Patients: search list and full patient profile.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, busy, srOnly, localISO, addMonthsISO } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, busy, srOnly, localISO, addMonthsISO, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
 import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt } from './invoice.js';
@@ -9,6 +9,29 @@ export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart con
 /** The Karachi calendar day of a timestamp (its UTC day is a day behind before 5 AM PKT). */
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 const THUMB_WIDTH = 240;
+const SIGNED_FOR_MS = 3600 * 1000; // a signed storage link lasts an hour
+
+/**
+ * A signed link expires, so a record left open for an hour has dead "full size" and "Open" links. When one is
+ * clicked close to (or past) its expiry, the tab is opened now, while the click still counts, a fresh link is
+ * signed, and the tab is pointed at it. A link with no expiry (demo files) is left to open on its own.
+ */
+function freshLinkOnClick(link, item, signOpts) {
+  link.addEventListener('click', async (e) => {
+    const d = state.data;
+    if (!d.signedUrls || !item.storage_path || !item.url_expires_at || Date.now() < item.url_expires_at - 60000) return;
+    e.preventDefault();
+    const tab = window.open('', '_blank');
+    if (tab) tab.opener = null;
+    try {
+      const url = (await d.signedUrls([item.storage_path], signOpts)).get(item.storage_path);
+      if (!url) throw new Error('The file link could not be refreshed. Reload the page and try again.');
+      item.url = link.href = url;
+      item.url_expires_at = Date.now() + SIGNED_FOR_MS;
+      if (tab) tab.location = url;
+    } catch (err) { tab?.close(); toast(friendlyError(err), 'error'); }
+  });
+}
 
 export async function renderPatients(root, params) {
   const d = state.data;
@@ -18,7 +41,11 @@ export async function renderPatients(root, params) {
   const run = async () => {
     try {
       const rows = await d.searchPatients(input.value);
-      mount(results, rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+      // Newest first, cut at the cap: say so, or staff read "not in the list" as "not registered" and add a duplicate.
+      const cap = rows.truncated ? h('div', { class: 'alert alert-warning', role: 'status' }, input.value.trim()
+        ? `Showing the ${rows.cap ?? rows.length} most recently registered matches. Type more of the name, the full Mr# or 4+ digits of the phone to find older patients.`
+        : `Showing the ${rows.cap ?? rows.length} newest patients. Search to find others.`) : null;
+      mount(results, cap, rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Mr#'), h('th', { scope: 'col' }, 'Name'), h('th', { scope: 'col' }, 'Phone'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Flags'), h('th', { scope: 'col', class: 'right' }, 'Dues'))),
         h('tbody', {}, rows.map((p) => h('tr', {},
           h('td', { class: 'mr' }, p.mr_number),
@@ -86,14 +113,16 @@ export async function renderPatient(root, id) {
     modal('Braces are off — start the retainer case?', h('div', {},
       h('p', {}, 'Retainers are made in-house. The case starts at the impression stage and appears on the Coordinator → Retainers list, with a reminder for the first check.'),
       h('div', { class: 'form-grid' }, field('Arch', arch), field('First retainer check', nextCheck))), [
-      { label: 'Not now', onClick: () => reload() },
+      { label: 'Not now' },
       { label: 'Start retainer case', primary: true, onClick: async () => {
         try {
           await d.saveRetainerCase({ patient_id: id, braces_case_id: braces.id, branch_id: p.first_branch_id || null, arch: arch.value, stage: 'impression', impression_date: offDate, next_check_date: nextCheck.value || null });
-          toast('Retainer case started.', 'ok'); reload();
+          toast('Retainer case started.', 'ok');
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ]);
+    // The profile still shows the old braces case, so it reloads however this closes (a button, ×, Escape or the
+    // backdrop). Not when the router closed it to leave the page: root has been replaced by then.
+    ], { onClose: () => { if (root.isConnected) reload(); } });
   };
 
   const startBraces = () => {
@@ -122,16 +151,24 @@ export async function renderPatient(root, id) {
     const mhNotes = h('input', { value: mh.notes || '', placeholder: 'Anything else the doctor should know' });
     const treatConsent = h('input', { type: 'checkbox', checked: !!p.treatment_consent_at });
     const ownDoctor = select([{ value: '', label: "Clinic's patient (Dr. Ali)" }, ...state.ref.clinicians.filter((c) => c.is_doctor && c.display_name !== 'Dr. Ali Rashid').map((c) => ({ value: c.id, label: c.display_name }))], p.referred_by_clinician || '');
-    modal('Edit patient', h('div', {}, mr ? field('Mr# (admin only)', mr) : null, field('Name', name), field('Phone', phone), field('Email', email),
+    const body = h('div', {}, mr ? field('Mr# (admin only)', mr, null, { required: true }) : null, field('Name', name, null, { required: true }), field('Phone', phone), field('Email', email),
       field('Brought in by doctor', ownDoctor, "A doctor's own patient: their percentage (Admin → Clinic setup) is counted on this patient's bills."),
       h('label', { class: 'inline', style: { marginBottom: '12px' } }, consent, 'Before/after photos may be shown publicly'),
       h('h3', {}, 'Medical history'),
       h('div', { class: 'inline', style: { marginBottom: '8px' } }, condBoxes.map(({ c, box }) => h('label', { class: 'inline' }, box, c))),
       h('div', { class: 'form-grid' }, field('Allergies', allergies), field('Medications', medications), field('Other', mhNotes)),
       h('label', { class: 'inline', style: { margin: '10px 0' } }, treatConsent, p.treatment_consent_at ? `Treatment consent signed (${shortDate(dayOf(p.treatment_consent_at))})` : 'Treatment consent form signed'),
-      field('Notes', notes)), [
+      field('Notes', notes));
+    modal('Edit patient', body, [
       { label: 'Cancel' },
       { label: 'Save', primary: true, onClick: async () => {
+        // The same checks as registering a patient; a phone is only checked when it was changed (old records may hold short numbers).
+        const errors = [];
+        if (name.value.trim().length < 2) errors.push({ input: name, message: 'Write the patient name.' });
+        if (mr && !mr.value.trim()) errors.push({ input: mr, message: 'The Mr# cannot be empty.' });
+        if (phone.value.trim() && phone.value.trim() !== (p.phone || '') && phone.value.replace(/\D/g, '').length < 10) errors.push({ input: phone, message: 'Write a full phone number with at least 10 digits, e.g. 0300 1234567.' });
+        if (errors.length) return showFormErrors(body, errors);
+        clearFieldErrors(body);
         const changes = { full_name: name.value.trim(), phone: phone.value.trim() || null, email: email.value.trim() || null, photo_consent_public: consent.checked, notes: notes.value || null, referred_by_clinician: ownDoctor.value || null,
           medical_history: { conditions: condBoxes.filter((x) => x.box.checked).map((x) => x.c), allergies: allergies.value.trim() || null, medications: medications.value.trim() || null, notes: mhNotes.value.trim() || null, updated_at: localISO() } };
         if (consent.checked && !p.photo_consent_public) changes.photo_consent_at = new Date().toISOString();
@@ -153,12 +190,15 @@ export async function renderPatient(root, id) {
 
   const voidInvoice = (i) => {
     const reason = h('input', { placeholder: 'Why is this invoice being voided?' });
-    modal(`Void invoice ${i.invoice_no}?`, h('div', {},
+    const body = h('div', {},
       h('p', {}, `The invoice for ${rupees(i.total ?? i.subtotal - i.discount_amount)} stays on record, marked VOID, with your reason.`),
-      field('Reason', reason)), [
+      field('Reason', reason, null, { required: true }));
+    modal(`Void invoice ${i.invoice_no}?`, body, [
       { label: 'Cancel' },
       { label: 'Void invoice', danger: true, onClick: async () => {
-        try { await d.voidInvoice(i.id, reason.value.trim()); toast('Invoice voided.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        const why = reason.value.trim();
+        if (!why) return showFormErrors(body, [{ input: reason, message: 'Write why this invoice is being voided.' }]);
+        try { await d.voidInvoice(i.id, why); toast('Invoice voided.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ], { destructive: true, initialFocus: reason });
   };
@@ -168,37 +208,46 @@ export async function renderPatient(root, id) {
     { label: 'Remove plan', danger: true, onClick: async () => { try { await d.deletePaymentPlan(plan.id); toast('Plan removed.', 'ok'); reload(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
   ], { destructive: true });
 
-  // Photos: thumbnails in the grid instead of full-size camera originals, signed in one request.
-  // A signed link expires after an hour, so an image that fails to load is signed again once.
+  // Photos: getPatient already signed every photo with the record (thumb_url, url, url_expires_at), so the
+  // grid shows at once. A signed link expires after an hour: an image that fails to load is signed again once,
+  // and a full-size link clicked near its expiry is signed again first (freshLinkOnClick).
+  const signedAt = Date.now();
   const photoItems = p.photos.map((ph) => {
-    const img = h('img', { alt: ph.view_label || 'Photo', loading: 'lazy', decoding: 'async' });
-    const link = h('a', { href: ph.url || '#', target: '_blank', rel: 'noopener' }, img);
+    const img = h('img', { alt: ph.view_label || 'Photo', loading: 'lazy', decoding: 'async', src: ph.thumb_url || ph.url || null });
+    const link = h('a', { href: ph.url || null, target: '_blank', rel: 'noopener' }, img);
+    freshLinkOnClick(link, ph);
     img.addEventListener('error', async () => {
       if (img.dataset.resigned || !d.signedUrls) return;
       img.dataset.resigned = '1';
       try {
         const [thumb, full] = await Promise.all([d.signedUrls([ph.storage_path], { width: THUMB_WIDTH }), d.signedUrls([ph.storage_path])]);
         const t = thumb?.get?.(ph.storage_path); const f = full?.get?.(ph.storage_path);
-        if (f) link.href = f;
+        if (f) { ph.url = link.href = f; ph.url_expires_at = Date.now() + SIGNED_FOR_MS; }
         if (t || f) img.src = t || f;
       } catch { /* the broken image stays; reloading the page signs everything again */ }
     });
     return { ph, img, link };
   });
-  const loadThumbs = async () => {
-    if (!photoItems.length) return;
-    const paths = (list) => list.map((x) => x.ph.storage_path);
-    const unsigned = photoItems.filter((x) => !x.ph.url);
-    const [thumbs, full] = d.signedUrls ? await Promise.all([
-      d.signedUrls(paths(photoItems), { width: THUMB_WIDTH }).catch(() => null),
-      unsigned.length ? d.signedUrls(paths(unsigned)).catch(() => null) : null,
-    ]) : [null, null];
-    for (const x of photoItems) {
-      const f = x.ph.url || full?.get?.(x.ph.storage_path);
-      if (f) x.link.href = f;
+  // Only a photo that arrived with no link at all (signing failed with the record) is signed here, in one batched call each.
+  const loadMissingLinks = async () => {
+    const missing = photoItems.filter((x) => !x.ph.url && !x.ph.thumb_url && x.ph.storage_path);
+    if (!missing.length || !d.signedUrls) return;
+    const paths = missing.map((x) => x.ph.storage_path);
+    const [thumbs, full] = await Promise.all([d.signedUrls(paths, { width: THUMB_WIDTH }).catch(() => null), d.signedUrls(paths).catch(() => null)]);
+    for (const x of missing) {
+      const f = full?.get?.(x.ph.storage_path);
+      if (f) { x.ph.url = x.link.href = f; x.ph.url_expires_at = Date.now() + SIGNED_FOR_MS; }
       const src = thumbs?.get?.(x.ph.storage_path) || f;
       if (src) x.img.src = src;
     }
+  };
+
+  // Documents carry no expiry field: their links were signed with the record, so they run out an hour after it loaded.
+  const documentLink = (doc) => {
+    const link = h('a', { class: 'btn btn-small', href: doc.url, target: '_blank', rel: 'noopener', 'aria-label': `Open ${doc.title || 'document'} (opens in a new tab)` }, 'Open');
+    doc.url_expires_at ??= signedAt + SIGNED_FOR_MS;
+    freshLinkOnClick(link, doc, { bucket: 'patient-documents' });
+    return link;
   };
 
   const mh = p.medical_history || {};
@@ -289,7 +338,7 @@ export async function renderPatient(root, id) {
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Type'), h('th', { scope: 'col' }, 'Title'), h('th', { scope: 'col' }, srOnly('Open')))),
         h('tbody', {}, p.documents.map((doc) => h('tr', {},
           h('td', { class: 'nowrap' }, shortDate(doc.added_on)), h('td', {}, DOCUMENT_KINDS[doc.kind] || doc.kind), h('td', {}, doc.title),
-          h('td', { class: 'right' }, doc.url ? h('a', { class: 'btn btn-small', href: doc.url, target: '_blank', rel: 'noopener' }, 'Open') : h('span', { class: 'muted' }, 'Not available'))))))) : empty('No documents yet. Signed consent forms and ID copies go here.')),
+          h('td', { class: 'right' }, doc.url ? documentLink(doc) : h('span', { class: 'muted' }, 'Not available'))))))) : empty('No documents yet. Signed consent forms and ID copies go here.')),
     p.retainers.length ? h('section', { class: 'panel' }, h('h2', {}, 'Retainers'),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Arch'), h('th', { scope: 'col' }, 'Stage'), h('th', { scope: 'col' }, 'Impression'), h('th', { scope: 'col' }, 'Next check'))),
         h('tbody', {}, p.retainers.map((r) => {
@@ -298,5 +347,5 @@ export async function renderPatient(root, id) {
           return h('tr', {}, h('td', {}, r.arch), h('td', {}, r.stage.replace('_', ' ')), h('td', {}, shortDate(r.impression_date)),
             h('td', {}, shortDate(r.next_check_date), overdue ? [' ', h('span', { class: 'badge badge-dues badge-overdue' }, 'Overdue')] : null));
         }))))) : null);
-  loadThumbs();
+  loadMissingLinks();
 }

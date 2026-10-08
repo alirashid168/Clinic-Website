@@ -20,7 +20,8 @@ export async function renderDuplicates(root) {
       h('p', {}, h('strong', {}, `Keep Mr# ${keep.mr_number} · ${keep.full_name}`), '. The following will be moved onto it and then removed:'),
       h('ul', {}, others.map((p) => h('li', {}, `Mr# ${p.mr_number} · ${p.full_name} — ${p.visits} visits, ${p.invoices} invoices${p.dues > 0 ? `, dues ${rupees(p.dues)}` : ''}`))),
       h('p', { class: 'muted' }, 'Visits, invoices, payments, photos, documents, braces and retainer cases, plans, reminders and complaints all move across; dues add up. Blank details (email, gender, date of birth, address) are filled from the removed record. The removed Mr# stays in the notes. This cannot be undone.'),
-      h('label', { class: 'inline' }, compared, 'I have compared these records and they are the same person'));
+      // In a .field, so a "not ticked" error goes after the label, not inside it.
+      h('div', { class: 'field' }, h('label', { class: 'inline' }, compared, 'I have compared these records and they are the same person')));
     modal('Merge these records?', body, [
       { label: 'Cancel' },
       { label: `Merge ${others.length} into Mr# ${keep.mr_number}`, danger: true, onClick: async () => {
@@ -51,7 +52,7 @@ export async function renderDuplicates(root) {
           h('td', { class: 'nowrap' }, shortDate(String(p.created_at || '').slice(0, 10))),
           h('td', {}, branchName(p.first_branch_id)),
           h('td', { class: 'right' }, p.visits), h('td', { class: 'right' }, p.invoices),
-          h('td', { class: 'right', style: { color: Number(p.dues) > 0 ? 'var(--stop)' : '' } }, Number(p.dues) ? rupees(p.dues) : ''),
+          h('td', { class: ['right', Number(p.dues) > 0 && 'status-bad'] }, Number(p.dues) ? rupees(p.dues) : ''),
           h('td', { class: 'nowrap' }, shortDate(p.last_visit))))))));
   };
 

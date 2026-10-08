@@ -164,13 +164,17 @@ function liveRegion(assertive) {
   return pageRegion(assertive);
 }
 
+let messageGen = 0; // bumped by clearMessages(), so announcements still waiting to be written are dropped
+
 /** Says a short message to screen-reader users without moving focus. */
 export function announce(text, { assertive = false } = {}) {
   const msg = String(text ?? '').trim();
   if (!msg) return;
   // Written a moment later (and into whichever region is current then), so the
   // same message twice is spoken twice and a dialog closing right after does not swallow it.
+  const gen = messageGen;
   setTimeout(() => {
+    if (gen !== messageGen) return;
     const region = liveRegion(assertive);
     region.textContent = msg;
     clearTimeout(clearTimers.get(region));
@@ -212,7 +216,18 @@ export function toast(message, kind = 'info', ms = 4000) {
   announce(text, { assertive: isError });
 }
 
-const NETWORK = /Failed to fetch|NetworkError|Load failed|network (error|request failed)|timed? ?out|timeout|did not respond/i;
+/** Takes every toast and spoken message off the screen at once. Logout uses it, because they can name patients. */
+export function clearMessages() {
+  messageGen++;
+  document.getElementById('toasts')?.replaceChildren();
+  for (const region of document.querySelectorAll('#live-regions [aria-live]')) region.textContent = '';
+}
+
+// Plain connection trouble. The app's own markers count too: a read that gave up (js/data/supabase.js) reaches
+// here as "TIMEOUT: ..." (postgrest-js puts the error name in front), and a CDN that never answered says "did not respond".
+const NETWORK = /Failed to fetch|NetworkError|Load failed|network (error|request failed)|\bTIMEOUT:|\btimed out\b|did not respond/i;
+// The database stopped a slow query (Postgres code 57014). The connection is fine; the request was too big.
+const DB_BUSY = /statement timeout|lock timeout|canceling statement/i;
 
 /**
  * Turns database errors into plain sentences. Staff wording by default;
@@ -221,6 +236,11 @@ const NETWORK = /Failed to fetch|NetworkError|Load failed|network (error|request
 export function friendlyError(err, { audience = 'staff' } = {}) {
   const msg = (err && (err.message || err.error_description || String(err))) || 'Something went wrong';
   const isPublic = audience === 'public';
+  if (err?.code === '57014' || DB_BUSY.test(msg)) {
+    return isPublic
+      ? 'The clinic system is busy right now. Please try again in a minute.'
+      : 'The database took too long on this. Try a shorter date range or a narrower search.';
+  }
   if (NETWORK.test(msg)) {
     return isPublic
       ? 'We could not reach the clinic system. Check your internet connection and try again.'
@@ -307,6 +327,7 @@ function focusEl(el, options) {
  */
 export function modal(title, body, actions = [], opts = {}) {
   const opener = document.activeElement;
+  const openerFp = fingerprint(opener);
   const titleId = uid('dlg-title');
   const bodyId = uid('dlg-body');
   const heading = h('h2', { id: titleId, tabindex: '-1' }, title);
@@ -373,7 +394,7 @@ export function modal(title, body, actions = [], opts = {}) {
     document.removeEventListener('keydown', onKey);
     backdrop.remove();
     syncInert();
-    if (restoreFocus) returnFocus(opener);
+    if (restoreFocus) returnFocus(opener, openerFp);
     opts.onClose?.();
   }
   const close = () => finish(true);
@@ -394,11 +415,69 @@ export function modal(title, body, actions = [], opts = {}) {
   return { close, dialog };
 }
 
-function returnFocus(opener) {
-  if (opener && opener !== document.body && opener.isConnected && !opener.closest('[inert]')) { opener.focus(); return; }
-  // The button that opened the dialog was re-rendered away: go to the dialog underneath, or the page heading.
+// ---- keeping the person's place after a dialog
+// A dialog action usually saves and then re-renders the page, which replaces the button that opened the dialog,
+// and focus would drop to <body> (back to the top of the page for a keyboard or screen-reader user). So a dialog
+// remembers what its opener looked like: the same kind of control with the same name in the same row. If the
+// opener is replaced, focus goes to its twin in the new page, or failing that to the page heading.
+const ROW = 'tr, li, [role="row"], .card';
+const nameOf = (el) => (el.getAttribute('aria-label') || el.textContent).replace(/\s+/g, ' ').trim();
+const rowOf = (el) => (el.closest(ROW)?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+const twinsOf = (app, tag, name) => [...app.querySelectorAll(tag)].filter((n) => nameOf(n) === name);
+
+function fingerprint(el) {
+  const app = document.getElementById('app');
+  if (!app || !el || !app.contains(el) || !nameOf(el)) return null;
+  return { tag: el.localName, name: nameOf(el), row: rowOf(el), index: twinsOf(app, el.localName, nameOf(el)).indexOf(el) };
+}
+
+// Same row if the row's text still matches, otherwise the same position among the controls of that name.
+function findTwin(fp) {
+  const app = document.getElementById('app');
+  if (!fp || !app) return null;
+  const twins = twinsOf(app, fp.tag, fp.name);
+  return twins.find((n) => rowOf(n) === fp.row) || twins[Math.min(fp.index, twins.length - 1)] || null;
+}
+
+// The opener still exists when the dialog closes, but the page re-renders a moment later (after a save).
+// Watch the page for that one re-render. The watch ends at the first key press or tap, when focus is
+// somewhere real, or after 10 seconds, so focus is never moved from under the person.
+function watchRerender(opener, fp) {
+  const app = document.getElementById('app');
+  if (!app || !app.contains(opener)) return;
+  const ctl = new AbortController();
+  let settle;
+  const stop = () => { ctl.abort(); observer.disconnect(); clearTimeout(settle); clearTimeout(giveUp); };
+  const lost = () => !document.activeElement || document.activeElement === document.body || document.activeElement === document.documentElement;
+  const refocus = (last) => { // true once the watch is over
+    if (!lost()) { stop(); return true; }
+    const target = findTwin(fp) || (last ? app.querySelector('h1') : null);
+    if (!target) return false;
+    stop();
+    focusEl(target, { preventScroll: true });
+    return true;
+  };
+  const observer = new MutationObserver(() => {
+    if (opener.isConnected) return; // not replaced yet
+    if (refocus(false)) return;
+    clearTimeout(settle);
+    settle = setTimeout(() => refocus(true), 150); // the page finished re-rendering and has no twin: the heading
+  });
+  observer.observe(app, { childList: true, subtree: true });
+  const giveUp = setTimeout(stop, 10000);
+  for (const type of ['keydown', 'pointerdown']) document.addEventListener(type, stop, { capture: true, signal: ctl.signal });
+}
+
+function returnFocus(opener, fp) {
+  if (opener && opener !== document.body && opener.isConnected && !opener.closest('[inert]')) {
+    opener.focus();
+    watchRerender(opener, fp);
+    return;
+  }
+  // The button that opened the dialog was replaced while it was open: go to the dialog underneath, else to the
+  // same button in the new page, else to the page heading.
   const top = openModals[openModals.length - 1];
-  focusEl(top ? top.dialog.querySelector('h2') : document.querySelector('#app h1'), { preventScroll: true });
+  focusEl(top ? top.dialog.querySelector('h2') : (findTwin(fp) || document.querySelector('#app h1')), { preventScroll: true });
 }
 
 /** Closes every open dialog (route changes and logout), without moving focus. */
@@ -527,7 +606,10 @@ export function select(options, value, props = {}) {
  */
 export function tabs({ label, items = [], current, onChange, panel, class: extra } = {}) {
   const base = uid('tabs');
-  let selected = current ?? items[0]?.id;
+  // An id that matches no tab (an old link, a tab this person may not use) falls back to the first one, so
+  // exactly one tab is always selected and reachable by keyboard. Callers pick the same fallback for their panel.
+  const known = (id) => items.some((it) => String(it.id) === String(id));
+  let selected = known(current) ? current : items[0]?.id;
   const tabId = (id) => `${base}-${String(id).replace(/[^\w-]/g, '_')}`;
   const panelEl = panel || h('div', {});
   panelEl.setAttribute('role', 'tabpanel');
@@ -572,7 +654,7 @@ export function tabs({ label, items = [], current, onChange, panel, class: extra
     buttons[next].focus();
   });
   paint();
-  return { el, panel: panelEl, panelId: panelEl.id, setCurrent(id) { selected = id; paint(); } };
+  return { el, panel: panelEl, panelId: panelEl.id, setCurrent(id) { selected = known(id) ? id : items[0]?.id; paint(); } };
 }
 
 export function downloadCSV(filename, rows) {

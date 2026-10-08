@@ -25,6 +25,10 @@ const TABS = {
   accounts: [['expenses', 'Expenses by category'], ['cash', 'Cash closings'], ['lab', 'Lab and retainer costs']],
   hr: [['doctors', 'Doctors'], ['logins', 'Logins']],
 };
+// Reports that take a search box, a payment-mode filter, or no period at all (they show the position today).
+const SEARCHABLE = ['financial/transactions', 'financial/summary', 'financial/methods', 'financial/procedures', 'financial/doctors', 'financial/pending', 'financial/advance', 'financial/void', 'financial/refunds', 'financial/discounts', 'patients/dues', 'hr/doctors'];
+const BY_MODE = ['financial/transactions', 'financial/summary'];
+const AS_OF_TODAY = ['financial/pending', 'financial/advance', 'patients/dues'];
 const METHOD_LABEL = { cash: 'Cash', card: 'Card', bank_transfer: 'Bank transfer', cheque: 'Cheque', other: 'Other' };
 const monthLabel = (m) => (m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '');
 const num = (v) => Number(v || 0).toLocaleString('en-PK');
@@ -90,7 +94,7 @@ export async function renderReports(root, params) {
       h('button', { class: 'btn btn-small', onclick: () => printSheet(body) }, 'Print'))),
     help ? h('p', { class: 'muted' }, help) : null,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, columns.map(([label, , kind]) => h('th', { class: kind === 'money' || kind === 'num' ? 'right' : '' }, label)))),
+      h('thead', {}, h('tr', {}, columns.map(([label, , kind]) => h('th', { scope: 'col', class: kind === 'money' || kind === 'num' ? 'right' : '' }, label)))),
       h('tbody', {}, rows.map((r) => h('tr', {}, columns.map(([, key, kind]) => cell(r, key, kind))))),
       totals ? h('tfoot', {}, h('tr', {}, columns.map(([, key, kind], i) => i === 0 ? h('td', {}, h('strong', {}, 'Total')) : (kind === 'money' || kind === 'num') && totals[key] !== undefined ? h('td', { class: 'right' }, h('strong', {}, kind === 'money' ? rupees(totals[key]) : num(totals[key]))) : h('td', {})))) : null)) : empty('Nothing in this period.'));
   /** tone 'bad' | 'ok' colours the figure through the status classes; the label always says what it is. */
@@ -323,6 +327,18 @@ export async function renderReports(root, params) {
   function loadersAlias(key) { return (...a) => loaders[key](...a); }
 
   // ------------------------------------------------------------ drawing
+  /**
+   * What the report covers, as the first line inside the report body: that is what Print prints, so a paper copy
+   * always says which period, branch, payment mode and search its totals belong to.
+   */
+  const caption = () => {
+    const key = `${group}/${tab}`;
+    const when = group === 'inventory' || AS_OF_TODAY.includes(key) ? `as of ${shortDate(today)}` : `${shortDate(from.value)} – ${shortDate(to.value)}`;
+    const parts = [groups.find((g) => g[0] === group)?.[1], TABS[group].find((t) => t[0] === tab)?.[1], when, branch.value ? branchName(Number(branch.value)) : 'All branches'];
+    if (BY_MODE.includes(key) && method.value) parts.push(METHOD_LABEL[method.value]);
+    if (SEARCHABLE.includes(key) && q()) parts.push(`Search: "${search.value.trim()}"`);
+    return h('p', { class: 'report-caption print-only' }, parts.filter(Boolean).join(' · '));
+  };
   const go = () => { history.replaceState(null, '', `#/staff/reports?group=${group}&tab=${tab}&from=${from.value}&to=${to.value}${branch.value ? `&branch=${branch.value}` : ''}`); };
   let loading = 0;
   async function load() {
@@ -331,7 +347,7 @@ export async function renderReports(root, params) {
     mount(body, h('p', { class: 'muted' }, 'Loading…'));
     try {
       const parts = await loaders[`${group}/${tab}`]();
-      if (n === loading) mount(body, parts.filter(Boolean));
+      if (n === loading) mount(body, caption(), parts.filter(Boolean));
     } catch (e) { if (n === loading) mount(body, empty(friendlyError(e))); }
   }
   // Two tab strips: the report family, then the report. A strip updates in place when a tab is
@@ -348,13 +364,12 @@ export async function renderReports(root, params) {
     mount(groupTabs.panel, reportTabs.el, reportTabs.panel);
   }
   function drawFilters() {
-    const financial = group === 'financial';
     const noDates = group === 'inventory';
     mount(filters,
       noDates ? null : h('label', { class: 'inline' }, 'From ', from), noDates ? null : h('label', { class: 'inline' }, 'To ', to),
       branch,
-      financial && ['transactions', 'summary'].includes(tab) ? method : null,
-      ['financial/transactions', 'financial/summary', 'financial/methods', 'financial/procedures', 'financial/doctors', 'financial/pending', 'financial/advance', 'financial/void', 'financial/refunds', 'financial/discounts', 'patients/dues', 'hr/doctors'].includes(`${group}/${tab}`) ? search : null,
+      BY_MODE.includes(`${group}/${tab}`) ? method : null,
+      SEARCHABLE.includes(`${group}/${tab}`) ? search : null,
       h('button', { class: 'btn btn-small btn-primary', onclick: load }, 'Search'));
   }
   [from, to, branch, method].forEach((el) => el.addEventListener('change', load));

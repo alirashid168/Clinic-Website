@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Dr. Ali Rashid's Dental Clinic | Braces in Karachi, Lahore and Islamabad</title>
   <meta name="description" content="Braces, smile makeovers and dental care in Karachi, Lahore and Islamabad.">
   <link rel="canonical" href="https://www.dralirashid.com/">
@@ -48,13 +48,14 @@
   <link rel="modulepreload" href="js/views/schedule.js">
   <link rel="modulepreload" href="js/lib/hours.js">
   <link rel="modulepreload" href="js/ui/smile-card.js">
-  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Plus Jakarta Sans is one variable font file (every weight), so this single preload starts the hero's font
+       download with the page instead of after the app has rendered. The address is Google's versioned one (v12) for
+       the Latin subset. If Google ever publishes a new version the page still works (the font simply loads later,
+       and the browser console says this file was "preloaded but not used"): update the address or delete this line.
+       Self-hosting the font would remove that upkeep. -->
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="https://fonts.gstatic.com/s/plusjakartasans/v12/LDIoaomQNQcsA88c7O9yZ4KMCoOg4Ko20yw.woff2">
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/app.css">
-  <script>
-    // Browsers fetch a web font only when text needs it, which here would be after the app has
-    // loaded. Ask for the headline font now so the hero does not repaint in a different font.
-    try { document.fonts && document.fonts.load('800 1em "Plus Jakarta Sans"'); } catch (e) {}
-  </script>
 
   <!-- Clinic details for search engines. Only facts the site already states: add the branch
        addresses, opening hours and geo position here once Dr. Ali confirms them. -->

@@ -2,22 +2,33 @@
 //
 // Two separate things, on purpose:
 //  - Branch hours: when a clinic is open. Karachi branches open on fixed
-//    weekdays whether or not Dr. Ali is there. Lahore and Islamabad open ONLY
-//    on Dr. Ali's visit dates, so their cards list dates, never weekdays.
+//    weekdays (clinic_timings, mode 'weekly') whether or not Dr. Ali is there.
+//    Lahore and Islamabad (mode 'visits') open ONLY on Dr. Ali's visit dates,
+//    so their cards list dates, never weekdays.
 //  - Dr. Ali's calendar: where he personally is. A normal week follows the
 //    recurring weekday rows; a date with its own (on_date) rows, such as a
 //    Lahore or Islamabad trip, replaces the normal week for that day.
+//
+// One rule for Dr. Ali's times: slotsOn(). The "This week" strip, the clinic
+// cards' bars, visit-branch opening times, trip lists and calendars all read
+// it, so they cannot disagree. The dated rows staff enter in the admin
+// calendar are the source for visit days; the old clinic_timings 'hours'
+// string of a visit branch is not used, because staff cannot edit it.
 
 export type DayKey = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
 export const DAY_ORDER: DayKey[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_BY_INDEX: DayKey[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const SHORT: Record<DayKey, string> = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LONG: Record<DayKey, string> = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+/** Short weekday names by JS weekday index (0 = Sunday). */
+export const SHORT_DOW: string[] = DAY_BY_INDEX.map((k) => SHORT[k]);
+export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 /** Per-branch hours, stored in app_settings.clinic_timings.branches. */
 export type BranchHours =
   | { mode: 'weekly'; days: Partial<Record<DayKey, string>> }       // "12:00-21:00"
-  | { mode: 'visits'; hours?: string };                              // open only on visit dates
+  | { mode: 'visits'; hours?: string };                              // open only on visit dates (hours is no longer read)
 
 export interface ScheduleRow {
   id?: string;
@@ -32,6 +43,12 @@ export interface ScheduleRow {
 
 export interface Slot { branch_id: number; start: string; end: string; }
 
+/** One trip: consecutive days Dr. Ali is at a visit branch. `parts` are the pieces of `time` that must not be split across lines. */
+export interface VisitRun { from: string; to: string; text: string; label: string; time: string; parts: string[]; }
+
+/** One branch on one date: when it is open, and when Dr. Ali is there. */
+export interface BranchDay { date: string; open: [string, string] | null; ali: [string, string][]; }
+
 // ---------------------------------------------------------------- dates
 export function addDays(iso: string, n: number): string {
   const d = new Date(iso + 'T12:00:00Z');
@@ -45,6 +62,11 @@ export function dayKeyOf(iso: string): DayKey { return DAY_BY_INDEX[weekdayOf(is
 export function dateLabel(iso: string): string {
   const [, m, d] = iso.split('-').map(Number);
   return `${SHORT[dayKeyOf(iso)]} ${d} ${MONTHS[m - 1]}`;
+}
+/** "Thursday 8 October" */
+export function fullDateLabel(iso: string): string {
+  const [, m, d] = iso.split('-').map(Number);
+  return `${LONG[dayKeyOf(iso)]} ${d} ${MONTH_NAMES[m - 1]}`;
 }
 
 // ---------------------------------------------------------------- times
@@ -68,51 +90,6 @@ export function branchHoursFrom(setting: unknown): Record<string, BranchHours> {
   return (t && typeof t === 'object' && t.branches && typeof t.branches === 'object') ? t.branches : {};
 }
 
-// ---------------------------------------------------------------- branch cards
-/** Weekday lines such as "Mon – Thu: 12 PM – 9 PM", "Sun: Closed". Consecutive equal days are merged. */
-export function weeklyLines(days: Partial<Record<DayKey, string>>): string[] {
-  const groups: { from: DayKey; to: DayKey; v: string }[] = [];
-  for (const k of DAY_ORDER) {
-    const v = days[k] || '';
-    const last = groups[groups.length - 1];
-    if (last && last.v === v) last.to = k; else groups.push({ from: k, to: k, v });
-  }
-  return groups.map((g) => {
-    const label = g.from === g.to ? SHORT[g.from] : `${SHORT[g.from]} – ${SHORT[g.to]}`;
-    return `${label}: ${g.v ? range(g.v) : 'Closed'}`;
-  });
-}
-
-/** Upcoming visit dates of a branch, merged into runs of consecutive days. */
-export function visitRuns(rows: ScheduleRow[], branchId: number, today: string, hours?: string): { from: string; to: string; text: string; label: string; time: string }[] {
-  const byDate = new Map<string, ScheduleRow[]>();
-  for (const r of rows) {
-    if (r.branch_id !== branchId || !r.on_date || r.unavailable || r.on_date < today) continue;
-    byDate.set(r.on_date, [...(byDate.get(r.on_date) || []), r]);
-  }
-  const dates = [...byDate.keys()].sort();
-  const runs: { from: string; to: string; times: string[]; dates: string[] }[] = [];
-  for (const d of dates) {
-    const own = byDate.get(d)!.sort((a, b) => a.start_time.localeCompare(b.start_time));
-    const t = hours ? range(hours) : range(own[0].start_time.slice(0, 5), own[own.length - 1].end_time.slice(0, 5));
-    const last = runs[runs.length - 1];
-    if (last && addDays(last.to, 1) === d) { last.to = d; last.times.push(t); last.dates.push(d); } else runs.push({ from: d, to: d, times: [t], dates: [d] });
-  }
-  return runs.map((r) => {
-    const label = r.from === r.to ? dateLabel(r.from) : `${dateLabel(r.from)} – ${dateLabel(r.to)}`;
-    const same = r.times.every((x) => x === r.times[0]);
-    const time = same ? r.times[0] : r.dates.map((d, i) => `${SHORT[dayKeyOf(d)]} ${r.times[i]}`).join(' · ');
-    return { from: r.from, to: r.to, text: same ? `${label}, ${r.times[0]}` : label, label, time };
-  });
-}
-
-/** Is the branch open on this date? null when hours are unknown. */
-export function openOn(h: BranchHours | undefined, rows: ScheduleRow[], branchId: number, date: string): boolean | null {
-  if (!h) return null;
-  if (h.mode === 'weekly') return !!h.days[dayKeyOf(date)];
-  return rows.some((r) => r.branch_id === branchId && r.on_date === date && !r.unavailable);
-}
-
 // ---------------------------------------------------------------- Dr. Ali's calendar
 /** Where Dr. Ali is on a date. Dated rows replace the normal week for that day. */
 export function slotsOn(rows: ScheduleRow[], date: string): { slots: Slot[]; dated: boolean } {
@@ -127,13 +104,52 @@ export function slotsOn(rows: ScheduleRow[], date: string): { slots: Slot[]; dat
   return { slots: sort(weekly.map(toSlot)), dated: false };
 }
 
+/** Dr. Ali's slots at one branch on a date (from slotsOn, so they match the strip). */
+export function aliSlotsAt(rows: ScheduleRow[], branchId: number, date: string): Slot[] {
+  return slotsOn(rows, date).slots.filter((s) => s.branch_id === branchId);
+}
+
+// ---------------------------------------------------------------- branch cards
+/**
+ * Upcoming visit dates of a branch (days Dr. Ali is there), merged into runs of consecutive days.
+ * When the times differ inside a run, `time` groups the days that share one:
+ * "Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM", and `parts` holds those pieces.
+ */
+export function visitRuns(rows: ScheduleRow[], branchId: number, today: string, horizon = 180): VisitRun[] {
+  const runs: { from: string; to: string; times: string[]; dates: string[] }[] = [];
+  for (let n = 0; n < horizon; n++) {
+    const d = addDays(today, n);
+    const own = aliSlotsAt(rows, branchId, d);
+    if (!own.length) continue;
+    const t = own.map((s) => range(s.start, s.end)).join(', ');
+    const last = runs[runs.length - 1];
+    if (last && addDays(last.to, 1) === d) { last.to = d; last.times.push(t); last.dates.push(d); } else runs.push({ from: d, to: d, times: [t], dates: [d] });
+  }
+  return runs.map((r) => {
+    const label = r.from === r.to ? dateLabel(r.from) : `${dateLabel(r.from)} – ${dateLabel(r.to)}`;
+    const same = r.times.every((x) => x === r.times[0]);
+    let parts: string[];
+    if (same) parts = [r.times[0]];
+    else {
+      // Consecutive days with the same time become one piece: "Sat – Sun 12 PM – 9 PM".
+      const groups: { first: string; last: string; time: string }[] = [];
+      r.dates.forEach((d, i) => {
+        const g = groups[groups.length - 1];
+        if (g && g.time === r.times[i]) g.last = d; else groups.push({ first: d, last: d, time: r.times[i] });
+      });
+      parts = groups.map((g) => `${g.first === g.last ? SHORT[dayKeyOf(g.first)] : `${SHORT[dayKeyOf(g.first)]} – ${SHORT[dayKeyOf(g.last)]}`} ${g.time}`);
+    }
+    const time = parts.join(' · ');
+    return { from: r.from, to: r.to, text: `${label}, ${time}`, label, time, parts };
+  });
+}
+
 // ---------------------------------------------------------------- live status
 // Minutes since midnight: "16:30" -> 990.
 export function toMin(t: string): number {
   const [h, m] = t.slice(0, 5).split(':').map(Number);
   return h * 60 + (m || 0);
 }
-const LONG: Record<DayKey, string> = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
 
 /** "today", "tomorrow", "Thursday", or "Thu 15 Oct" further out. */
 export function whenLabel(date: string, today: string): string {
@@ -143,18 +159,25 @@ export function whenLabel(date: string, today: string): string {
   return dateLabel(date);
 }
 
-/** The branch's opening span on a date, as [start, end] times, or null when closed. */
+/**
+ * The branch's opening span on a date, as [start, end] times, or null when closed.
+ * Weekly branches: their fixed hours for that weekday (or, on a normally closed day,
+ * the hours Dr. Ali is booked there). Visit branches: Dr. Ali's slots there that day.
+ */
 export function openSpan(h: BranchHours | undefined, rows: ScheduleRow[], branchId: number, date: string): [string, string] | null {
   if (!h) return null;
+  const own = aliSlotsAt(rows, branchId, date);
+  const ali: [string, string] | null = own.length ? [own[0].start, own.reduce((e, s) => (s.end > e ? s.end : e), own[0].end)] : null;
   if (h.mode === 'weekly') {
-    const v = h.days[dayKeyOf(date)];
-    return v ? (v.split('-') as [string, string]) : null;
+    const v = h.days?.[dayKeyOf(date)];
+    return v ? (v.split('-') as [string, string]) : ali;
   }
-  const own = rows.filter((r) => r.branch_id === branchId && r.on_date === date && !r.unavailable)
-    .sort((a, b) => a.start_time.localeCompare(b.start_time));
-  if (!own.length) return null;
-  if (h.hours) return h.hours.split('-') as [string, string];
-  return [own[0].start_time.slice(0, 5), own[own.length - 1].end_time.slice(0, 5)];
+  return ali;
+}
+
+/** One branch on one date: its opening span and Dr. Ali's slots there. Cards and the strip share this rule. */
+export function branchDay(h: BranchHours | undefined, rows: ScheduleRow[], branchId: number, date: string): BranchDay {
+  return { date, open: openSpan(h, rows, branchId, date), ali: aliSlotsAt(rows, branchId, date).map((s): [string, string] => [s.start, s.end]) };
 }
 
 /** "Open now · until 9 PM", "Opens today, 4 PM", "Opens Thursday, 4 PM", "Next open Thu 22 Oct". */
@@ -185,8 +208,7 @@ export function aliNext(rows: ScheduleRow[], branchId: number, today: string, no
   { here: boolean; date: string; start: string; end: string } | null {
   for (let n = 0; n < horizon; n++) {
     const date = addDays(today, n);
-    for (const s of slotsOn(rows, date).slots) {
-      if (s.branch_id !== branchId) continue;
+    for (const s of aliSlotsAt(rows, branchId, date)) {
       if (n === 0 && nowMin >= toMin(s.end)) continue;
       return { here: n === 0 && nowMin >= toMin(s.start), date, start: s.start, end: s.end };
     }
@@ -206,5 +228,5 @@ export function monthCells(year: number, month: number): { day: number; iso: str
   return cells;
 }
 export function monthTitle(year: number, month: number): string {
-  return ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][month - 1] + ' ' + year;
+  return MONTH_NAMES[month - 1] + ' ' + year;
 }

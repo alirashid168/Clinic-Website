@@ -99,9 +99,11 @@ function markCurrent(container) {
   }
 }
 
-const hoverMenus = matchMedia('(hover: hover) and (min-width: 901px)');
-const narrowScreen = matchMedia('(max-width: 900px)');
-let refLoaded = false;
+// The top bar needs room for the menu, the search box and the account menu, so below 1180px the
+// same menu is a drawer (the CSS uses the same breakpoint).
+const hoverMenus = matchMedia('(hover: hover) and (min-width: 1180px)');
+const wideScreen = matchMedia('(min-width: 1180px)');
+let refSession = null; // the session the clinician, treatment and settings lists were loaded for
 let renderCtl = null;
 
 export async function renderStaff(root, path, params, signOut) {
@@ -112,7 +114,10 @@ export async function renderStaff(root, path, params, signOut) {
   const { signal } = ctl;
   const on = (target, type, fn) => target.addEventListener(type, fn, { signal });
   document.body.classList.remove('drawer-open');
-  if (!refLoaded) { await loadStaffRef(); refLoaded = true; }
+  // Reload these lists for every new login (and token refresh), so a settings change reaches a
+  // shared computer that is never reloaded; page changes within one session reuse them.
+  const session = state.session;
+  if (refSession !== session) { await loadStaffRef(); refSession = session; }
   if (signal.aborted) return;
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
@@ -135,7 +140,8 @@ export async function renderStaff(root, path, params, signOut) {
   on(document, 'click', (e) => { if (!e.target.closest('.menu')) closeAll(); });
   on(document, 'keydown', (e) => {
     if (e.key !== 'Escape' || document.querySelector('.modal')) return;
-    const open = document.querySelector('.menu.open');
+    // A menu opened by hover has aria-expanded but not .open; Escape closes it as well (WCAG 1.4.13).
+    const open = document.querySelector('.menu.open') || document.querySelector('.menu > button[aria-expanded="true"]')?.parentElement;
     if (open) {
       const inside = open.contains(document.activeElement);
       setOpen(open, false);
@@ -148,7 +154,12 @@ export async function renderStaff(root, path, params, signOut) {
     const listId = `menu-list-${m.key}`;
     const btn = h('button', { type: 'button', class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-expanded': 'false', 'aria-controls': listId },
       m.label, current(m.key) ? srOnly(' (current section)') : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
-    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: closeAll }, i.label))));
+    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: () => {
+      // Choosing the page already on screen fires no hashchange, so give focus back to the menu button.
+      const same = i.href === location.hash;
+      closeAll();
+      if (same) btn.focus();
+    } }, i.label))));
     markCurrent(list);
     return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
   };
@@ -164,7 +175,7 @@ export async function renderStaff(root, path, params, signOut) {
       wrap, input, popup: results, listLabel: 'Patients found', reopenOnFocus: true,
       search: async (t) => (await state.data.searchPatients(t)).slice(0, 8),
       option: (p) => h('a', { href: `#/staff/patient/${p.id}` },
-        h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), h('strong', {}, p.full_name),
+        h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), h('strong', { title: p.full_name }, p.full_name),
         h('span', { class: 'muted' }, [p.phone, branchName(p.first_branch_id)].filter(Boolean).join(' · ')),
         can('dues.view') && Number(p.dues) > 0 ? h('span', { class: 'badge badge-dues' }, h('span', { 'aria-hidden': 'true' }, '$$ '), srOnly('Dues '), rupees(p.dues)) : null),
       onPick: (p) => { input.value = ''; location.hash = `#/staff/patient/${p.id}`; },
@@ -190,7 +201,7 @@ export async function renderStaff(root, path, params, signOut) {
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
   const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
   const drawer = h('nav', { class: 'sidebar', id: 'staff-drawer', 'aria-label': 'Staff navigation' },
-    h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', style: { color: 'inherit', alignSelf: 'flex-end' }, onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
+    h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' }, onclick: () => closeDrawer(location.hash === '#/staff/today') }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
     items.map((m) => (m.items
       ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => drawerLink(i)))
@@ -238,7 +249,7 @@ export async function renderStaff(root, path, params, signOut) {
   }
   toggle.addEventListener('click', () => (drawer.classList.contains('open') ? closeDrawer(true) : openDrawer()));
   on(window, 'hashchange', () => { closeDrawer(false); ctl.abort(); });
-  on(narrowScreen, 'change', () => { if (!narrowScreen.matches) closeDrawer(false); });
+  on(wideScreen, 'change', () => { if (wideScreen.matches) closeDrawer(false); });
 
   // Load-shedding: say so at the top, and say exactly what keeps working. Only typed cells on the
   // Aaj ki List (treatment, details, notes) are kept on the device; everything else needs the connection.
@@ -257,9 +268,13 @@ export async function renderStaff(root, path, params, signOut) {
     if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);
     else if (section === 'patient' && id && can('patients.view')) await renderPatient(main, id);
     else if (page && page.show()) await page.render(main, params, signal);
-    else mount(main, empty('This page is not available for your account.', h('a', { class: 'btn', href: '#/staff/today' }, 'Go to Today')));
+    else {
+      document.title = 'Page not available | Clinic system';
+      mount(main, h('div', { class: 'page-head' }, h('h1', {}, 'Page not available')),
+        empty('This page is not available for your account.', h('a', { class: 'btn', href: '#/staff/today' }, 'Go to Today')));
+    }
   } catch (e) {
     toast(friendlyError(e), 'error');
-    mount(main, empty(friendlyError(e)));
+    mount(main, h('div', { class: 'page-head' }, h('h1', {}, 'This page could not load')), empty(friendlyError(e)));
   }
 }

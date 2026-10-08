@@ -6,7 +6,7 @@
 //
 // The public pages render straight away and fill in their data when
 // state.ready resolves. Login, portal and staff code load only when visited.
-import { h, mount, toast, friendlyError, empty, modal, closeAllModals, extLink } from './ui/dom.js';
+import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink } from './ui/dom.js';
 import { state } from './state.js';
 import { CONFIG } from './config.js';
 import * as content from './content.js';
@@ -27,7 +27,10 @@ const STAFF_TITLES = {
 let routeGen = 0;
 let firstRoute = true;
 let signingOut = false;
-let returnTo = null; // where to go after logging in, when a login was needed on the way
+// Where to go after logging in, when a login was needed on the way: { hash }, or after a logout
+// { hash, staffId }, which only that same person is taken back to (see onSignedIn).
+let returnTo = null;
+let onLoginPage = false;
 
 function setMeta(title, description = HOME_DESC) {
   document.title = title;
@@ -83,6 +86,9 @@ async function route() {
   const params = new URLSearchParams(query);
   const parts = pathPart.split('/').filter(Boolean);
   const current = () => gen === routeGen;
+  // Leaving the login page without signing in forgets where the person was heading.
+  if (onLoginPage && parts[0] !== 'login') returnTo = null;
+  onLoginPage = parts[0] === 'login';
 
   const view = newView();
   window.scrollTo(0, 0);
@@ -129,7 +135,7 @@ async function route() {
       setMeta(`Your patient account | ${SITE}`);
       await state.ready;
       if (!current() || unavailable(view)) return;
-      if ((signingOut ? null : state.session)?.kind !== 'patient') { returnTo = location.hash; return go('#/login/patient'); }
+      if ((signingOut ? null : state.session)?.kind !== 'patient') { returnTo = { hash: location.hash }; return go('#/login/patient'); }
       const { renderPortal } = await import('./views/portal.js');
       if (!current()) return;
       return await show(gen, view, first, () => renderPortal(view, signOut));
@@ -140,7 +146,7 @@ async function route() {
       setMeta(`${STAFF_TITLES[parts[1] || 'today'] || 'Clinic system'} | Clinic system`);
       await state.ready;
       if (!current() || unavailable(view)) return;
-      if ((signingOut ? null : state.session)?.kind !== 'staff') { returnTo = location.hash; return go('#/login/staff'); }
+      if ((signingOut ? null : state.session)?.kind !== 'staff') { returnTo = { hash: location.hash }; return go('#/login/staff'); }
       const { renderStaff } = await import('./views/staff/shell.js');
       if (!current()) return;
       return await show(gen, view, first, () => renderStaff(view, parts.slice(1).join('/') || 'today', params, signOut));
@@ -199,44 +205,76 @@ function unavailable(view) {
 function onSignedIn() {
   const kind = state.session?.kind;
   const area = kind === 'staff' ? '#/staff' : '#/patient';
-  const back = returnTo?.startsWith(area) ? returnTo : null;
+  // A page saved at an idle logout belongs to the person who was working on it: on a shared computer the
+  // next login must not land on someone else's patient record. A page the person asked for before logging in is theirs.
+  const mine = !returnTo?.staffId || returnTo.staffId === state.session?.staff?.id;
+  const back = mine && returnTo?.hash.startsWith(area) ? returnTo.hash : null;
   returnTo = null;
   startIdle();
   location.hash = back || (kind === 'staff' ? '#/staff/today' : '#/patient');
 }
 
-async function signOut() {
+// What the logout toast says about Aaj ki List edits still on this computer. autosave.clearForUser resolves to
+// { pending, failed }: pending edits are sent by themselves the next time that person opens the list (if within a
+// day), failed ones wait for Try again or Discard. (An older autosave.js resolved to one number for both.)
+function waitingMessage(left) {
+  const changes = (n) => `${n} change${n === 1 ? '' : 's'} on the Aaj ki List`;
+  const it = (n) => (n === 1 ? 'it' : 'them');
+  const listed = (n) => `${n === 1 ? 'It' : 'They'} will be listed at the top of the Aaj ki List the next time you log in here, where you can Try again or Discard ${it(n)}.`;
+  if (typeof left === 'number') {
+    return left > 0 ? `${changes(left)} ${left === 1 ? 'is' : 'are'} still on this computer. Recent ones are sent the next time you log in here and open the Aaj ki List; any that could not be saved are listed at the top, where you can Try again or Discard ${it(left)}.` : '';
+  }
+  const { pending = 0, failed = 0 } = left || {};
+  const text = [];
+  if (pending) text.push(`${changes(pending)} ${pending === 1 ? 'is' : 'are'} waiting on this computer. ${pending === 1 ? 'It' : 'They'} will be sent the next time you log in here and open the Aaj ki List, as long as that is within a day; after that ${pending === 1 ? 'it is' : 'they are'} listed at the top for you to check.`);
+  if (failed) text.push(`${changes(failed)} could not be saved. ${listed(failed)}`);
+  return text.join(' ');
+}
+
+// { remote: true }: the login already ended in another tab, so there is nothing to send or to end here.
+// { local: true }: end only this computer's login (the data layer keeps other computers on a shared login signed in).
+async function signOut({ remote = false, local = false } = {}) {
   if (signingOut) return;
   signingOut = true;
   stopIdle();
   closeAllModals();
+  clearMessages(); // toasts and announcements can name patients
   // Take patient details off the screen straight away; the rest can take a moment.
   routeGen++;
   mount(newView(), h('div', { class: 'empty' }, h('p', {}, 'Logging out…')));
-  let waiting = 0;
+  let left = null;
   try {
     // Send any Aaj ki List edits still waiting, then stop the queue so nothing goes out under the next login.
+    // Not for a remote logout: the login in this tab is gone, and edits would go out under whoever signed in elsewhere.
     const autosave = await import('./lib/autosave.js');
-    waiting = (await autosave.clearForUser?.({ flush: true, timeoutMs: 3000 })) || 0;
+    left = await autosave.clearForUser?.({ flush: !remote, timeoutMs: 3000 });
   } catch (e) {
     console.error(e);
   }
-  try { await state.data?.signOut(); } catch (e) { console.error(e); }
+  if (!remote) {
+    try { await state.data?.signOut(local ? { scope: 'local' } : undefined); } catch (e) { console.error(e); }
+  }
   state.session = null;
   signingOut = false;
+  clearMessages(); // anything that arrived while the edits were being sent
   if (location.hash.replace(/^#\/?/, '')) location.hash = '#/';
   else route();
-  if (waiting) {
-    toast(`${waiting} change${waiting === 1 ? '' : 's'} on the Aaj ki List could not be sent yet. ${waiting === 1 ? 'It stays' : 'They stay'} on this computer and will be sent the next time you log in here and open the Aaj ki List.`, 'info', 10000);
-  }
+  const waiting = waitingMessage(left);
+  if (waiting) toast(waiting, 'info', 12000);
 }
 
 // ---------------------------------------------------------------- idle logout
 // Staff are logged out after a period of no activity (shared clinic computers).
 // A warning comes a minute before, with a "Stay signed in" button. The limit
 // is checked against the clock, so a computer that slept is not given extra time.
+//
+// All tabs of one browser share a single login, so activity is shared too (through localStorage):
+// a tab left idle in the background never logs out the tab that is in use. Each tab warns, and
+// logs out, only when every tab has been idle; "Stay signed in" in any tab keeps them all.
 const WARN_MS = 60 * 1000;
+const SHARED_KEY = 'staff-last-active';
 let lastActive = Date.now();
+let lastShared = 0;
 let lastScheduled = 0;
 let idleTimer = null;
 let warning = null;
@@ -244,8 +282,22 @@ let warning = null;
 const idleApplies = () => !signingOut && state.session?.kind === 'staff' && state.data?.mode !== 'demo';
 const idleLimitMs = () => (Number(state.ref.settings?.session_timeout_minutes) || 30) * 60 * 1000;
 
+function sharedActive() {
+  try { return Number(localStorage.getItem(SHARED_KEY)) || 0; } catch { return 0; }
+}
+
+function shareActivity(at) {
+  if (at - lastShared < 1000) return;
+  lastShared = at;
+  try { localStorage.setItem(SHARED_KEY, String(at)); } catch { /* storage blocked or full: this tab then counts alone */ }
+}
+
+// How long nothing has happened in this tab or any other tab of this browser.
+const idleFor = () => Date.now() - Math.max(lastActive, sharedActive());
+
 function startIdle() {
   lastActive = Date.now();
+  shareActivity(lastActive);
   scheduleIdle();
 }
 
@@ -262,7 +314,7 @@ function scheduleIdle() {
   idleTimer = null;
   if (!idleApplies()) return;
   lastScheduled = Date.now();
-  const left = idleLimitMs() - (Date.now() - lastActive);
+  const left = idleLimitMs() - idleFor();
   idleTimer = setTimeout(warnIdle, Math.max(left - WARN_MS, 0));
 }
 
@@ -272,24 +324,33 @@ function onActivity(e) {
   // Inside the warning, its own buttons decide (so "Log out now" is not taken as activity).
   if (warning && e?.target instanceof Node && warning.dialog.contains(e.target)) return;
   const now = Date.now();
-  if (now - lastActive >= idleLimitMs()) { idleSignOut(); return; } // the limit passed while the tab was hidden or the computer slept
+  if (idleFor() >= idleLimitMs()) { idleSignOut(); return; } // the limit passed while the tab was hidden or the computer slept
   lastActive = now;
+  shareActivity(now);
   if (warning) { const w = warning; warning = null; w.close(); }
   // Scrolling and typing fire constantly; rescheduling once a second is plenty.
   if (idleTimer && now - lastScheduled < 1000) return;
   scheduleIdle();
 }
 
+// Another tab of this browser had activity: whatever this tab was counting down is off.
+window.addEventListener('storage', (e) => {
+  if (e.key !== SHARED_KEY || !idleApplies()) return;
+  if (warning) { const w = warning; warning = null; w.close(); }
+  scheduleIdle();
+});
+
 function warnIdle() {
   if (!idleApplies()) return;
-  const left = idleLimitMs() - (Date.now() - lastActive);
+  const left = idleLimitMs() - idleFor();
   if (left <= 0) { idleSignOut(); return; }
-  if (left > WARN_MS + 1000) { scheduleIdle(); return; } // there was activity since this was set
-  const seconds = h('span', {}, String(Math.round(left / 1000)));
-  const tick = setInterval(() => { seconds.textContent = String(Math.max(0, Math.round((idleLimitMs() - (Date.now() - lastActive)) / 1000))); }, 1000);
+  if (left > WARN_MS + 1000) { scheduleIdle(); return; } // there was activity since this was set (here or in another tab)
+  const seconds = h('span', { class: 'idle-countdown' }, String(Math.round(left / 1000)));
+  const tick = setInterval(() => { seconds.textContent = String(Math.max(0, Math.round((idleLimitMs() - idleFor()) / 1000))); }, 1000);
   const w = modal('Are you still there?',
-    [h('p', {}, 'Nothing has happened on this screen for a while. To keep patient details private, you will be logged out in ', seconds, ' seconds.'),
-      h('p', {}, 'Choose “Stay signed in” to keep working.')],
+    h('div', { class: 'idle-warning' },
+      h('p', {}, 'Nothing has happened on this screen for a while. To keep patient details private, you will be logged out in ', seconds, ' seconds.'),
+      h('p', {}, 'Choose “Stay signed in” to keep working.')),
     [{ label: 'Log out now', onClick: () => signOut() }, { label: 'Stay signed in', primary: true }],
     { alert: true, onClose: () => { clearInterval(tick); if (warning === w) { warning = null; onActivity(); } } });
   warning = w;
@@ -300,9 +361,19 @@ function warnIdle() {
 async function idleSignOut() {
   if (!idleApplies()) return;
   const minutes = Math.max(1, Math.round(idleLimitMs() / 60000));
-  if (location.hash.startsWith('#/staff')) returnTo = location.hash;
-  await signOut();
-  toast(`You were logged out because there was no activity for ${minutes} minutes.`, 'info', 10000);
+  if (location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId: state.session?.staff?.id };
+  // Only this computer's login ends: the same shared login may be in use on another computer.
+  await signOut({ local: true });
+  toast(`You were logged out because there was no activity for ${minutes} minute${minutes === 1 ? '' : 's'}.`, 'info', 10000);
+}
+
+// The login ended in another tab (logged out there, or the session expired): leave the same way
+// signOut() does, instead of leaving patient details on screen under a login that no longer exists.
+async function endedElsewhere() {
+  const staffId = state.session?.staff?.id;
+  if (staffId && location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId };
+  await signOut({ remote: true });
+  toast('You were logged out. Your login ended in another tab or window, or it expired. Please log in again.', 'info', 10000);
 }
 
 // 'app:activity' is sent by long jobs (an import running for an hour) so they are not cut off mid-way.
@@ -325,9 +396,14 @@ route();
 
 state.ready.then(() => {
   if (!state.data) return;
+  const personOf = (s) => s?.staff?.id || s?.patient?.id || null;
   state.data.onAuthChange?.(async () => {
-    const s = await state.data.getSession().catch(() => null);
+    let s;
+    try { s = await state.data.getSession(); } catch (e) { console.error(e); return; } // a hiccup (offline?) is not a logout
     if (signingOut) return;
+    const was = state.session;
+    // The login this tab was using is gone, or another person signed in from another tab.
+    if (was && personOf(s) !== personOf(was)) { endedElsewhere(); return; }
     state.session = s;
     if (!idleApplies()) stopIdle();
     else if (!idleTimer && !warning) scheduleIdle();

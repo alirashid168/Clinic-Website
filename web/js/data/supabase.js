@@ -4,21 +4,19 @@
 //
 // Capped lists keep returning arrays; when a cap is reached the array carries
 // `truncated = true` and `cap = N` so the screen can say "showing the first N".
-// Report totals come from SQL functions (supabase/migrations/20261007_audit_fixes.sql)
+// Report totals come from SQL functions (supabase/migrations/20261007002000_audit_fixes.sql)
 // and fall back to adding up rows in the browser while that file is not applied.
 
 import { CONFIG } from '../config.js';
 import { todayISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
 
-// supabase-js pinned to one exact release (bump on purpose, after testing), with a
-// second CDN in case the first is blocked or down.
+// supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
+// is allowed by the site's Content-Security-Policy (script-src and connect-src), so there is no
+// second CDN: a slow or failed load is tried once more, then reported.
 const SDK_VERSION = '2.117.2';
-const SDK_URLS = [
-  `https://cdn.jsdelivr.net/npm/@supabase/supabase-js@${SDK_VERSION}/+esm`,
-  `https://esm.sh/@supabase/supabase-js@${SDK_VERSION}`,
-];
-const SDK_TIMEOUT_MS = 8000; // per CDN attempt
+const SDK_URL = `https://cdn.jsdelivr.net/npm/@supabase/supabase-js@${SDK_VERSION}/+esm`;
+const SDK_TIMEOUT_MS = 8000; // per attempt
 const READ_TIMEOUT_MS = 20000; // any read (GET) from the database or storage
 // Supabase image transformations need a paid plan. Until CONFIG.IMAGE_TRANSFORMS is
 // set to true, thumbnails and gallery images are the original files.
@@ -29,6 +27,8 @@ const ID_CHUNK = 100; // ids per ".in()" request, so URLs stay short
 const CACHE_MS = 5 * 60 * 1000; // public schedule and gallery
 
 const plainError = (message, code) => Object.assign(new Error(message), code ? { code } : {});
+/** The error of save_invoice / save_installment_plan when a retried key carries different details (same wording, for the fallback path). */
+const mismatchError = (what, undo) => plainError(`IDEMPOTENCY_MISMATCH: an earlier attempt already saved ${what} with different details. Refresh the patient record and check it (${undo} if it is wrong) before saving again.`, 'IDEMPOTENCY_MISMATCH');
 
 function check(res) {
   const { data, error } = res;
@@ -59,13 +59,14 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
 }
 async function loadSdk() {
-  const first = import(SDK_URLS[0]);
+  const first = import(SDK_URL);
   first.catch(() => {});
   try {
     return await withTimeout(first, SDK_TIMEOUT_MS);
   } catch {
-    // First CDN failed or is slow: try the second, and still take the first if it finishes before.
-    const second = import(SDK_URLS[1]);
+    // Failed or slow: ask once more (a browser remembers a failed module URL, a changed query string gets past that)
+    // and still take the first if it finishes before.
+    const second = import(`${SDK_URL}?retry=1`);
     second.catch(() => {});
     try {
       return await withTimeout(Promise.any([first, second]), SDK_TIMEOUT_MS);
@@ -81,19 +82,33 @@ function getSdk() {
   return sdkPromise;
 }
 
+/**
+ * What a read that took too long ends with. The "TIMEOUT:" prefix postgrest-js puts in front of the name keeps friendlyError()
+ * showing only the sentence and the sheet's retry treating it as a network problem. code = 'ABORT_ERR' tells postgrest-js
+ * this is an abort: it does not retry it (a retried timeout would keep the screen loading for another minute or more).
+ */
+function timeoutError() {
+  const err = new Error('The clinic server took too long to answer. Check the internet connection and try again.');
+  err.name = 'TIMEOUT';
+  err.code = 'ABORT_ERR';
+  return err;
+}
+
 /** Reads give up after READ_TIMEOUT_MS instead of hanging; uploads and saves are left alone. */
 function timedFetch(input, init = {}) {
   const method = String(init.method || 'GET').toUpperCase();
   if ((method !== 'GET' && method !== 'HEAD') || init.signal || typeof AbortController === 'undefined') return fetch(input, init);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => {
-    // "TIMEOUT:" prefix: friendlyError() shows only the sentence, and the sheet's retry treats it as a network problem.
-    const err = new Error('The clinic server took too long to answer. Check the internet connection and try again.');
-    err.name = 'TIMEOUT';
-    ctrl.abort(err);
-  }, READ_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
   return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
 }
+
+// Database functions that only read. They are sent as POST, which timedFetch leaves alone, so callRpc gives them
+// the same time limit as a GET. Saving functions (save_invoice, close_cash, merge_patients, imports ...) have none.
+const READ_RPCS = new Set(['payments_summary', 'opd_summary', 'total_dues', 'clinic_report', 'doctor_summary', 'dues_for',
+  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins']);
+// How long to wait for the server to confirm a logout before ending it on this computer alone.
+const SIGNOUT_TIMEOUT_MS = 4000;
 
 // ------------------------------------------------------------ report totals (pure; also used by demo.js)
 const KARACHI_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE || 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -188,10 +203,22 @@ export async function createSupabaseAdapter() {
   const missingRpcs = new Set();
   const cache = new Map();
 
-  /** Calls a database function; { missing: true } when it is not installed yet (PostgREST PGRST202 / 404). */
+  /** sb.rpc(), with the read time limit for the functions in READ_RPCS. A timeout comes back as res.error ("TIMEOUT: ..."). */
+  async function callRpc(name, args) {
+    if (!READ_RPCS.has(name) || typeof AbortController === 'undefined') return sb.rpc(name, args);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
+    try {
+      return await sb.rpc(name, args).abortSignal(ctrl.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Calls a database function; { missing: true } when it is not installed yet (PostgREST PGRST202 / 404). A timeout is an error, never "missing". */
   async function rpc(name, args) {
     if (missingRpcs.has(name)) return { missing: true };
-    const res = await sb.rpc(name, args);
+    const res = await callRpc(name, args);
     if (res.error && (res.error.code === 'PGRST202' || res.status === 404)) { missingRpcs.add(name); return { missing: true }; }
     return { missing: false, data: check(res) };
   }
@@ -255,6 +282,21 @@ export async function createSupabaseAdapter() {
     return out;
   }
 
+  /** Ends the stored login. The "local" scope of sb.auth.signOut goes through the same request, so it cannot rescue a hung one. */
+  async function endSession({ scope = 'global' } = {}) {
+    cachedSession = null;
+    partial.clear();
+    let confirmed = false;
+    try { confirmed = !(await withTimeout(sb.auth.signOut({ scope }), SIGNOUT_TIMEOUT_MS))?.error; } catch { /* timed out, or no connection */ }
+    if (!confirmed) {
+      // Without this the tokens stay in localStorage, and a reload or a new tab is still signed in.
+      Promise.resolve(sb.auth.stopAutoRefresh?.()).catch(() => {});
+      const key = sb.auth.storageKey;
+      if (key) for (const k of [key, `${key}-user`, `${key}-code-verifier`]) { try { localStorage.removeItem(k); } catch { /* storage blocked */ } }
+    }
+    return confirmed;
+  }
+
   async function userId() {
     const { data } = await sb.auth.getUser();
     return data?.user?.id || null;
@@ -262,7 +304,7 @@ export async function createSupabaseAdapter() {
 
   async function duesFor(ids) {
     if (!ids.length) return {};
-    const rows = check(await sb.rpc('dues_for', { p_patients: ids }));
+    const rows = check(await callRpc('dues_for', { p_patients: ids }));
     return Object.fromEntries(rows.map((r) => [r.patient_id, Number(r.dues)]));
   }
   async function flagsFor(ids) {
@@ -271,7 +313,7 @@ export async function createSupabaseAdapter() {
     return Object.fromEntries(rows.map((r) => [r.patient_id, r]));
   }
 
-  const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone,medical_history), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
+  const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone,medical_history,photo_consent_public), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
   async function enrichVisits(rows) {
     const ids = [...new Set(rows.map((r) => r.patient_id))];
     const [dues, flags] = await Promise.all([duesFor(ids), flagsFor(ids)]);
@@ -340,14 +382,12 @@ export async function createSupabaseAdapter() {
       check(await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo: location.origin + '/reset-password.html' }));
     },
     async updatePassword(password) { check(await sb.auth.updateUser({ password })); },
-    // Always ends the session on this computer: if the server call fails (offline), the local session is still removed.
-    async signOut() {
-      cachedSession = null;
-      partial.clear();
-      let failed = false;
-      try { failed = !!(await sb.auth.signOut())?.error; } catch { failed = true; }
-      if (failed) { try { await sb.auth.signOut({ scope: 'local' }); } catch { /* nothing more to clear */ } }
-    },
+    /**
+     * Always ends the login on this computer, even with no connection: the server gets SIGNOUT_TIMEOUT_MS to confirm
+     * (scope 'global' ends every session of this login, 'local' only this browser's), then the stored login is removed
+     * by hand. Resolves true when the server confirmed, false when only this computer was signed out.
+     */
+    async signOut(opts) { return endSession(opts); },
     async getSession() {
       const uid = await userId();
       if (!uid) return null;
@@ -355,7 +395,7 @@ export async function createSupabaseAdapter() {
       const staff = check(await sb.from('staff').select('*').eq('id', uid).maybeSingle());
       let value = null;
       if (staff) {
-        if (!staff.active) { await sb.auth.signOut(); throw new Error('This account is switched off. Contact Dr. Ali.'); }
+        if (!staff.active) { await endSession(); throw new Error('This account is switched off. Contact Dr. Ali.'); }
         let perms;
         if (staff.role === 'admin') perms = new Set(PERMISSIONS.map((p) => p.key));
         else {
@@ -427,7 +467,7 @@ export async function createSupabaseAdapter() {
       return keepFlags(rows, rows.map((p) => ({ ...p, dues: dues[p.id] ?? 0, see_dr_ali: !!flags[p.id], braces_active: active.has(p.id) })));
     },
     async findDuplicates(name, phone) {
-      return check(await sb.rpc('find_possible_duplicates', { p_name: name || '', p_phone: phone || '' }));
+      return check(await callRpc('find_possible_duplicates', { p_name: name || '', p_phone: phone || '' }));
     },
     async createPatient(row) {
       const clean = { ...row, first_branch_id: row.first_branch_id ? Number(row.first_branch_id) : null };
@@ -444,7 +484,7 @@ export async function createSupabaseAdapter() {
     },
     /**
      * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (240px when
-     * IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); documents carry url. Signed in one batch per bucket.
+     * IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); documents carry url and url_expires_at. Signed in one batch per bucket.
      * Re-sign an expired link with signedUrls([storage_path]) (documents: { bucket: 'patient-documents' }).
      */
     async getPatient(id) {
@@ -468,13 +508,14 @@ export async function createSupabaseAdapter() {
         sb.from('complaints').select('*, messages:complaint_messages(*)').eq('patient_id', id).order('created_at', { ascending: false }).then(check),
         sb.from('braces_cases').select('*').eq('patient_id', id).eq('status', 'active').then(check).then(async (cases) => {
           if (!cases[0]) return null;
-          const next = check(await sb.rpc('next_braces_month', { p_case: cases[0].id }));
+          const next = check(await callRpc('next_braces_month', { p_case: cases[0].id }));
           return { ...cases[0], next_month: next };
         }),
         duesFor([id]), flagsFor([id]),
         sb.from('patient_documents').select('*').eq('patient_id', id).order('added_on', { ascending: false }).then(check).then(async (rows) => {
           const urls = await signed(rows, { bucket: 'patient-documents' });
-          for (const doc of rows) doc.url = urls.get(doc.storage_path) || null;
+          const expires = Date.now() + SIGNED_URL_TTL * 1000;
+          for (const doc of rows) { doc.url = urls.get(doc.storage_path) || null; doc.url_expires_at = expires; }
           return rows;
         }),
         this.paymentPlans(id).catch(() => []),
@@ -484,7 +525,7 @@ export async function createSupabaseAdapter() {
 
     // ------------------------------------------------------------ braces
     async bracesGuidance(patientId) {
-      const g = check(await sb.rpc('braces_guidance', { p_patient: patientId }));
+      const g = check(await callRpc('braces_guidance', { p_patient: patientId }));
       if (g?.alerts) g.alerts = g.alerts.map((text) => ({ level: alertLevel(text), text }));
       return g;
     },
@@ -594,7 +635,9 @@ export async function createSupabaseAdapter() {
     /**
      * One database call (save_invoice: invoice + lines + issue, all or nothing). Pass { idempotencyKey } (a
      * crypto.randomUUID() made when the form opens) so a retried Save returns the same invoice instead of a second one.
-     * Without the migration it falls back to the old three steps, finishing the same draft on a retry.
+     * The same key with different details is refused (IDEMPOTENCY_MISMATCH): the first save did go through.
+     * Without the migration it falls back to the old three steps. A retry finishes the same draft: with the lines the
+     * form has NOW (an earlier attempt that stopped half way is rewritten), or returns the invoice if it was issued.
      */
     async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
       const key = opts.idempotencyKey || idempotencyKey || null;
@@ -604,22 +647,41 @@ export async function createSupabaseAdapter() {
       if (!viaRpc.missing) return viaRpc.data;
 
       const subtotal = items.reduce((s, it) => s + Number(it.quantity || 1) * Number(it.unit_price || 0), 0);
+      const sig = JSON.stringify([header, lines]); // what this attempt was asked to save
+      const full = async (id) => check(await sb.from('invoices').select('*, items:invoice_items(*)').eq('id', id).single());
+      const earlier = key ? partial.get('invoice:' + key) : null;
+      let inv = earlier ? check(await sb.from('invoices').select('*, items:invoice_items(id)').eq('id', earlier.id).maybeSingle()) : null;
+      if (inv?.status === 'void') inv = null; // voided since: this is a new invoice
+      if (inv && inv.status !== 'draft') {
+        // An earlier attempt got as far as issuing it (or sending it for discount approval): the same save again, or a mismatch.
+        if (earlier.sig !== sig) throw mismatchError(`invoice ${inv.invoice_no}`, 'void it');
+        return full(inv.id);
+      }
       // Saved as a draft first so its lines can be added, then issued. Discounts above
       // the person's limit stay "pending approval" (the database decides).
-      let inv = null;
-      const earlierId = key ? partial.get('invoice:' + key) : null;
-      if (earlierId) inv = check(await sb.from('invoices').select('*, items:invoice_items(id)').eq('id', earlierId).maybeSingle());
+      let status = inv?.status;
+      const edited = !!inv && earlier.sig !== sig; // a draft left by an attempt that stopped half way, and the form was changed since
       if (!inv) {
         inv = check(await sb.from('invoices').insert({
-          patient_id, branch_id: Number(branch_id), visit_id, subtotal, discount_amount: Number(discount_amount) || 0,
+          patient_id, branch_id: header.branch_id, visit_id, subtotal, discount_amount: header.discount_amount,
           discount_reason, status: 'draft',
         }).select().single());
         inv.items = [];
-        if (key) partial.set('invoice:' + key, inv.id);
+        status = inv.status;
+        if (key) partial.set('invoice:' + key, { id: inv.id, sig });
+      } else if (edited) {
+        // Nobody can delete a draft invoice, so the one left over is rewritten with the lines the form has now. The order
+        // matters: the discount rules re-check on every change, and an invoice with no lines counts as 100% off. So clear the
+        // discount, swap the lines, then set the discount again against the real subtotal (like a first save does).
+        check(await sb.from('invoices').update({ branch_id: header.branch_id, visit_id, discount_amount: 0, discount_reason: null }).eq('id', inv.id));
+        if (inv.items?.length) check(await sb.from('invoice_items').delete().eq('invoice_id', inv.id));
+        inv.items = [];
+        partial.set('invoice:' + key, { id: inv.id, sig });
       }
       if (!inv.items?.length) check(await sb.from('invoice_items').insert(lines.map((it) => ({ invoice_id: inv.id, ...it }))));
-      if (inv.status === 'draft') check(await sb.from('invoices').update({ status: 'issued' }).eq('id', inv.id));
-      return check(await sb.from('invoices').select('*, items:invoice_items(*)').eq('id', inv.id).single());
+      if (edited) status = check(await sb.from('invoices').update({ discount_amount: header.discount_amount, discount_reason }).eq('id', inv.id).select('status').single()).status;
+      if (status === 'draft') check(await sb.from('invoices').update({ status: 'issued' }).eq('id', inv.id));
+      return full(inv.id);
     },
     async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null }) {
       return check(await sb.from('payments').insert({ patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() }).select().single());
@@ -639,7 +701,7 @@ export async function createSupabaseAdapter() {
     async paymentPlans(patientId) {
       return check(await sb.from('payment_plans').select('*, installments:plan_installments(*)').eq('patient_id', patientId).order('created_at', { ascending: false }));
     },
-    /** One database call (save_installment_plan: plan + installments together). { idempotencyKey } as for createInvoice. */
+    /** One database call (save_installment_plan: plan + installments together). { idempotencyKey } and the retry rules as for createInvoice. */
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
       const key = opts.idempotencyKey || idempotencyKey || null;
       const head = { patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes };
@@ -647,13 +709,20 @@ export async function createSupabaseAdapter() {
       const viaRpc = await rpc('save_installment_plan', { p_idempotency_key: key, p_plan: head, p_installments: rows });
       if (!viaRpc.missing) return viaRpc.data;
 
-      let plan = null;
-      const earlierId = key ? partial.get('plan:' + key) : null;
-      if (earlierId) plan = check(await sb.from('payment_plans').select('*, installments:plan_installments(id)').eq('id', earlierId).maybeSingle());
+      const sig = JSON.stringify([head, rows]); // what this attempt was asked to save
+      const earlier = key ? partial.get('plan:' + key) : null;
+      let plan = earlier ? check(await sb.from('payment_plans').select('*, installments:plan_installments(id)').eq('id', earlier.id).maybeSingle()) : null;
+      // The installments go in with one insert, so a plan that has any has all of them: an earlier attempt that completed.
+      if (plan?.installments?.length && earlier.sig !== sig) throw mismatchError('this payment plan', 'delete the plan');
       if (!plan) {
         plan = check(await sb.from('payment_plans').insert({ ...head, created_by: await userId() }).select().single());
         plan.installments = [];
-        if (key) partial.set('plan:' + key, plan.id);
+        if (key) partial.set('plan:' + key, { id: plan.id, sig });
+      } else if (!plan.installments?.length && earlier.sig !== sig) {
+        // The earlier attempt stopped after the plan row and the form was edited since: the plan takes the edited details.
+        const { patient_id: _same, ...edits } = head;
+        plan = { ...check(await sb.from('payment_plans').update(edits).eq('id', plan.id).select().single()), installments: [] };
+        partial.set('plan:' + key, { id: plan.id, sig });
       }
       if (!plan.installments?.length) check(await sb.from('plan_installments').insert(rows.map((i) => ({ plan_id: plan.id, ...i }))));
       const { installments: _done, ...row } = plan;
@@ -870,7 +939,7 @@ export async function createSupabaseAdapter() {
       const visits = await enrichVisits(rows.map((r) => r.visit));
       return visits.map((v, i) => ({ role: rows[i].role, ...v })).sort((a, b) => b.visit_date.localeCompare(a.visit_date));
     },
-    async doctorSummary(clinicianId, from, to) { return check(await sb.rpc('doctor_summary', { p_clinician: clinicianId, p_from: from, p_to: to })); },
+    async doctorSummary(clinicianId, from, to) { return check(await callRpc('doctor_summary', { p_clinician: clinicianId, p_from: from, p_to: to })); },
     async myClinicianId() {
       const uid = await userId();
       const row = check(await sb.from('clinicians').select('id').eq('staff_id', uid).maybeSingle());
@@ -934,7 +1003,7 @@ export async function createSupabaseAdapter() {
       forget('schedule');
     },
     async deleteScheduleRow(id) { check(await sb.from('dr_ali_schedule').delete().eq('id', id)); forget('schedule'); },
-    async staffLogins() { return check(await sb.rpc('staff_logins', { p_limit: 200 })); },
+    async staffLogins() { return check(await callRpc('staff_logins', { p_limit: 200 })); },
     async auditLog() {
       const [rows, names] = await Promise.all([sb.from('audit_log').select('*').order('at', { ascending: false }).limit(201).then(check), staffNames()]);
       const list = capped(rows, 200);
@@ -970,7 +1039,7 @@ export async function createSupabaseAdapter() {
       return rows.reduce((t, x) => t + Number(x.dues), 0);
     },
     async commissionRules() { return check(await sb.from('doctor_commission_rules').select('*').eq('active', true)); },
-    async report(kind, from, to) { return check(await sb.rpc('clinic_report', { p_kind: kind, p_from: from, p_to: to })) || []; },
+    async report(kind, from, to) { return check(await callRpc('clinic_report', { p_kind: kind, p_from: from, p_to: to })) || []; },
 
     // ------------------------------------------------------------ clinic setup (admin)
     async setupLists() {
@@ -996,7 +1065,7 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ duplicates (admin)
-    async patientDuplicates() { return check(await sb.rpc('patient_duplicates')) || []; },
+    async patientDuplicates() { return check(await callRpc('patient_duplicates')) || []; },
     async mergePatients(keepId, removeId) { return check(await sb.rpc('merge_patients', { p_keep: keepId, p_remove: removeId })); },
 
     // ------------------------------------------------------------ import from Healthwire (admin)

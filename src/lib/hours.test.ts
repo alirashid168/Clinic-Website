@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clock, range, weeklyLines, visitRuns, openOn, slotsOn, branchHoursFrom, dateLabel, type ScheduleRow, type BranchHours } from './hours.ts';
+import { clock, range, visitRuns, slotsOn, aliSlotsAt, openSpan, branchDay, branchHoursFrom, dateLabel, fullDateLabel, monthTitle, SHORT_DOW, MONTHS, type ScheduleRow, type BranchHours } from './hours.ts';
 
 const GUL = 1, NN = 2, DHA = 3, LHR = 4, ISB = 5;
 const SETTING = {
@@ -36,31 +36,61 @@ test('times read the way patients say them', () => {
   assert.equal(dateLabel('2026-10-08'), 'Thu 8 Oct');
 });
 
-test('Karachi branch cards show their own weekdays, Sunday closed', () => {
-  assert.deepEqual(weeklyLines((H[GUL] as any).days), ['Mon – Thu: 12 PM – 9 PM', 'Fri: 3 PM – 9 PM', 'Sat: 12 PM – 9 PM', 'Sun: Closed']);
-  assert.deepEqual(weeklyLines((H[NN] as any).days), ['Mon: 4 PM – 9 PM', 'Tue – Wed: Closed', 'Thu: 4 PM – 9 PM', 'Fri – Sun: Closed']);
-  assert.deepEqual(weeklyLines((H[DHA] as any).days), ['Mon: Closed', 'Tue: 4 PM – 9 PM', 'Wed – Sun: Closed']);
+test('Lahore lists only visit dates, with the times of the dated rows (Friday starts at 3 PM)', () => {
+  const trip = 'Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM';
+  assert.deepEqual(visitRuns(ROWS, LHR, '2026-10-06').map((r) => r.text),
+    [`Thu 8 Oct – Sun 11 Oct, ${trip}`, `Thu 22 Oct – Sun 25 Oct, ${trip}`]);
+  assert.deepEqual(visitRuns(ROWS, LHR, '2026-10-12').map((r) => r.label), ['Thu 22 Oct – Sun 25 Oct'], 'past trips drop off');
+  assert.equal(visitRuns(ROWS, LHR, '2026-10-06', 10).length, 1, 'the horizon (days ahead) limits the search');
 });
 
-test('Lahore lists only visit dates, with clinic hours 12–9 even on Friday', () => {
-  assert.deepEqual(visitRuns(ROWS, LHR, '2026-10-06', '12:00-21:00').map((r) => r.text),
-    ['Thu 8 Oct – Sun 11 Oct, 12 PM – 9 PM', 'Thu 22 Oct – Sun 25 Oct, 12 PM – 9 PM']);
-  assert.deepEqual(visitRuns(ROWS, LHR, '2026-10-12', '12:00-21:00').map((r) => r.text), ['Thu 22 Oct – Sun 25 Oct, 12 PM – 9 PM'], 'past trips drop off');
+test("a trip's times come as pieces that never split, days with the same time grouped", () => {
+  const lhr = visitRuns(ROWS, LHR, '2026-10-06')[0];
+  assert.deepEqual(lhr.parts, ['Thu 12 PM – 9 PM', 'Fri 3 PM – 9 PM', 'Sat – Sun 12 PM – 9 PM']);
+  assert.equal(lhr.time, lhr.parts.join(' · '));
+  const same = visitRuns([d(LHR, '2026-10-20', '12:00', '21:00'), d(LHR, '2026-10-21', '12:00', '21:00')], LHR, '2026-10-19')[0];
+  assert.deepEqual(same.parts, ['12 PM – 9 PM'], 'one time for every day: one piece, no weekday names');
+  assert.equal(same.text, 'Tue 20 Oct – Wed 21 Oct, 12 PM – 9 PM');
+  const back = visitRuns([d(LHR, '2026-10-20', '12:00', '21:00'), d(LHR, '2026-10-21', '15:00', '21:00'), d(LHR, '2026-10-22', '12:00', '21:00')], LHR, '2026-10-19')[0];
+  assert.deepEqual(back.parts, ['Tue 12 PM – 9 PM', 'Wed 3 PM – 9 PM', 'Thu 12 PM – 9 PM'], 'a time that comes back is a new piece');
 });
 
 test('Islamabad visit days keep their different times', () => {
-  assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-06').map((r) => r.text), ['Mon 12 Oct – Tue 13 Oct', 'Mon 26 Oct – Tue 27 Oct']);
-  assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-13').map((r) => r.text), ['Tue 13 Oct, 2 PM – 8 PM', 'Mon 26 Oct – Tue 27 Oct']);
+  const trip = 'Mon 4 PM – 10 PM · Tue 2 PM – 8 PM';
+  assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-06').map((r) => r.text), [`Mon 12 Oct – Tue 13 Oct, ${trip}`, `Mon 26 Oct – Tue 27 Oct, ${trip}`]);
+  assert.deepEqual(visitRuns(ROWS, ISB, '2026-10-13').map((r) => r.text), ['Tue 13 Oct, 2 PM – 8 PM', `Mon 26 Oct – Tue 27 Oct, ${trip}`]);
 });
 
-test('open today: Karachi by weekday, Lahore/Islamabad only on visit dates', () => {
-  assert.equal(openOn(H[GUL], ROWS, GUL, '2026-10-11'), false, 'Gulshan closed Sunday');
-  assert.equal(openOn(H[GUL], ROWS, GUL, '2026-10-09'), true, 'Gulshan open while Dr. Ali is in Lahore');
-  assert.equal(openOn(H[NN], ROWS, NN, '2026-10-12'), true, 'North Nazimabad open while Dr. Ali is in Islamabad');
-  assert.equal(openOn(H[LHR], ROWS, LHR, '2026-10-07'), false);
-  assert.equal(openOn(H[LHR], ROWS, LHR, '2026-10-08'), true);
-  assert.equal(openOn(H[ISB], ROWS, ISB, '2026-10-14'), false);
-  assert.equal(openOn(undefined, ROWS, 9, '2026-10-08'), null);
+test("one rule for Dr. Ali's times: the strip, cards and trips all read slotsOn", () => {
+  // Lahore's old clinic_timings 'hours' (12–9) is not used: Friday's dated row says 3 PM.
+  assert.deepEqual(aliSlotsAt(ROWS, LHR, '2026-10-09'), [{ branch_id: LHR, start: '15:00', end: '21:00' }]);
+  assert.deepEqual(openSpan(H[LHR], ROWS, LHR, '2026-10-09'), ['15:00', '21:00']);
+  assert.equal(openSpan(H[LHR], ROWS, LHR, '2026-10-07'), null, 'no dated row, not open');
+  assert.deepEqual(openSpan(H[ISB], ROWS, ISB, '2026-10-12'), ['16:00', '22:00']);
+  assert.equal(openSpan(H[ISB], ROWS, ISB, '2026-10-14'), null);
+  assert.equal(openSpan(undefined, ROWS, 9, '2026-10-08'), null, 'unknown hours');
+});
+
+test('branchDay: Karachi by weekday, Sunday closed, plus where Dr. Ali is', () => {
+  assert.deepEqual(branchDay(H[GUL], ROWS, GUL, '2026-10-11'), { date: '2026-10-11', open: null, ali: [] }, 'Gulshan closed Sunday, Dr. Ali is in Lahore');
+  assert.deepEqual(branchDay(H[GUL], ROWS, GUL, '2026-10-09'), { date: '2026-10-09', open: ['15:00', '21:00'], ali: [] }, 'Gulshan open while Dr. Ali is in Lahore');
+  assert.deepEqual(branchDay(H[NN], ROWS, NN, '2026-10-12'), { date: '2026-10-12', open: ['16:00', '21:00'], ali: [] }, 'North Nazimabad open while Dr. Ali is in Islamabad');
+  assert.deepEqual(branchDay(H[GUL], ROWS, GUL, '2026-10-07'), { date: '2026-10-07', open: ['12:00', '21:00'], ali: [['12:00', '21:00']] });
+  assert.deepEqual(branchDay(H[LHR], ROWS, LHR, '2026-10-08'), { date: '2026-10-08', open: ['12:00', '21:00'], ali: [['12:00', '21:00']] }, 'a visit branch is open exactly when Dr. Ali is there');
+});
+
+test('a normally closed Karachi day opens when Dr. Ali is booked there', () => {
+  const rows = [...ROWS, w(DHA, 0, '14:00', '18:00')]; // Sundays at DHA
+  assert.deepEqual(openSpan(H[DHA], rows, DHA, '2026-10-18'), ['14:00', '18:00'], 'Sunday: not a weekly day, but Dr. Ali is there');
+  assert.deepEqual(branchDay(H[DHA], rows, DHA, '2026-10-18').ali, [['14:00', '18:00']]);
+  assert.equal(openSpan(H[DHA], ROWS, DHA, '2026-10-18'), null, 'without the row it stays closed');
+});
+
+test('date and month labels', () => {
+  assert.equal(fullDateLabel('2026-10-08'), 'Thursday 8 October');
+  assert.equal(monthTitle(2026, 10), 'October 2026');
+  assert.deepEqual(SHORT_DOW, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+  assert.equal(MONTHS[9], 'Oct');
 });
 
 test("Dr. Ali's calendar: normal week, replaced by trip days", () => {
@@ -100,7 +130,8 @@ test('branch status reads like a receptionist would say it', () => {
   assert.deepEqual(branchStatus(H[NN], ROWS, NN, T, at('17:10')), { open: false, text: 'Opens Thursday, 4 PM' });
   assert.deepEqual(branchStatus(H[DHA], ROWS, DHA, T, at('21:30')), { open: false, text: 'Opens Tue 13 Oct, 4 PM' });
   assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, T, at('17:10')), { open: false, text: 'Opens Thursday, 12 PM' });
-  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('13:00')), { open: true, text: 'Open now · until 9 PM' }, 'Lahore Friday: clinic open from 12');
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('13:00')), { open: false, text: 'Opens today, 3 PM' }, "Lahore Friday: Dr. Ali's dated row says 3 PM, not the old 12");
+  assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-09', at('16:00')), { open: true, text: 'Open now · until 9 PM' });
   assert.deepEqual(branchStatus(H[ISB], ROWS, ISB, '2026-10-14', at('12:00')), { open: false, text: 'Next open Mon 26 Oct' });
   assert.deepEqual(branchStatus(H[LHR], ROWS, LHR, '2026-10-26', at('12:00')), { open: false, text: 'No dates scheduled yet' });
 });
@@ -128,5 +159,5 @@ test('visit runs carry per-day times when they differ', () => {
   const r = visitRuns(ROWS, ISB, '2026-10-06');
   assert.equal(r[0].label, 'Mon 12 Oct – Tue 13 Oct');
   assert.equal(r[0].time, 'Mon 4 PM – 10 PM · Tue 2 PM – 8 PM');
-  assert.equal(visitRuns(ROWS, LHR, '2026-10-06', '12:00-21:00')[0].time, '12 PM – 9 PM');
+  assert.equal(visitRuns(ROWS, LHR, '2026-10-06')[0].time, 'Thu 12 PM – 9 PM · Fri 3 PM – 9 PM · Sat – Sun 12 PM – 9 PM');
 });

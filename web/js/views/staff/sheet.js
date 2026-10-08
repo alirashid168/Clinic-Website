@@ -12,9 +12,6 @@ import { newInvoiceModal, paymentModal } from './invoice.js';
 const NETWORK = /Failed to fetch|NetworkError|network|timeout|Load failed/i;
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = { treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes' };
-// The patient cell is each row's header (th scope=row). The table.sheet th rules are for the
-// sticky column headers, so undo the ones that would make every row header stick to the top.
-const ROW_HEAD_STYLE = { top: 'auto', zIndex: 1, background: 'var(--surface)', color: 'inherit', fontWeight: 'inherit', fontSize: 'inherit', padding: 0, whiteSpace: 'normal', textAlign: 'left', borderRight: '1px solid var(--border)', borderBottom: '1px solid var(--border)', boxShadow: '1px 0 0 var(--border-strong)' };
 
 const isNetworkError = (e) => NETWORK.test(e?.message || String(e)) || !navigator.onLine;
 // Status, doctor and new-patient changes are not queued offline: say plainly that nothing was saved.
@@ -335,6 +332,15 @@ export async function renderSheet(root, params, signal) {
     });
   }
 
+  // Visit rows carry only some of the patient's columns. If this one has no photo-consent flag,
+  // read it from the patient's record, so "may be shown on the website" is not locked for a patient
+  // who has consented. (Without access to the record, it stays locked, as before.)
+  async function withPhotoConsent(patient) {
+    if (typeof patient.photo_consent_public === 'boolean') return patient;
+    const full = await d.getPatient(patient.id).catch(() => null);
+    return { ...patient, photo_consent_public: !!full?.photo_consent_public };
+  }
+
   async function openRow(row) {
     let g = row.braces_month ? await d.bracesGuidance(row.patient_id).catch(() => null) : null;
     // Guidance is for this row's month (a completed visit is no longer the "next" month).
@@ -346,8 +352,14 @@ export async function renderSheet(root, params, signal) {
         rule_confirmed: local.rule.confirmed && !local.beyondProtocol, alerts: local.alerts };
     }
     let dialog = null;
+    let opening = false; // a double click must not open two upload dialogs
+    const uploadPhotos = async () => {
+      if (opening) return;
+      opening = true;
+      try { photoUploadModal(await withPhotoConsent(row.patient), { visitId: row.id, branchId: row.branch_id, onDone: load }); } finally { opening = false; }
+    };
     const actions = [
-      can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(row.patient, { visitId: row.id, branchId: row.branch_id, onDone: load }) }, 'Upload photos') : null,
+      can('photos.upload') ? h('button', { class: 'btn', onclick: uploadPhotos }, 'Upload photos') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone: load }) }, 'New invoice') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => paymentModal(row.patient, { branchId: row.branch_id, dues: row.dues, onDone: load }) }, 'Take payment') : null,
       can('flags.raise') && !row.see_dr_ali ? h('button', { class: 'btn', onclick: () => flagForAliModal(row.patient, load) }, 'Next appointment with Dr. Ali') : null,
@@ -409,7 +421,8 @@ export async function renderSheet(root, params, signal) {
 
     return h('tr', { dataset: { id: row.id } },
       !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(row.branch_id))) : null,
-      h('th', { scope: 'row', class: 'frozen row-head', style: ROW_HEAD_STYLE }, h('div', { class: 'cell' },
+      // The patient cell is the row's header (th scope=row); app.css styles .row-head.
+      h('th', { scope: 'row', class: 'frozen row-head' }, h('div', { class: 'cell' },
         h('span', { class: 'token', title: arrived ? `Arrived ${arrived}` : null }, srOnly('Token '), row.token_no ?? '–', arrived ? srOnly(`, arrived ${arrived}`) : null),
         h('button', { type: 'button', class: 'link-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, style: { textDecoration: 'none', textAlign: 'left' }, onclick: () => openRow(row) },
           h('div', {}, who), h('div', { class: 'muted field-hint', style: { fontWeight: 500 } }, `Mr# ${row.patient.mr_number}`)))),

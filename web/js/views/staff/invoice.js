@@ -93,9 +93,12 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
     linesBody.append(h('tr', {}, h('td', {}, line.desc), h('td', {}, line.qty), h('td', {}, line.price)));
     recalc();
   }
+  // An empty quantity means 1; a typed 0 or a negative number is an error (see Save), never a line that counts backwards.
+  const qtyOf = (l) => (l.qty.value.trim() === '' ? 1 : Number(l.qty.value));
+  const subtotalOf = () => lines.reduce((s, l) => s + Math.max(0, qtyOf(l)) * Math.max(0, Number(l.price.value || 0)), 0);
   function recalc() {
-    const sub = lines.reduce((s, l) => s + Number(l.qty.value || 1) * Number(l.price.value || 0), 0);
-    totalEl.textContent = `Subtotal ${rupees(sub)} · Total ${rupees(Math.max(0, sub - Number(discount.value || 0)))}`;
+    const sub = subtotalOf();
+    totalEl.textContent = `Subtotal ${rupees(sub)} · Total ${rupees(Math.max(0, sub - Math.max(0, Number(discount.value || 0))))}`;
   }
   const quick = select(treatmentOptions, '', { onchange: (e) => { if (e.target.value) { addLine(e.target.value); e.target.value = ''; } } });
   addLine();
@@ -106,7 +109,7 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
     field('Add a treatment', quick),
     h('div', { class: 'table-scroll' }, h('table', { class: 'list invoice-lines' },
       h('caption', { class: 'sr-only' }, 'Invoice lines'),
-      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Treatment'), h('th', { scope: 'col', style: { width: '90px' } }, 'Qty'), h('th', { scope: 'col', style: { width: '140px' } }, 'Price (Rs)'))),
+      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Treatment'), h('th', { scope: 'col' }, 'Qty'), h('th', { scope: 'col' }, 'Price (Rs)'))),
       linesBody)),
     h('button', { class: 'btn btn-small', type: 'button', onclick: () => { addLine(); lines[lines.length - 1].desc.focus(); } }, 'Add line'),
     h('div', { class: 'form-grid', style: { marginTop: '12px' } },
@@ -118,16 +121,24 @@ export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
     { label: 'Cancel' },
     { label: 'Save invoice', primary: true, onClick: async () => {
       clearFieldErrors(body);
-      const items = lines.filter((l) => l.desc.value.trim() && Number(l.price.value) >= 0 && l.price.value !== '')
-        .map((l) => ({ description: l.desc.value.trim(), quantity: Number(l.qty.value || 1), unit_price: Number(l.price.value) }));
       const errors = [];
-      const noPrice = lines.find((l) => l.desc.value.trim() && l.price.value === '');
-      if (noPrice) errors.push({ input: noPrice.price, message: 'Enter a price for this treatment.' });
-      else if (!items.length) errors.push({ input: lines[0].desc, message: 'Add at least one treatment with a price.' });
-      if (Number(discount.value) > 0 && !reason.value.trim()) errors.push({ input: reason, message: 'Write a reason for the discount.' });
+      const filled = lines.filter((l) => l.desc.value.trim());
+      for (const l of filled) {
+        if (l.price.value === '') errors.push({ input: l.price, message: 'Enter a price for this treatment.' });
+        else if (!(Number(l.price.value) >= 0)) errors.push({ input: l.price, message: 'The price cannot be negative.' });
+        if (!(qtyOf(l) > 0)) errors.push({ input: l.qty, message: 'The quantity must be more than 0.' });
+      }
+      if (!filled.length) errors.push({ input: lines[0].desc, message: 'Add at least one treatment with a price.' });
+      const sub = subtotalOf();
+      const off = Number(discount.value || 0);
+      if (!errors.length && !(sub > 0)) errors.push({ input: filled[0].price, message: 'The invoice total is Rs 0. Enter a price above zero.' });
+      if (off < 0) errors.push({ input: discount, message: 'The discount cannot be negative.' });
+      else if (!errors.length && off > sub) errors.push({ input: discount, message: `The discount cannot be more than the subtotal (${rupees(sub)}).` });
+      if (off > 0 && !reason.value.trim()) errors.push({ input: reason, message: 'Write a reason for the discount.' });
       if (errors.length) { showFormErrors(body, errors); return false; }
+      const items = filled.map((l) => ({ description: l.desc.value.trim(), quantity: qtyOf(l), unit_price: Number(l.price.value) }));
       try {
-        const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items, discount_amount: Number(discount.value || 0), discount_reason: reason.value.trim() || null, visit_id: visitId || null };
+        const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items, discount_amount: off, discount_reason: reason.value.trim() || null, visit_id: visitId || null };
         // The key goes in the options argument (data contract); it is also on the payload for adapters that read it there.
         const inv = await state.data.createInvoice({ ...payload, idempotencyKey }, { idempotencyKey });
         toast(inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`, 'ok');

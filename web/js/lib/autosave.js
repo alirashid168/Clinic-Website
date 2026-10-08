@@ -1,7 +1,4 @@
 // GENERATED from src/lib by scripts/build-lib.sh. Edit the .ts file, not this one.
-// (2026-10-07 audit fixes were made here directly because src/lib is not in this
-// repository: port the per-user queue, clearForUser() and the failed-edit list
-// back to autosave.ts before the next build.)
 // Auto-save with an offline buffer, Google Sheets style.
 // Every cell edit is queued, merged with other edits to the same row, saved
 // almost immediately, and kept on the device until the server confirms it.
@@ -13,6 +10,9 @@
 // edits under another person's login. Edits that cannot be saved are kept in a
 // visible "failed" list (also stored on the device) with Retry and Discard, and
 // each failure fires a document-level 'app:save-failed' event.
+//
+// An edit that is being sent is never changed: whatever is typed for the same
+// row meanwhile becomes its own queued edit, sent right after, in order.
 /** Errors the server will never accept (permission, validation). Not retried. */
 export class PermanentSaveError extends Error {
 }
@@ -28,9 +28,15 @@ export class AutosaveQueue {
     pending = [];
     timer = null;
     flushing = false;
+    /** The flush that is running now: a second flush() waits for it instead of starting another. */
+    flushRun = null;
+    /** The edit whose send is in flight. It is never merged into. */
+    sending = null;
     online = true;
-    disposed = false;
+    isDisposed = false;
     o;
+    key;
+    failedKey;
     /** [{ key, edit: { table, rowId, changes, firstEditedAt }, error, at }] — one entry per row. */
     failed = [];
     constructor(options) {
@@ -75,6 +81,10 @@ export class AutosaveQueue {
     get userId() {
         return this.o.userId || null;
     }
+    /** True once the person who opened this queue has logged out (clearForUser) or it was replaced. */
+    get disposed() {
+        return this.isDisposed;
+    }
     get pendingCount() {
         return this.pending.length;
     }
@@ -85,9 +95,9 @@ export class AutosaveQueue {
     get failedEdits() {
         return this.failed.map((f) => ({ key: f.key, table: f.edit.table, rowId: f.edit.rowId, changes: { ...f.edit.changes }, error: f.error, at: f.at }));
     }
-    /** Record a cell change. Later edits to the same row merge into one save. */
+    /** Record a cell change. Later edits to the same row merge into one save, unless that save is already being sent. */
     edit(table, rowId, field, value) {
-        if (this.disposed) {
+        if (this.isDisposed) {
             // The person who opened this queue has logged out: never save under someone else, and never fail silently.
             this.announce({
                 key: `${table}:${rowId}`,
@@ -99,7 +109,7 @@ export class AutosaveQueue {
             this.o.onState?.('error', 0, 1);
             return;
         }
-        const existing = this.pending.find((p) => p.table === table && p.rowId === rowId && p.attempts === 0);
+        const existing = this.pending.find((p) => p.table === table && p.rowId === rowId && p.attempts === 0 && p !== this.sending);
         if (existing)
             existing.changes[field] = value;
         else
@@ -117,49 +127,64 @@ export class AutosaveQueue {
     }
     setOnline(online) {
         this.online = online;
-        if (this.disposed)
+        if (this.isDisposed)
             return;
         if (online)
             this.schedule(0);
         else
             this.emit();
     }
-    /** Send everything now (e.g. before the page closes). */
-    async flush() {
-        if (this.disposed)
-            return;
-        if (this.flushing || !this.online) {
+    /**
+     * Send everything now (e.g. before the page closes). If a flush is already running, this waits for that
+     * one (it also sends whatever was queued behind the edit in flight), so logout can wait for a save in progress.
+     */
+    flush() {
+        if (this.isDisposed)
+            return Promise.resolve();
+        if (this.flushRun)
+            return this.flushRun;
+        if (!this.online) {
             this.emit();
-            return;
+            return Promise.resolve();
         }
+        const run = this.drain().finally(() => {
+            if (this.flushRun === run)
+                this.flushRun = null;
+        });
+        this.flushRun = run;
+        return run;
+    }
+    async drain() {
         this.flushing = true;
         this.emit();
         try {
-            while (this.pending.length && this.online && !this.disposed) {
+            while (this.pending.length && this.online && !this.isDisposed) {
                 const edit = this.pending[0];
+                this.sending = edit;
                 try {
-                    await this.o.send(edit);
-                    this.pending.shift();
-                    this.persist();
+                    // The sender gets a copy, so nothing typed meanwhile can change what is being sent.
+                    await this.o.send({ ...edit, changes: { ...edit.changes } });
+                    this.finish(edit);
                 }
                 catch (err) {
                     if (err instanceof PermanentSaveError) {
-                        this.pending.shift();
-                        this.persist();
+                        this.finish(edit);
                         this.addFailed(edit, err, true);
                         continue;
                     }
                     edit.attempts += 1;
                     this.persist();
                     if (edit.attempts >= this.o.maxAttempts) {
-                        this.pending.shift();
-                        this.persist();
+                        this.finish(edit);
                         this.addFailed(edit, err, true);
                         continue;
                     }
                     // Network trouble: back off (1s, 2s, 4s ... max 30s) and try again later.
                     this.schedule(Math.min(30_000, 1000 * 2 ** (edit.attempts - 1)));
                     break;
+                }
+                finally {
+                    this.sending = null;
                 }
             }
         }
@@ -168,16 +193,24 @@ export class AutosaveQueue {
             this.emit();
         }
     }
+    /** Take a sent (or given-up) edit out of the queue. */
+    finish(edit) {
+        const i = this.pending.indexOf(edit);
+        if (i < 0)
+            return;
+        this.pending.splice(i, 1);
+        this.persist();
+    }
     /** Put a failed edit (or all of them, when no key is given) back in the queue and send it. */
     retryFailed(key) {
-        if (this.disposed)
+        if (this.isDisposed)
             return;
         const picked = this.failed.filter((f) => key === undefined || f.key === key);
         if (!picked.length)
             return;
         this.failed = this.failed.filter((f) => !picked.includes(f));
         for (const f of picked) {
-            const existing = this.pending.find((p) => keyOf(p) === f.key && p.attempts === 0);
+            const existing = this.pending.find((p) => keyOf(p) === f.key && p.attempts === 0 && p !== this.sending);
             // Anything typed since the failure is newer, so it wins over the retried values.
             if (existing)
                 existing.changes = { ...f.edit.changes, ...existing.changes };
@@ -197,7 +230,7 @@ export class AutosaveQueue {
     }
     /** Stop timers and forget the queue in memory. Unsent edits stay on the device under this user's key. */
     dispose() {
-        this.disposed = true;
+        this.isDisposed = true;
         if (this.timer !== null)
             this.o.clearTimer(this.timer);
         this.timer = null;
@@ -211,7 +244,7 @@ export class AutosaveQueue {
         this.remove(this.failedKey);
     }
     schedule(ms) {
-        if (this.disposed)
+        if (this.isDisposed)
             return;
         if (this.timer !== null)
             this.o.clearTimer(this.timer);
@@ -233,7 +266,8 @@ export class AutosaveQueue {
         else
             this.failed.push({ key, edit: { table: edit.table, rowId: edit.rowId, changes: { ...edit.changes }, firstEditedAt: edit.firstEditedAt || at }, error, at });
         this.persistFailed();
-        if (!announce)
+        // After logout the person is gone: the entry is kept for their next login, but no message is shown to whoever is there now.
+        if (!announce || this.isDisposed)
             return;
         const entry = this.failed.find((f) => f.key === key);
         this.announce({
@@ -307,25 +341,31 @@ export class AutosaveQueue {
 /**
  * Call at logout (and idle logout). Stops every queue in this tab so nothing is
  * sent under the next person's login. Pass { flush: true } BEFORE signing out
- * to try to send waiting edits first (gives up after timeoutMs). Unsent edits
- * stay on this computer under their owner's key and are sent the next time that
- * same person opens the Aaj ki List; { discard: true } deletes them instead.
- * Resolves to the number of edits still waiting (pending + failed).
+ * to try to send waiting edits first (waits for a save already in progress too;
+ * gives up after timeoutMs). Unsent edits stay on this computer under their
+ * owner's key and are sent the next time that same person opens the Aaj ki
+ * List; { discard: true } deletes them instead.
+ * Resolves to the edits still waiting, split by what happens to them:
+ * `pending` are sent automatically at the next login (within a day), `failed`
+ * are listed on the Aaj ki List and wait for Try again or Discard.
  */
 export async function clearForUser({ flush = false, discard = false, timeoutMs = 5000 } = {}) {
     const queues = [...live];
     if (flush) {
         let timer;
-        const limit = new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); });
+        const limit = new Promise((resolve) => {
+            timer = setTimeout(resolve, timeoutMs);
+        });
         await Promise.race([Promise.allSettled(queues.map((q) => q.flush())), limit]);
         clearTimeout(timer);
     }
-    let left = 0;
+    const left = { pending: 0, failed: 0 };
     for (const q of queues) {
         q.dispose();
         if (discard)
             q.forget();
-        left += q.pendingCount + q.failedCount;
+        left.pending += q.pendingCount;
+        left.failed += q.failedCount;
     }
     return left;
 }

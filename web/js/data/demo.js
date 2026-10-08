@@ -252,7 +252,7 @@ export function createDemoAdapter() {
 
   const enrichVisit = (v) => {
     const p = patient(v.patient_id);
-    return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, medical_history: clone(p.medical_history) || {} },
+    return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, medical_history: clone(p.medical_history) || {}, photo_consent_public: !!p.photo_consent_public },
       staff: db.visit_staff.filter((s) => s.visit_id === v.id).map((s) => ({ ...s, name: clinician(s.clinician_id)?.display_name })),
       dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id) };
   };
@@ -314,7 +314,7 @@ export function createDemoAdapter() {
     },
     async signIn() { fail('In demo mode, pick an account from the list.'); },
     async sendPasswordReset() { fail('Password reset emails are not sent in the demo.'); },
-    async signOut() { session = null; },
+    async signOut() { session = null; return true; },
     async getSession() {
       if (!session) return null;
       if (session.patient) return { kind: 'patient', patient: clone(session.patient), perms: new Set() };
@@ -518,8 +518,12 @@ export function createDemoAdapter() {
     async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
       const key = opts.idempotencyKey || idempotencyKey;
-      const prior = key && db.invoices.find((i) => i.id === saved.get('invoice:' + key));
-      if (prior) return clone(prior);
+      const sig = JSON.stringify([patient_id, Number(branch_id), visit_id, Number(discount_amount) || 0, discount_reason, items.map((it) => [it.description, Number(it.quantity || 1), Number(it.unit_price)])]);
+      const prior = key && db.invoices.find((i) => i.id === saved.get('invoice:' + key)?.id);
+      if (prior) {
+        if (saved.get('invoice:' + key).sig !== sig) fail(`IDEMPOTENCY_MISMATCH: an earlier attempt already saved invoice ${prior.invoice_no} with different details. Refresh the patient record and check it (void it if it is wrong) before saving again.`);
+        return clone(prior);
+      }
       if (!branchOk(branch_id)) fail('new row violates row-level security policy (branch)');
       const subtotal = items.reduce((s, it) => s + Number(it.quantity || 1) * Number(it.unit_price || 0), 0);
       const role = me().role;
@@ -530,7 +534,7 @@ export function createDemoAdapter() {
         items: items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) })),
         created_by: me().id };
       db.invoices.push(inv); audit('invoices', 'INSERT', inv);
-      if (key) saved.set('invoice:' + key, inv.id);
+      if (key) saved.set('invoice:' + key, { id: inv.id, sig });
       if (pending) db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: inv.discount_amount, reason: discount_reason, status: 'pending', created_at: new Date().toISOString() });
       return clone(inv);
     },
@@ -552,12 +556,16 @@ export function createDemoAdapter() {
       need('billing.create');
       db.payment_plans ||= [];
       const key = opts.idempotencyKey || idempotencyKey;
-      const again = key && db.payment_plans.find((p) => p.id === saved.get('plan:' + key));
-      if (again) return clone(again);
+      const sig = JSON.stringify([patient_id, braces_case_id, Number(total_fee), starts_on || todayISO(), notes, installments.map((i) => [i.due_date, Number(i.amount), i.note || null])]);
+      const again = key && db.payment_plans.find((p) => p.id === saved.get('plan:' + key)?.id);
+      if (again) {
+        if (saved.get('plan:' + key).sig !== sig) fail('IDEMPOTENCY_MISMATCH: an earlier attempt already saved this payment plan with different details. Refresh the patient record and check it (delete the plan if it is wrong) before saving again.');
+        return clone(again);
+      }
       const plan = { id: uid(), patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_at: new Date().toISOString(),
         installments: installments.map((i) => ({ id: uid(), due_date: i.due_date, amount: Number(i.amount), note: i.note || null })) };
       db.payment_plans.push(plan);
-      if (key) saved.set('plan:' + key, plan.id);
+      if (key) saved.set('plan:' + key, { id: plan.id, sig });
       return clone(plan);
     },
     async deletePaymentPlan(id) { need('billing.create'); db.payment_plans = (db.payment_plans || []).filter((p) => p.id !== id); },

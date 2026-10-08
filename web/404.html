@@ -8,8 +8,9 @@
   <meta name="theme-color" content="#22113b">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
-  <!-- Served for any address that does not exist (old pages of the previous website, typos),
-       so everything is inline and every link starts with "/". -->
+  <!-- Served for any address that does not exist (old pages of the previous website, typos), so the
+       styles are inline and every link starts with "/". js/not-found.js (an external file, because the site's
+       security policy blocks inline scripts) picks the right link, and says when it will move you. -->
   <style>
     html, body { margin: 0; }
     body { min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: 24px 16px; box-sizing: border-box;
@@ -31,7 +32,7 @@
   <main>
     <p><a href="/#/">Dr. Ali Rashid's Dental Clinic</a></p>
     <h1>We could not find that page</h1>
-    <p>Our website has changed, so this address no longer leads anywhere. <span id="auto">You will be taken to the homepage in a few seconds.</span></p>
+    <p>Our website has changed, so this address no longer leads anywhere. <span id="auto" aria-live="polite"></span></p>
     <p><a class="btn" id="go" href="/#/">Go to the homepage</a></p>
     <p class="muted">Or go straight to:</p>
     <ul>
@@ -40,29 +41,6 @@
       <li><a href="/#/login/patient">Patient login</a></li>
     </ul>
   </main>
-  <script>
-    // Send old addresses to the matching page of the new site, anything else to the homepage.
-    // The wait is cancelled as soon as someone presses a key or taps, so nobody is moved mid-read.
-    (function () {
-      var path = location.pathname.replace(/\/+$/, '').replace(/\.html?$/, '').toLowerCase();
-      var route = path.replace(/^\//, '');
-      var target = '/#/';
-      if (/^(visitor|clinics|dr-ali|login\/(staff|patient)|patient(\/demo)?)$/.test(route)) target = '/#/' + route;
-      else if (/contact|location|branch|clinic|address|timing/.test(path)) target = '/#/clinics';
-      else if (/service|treatment|brace|price|orthodont|veneer|smile/.test(path)) target = '/#/visitor';
-      var go = document.getElementById('go');
-      go.href = target;
-      if (target !== '/#/') go.textContent = 'Go to the new page';
-      var timer = setTimeout(function () { location.replace(target); }, 6000);
-      function stay() {
-        clearTimeout(timer);
-        document.getElementById('auto').textContent = '';
-        document.removeEventListener('keydown', stay);
-        document.removeEventListener('pointerdown', stay);
-      }
-      document.addEventListener('keydown', stay);
-      document.addEventListener('pointerdown', stay);
-    })();
-  </script>
+  <script src="/js/not-found.js" defer></script>
 </body>
 </html>

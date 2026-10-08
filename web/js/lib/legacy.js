@@ -60,7 +60,7 @@ export function cleanLegacyName(raw) {
     return { name, branch };
 }
 // ---------------------------------------------------------------------------
-// Doctor names: many spellings in the sheets ("Dr Haniya", "Dr. Verda Javed")
+// Doctor names: many spellings in the sheets ("Dr A", "Dr. A Surname")
 // ---------------------------------------------------------------------------
 export function normaliseDoctorKey(raw) {
     return raw.toLowerCase().replace(/\bdr\.?\s*/g, '').replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
@@ -74,7 +74,7 @@ export function matchClinician(raw, clinicians) {
         if (keys.includes(key))
             return c;
     }
-    // First-name match only if it is unambiguous ("Dr Hameeda" -> Dr. Hameeda Sharaf)
+    // First-name match only if it is unambiguous ("Dr A" -> Dr. A Surname)
     const first = clinicians.filter((c) => normaliseDoctorKey(c.displayName).split(' ')[0] === key.split(' ')[0]
         && key.split(' ').length === 1);
     return first.length === 1 ? first[0] : null;

@@ -7,6 +7,9 @@ import { state, branchName } from '../state.js';
 // they load only when a patient has a plan or opens an invoice.
 const invoiceModule = () => import('./staff/invoice.js');
 
+/** Patients never see staff instructions or database text (see friendlyError in ui/dom.js). */
+const patientError = (err) => friendlyError(err, { audience: 'public' });
+
 function loading(root, text) {
   mount(root, h('main', { class: 'public-main', 'aria-busy': 'true' }, h('p', { class: 'empty', role: 'status' }, text)));
 }
@@ -20,19 +23,23 @@ export async function renderPortal(root, signOut) {
 }
 
 /** Public demo: a made-up sample patient, so anyone can see what the portal looks like before logging in. */
-let demoAdapter;
+let demoAdapter, demoBranches = [];
 export async function renderPortalDemo(root) {
   loading(root, 'Loading the sample account…');
   if (!demoAdapter) {
     const { createDemoAdapter } = await import('../data/demo.js');
     const adapter = createDemoAdapter();
     await adapter.signInDemo('p-demo');
+    demoBranches = await adapter.branches();
     demoAdapter = adapter; // only once it works, so a failed load is tried again next time
   }
   const d = demoAdapter;
   const me = (await d.getSession()).patient;
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
-  return portalPage(root, { d, p, ratings, signOut: null, preview: 'demo' });
+  // The sample's visits use the sample clinic's own branch ids, so their names come from the sample data.
+  // Never copied into state.ref: during an outage the public pages would list sample branches as real ones.
+  const branchLabel = (id) => demoBranches.find((b) => b.id === Number(id))?.name || '';
+  return portalPage(root, { d, p, ratings, signOut: null, preview: 'demo', branchLabel });
 }
 
 /** Staff preview: exactly what this patient sees in their account (buttons switched off). */
@@ -85,13 +92,13 @@ function photoImg(d, ph) {
         ph.url = link.href = url;
         ph.url_expires_at = Date.now() + 3600 * 1000;
         if (tab) tab.location = url;
-      } catch (err) { tab?.close(); toast(friendlyError(err), 'error'); }
+      } catch (err) { tab?.close(); toast(patientError(err), 'error'); }
     },
   }, img, srOnly(' (full size, opens in a new tab)'));
   return link;
 }
 
-async function portalPage(root, { d, p, ratings, signOut, preview }) {
+async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel = branchName }) {
   const rated = new Set(ratings.map((r) => r.visit_id));
   const completed = p.visits.filter((v) => v.status === 'completed');
   const complaints = p.complaints || [];
@@ -136,7 +143,7 @@ async function portalPage(root, { d, p, ratings, signOut, preview }) {
       { label: 'Cancel' },
       { label: 'Send rating', primary: true, onClick: async () => {
         if (!stars) { showFormErrors(form, [{ input: starRow, message: 'Choose from 1 to 5 stars.' }]); return false; }
-        try { await d.rateVisit(visit.id, stars, comment.value); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.rateVisit(visit.id, stars, comment.value); } catch (e) { toast(patientError(e), 'error'); return false; }
         toast('Thank you for your rating.', 'ok');
         markRated(button);
       } },
@@ -167,7 +174,7 @@ async function portalPage(root, { d, p, ratings, signOut, preview }) {
         if (errors.length) { showFormErrors(form, errors); return false; }
         const item = { subject: subject.value.trim(), body: body.value.trim() };
         let saved;
-        try { saved = await d.fileComplaint(item); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { saved = await d.fileComplaint(item); } catch (e) { toast(patientError(e), 'error'); return false; }
         toast(preview === 'demo' ? 'Sent (sample account: nothing is really sent).' : 'Sent to Dr. Ali.', 'ok');
         complaints.unshift({ status: 'new', messages: [], ...(saved && typeof saved === 'object' ? saved : {}), ...item });
         drawMessages();
@@ -180,7 +187,7 @@ async function portalPage(root, { d, p, ratings, signOut, preview }) {
   const today = localISO();
   const next = p.visits.filter((v) => v.status === 'scheduled' && v.visit_date >= today).sort((a, b) => a.visit_date.localeCompare(b.visit_date))[0];
   const viewInvoice = async (i) => {
-    try { (await invoiceModule()).printInvoice(i, p, { patientView: true }); } catch (e) { toast(friendlyError(e), 'error'); }
+    try { (await invoiceModule()).printInvoice(i, p, { patientView: true }); } catch (e) { toast(patientError(e), 'error'); }
   };
   mount(root,
     preview === true ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },
@@ -198,17 +205,17 @@ async function portalPage(root, { d, p, ratings, signOut, preview }) {
         h('button', { class: 'btn btn-primary', onclick: complain, ...off }, 'Report / complain to Dr. Ali Rashid')),
       p.flag ? h('div', { class: 'alert alert-warning' }, h('strong', {}, 'Please get your next appointment done by Dr. Ali Rashid. '),
         'Check ', h('a', { href: '#/clinics' }, "Dr. Ali's days at each branch"), ' and come on one of those days.') : null,
-      next ? h('div', { class: 'alert alert-info' }, h('strong', {}, 'Your next appointment: '), `${shortDate(next.visit_date)} at ${branchName(next.branch_id)}`, next.treatment_label ? ` · ${next.treatment_label}` : '') : null,
+      next ? h('div', { class: 'alert alert-info' }, h('strong', {}, 'Your next appointment: '), `${shortDate(next.visit_date)}${branchLabel(next.branch_id) ? ` at ${branchLabel(next.branch_id)}` : ''}`, next.treatment_label ? ` · ${next.treatment_label}` : '') : null,
       h('div', { class: 'stat-row' },
         h('div', { class: 'stat' }, h('strong', {}, rupees(Math.max(0, p.dues))), h('span', {}, p.dues > 0 ? 'Pending dues' : 'No pending dues')),
         p.braces_case ? h('div', { class: 'stat' }, h('strong', {}, `Month ${p.braces_case.next_month - 1 || 0}`), h('span', {}, 'Braces months completed')) : null,
         h('div', { class: 'stat' }, h('strong', {}, completed.length), h('span', {}, 'Visits completed')),
-        (() => { const seen = [...new Set(completed.map((v) => v.branch_id))].map(branchName).filter(Boolean); return seen.length ? h('div', { class: 'stat' }, h('strong', {}, seen.length), h('span', {}, seen.length === 1 ? `Branch: ${seen[0]}` : `Branches: ${seen.join(', ')}`)) : null; })()),
+        (() => { const seen = [...new Set(completed.map((v) => v.branch_id))].map((id) => branchLabel(id)).filter(Boolean); return seen.length ? h('div', { class: 'stat' }, h('strong', {}, seen.length), h('span', {}, seen.length === 1 ? `Branch: ${seen[0]}` : `Branches: ${seen.join(', ')}`)) : null; })()),
       h('div', { class: 'grid-2' },
         h('section', { class: 'panel' },
           h('h2', {}, 'Your visits'),
           completed.length ? h('ul', { class: 'timeline' }, completed.map((v) => h('li', {},
-            h('strong', {}, shortDate(v.visit_date)), ' · ', branchName(v.branch_id),
+            h('strong', {}, shortDate(v.visit_date)), branchLabel(v.branch_id) ? ` · ${branchLabel(v.branch_id)}` : null,
             h('div', {}, [v.treatment_label, v.braces_month ? `braces month ${v.braces_month}` : null].filter(Boolean).join(', ')),
             h('div', { class: 'muted' }, v.staff.filter((s) => s.role === 'doctor').map((s) => s.name).join(', ')),
             rated.has(v.id) ? h('span', { class: 'badge badge-ok' }, 'Rated')
@@ -221,7 +228,12 @@ async function portalPage(root, { d, p, ratings, signOut, preview }) {
               h('td', {}, i.invoice_no), h('td', {}, shortDate(i.issue_date)), h('td', { class: 'right' }, rupees(i.total)),
               h('td', { class: 'right' }, h('button', { class: 'btn btn-small', onclick: () => viewInvoice(i) }, 'View', srOnly(` invoice ${i.invoice_no}`))))))) : empty('No invoices yet.'),
           p.payments.length ? h('p', { class: 'muted', style: { marginTop: '10px' } }, `Paid so far: ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))}`) : null,
-          inv ? h('div', { style: { marginTop: '12px' } }, h('h3', {}, 'Your installment plan'), p.plans.map((plan) => inv.planTable(plan, p.payments))) : null)),
+          inv ? h('div', { style: { marginTop: '12px' } }, h('h3', {}, 'Your installment plan'), p.plans.map((plan) => inv.planTable(plan, p.payments)))
+            // The plan module did not load (dropped connection): say so, so a missing plan never reads as "nothing is owed".
+            // A page reload, not a retry button: a browser can keep a failed dynamic import failed until the page reloads.
+            : (p.plans || []).length ? h('div', { style: { marginTop: '12px' } }, h('h3', {}, 'Your installment plan'),
+              h('p', { class: 'muted', role: 'status' }, 'Your installment plan could not load. Reload the page to try again.'),
+              h('button', { type: 'button', class: 'btn btn-small', onclick: () => location.reload() }, 'Reload the page')) : null)),
       h('section', { class: 'panel' },
         h('h2', {}, 'Photos and X-rays'),
         p.photos.length ? h('div', { class: 'photo-grid' }, p.photos.map((ph) => h('figure', {},

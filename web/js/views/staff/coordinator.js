@@ -2,7 +2,7 @@
 // retainers (made in-house), low ratings.
 import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, tabs, localISO, addMonthsISO, srOnly, announce, showFormErrors, clearFieldErrors, busy } from '../../ui/dom.js';
 import { state, can, branchName, myBranches, defaultBranchId } from '../../state.js';
-import { patientSearch, commitOnFinish } from './common.js';
+import { patientSearch, commitOnFinish, capNote } from './common.js';
 
 const REMINDER_KINDS = { followup: 'Follow-up', appointment: 'Appointment due', installment: 'Installment', retainer: 'Retainer', lab: 'Lab', recall: 'Recall', dues: 'Dues' };
 const REMINDER_STATUS = { open: 'Open', contacted: 'Contacted', no_answer: 'No answer', booked: 'Booked', done: 'Done', cancelled: 'Cancelled' };
@@ -69,14 +69,19 @@ export async function renderCoordinator(root, params) {
   ].filter(Boolean);
   let tab = available.some(([k]) => k === params.get('tab')) ? params.get('tab') : available[0]?.[0];
   const panel = h('div', {});
+  // Each draw gets a number. A list that arrives after the person has moved to another tab (or
+  // after a newer draw) finds its number out of date and leaves the panel alone.
+  let gen = 0;
   async function draw() {
+    const mine = ++gen;
+    const live = () => mine === gen;
     try {
-      if (tab === 'reminders') await reminders(panel, draw);
-      else if (tab === 'dropoffs') await dropoffs(panel);
-      else if (tab === 'lab') await lab(panel, draw);
-      else if (tab === 'retainers') await retainers(panel, draw);
-      else await ratings(panel);
-    } catch (e) { mount(panel, empty(friendlyError(e))); }
+      if (tab === 'reminders') await reminders(panel, draw, live);
+      else if (tab === 'dropoffs') await dropoffs(panel, live);
+      else if (tab === 'lab') await lab(panel, draw, live);
+      else if (tab === 'retainers') await retainers(panel, draw, live);
+      else await ratings(panel, draw, live);
+    } catch (e) { if (live()) mount(panel, empty(friendlyError(e))); }
   }
   // The tab strip is built once; choosing a tab only redraws the panel (role=tabpanel, linked by
   // tabs()), so focus stays on the tab.
@@ -90,9 +95,10 @@ export async function renderCoordinator(root, params) {
   await draw();
 }
 
-async function reminders(root, redraw) {
+async function reminders(root, redraw, live) {
   const d = state.data;
   const [rows, due] = await Promise.all([d.reminders(), d.installmentsDue ? d.installmentsDue().catch(() => []) : []]);
+  if (!live()) return;
   const today = localISO();
   const installmentsPanel = due.length ? h('section', { class: 'panel' },
     h('h2', {}, 'Installments due'),
@@ -135,13 +141,15 @@ async function reminders(root, redraw) {
   };
   remount(root, installmentsPanel, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Who to call'), h('button', { class: 'btn btn-primary btn-small', dataset: { key: 'add' }, onclick: add }, 'New reminder')),
+    capNote(rows, 'reminders (earliest due first)', 'later reminders are not listed'),
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Due'), h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Type'), h('th', { scope: 'col' }, 'Note'), h('th', { scope: 'col' }, 'Status'))),
       h('tbody', {}, rows.map(reminderRow)))) : empty('Nothing to follow up. Add a reminder when a patient needs a call.')));
 }
 
-async function dropoffs(root) {
+async function dropoffs(root, live) {
   const rows = await state.data.dropoffs();
+  if (!live()) return;
   remount(root, h('section', { class: 'panel' },
     h('h2', {}, 'Braces patients who have not come back'),
     h('p', { class: 'muted' }, `Active braces patients with no completed visit in the last ${state.ref.settings?.dropoff_days || 42} days.`),
@@ -153,9 +161,10 @@ async function dropoffs(root) {
         h('td', { class: 'right' }, r.days_since !== null && r.days_since !== undefined ? `${r.days_since} days` : '')))))) : empty('Every braces patient has been seen recently.')));
 }
 
-async function lab(root, redraw) {
+async function lab(root, redraw, live) {
   const d = state.data;
   const rows = await d.labCases();
+  if (!live()) return;
   const add = () => {
     const pp = pickPatient();
     const branch = select(myBranches().map((b) => ({ value: b.id, label: b.name })), defaultBranchId());
@@ -197,14 +206,16 @@ async function lab(root, redraw) {
   };
   remount(root, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Lab work'), h('button', { class: 'btn btn-primary btn-small', dataset: { key: 'add' }, onclick: add }, 'New lab case')),
+    capNote(rows, 'lab cases (newest first)', 'older cases are not listed'),
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Work'), h('th', { scope: 'col' }, 'Lab'), h('th', { scope: 'col' }, 'Sent'), h('th', { scope: 'col' }, 'Due'), h('th', { scope: 'col', class: 'right' }, 'Cost'), h('th', { scope: 'col' }, 'Status'))),
       h('tbody', {}, rows.map(labRow)))) : empty('No lab cases yet.')));
 }
 
-async function retainers(root, redraw) {
+async function retainers(root, redraw, live) {
   const d = state.data;
   const rows = await d.retainerCases();
+  if (!live()) return;
   const add = () => {
     const pp = pickPatient();
     const arch = select([{ value: 'both', label: 'Upper and lower' }, { value: 'upper', label: 'Upper' }, { value: 'lower', label: 'Lower' }], 'both');
@@ -230,7 +241,9 @@ async function retainers(root, redraw) {
   const alertHost = h('div', {});
   const drawAlert = () => {
     const overdue = rows.filter(isLate);
-    mount(alertHost, overdue.length ? h('div', { class: 'alert alert-warning' }, `${overdue.length} retainer check${overdue.length > 1 ? 's are' : ' is'} overdue: `, overdue.slice(0, 6).map((r, i) => [i ? ', ' : '', h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name || 'patient')]), overdue.length > 6 ? ', …' : '', '. Call them for a follow-up.') : null);
+    // On a cut-off list there may be more overdue checks than the ones shown.
+    const atLeast = rows.truncated ? 'At least ' : '';
+    mount(alertHost, overdue.length ? h('div', { class: 'alert alert-warning' }, `${atLeast}${overdue.length} retainer check${overdue.length > 1 ? 's are' : ' is'} overdue: `, overdue.slice(0, 6).map((r, i) => [i ? ', ' : '', h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name || 'patient')]), overdue.length > 6 ? ', …' : '', '. Call them for a follow-up.') : null);
   };
   const nextCheckCell = (r) => {
     const late = isLate(r);
@@ -263,15 +276,17 @@ async function retainers(root, redraw) {
   drawAlert();
   remount(root, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Retainers (made in-house)'), can('retainers.manage') ? h('button', { class: 'btn btn-primary btn-small', dataset: { key: 'add' }, onclick: add }, 'New retainer') : null),
+    capNote(rows, 'retainer cases (newest first)', 'older cases are not listed'),
     alertHost,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Arch'), h('th', { scope: 'col' }, 'Impression'), h('th', { scope: 'col' }, 'Next check'), h('th', { scope: 'col', class: 'right' }, 'Lab cost'), h('th', { scope: 'col' }, 'Stage'))),
       h('tbody', {}, rows.map(retainerRow)))) : empty('No retainer cases yet.')));
 }
 
-async function ratings(root) {
+async function ratings(root, redraw, live) {
   const d = state.data;
   const rows = await d.lowRatings();
+  if (!live()) return;
   remount(root, h('section', { class: 'panel' },
     h('h2', {}, 'Low ratings to follow up'),
     h('p', { class: 'muted' }, 'Call the patient, then mark the rating as followed up so it leaves this list.'),
@@ -284,6 +299,7 @@ async function ratings(root) {
         h('td', { class: 'nowrap muted' }, shortDate(String(r.created_at).slice(0, 10))),
         h('td', { class: 'right' }, can('reminders.manage') ? h('button', { class: 'btn btn-small', dataset: { key: `followup-${r.visit_id}` }, 'aria-label': `Followed up: ${r.patient?.full_name || 'patient'}, ${r.stars} of 5 stars`, onclick: busy(async () => {
           // Redraw after busy() has given focus back to this button, so remount() can move it on.
-          try { await d.followUpRating(r.visit_id); toast('Marked as followed up.', 'ok'); setTimeout(() => ratings(root)); } catch (e) { toast(friendlyError(e), 'error'); }
+          // The tab's own draw() shows the error in the panel if the new list cannot be fetched.
+          try { await d.followUpRating(r.visit_id); toast('Marked as followed up.', 'ok'); setTimeout(redraw); } catch (e) { toast(friendlyError(e), 'error'); }
         }) }, 'Followed up') : null)))))) : empty('No low ratings waiting. Patients are happy.')));
 }

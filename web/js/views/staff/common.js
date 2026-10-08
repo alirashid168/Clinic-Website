@@ -3,6 +3,16 @@
 import { h, mount, modal, field, select, toast, friendlyError, rupees, announce, showFormErrors, clearFieldErrors, localISO } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId } from '../../state.js';
 
+/**
+ * The notice for a list the server cut off (the data layer sets rows.truncated and rows.cap), so a
+ * partial list never reads as complete. `effect` says what the person is missing; null when the list is whole.
+ */
+export function capNote(rows, what, effect = 'totals may be incomplete') {
+  return rows?.truncated
+    ? h('div', { class: 'alert alert-warning', role: 'status' }, h('strong', {}, 'Incomplete: '), `showing the first ${rows.cap ?? rows.length} ${what}; ${effect}.`)
+    : null;
+}
+
 export const STATUS_LABELS = { scheduled: 'Scheduled', waiting: 'Waiting', in_treatment: 'In treatment', completed: 'Completed', cancelled: 'Cancelled', no_show: 'No show' };
 
 export function duesBadge(dues) {
@@ -136,8 +146,10 @@ export function commitOnFinish(el, onCommit, onPreview) {
   el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') finish();
     else if (e.key === 'Escape' && el.value !== committed) { e.preventDefault(); e.stopPropagation(); el.value = committed; onPreview?.(committed); }
-    else if (e.key.length === 1 || /^(Arrow|Page|Home|End)/.test(e.key)) {
+    else if (e.key.length === 1 || /^(Arrow|Page|Home|End|Backspace|Delete)/.test(e.key)) {
       // On Windows these change a closed select at once, firing `change` within this same task.
+      // Backspace and Delete do the same to a date input (clearing a part empties it), so clearing
+      // a date stays provisional until Enter or leaving the field.
       fromKey = true;
       setTimeout(() => { fromKey = false; }, 0);
     }
@@ -218,17 +230,21 @@ export const PHOTO_VIEWS = ['Front', 'Smile', 'Left', 'Right', 'Upper occlusal',
 // Edited before/after photos are what patients open in their account, mostly on
 // mobile data. Phone cameras give 4000px+ files of several MB, so these are
 // shrunk to this long edge before upload. Raw clinical photos and X-rays are
-// uploaded untouched (they are the clinical record).
+// uploaded untouched (they are the clinical record). Edited collages are often PNG exports, so
+// PNG is shrunk too (HEIC is already turned into JPEG by the phone's file picker).
 const PATIENT_PHOTO_MAX_EDGE = 2400;
 
 async function shrinkPhoto(file) {
-  if (!/^image\/(jpeg|webp)$/.test(file.type) || file.size < 1.5e6 || typeof createImageBitmap !== 'function') return file;
+  if (!/^image\/(jpeg|webp|png)$/.test(file.type) || file.size < 1.5e6 || typeof createImageBitmap !== 'function') return file;
   try {
     const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
     const scale = Math.min(1, PATIENT_PHOTO_MAX_EDGE / Math.max(bmp.width, bmp.height));
     if (scale === 1) { bmp.close?.(); return file; }
     const canvas = h('canvas', { width: Math.round(bmp.width * scale), height: Math.round(bmp.height * scale) });
-    canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; // a transparent PNG would turn black as a JPEG
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
     bmp.close?.();
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
     if (!blob || blob.size >= file.size) return file;

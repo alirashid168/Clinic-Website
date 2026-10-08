@@ -5,8 +5,9 @@
 -- HOW TO APPLY
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
 --   It is safe to run more than once (create or replace / if not exists).
---   (With the Supabase CLI, rename it to a 14-digit timestamp first, for example
---   20261007000000_audit_fixes.sql, then run `supabase db push`.)
+--   With the Supabase CLI, keep the file name as it is: 20261007002000 sorts after the
+--   last migration (20261007001900_login_log.sql), so `supabase db push` applies it in order.
+--   (Pasting it in the SQL editor first and running `db push` later is fine: it can run twice.)
 --
 -- THE WEBSITE WORKS WITHOUT IT
 --   js/data/supabase.js calls these functions and, while they are missing
@@ -20,6 +21,20 @@
 --   existing row-level security policies decide what it can read and write,
 --   exactly as for the requests the website already makes. A total only adds up
 --   rows that person could already download. Only signed-in users may call them.
+--
+-- RETRIES
+--   A save carries a key made by the browser when the form opened. The same key
+--   with the same details returns the record the first attempt created, so a
+--   lost answer never produces a second invoice or plan. The same key with
+--   DIFFERENT details raises IDEMPOTENCY_MISMATCH: the first attempt did commit,
+--   and saving the edited form on top of it would bill the patient twice. If the
+--   first attempt failed, nothing was saved (one transaction), the key is free,
+--   and the edited retry creates the right record.
+--
+-- WHY THE TOTALS ARE NOT clinic_report()
+--   clinic_report() answers by month, for finance.view only, with its own
+--   definer rights. These totals are by day and branch (cash / card / bank,
+--   refunds, waits), for anyone whose own row-level security shows the rows.
 --
 -- WHAT IT ASSUMES ABOUT THE SCHEMA (all seen in the website's own queries)
 --   payments(id, patient_id, branch_id, amount, method, received_at timestamptz)
@@ -54,9 +69,11 @@ create table if not exists public.idempotency_keys (
   key         uuid primary key,
   kind        text not null,                       -- 'invoice' | 'plan'
   result_id   text,                                -- id of the record that save created
+  request_hash text,                               -- md5 of the details that save was made with
   created_by  uuid not null default auth.uid(),
   created_at  timestamptz not null default now()
 );
+alter table public.idempotency_keys add column if not exists request_hash text;
 
 alter table public.idempotency_keys enable row level security;
 
@@ -87,6 +104,8 @@ declare
   v_inv  public.invoices%rowtype;
   v_subtotal numeric;
   v_prev text;
+  v_prev_hash text;
+  v_hash text;
   v_rows integer;
   v_out  jsonb;
 begin
@@ -94,13 +113,17 @@ begin
     raise exception 'An invoice needs at least one line.';
   end if;
 
+  -- jsonb text is normalised (key order, spacing), so the same details always give the same hash.
+  v_hash := md5(jsonb_build_object('invoice', p_invoice, 'items', p_items)::text);
+
   if p_idempotency_key is not null then
-    insert into public.idempotency_keys (key, kind) values (p_idempotency_key, 'invoice')
+    insert into public.idempotency_keys (key, kind, request_hash) values (p_idempotency_key, 'invoice', v_hash)
       on conflict (key) do nothing;
     get diagnostics v_rows = row_count;
     if v_rows = 0 then
-      -- Saved already (an earlier attempt whose answer never arrived): return that invoice.
-      select k.result_id into v_prev from public.idempotency_keys k
+      -- Saved already (an earlier attempt whose answer never arrived): return that invoice,
+      -- unless this retry carries different details (then the earlier invoice is NOT what was asked for).
+      select k.result_id, k.request_hash into v_prev, v_prev_hash from public.idempotency_keys k
         where k.key = p_idempotency_key and k.kind = 'invoice';
       if v_prev is null then
         raise exception 'This invoice was already saved. Refresh the page to see it.';
@@ -111,6 +134,9 @@ begin
         from public.invoices inv where inv.id::text = v_prev;
       if v_out is null then
         raise exception 'This invoice was already saved. Refresh the page to see it.';
+      end if;
+      if v_prev_hash is not null and v_prev_hash <> v_hash then
+        raise exception 'IDEMPOTENCY_MISMATCH: an earlier attempt already saved invoice % with different details. Refresh the patient record and check it (void it if it is wrong) before saving again.', v_out->>'invoice_no';
       end if;
       return v_out;
     end if;
@@ -159,6 +185,8 @@ declare
   v_head public.payment_plans%rowtype;
   v_plan public.payment_plans%rowtype;
   v_prev text;
+  v_prev_hash text;
+  v_hash text;
   v_rows integer;
   v_out  jsonb;
 begin
@@ -166,12 +194,14 @@ begin
     raise exception 'Add at least one installment to the plan.';
   end if;
 
+  v_hash := md5(jsonb_build_object('plan', p_plan, 'installments', p_installments)::text);
+
   if p_idempotency_key is not null then
-    insert into public.idempotency_keys (key, kind) values (p_idempotency_key, 'plan')
+    insert into public.idempotency_keys (key, kind, request_hash) values (p_idempotency_key, 'plan', v_hash)
       on conflict (key) do nothing;
     get diagnostics v_rows = row_count;
     if v_rows = 0 then
-      select k.result_id into v_prev from public.idempotency_keys k
+      select k.result_id, k.request_hash into v_prev, v_prev_hash from public.idempotency_keys k
         where k.key = p_idempotency_key and k.kind = 'plan';
       if v_prev is null then
         raise exception 'This plan was already saved. Refresh the page to see it.';
@@ -179,6 +209,9 @@ begin
       select to_jsonb(pp) into v_out from public.payment_plans pp where pp.id::text = v_prev;
       if v_out is null then
         raise exception 'This plan was already saved. Refresh the page to see it.';
+      end if;
+      if v_prev_hash is not null and v_prev_hash <> v_hash then
+        raise exception 'IDEMPOTENCY_MISMATCH: an earlier attempt already saved this payment plan with different details. Refresh the patient record and check it (delete the plan if it is wrong) before saving again.';
       end if;
       return v_out;
     end if;
