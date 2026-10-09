@@ -10,9 +10,17 @@
 //   ban_user       { user_id }                                                                                  (needs users.manage)
 //   unban_user     { user_id }                                                                                  (needs users.manage)
 //   invite_patient { patient_id }  sends the patient an email to set a password for the portal              (needs portal.invite)
+//   create_patient_login   { patient_id, password }  makes the patient's portal login at the clinic: the username is
+//                  the name and Mr# at the clinic domain (alirashid-1705@dralirashid.com), no email is sent, and the
+//                  patient must choose their own password at the first login                                   (needs portal.invite)
+//   reset_patient_password { patient_id, password }  sets a new password for a login made that way             (needs portal.invite)
+//   portal_login_info      { patient_id }  { has_login, clinic_login, username }                                (needs portal.invite)
+// The three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts.
 //
 // Deploy: supabase functions deploy admin-users
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { createPatientLogin, portalLoginInfo, resetPatientPassword } from './patient-login-actions.ts';
+import { isPatientLoginName } from './portal-login.ts';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -27,6 +35,8 @@ const STAFF_DOMAIN = Deno.env.get('STAFF_EMAIL_DOMAIN') ?? 'dralirashid.com';
 // (or set the SITE_URL secret, which takes priority).
 const SITE_URL = (Deno.env.get('SITE_URL') ?? 'https://www.dralirashid.com').replace(/\/$/, '');
 const ROLES = ['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant'];
+// Patient logins look like name-1705@domain. A staff login never may, so the two cannot be mixed up.
+const PATIENT_SHAPE_ERROR = 'That login name has the shape of a patient login (a name, a dash and a number). Choose a staff name such as reception@' + STAFF_DOMAIN + '.';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -61,6 +71,7 @@ Deno.serve(async (req) => {
       const fullName = String(body.full_name ?? '').trim();
       const role = String(body.role ?? '');
       if (!email.endsWith('@' + STAFF_DOMAIN)) return json({ error: `Staff emails must end with @${STAFF_DOMAIN}` });
+      if (isPatientLoginName(email, STAFF_DOMAIN)) return json({ error: PATIENT_SHAPE_ERROR });
       if (fullName.length < 2) return json({ error: 'Write the staff member\'s name.' });
       if (!ROLES.includes(role)) return json({ error: 'Choose a role.' });
 
@@ -125,6 +136,7 @@ Deno.serve(async (req) => {
       const email = body.email == null ? '' : String(body.email).trim().toLowerCase();
       if (email && email !== target.email) {
         if (!/^[^@\s]+@[^@\s]+$/.test(email) || !email.endsWith('@' + STAFF_DOMAIN)) return json({ error: `Staff emails must end with @${STAFF_DOMAIN}` });
+        if (isPatientLoginName(email, STAFF_DOMAIN)) return json({ error: PATIENT_SHAPE_ERROR });
         const { data: taken } = await admin.from('staff').select('id').eq('email', email).neq('id', userId).maybeSingle();
         if (taken) return json({ error: 'That login email is already used. Pick another.' });
         changes.email = email; changes.email_confirm = true;
@@ -165,6 +177,12 @@ Deno.serve(async (req) => {
       await admin.from('patients').update({ portal_user_id: invited.user.id }).eq('id', patient.id);
       await admin.from('audit_log').insert({ table_name: 'patients', row_id: patient.id, action: 'PORTAL_INVITE', actor: caller });
       return json({ ok: true });
+    }
+
+    if (action === 'create_patient_login' || action === 'reset_patient_password' || action === 'portal_login_info') {
+      const run = action === 'create_patient_login' ? createPatientLogin : action === 'reset_patient_password' ? resetPatientPassword : portalLoginInfo;
+      const result = await run({ admin, can, caller, domain: STAFF_DOMAIN }, body);
+      return json(result.body, result.status);
     }
 
     return json({ error: 'Unknown action' }, 400);

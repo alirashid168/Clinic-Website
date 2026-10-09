@@ -10,6 +10,7 @@
 import { CONFIG } from '../config.js';
 import { todayISO, addDaysISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
+import { isPatientLoginName } from '../lib/portal-login.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
 // is allowed by the site's Content-Security-Policy (script-src and connect-src), so there is no
@@ -411,7 +412,7 @@ export async function createSupabaseAdapter() {
    * The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE): GoTrue refuses even a still
    * valid token of a switched-off account with 403 user_banned, and one of a deleted account with 403 user_not_found.
    */
-  async function userId() {
+  async function currentUser() {
     const { data, error } = await sb.auth.getUser();
     if (error) {
       if (error.code === 'user_banned') await endLogin('switched_off');
@@ -419,7 +420,23 @@ export async function createSupabaseAdapter() {
       const refused = error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
       if (!refused) check({ error, status: error.status });
     }
-    return data?.user?.id || null;
+    return data?.user || null;
+  }
+  async function userId() { return (await currentUser())?.id || null; }
+
+  /**
+   * Calls the admin-users Edge Function. A refused or failed call carries the function's own message in the body of its answer
+   * (supabase-js only says "non-2xx" itself), so that message is read out and thrown.
+   */
+  async function adminUsers(body) {
+    const { data, error } = await sb.functions.invoke('admin-users', { body });
+    if (error) {
+      let message = error.message;
+      try { const sent = await error.context?.json?.(); if (sent?.error) message = sent.error; } catch { /* keep the generic text */ }
+      throw new Error(message);
+    }
+    if (data?.error) throw new Error(data.error);
+    return data;
   }
 
   async function duesFor(ids) {
@@ -517,17 +534,28 @@ export async function createSupabaseAdapter() {
       try { if (session) await sb.from('login_events').insert({ user_id: await userId(), kind: session.kind, user_agent: navigator.userAgent.slice(0, 300) }); } catch { /* the log never blocks a login */ }
       return session;
     },
-    /** True for staff login names (@STAFF_EMAIL_DOMAIN). They need no real inbox, so they get no reset emails. */
+    /** True for staff login names (@STAFF_EMAIL_DOMAIN, not shaped like a patient username). They need no real inbox, so they get no reset emails. */
     isStaffEmail(email) {
       const domain = String(CONFIG.STAFF_EMAIL_DOMAIN || '').toLowerCase();
-      return !!domain && String(email || '').trim().toLowerCase().endsWith('@' + domain);
+      return !!domain && String(email || '').trim().toLowerCase().endsWith('@' + domain) && !this.isPortalLoginName(email);
     },
+    /** True for a patient's username made at the clinic (alirashid-1705@STAFF_EMAIL_DOMAIN). It has no inbox either: the clinic resets its password. */
+    isPortalLoginName(email) { return isPatientLoginName(email, CONFIG.STAFF_EMAIL_DOMAIN); },
     async sendPasswordReset(email) {
-      // Staff login emails do not need a real inbox: sending would bounce, and the person would wait for nothing.
+      // Staff login emails do not need a real inbox: sending would bounce, and the person would wait for nothing. Nor do patients' clinic usernames.
+      if (this.isPortalLoginName(email)) throw plainError('Ask the clinic to reset your password.', 'CLINIC_RESET');
       if (this.isStaffEmail(email)) throw plainError('Staff passwords are not reset by email. Ask Dr. Ali to set a new one under Admin → Staff accounts.', 'STAFF_RESET');
       check(await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo: location.origin + '/reset-password.html' }));
     },
     async updatePassword(password) { check(await sb.auth.updateUser({ password })); },
+    /**
+     * The logged-in patient chooses their own password. Also clears the "must change" flag of a login the clinic made, so the
+     * portal opens from now on. (The flag is the patient's own to change: it asks for a new password, it is not a lock.)
+     */
+    async changePassword(password) {
+      check(await sb.auth.updateUser({ password, data: { must_change_password: false } }));
+      cachedSession = null;
+    },
     /**
      * Always ends the login on this computer, even with no connection: the server gets SIGNOUT_TIMEOUT_MS to confirm
      * (scope 'global' ends every session of this login, 'local' only this browser's), then the stored login is removed
@@ -541,9 +569,12 @@ export async function createSupabaseAdapter() {
      * that has neither a staff nor a patient record any more as that final answer: asked twice, then checked once more.
      */
     async getSession({ strict = false } = {}) {
-      const uid = await userId();
+      const user = await currentUser();
+      const uid = user?.id || null;
       if (!uid) return null;
-      if (cachedSession?.uid === uid && (cachedSession.value || !strict)) return cachedSession.value;
+      // A login the clinic made for a patient asks for a new password first (user_metadata.must_change_password, read fresh each time).
+      const flagged = (v) => (v?.kind === 'patient' ? { ...v, mustChangePassword: user.user_metadata?.must_change_password === true } : v);
+      if (cachedSession?.uid === uid && (cachedSession.value || !strict)) return flagged(cachedSession.value);
       let value = await loadProfile(uid);
       if (!value && strict) {
         // A read that went out without the person's token would answer empty as well, so one empty answer is not proof.
@@ -551,7 +582,7 @@ export async function createSupabaseAdapter() {
         if (!value && (await userId()) === uid) await endLogin('account_gone');
       }
       cachedSession = { uid, value };
-      return value;
+      return flagged(value);
     },
     // fn(eventName, reason) runs after every login event (SIGNED_IN, TOKEN_REFRESHED, SIGNED_OUT ...); reason comes with SIGNED_OUT only
     // (see ACCOUNT_ERRORS). Its result is deliberately not returned: auth-js waits for this callback before it carries on, so handing
@@ -635,6 +666,21 @@ export async function createSupabaseAdapter() {
       const { data, error } = await sb.functions.invoke('admin-users', { body: { action: 'invite_patient', patient_id: id } });
       if (error) throw new Error(error.message);
       if (data?.error) throw new Error(data.error);
+    },
+    /** Staff make the patient's portal login at the clinic. Resolves { username } (the full address); the password is not kept anywhere here. */
+    async createPatientLogin(id, password) {
+      const { username } = await adminUsers({ action: 'create_patient_login', patient_id: id, password });
+      return { username };
+    },
+    /** Staff set a new password for a login made that way; the patient is asked to choose their own again. Resolves { username }. */
+    async resetPatientPassword(id, password) {
+      const { username } = await adminUsers({ action: 'reset_patient_password', patient_id: id, password });
+      return { username };
+    },
+    /** { has_login, clinic_login, username }: whether the patient has a portal login, and (for a clinic one) its username. */
+    async portalLoginInfo(id) {
+      const { has_login, clinic_login, username } = await adminUsers({ action: 'portal_login_info', patient_id: id });
+      return { has_login: !!has_login, clinic_login: !!clinic_login, username: username || null };
     },
     /**
      * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (the stored thumbnail

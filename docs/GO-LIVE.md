@@ -18,6 +18,7 @@ Steps marked **(Dr. Ali)** need you: a sign-in, a payment or an approval. Everyt
    ```
 3. Deploy the Edge Function: `supabase functions deploy admin-users`, with secrets `SITE_URL=https://<site>` and `STAFF_EMAIL_DOMAIN=dralirashid.com`.
 4. Turn on two-factor login for staff (Supabase Auth → MFA) once everyone has a phone authenticator.
+5. **Patient portal logins made at the clinic.** Staff open the patient, choose **Create portal login**, and hand over the printed slip (username such as alirashid-1705@dralirashid.com and a first password). No email is sent, so this works for patients without an email address. The patient is asked to choose their own password at the first login; if they forget it, staff choose **Reset portal password**. The permission is "Invite patients to the patient portal" (`portal.invite`): by default only the coordinator and admin have it, so tick it in the access list for the front desk if they will hand out logins. Addresses of this shape (a name, a dash and a number at @dralirashid.com) are reserved for patients: the staff screens refuse them for staff accounts. Redeploy the function after pulling this change: `supabase functions deploy admin-users` (it now has three files next to index.ts; deploy sends them all).
 
 ## 3. Website
 1. Put the project URL and anon key in `web/js/config.js` (safe to publish; the database enforces access).
