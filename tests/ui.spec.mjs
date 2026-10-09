@@ -53,9 +53,12 @@ await step('home shows the smile, three doors and calendar', async () => {
   await page.goto(BASE);
   // With WebGL the hero is the photo card (canvas) and the CSS arch is hidden; without it the 24 CSS teeth show.
   await page.waitForSelector('.smile-stage.has-card canvas, .smile-stage:not(.has-card) .tooth');
-  assert.equal(await page.locator('.tooth').count(), 24);
-  for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count());
-  assert.equal(await page.locator('.sx-day').count(), 7);
+  // The week with Dr. Ali fills in when the (demo) database answers, after the hero is already there: wait for it, or a slow first load
+  // counts 0 days (this first step failed now and then on a slow first load, and its messages did not say which count was wrong).
+  await page.locator('.sx-day').first().waitFor();
+  assert.equal(await page.locator('.tooth').count(), 24, 'tooth count');
+  for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count(), `door ${t}`);
+  assert.equal(await page.locator('.sx-day').count(), 7, 'sx-day count');
   await shot(page, '01-home');
 });
 await step('visitor page lists benefits, braces options and WhatsApp button', async () => {
@@ -78,12 +81,12 @@ await step('front desk sees only their branch and the Aaj ki List', async () => 
   assert.ok(await page.locator('.badge-dues').count(), 'dues flag visible');
   await shot(page, '03-sheet-frontdesk');
 });
-await step('front desk registers a new patient and gets the next Mr#', async () => {
+await step('front desk registers a new patient and gets the next Mr# (the website numbers from 50000, clear of Healthwire)', async () => {
   await page.fill('.add-panel input[type=search]', 'Komal Test');
   await page.click('.suggestions button:has-text("New patient")');
   await page.fill('.modal input[type=tel]', '0300 1234567');
   await page.click('.modal button:has-text("Create patient")');
-  await page.waitForSelector('.toast:has-text("Mr# 9841")');
+  await page.waitForSelector('.toast:has-text("Mr# 50000")');
   await page.waitForSelector('table.sheet tbody tr:has-text("Komal Test")');
 });
 await step('front desk adds a walk-in with the "+ New walk-in" button', async () => {
@@ -98,6 +101,17 @@ await step('front desk cannot see accounts or admin', async () => {
   assert.ok(!nav.includes('Access list') && !nav.includes('Staff accounts'));
   assert.ok(!nav.includes('Complaints'));
   assert.ok(!nav.includes('Financial'));
+});
+await step('front desk may make a patient portal login (owner decision, 9 Oct 2026): the button shows on the patient just registered and the username carries Mr# 50000', async () => {
+  await page.goto(BASE + '#/staff/patients?q=Komal%20Test');
+  await page.locator('table.list tbody tr', { hasText: 'Komal Test' }).locator('a').first().click();
+  await page.waitForSelector('h1:has-text("Komal Test")');
+  await page.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor();
+  await page.getByRole('button', { name: 'Create portal login' }).click();
+  const m = page.locator('.modal');
+  assert.equal(await m.locator('input[readonly]').inputValue(), 'komaltest-50000@dralirashid.com');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.waitFor({ state: 'detached' });
 });
 await step('top bar: patient search by name, Mr# and phone from any screen', async () => {
   const box = page.locator('.topsearch input');

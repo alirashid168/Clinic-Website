@@ -17,7 +17,7 @@ export const PERMISSIONS = [
     { key: 'patients.view', label: 'View patient profiles', category: 'Patients', defaults: [Y, Y, Y, Y, Y] },
     { key: 'patients.create', label: 'Register new patients (auto Mr#)', category: 'Patients', defaults: [Y, N, N, Y, N] },
     { key: 'patients.edit', label: 'Edit patient details', category: 'Patients', defaults: [Y, N, N, Y, N] },
-    { key: 'portal.invite', label: 'Invite patients to the patient portal', category: 'Patients', defaults: [N, N, N, Y, N] },
+    { key: 'portal.invite', label: 'Invite patients to the patient portal', category: 'Patients', defaults: [Y, N, N, Y, N] },
     { key: 'sheet.view', label: 'View Aaj ki List / queue', category: 'Daily list', defaults: [Y, Y, Y, Y, Y] },
     { key: 'sheet.edit', label: 'Add and edit Aaj ki List entries', category: 'Daily list', defaults: [Y, Y, Y, Y, N] },
     { key: 'treatment.enter', label: 'Enter treatment done / braces details', category: 'Daily list', defaults: [N, Y, Y, N, N] },
