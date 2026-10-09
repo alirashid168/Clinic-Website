@@ -14,6 +14,9 @@
 //   - the data layer saying the account itself is gone: switched off by Dr. Ali, deleted, or no longer linked to
 //     a staff or patient record (getSession() fails with ACCOUNT_OFF / ACCOUNT_GONE; it has ended the login by then).
 // Any other error, or "nobody" on any other event, changes nothing on screen: the next event looks again.
+// USER_UPDATED is one of those other events. It comes when the logged-in person changes their own password (data.changeOwnPassword)
+// or details, in this tab and in the other tabs of the browser: the same person, so it is looked up like TOKEN_REFRESHED, ends
+// nothing, and the open dialogs, forms and queued Aaj ki List edits stay as they are.
 //
 // An answer that comes back after the screen has changed (another logout or login happened while it was being
 // fetched) is dropped: it describes a login that is no longer the one on screen and must not put anyone back. An answer that a

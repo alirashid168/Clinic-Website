@@ -350,6 +350,9 @@ function focusEl(el, options) {
  * opts.destructive: start on the Cancel (non-primary) button, or the title if there is none.
  * opts.initialFocus: the element to start on. opts.alert: an alertdialog (urgent).
  * opts.onClose(): called once, however the dialog closes.
+ * opts.lockWhileWorking: Escape, the × button and a click outside do nothing while an action is working (for an action that goes
+ * ahead even when its dialog is gone, such as changing a password). The action buttons are disabled then too, so such an action
+ * must have a time limit of its own, or the dialog could not be closed for as long as it hangs.
  * Focus stays inside the dialog and returns to the button that opened it.
  */
 export function modal(title, body, actions = [], opts = {}) {
@@ -394,15 +397,18 @@ export function modal(title, body, actions = [], opts = {}) {
   },
   h('div', { class: 'modal-head' },
     heading,
-    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => close() }, '×')),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => dismiss() }, '×')),
   h('div', { class: 'modal-body', id: bodyId }, body),
   buttons.length ? h('div', { class: 'modal-actions' }, buttons) : null,
   h('div', { class: 'sr-only' }, polite, assertive));
-  const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } }, dialog);
+  const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) dismiss(); } }, dialog);
+
+  // The person asks to close it (×, Escape, a click outside); close() is also what the code calls.
+  function dismiss() { if (!(opts.lockWhileWorking && working)) close(); }
 
   const onKey = (e) => {
     if (openModals[openModals.length - 1] !== entry) return; // only the dialog on top reacts
-    if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); close(); return; }
+    if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); dismiss(); return; }
     if (e.key !== 'Tab') return;
     const items = focusables(dialog);
     if (!items.length) { e.preventDefault(); return; }

@@ -10,6 +10,7 @@
 import { CONFIG } from '../config.js';
 import { todayISO, addDaysISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
+import { passwordProblems, passwordError } from '../password-rules.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
 // is allowed by the site's Content-Security-Policy (script-src and connect-src), so there is no
@@ -170,6 +171,83 @@ const REASON_KEY = 'clinic-logout-reason'; // in localStorage, so the other tabs
 // when it thaws, which can be minutes later. The note is also tied to one person and used once per tab, and goes with the next
 // sign-in or logout (see noteReason()), so a longer life cannot label a later logout.
 const REASON_TTL_MS = 5 * 60 * 1000;
+
+// ------------------------------------------------------------ a person changing their own password
+const PASSWORD_CHECK_TIMEOUT_MS = 15000; // asking the login server whether the current password is right
+const PASSWORD_REVOKE_TIMEOUT_MS = 5000; // ending the session that check opened
+const PASSWORD_UPDATE_TIMEOUT_MS = 30000; // setting the new one (the library's own request has no limit, and the dialog stays shut while it runs)
+
+/** fetch() that is aborted (not just ignored) after `ms`; the timeout ends it with the same error a slow read gets. */
+function fetchWithin(url, init, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(timeoutError()), ms);
+  return fetch(url, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+/** Waits for `promise` at most `ms`, then fails with the same error a slow read gets. The promise itself is not cancelled. */
+function within(promise, ms) {
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(timeoutError()), ms); });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
+const WEAK_PASSWORD_REASONS = {
+  length: 'it is too short',
+  characters: 'it needs a mix of capital and small letters, numbers and symbols',
+  pwned: 'it is a well-known password that appears in lists of leaked passwords',
+};
+
+/**
+ * The error for a refused check or password change, in words for the person. `e` is { status, code, message, reasons, name }: an auth-js
+ * error has all of them, and the check (a plain request) reads them from the answer's JSON. Nothing here ends the login or names a password.
+ * `sentToken` is false for the check, which sends no token of the person: a 401 there is the gateway or the API key, not "you are not logged in".
+ */
+function ownPasswordError({ status = 0, code, message, reasons, name } = {}, { sentToken = true } = {}) {
+  if (code === 'invalid_credentials' || code === 'invalid_grant') return passwordError('WRONG_PASSWORD');
+  if (status === 429 || code === 'over_request_rate_limit') return passwordError('RATE_LIMITED');
+  if (code === 'same_password') return passwordError('SAME_PASSWORD');
+  if (code === 'weak_password') {
+    const why = (Array.isArray(reasons) ? reasons : []).map((r) => WEAK_PASSWORD_REASONS[r]).filter(Boolean);
+    return passwordError('WEAK_PASSWORD', `That password is too easy to guess${why.length ? `: ${why.join('; ')}` : ''}. Choose a different one.`);
+  }
+  if (code === 'reauthentication_needed' || code === 'reauthentication_not_valid') return passwordError('REAUTH_NEEDED');
+  if (code === 'user_banned') return plainError('This account is switched off. Contact Dr. Ali.', 'ACCOUNT_OFF');
+  if (sentToken && (status === 401 || name === 'AuthSessionMissingError' || ['session_not_found', 'bad_jwt', 'refresh_token_not_found', 'no_authorization'].includes(code))) return passwordError('NOT_LOGGED_IN');
+  // No answer at all (status 0: the connection failed, the browser's own words are kept for friendlyError) or the server failed: the usual
+  // wording for a lost answer. The password may or may not have been changed; the person is told so.
+  if (!status) return Object.assign(new Error(message || 'Failed to fetch'), { status: 0 });
+  if (status >= 500) return Object.assign(plainError(`The clinic system did not respond (error ${status}). Try again in a few minutes.`, code), { status });
+  return plainError('The password could not be changed just now. Please try again in a few minutes.', code);
+}
+
+/**
+ * Asks the login server whether `password` is right for `email`, WITHOUT logging in on this page: a plain POST of its own, so the page's
+ * stored login is not touched, no login event reaches this page (the login watcher hears nothing) and nothing is stored. (It does count as a sign-in
+ * at the server: "last login" moves to now.) The server opens a session for the check; it is ended at once, and a failure to end it is
+ * ignored (it would only stay unused). The tokens of the check live in this function and nowhere else. (If the check itself times out, or its
+ * answer cannot be read, there is no token to end: a session the server may have opened stays unused in its table, and its tokens never
+ * reached this page. The next password change of the account removes it.)
+ * Resolves to { revoked, userId }: revoked is a promise that never rejects and settles when that session has been ended, userId is the
+ * account the server says the password belongs to.
+ */
+async function checkPassword(email, password) {
+  const base = `${String(CONFIG.SUPABASE_URL).replace(/\/+$/, '')}/auth/v1`;
+  const apikey = CONFIG.SUPABASE_ANON_KEY;
+  const res = await fetchWithin(`${base}/token?grant_type=password`, {
+    method: 'POST', headers: { apikey, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }),
+  }, PASSWORD_CHECK_TIMEOUT_MS);
+  let body = null;
+  try { body = await res.json(); } catch { /* not JSON: a proxy's page */ }
+  if (!res.ok) {
+    const text = (v) => (typeof v === 'string' ? v : undefined); // the answer names its error as "error_code", "code" (newer) or "error" (OAuth style)
+    throw ownPasswordError({ status: res.status, code: text(body?.error_code) || text(body?.code) || text(body?.error), message: text(body?.msg) || text(body?.message) }, { sentToken: false });
+  }
+  if (typeof body?.access_token !== 'string') throw ownPasswordError({ status: 500 }, { sentToken: false });
+  const token = body.access_token;
+  const revoked = fetchWithin(`${base}/logout?scope=local`, { method: 'POST', headers: { apikey, Authorization: `Bearer ${token}` } }, PASSWORD_REVOKE_TIMEOUT_MS)
+    .then(() => {}, () => {});
+  return { revoked, userId: typeof body.user?.id === 'string' ? body.user.id : null };
+}
 
 // ------------------------------------------------------------ report totals (pure; also used by demo.js)
 const KARACHI_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE || 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -572,7 +650,8 @@ export async function createSupabaseAdapter() {
    * because one GET /user failed. The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE):
    * GoTrue refuses even a still valid token of a switched-off account with 403 user_banned, and one of a deleted account with
    * 403 user_not_found. The question is asked with the stored token itself (not with whatever the library holds when the request
-   * goes out), so the answer belongs to that person and only ever ends that person's login (see endLogin()).
+   * goes out), so the answer belongs to that person and only ever ends that person's login (see endLogin()). `email` is the login name
+   * the server has now (the stored copy is old after a rename, until the next refresh).
    */
   async function confirmedLogin() {
     const login = await storedLogin();
@@ -588,7 +667,7 @@ export async function createSupabaseAdapter() {
         check({ error, status: error.status });
       }
     }
-    return data?.user?.id ? { uid: data.user.id, jwt: login.jwt } : null;
+    return data?.user?.id ? { uid: data.user.id, jwt: login.jwt, email: data.user.email || null } : null;
   }
   async function userId() { return (await confirmedLogin())?.uid ?? null; }
 
@@ -704,6 +783,46 @@ export async function createSupabaseAdapter() {
       check(await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo: location.origin + '/reset-password.html' }));
     },
     async updatePassword(password) { check(await sb.auth.updateUser({ password })); },
+    /**
+     * The logged-in person changes their own password. The login server first confirms who is logged in (confirmedLogin(): its own email,
+     * and a switched-off account ends the login right there), then the current password is checked (checkPassword(): a request of its
+     * own that leaves this page's login, login events and storage alone), then the page's own client sets the new one, which sends
+     * USER_UPDATED (the login watcher takes it as the same person). The new password goes to the account that was checked: if the stored
+     * login is another person's by then (somebody logged out and in on another tab during the check), nothing is changed (LOGIN_CHANGED).
+     * That look is the last step before the library's updateUser(), which takes no token of its own and acts on whatever login is stored
+     * when it reads it, so the gap that is left is only the two local reads between them, not the seconds of the network check.
+     * Fails with an error whose code is WRONG_PASSWORD, SAME_PASSWORD, WEAK_PASSWORD, RATE_LIMITED, REAUTH_NEEDED, NOT_LOGGED_IN,
+     * LOGIN_CHANGED, ACCOUNT_OFF, ACCOUNT_GONE or PASSWORD_RULE (words in password-rules.js), or with a connection / server error that
+     * friendlyError() words. No failure here ends the login, except that a switched-off or deleted account is ended the usual way. No
+     * password appears in any error, log or storage. A change that was sent but whose answer was lost (a timeout) may still have happened.
+     *
+     * Known limit, by design: the current password is checked in the browser only. The login server itself accepts a new password from
+     * a valid login without asking for the old one (its "secure password change" setting is off, which would ask for a fresh login after
+     * 24 hours), and updatePassword() above does exactly that for the reset page. So this protects against a person at an unlocked
+     * computer clicking through the app, not against someone who already holds the login's token (devtools, a stolen token).
+     */
+    async changeOwnPassword(currentPassword, newPassword) {
+      const problem = passwordProblems({ current: currentPassword, next: newPassword })[0];
+      if (problem) throw passwordError('PASSWORD_RULE', problem.message);
+      // Errors that already carry their own words; anything else from the login look-ups is a connection or server problem.
+      const worded = (promise) => promise.catch((e) => { throw ['ACCOUNT_OFF', 'ACCOUNT_GONE', 'LOGIN_CHANGED'].includes(e.code) ? e : ownPasswordError(e); });
+      try {
+        const login = await worded(confirmedLogin());
+        if (!login?.email) throw passwordError('NOT_LOGGED_IN');
+        const { revoked, userId: checkedUid } = await checkPassword(login.email, currentPassword);
+        try {
+          if (checkedUid !== login.uid || (await worded(storedLogin()))?.uid !== login.uid) throw plainError('The login changed while the password was being checked. Please try again.', 'LOGIN_CHANGED');
+          const res = await within(sb.auth.updateUser({ password: newPassword }), PASSWORD_UPDATE_TIMEOUT_MS);
+          if (res.error) throw ownPasswordError(res.error);
+        } finally {
+          await revoked;
+        }
+      } catch (e) {
+        // "Switched off" from the check or the update: let the usual look end the login on this computer now, not at the next recheck.
+        if (e.code === 'ACCOUNT_OFF') await confirmedLogin().catch(() => {});
+        throw e;
+      }
+    },
     /**
      * Always ends the login on this computer, even with no connection: the server gets SIGNOUT_TIMEOUT_MS to confirm
      * (scope 'global' ends every session of this login, 'local' only this browser's), then the stored login is removed

@@ -10,6 +10,11 @@ import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
+const passwordDialogModule = () => import('../../ui/password-dialog.js');
+const openChangePassword = lazy(passwordDialogModule, 'openChangePassword');
+// Fetched as soon as the account menu or the phone drawer is opened, so the first click on "Change password" is not a silent wait
+// (offline it is left alone: a failed module load is remembered by the browser, and the click itself then reports the problem).
+const warmPasswordDialog = () => { if (navigator.onLine) passwordDialogModule().catch(() => {}); };
 const pagesModule = () => import('./pages.js');
 const patientsModule = () => import('./patients.js');
 const renderPatient = lazy(patientsModule, 'renderPatient');
@@ -195,8 +200,12 @@ export async function renderStaff(root, path, params, signOut) {
   const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },
     h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
     h('hr', {}),
+    // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
+    h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
     h('button', { type: 'button', class: 'menu-btn', onclick: signOut }, 'Log out'));
   const userMenu = disclosure(h('div', { class: 'menu user-menu' }, userBtn, userList), userBtn, userList);
+  userBtn.addEventListener('click', warmPasswordDialog, { once: true });
+  userMenu.addEventListener('mouseenter', warmPasswordDialog, { once: true });
 
   // ---- narrow screens (below the drawer breakpoint above): the menu as a drawer (same items, dropdowns
   // expanded as groups). It closes on the scrim, on Escape, on its close button and on navigation, gives
@@ -211,7 +220,9 @@ export async function renderStaff(root, path, params, signOut) {
       : drawerLink(m, current(m.key)))),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
-      h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); }, style: { marginTop: '8px' } }, 'Log out')));
+      h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
+        h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
+        h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); } }, 'Log out'))));
   drawer.querySelectorAll('.drawer-group').forEach(markCurrent);
   drawer.inert = true;
   const scrim = h('div', { class: 'drawer-scrim', hidden: true, 'aria-hidden': 'true', onclick: () => closeDrawer(true) });
@@ -251,6 +262,7 @@ export async function renderStaff(root, path, params, signOut) {
     if (wasOpen && returnFocus) toggle.focus();
   }
   toggle.addEventListener('click', () => (drawer.classList.contains('open') ? closeDrawer(true) : openDrawer()));
+  toggle.addEventListener('click', warmPasswordDialog, { once: true });
   on(window, 'hashchange', () => { closeDrawer(false); ctl.abort(); });
   on(wideScreen, 'change', () => { if (wideScreen.matches) closeDrawer(false); });
 
