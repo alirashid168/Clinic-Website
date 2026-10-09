@@ -12,7 +12,7 @@ import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '.
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
 import { todayISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
-import { checkPortalPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName } from '../lib/portal-login.js';
+import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor } from './supabase.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
@@ -418,6 +418,7 @@ export function createDemoAdapter() {
       const p = patient(id);
       if (!p.email) fail("Add the patient's email first.");
       if (p.portal_user_id) fail('This patient already has a portal login.');
+      if (String(p.email).trim().toLowerCase().endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Use Create portal login for clinic usernames.');
       p.portal_user_id = 'p-' + id;
     },
     /** Staff make the patient's portal login at the clinic. Resolves { username }. */
@@ -426,10 +427,10 @@ export function createDemoAdapter() {
       const p = patient(id);
       if (!p) fail('Patient not found.');
       if (p.portal_user_id) fail('This patient already has a portal login.');
-      const problem = checkPortalPassword(password);
+      const problem = checkSlipPassword(password);
       if (problem) fail(problem);
       const email = portalLoginEmail(p.full_name, p.mr_number, CONFIG.STAFF_EMAIL_DOMAIN);
-      if (!email) fail('This patient has no usable Mr#, so a username cannot be made.');
+      if (!email || !isPatientLoginName(email, CONFIG.STAFF_EMAIL_DOMAIN)) fail(NO_USERNAME_MESSAGE);
       if (db.portal_logins.some((l) => l.email === email) || db.staff.some((x) => x.email === email)) fail('That username is already used by another login.');
       db.portal_logins.push({ patient_id: id, email, password: String(password), must_change: true });
       p.portal_user_id = 'p-' + id;
@@ -442,7 +443,7 @@ export function createDemoAdapter() {
       const p = patient(id);
       if (!p) fail('Patient not found.');
       if (!p.portal_user_id) fail('This patient has no portal login yet. Create one first.');
-      const problem = checkPortalPassword(password);
+      const problem = checkSlipPassword(password);
       if (problem) fail(problem);
       const login = db.portal_logins.find((l) => l.patient_id === id);
       if (!login) fail('This patient logs in with their own email address. They can set a new password with "Forgot password" on the login page.');

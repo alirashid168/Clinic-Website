@@ -1,10 +1,11 @@
 // Staff and patient login. Problems are written under the form (and spoken),
 // so they stay until the next try instead of vanishing with a toast.
-import { h, mount, field, friendlyError, announce, busy, showFormErrors, clearFieldErrors } from '../ui/dom.js';
+import { h, mount, field, friendlyError, announce, busy, showFormErrors, clearFieldErrors, extLink } from '../ui/dom.js';
 import { state } from '../state.js';
 import { ROLE_LABELS } from '../lib/permissions.js';
 import { normalizeLoginInput } from '../lib/portal-login.js';
 import { CONFIG } from '../config.js';
+import { CONTACT } from '../content.js';
 
 function loginProblem(err, isStaff) {
   const msg = err?.message || '';
@@ -15,6 +16,14 @@ function loginProblem(err, isStaff) {
   if (/email not confirmed/i.test(msg)) return 'Your email address is not confirmed yet. Open the link in the email we sent you, then log in.';
   if (/rate limit|too many/i.test(msg)) return 'Too many tries. Wait a minute, then try again.';
   return friendlyError(err, isStaff ? undefined : { audience: 'public' });
+}
+
+/** A link that opens a WhatsApp chat with the clinic (the number set in staff Settings, else the one in content.js), or nothing without a number. */
+function clinicWhatsApp(label) {
+  let number = String(state.ref?.settings?.whatsapp_number || '').replace(/\D/g, '') || String(CONTACT.whatsapp || '').replace(/\D/g, '');
+  if (number.startsWith('0')) number = '92' + number.slice(1);
+  if (number.length < 7) return null;
+  return extLink(`https://wa.me/${number}?text=${encodeURIComponent('Hello, I need my patient account password reset.')}`, label);
 }
 
 export async function renderLogin(root, who, onSignedIn) {
@@ -32,6 +41,11 @@ export async function renderLogin(root, who, onSignedIn) {
   // A problem with the login as a whole (wrong password, no connection). Field problems go under their field.
   const problem = h('p', { class: 'field-error', id: `${who}-login-problem`, hidden: true });
   const note = h('p', { class: 'muted', hidden: true });
+  const showNote = (...parts) => {
+    note.replaceChildren(...parts.filter((x) => x !== null && x !== undefined));
+    note.hidden = false;
+    announce(note.textContent);
+  };
 
   const showProblem = (message) => {
     problem.textContent = message;
@@ -61,16 +75,16 @@ export async function renderLogin(root, who, onSignedIn) {
           if (!address) return showFormErrors(form, [{ input: email, message: 'Type your username or email address first, then choose "Forgot password" again.' }]);
           // A username made at the clinic has no inbox: no email is sent, the clinic sets a new password.
           if (address.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) {
-            note.textContent = 'Ask the clinic to reset your password. The front desk can give you a new one, in person or by phone.';
-            note.hidden = false;
-            announce(note.textContent);
+            const wa = clinicWhatsApp('message the clinic on WhatsApp');
+            showNote('Ask the clinic to reset your password. The front desk can give you a new one, in person or by phone', ...(wa ? [', or you can ', wa, '.'] : ['.']));
             return undefined;
           }
           try {
             await d.sendPasswordReset(address);
-            note.textContent = 'If this email has a patient account, a link to set a new password is on its way. Check your inbox (and spam folder).';
-            note.hidden = false;
-            announce(note.textContent);
+            // A patient whose login the clinic made also has their real email on file, but no link ever arrives for it: say where to go.
+            const wa = clinicWhatsApp('message the clinic on WhatsApp');
+            showNote('If this email has a patient account, a link to set a new password is on its way. Check your inbox (and spam folder). ',
+              'If the clinic gave you a username on a slip, no link will come: use that username here instead, ', ...(wa ? ['or ', wa] : ['or contact the clinic']), ' and ask for a new password.');
           } catch (err) {
             // A staff email typed here: the data layer explains that staff passwords are reset by an admin.
             showProblem(err?.code === 'STAFF_RESET' ? err.message : friendlyError(err, { audience: 'public' }));
@@ -104,7 +118,7 @@ export async function renderLogin(root, who, onSignedIn) {
       }
     },
   },
-  isStaff ? field('Email', email) : field('Username or email', email, 'On the slip the clinic gave you. If you gave the clinic your email address, you can use that instead.'),
+  isStaff ? field('Email', email) : field('Username or email', email, 'Use the username on the slip the clinic gave you. Patients who were invited by email use that email address.'),
   field('Password', password),
   problem,
   submit,

@@ -844,7 +844,13 @@ table.invoice-lines input { min-width: 0; }
 .slip-row { display: grid; gap: 2px; padding: var(--space-2) 0; border-top: 1px dashed var(--border); }
 .slip-label { font-size: var(--fs-xs); color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
 .slip-value { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-lg); overflow-wrap: anywhere; }
-.slip-hint { font-size: var(--fs-xs); color: var(--text-muted); }
+/* The username is one piece before the @ (the dash and the Mr# never split over two lines); the only break is right before the @.
+   The longer it is, the smaller the type, so that the longest username that can be made (24 + 1 + 30 characters) still fits an A6 page. */
+.slip-nowrap { white-space: nowrap; }
+.slip-user-md { font-size: var(--fs-ui); }
+.slip-user-sm { font-size: .6875rem; }
+.slip-user-xs { font-size: .5625rem; }
+.slip-hint { font-size: var(--fs-xs); color: var(--text-muted); overflow-wrap: anywhere; }
 .slip-note { margin-top: var(--space-3) !important; font-size: var(--fs-ui); }
 
 /* ------------------------------------------------------------ reports */

@@ -10,16 +10,17 @@
 //   ban_user       { user_id }                                                                                  (needs users.manage)
 //   unban_user     { user_id }                                                                                  (needs users.manage)
 //   invite_patient { patient_id }  sends the patient an email to set a password for the portal              (needs portal.invite)
+//                  Only for a real email address: an address at the clinic domain is refused (use create_patient_login).
 //   create_patient_login   { patient_id, password }  makes the patient's portal login at the clinic: the username is
 //                  the name and Mr# at the clinic domain (alirashid-1705@dralirashid.com), no email is sent, and the
 //                  patient must choose their own password at the first login                                   (needs portal.invite)
 //   reset_patient_password { patient_id, password }  sets a new password for a login made that way             (needs portal.invite)
 //   portal_login_info      { patient_id }  { has_login, clinic_login, username }                                (needs portal.invite)
-// The three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts.
+// invite_patient and the three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts.
 //
 // Deploy: supabase functions deploy admin-users
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { createPatientLogin, portalLoginInfo, resetPatientPassword } from './patient-login-actions.ts';
+import { createPatientLogin, findLoginByEmail, invitePatient, portalLoginInfo, resetPatientPassword } from './patient-login-actions.ts';
 import { isPatientLoginName } from './portal-login.ts';
 
 const cors = {
@@ -79,6 +80,10 @@ Deno.serve(async (req) => {
       if (password && password.length < 8) return json({ error: 'The password needs at least 8 characters.' });
       const { data: existing } = await admin.from('staff').select('id').eq('email', email).maybeSingle();
       if (existing) return json({ error: 'That login email is already used. Pick another.' });
+      // An invitation to an address that already has a login nobody has confirmed yet hands back THAT login (it was made by someone
+      // else, for example by a patient invitation), and the staff row would be attached to it. A staff account is only ever made on
+      // a login created just now. (With a password, createUser refuses an existing address by itself.)
+      if (!password && await findLoginByEmail(admin, email)) return json({ error: 'That login email is already used. Pick another.' });
 
       const { data: made, error: makeErr } = password
         ? await admin.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { full_name: fullName } })
@@ -164,19 +169,8 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'invite_patient') {
-      if (!(await can('portal.invite'))) return json({ error: 'You are not allowed to invite patients.' }, 403);
-      const { data: patient, error } = await admin.from('patients').select('id, email, full_name, portal_user_id').eq('id', String(body.patient_id ?? '')).single();
-      if (error || !patient) return json({ error: 'Patient not found.' });
-      if (patient.portal_user_id) return json({ error: 'This patient already has a portal login.' });
-      if (!patient.email) return json({ error: 'Add the patient\'s email first.' });
-      const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(patient.email.toLowerCase(), {
-        redirectTo: SITE_URL ? `${SITE_URL}/reset-password.html` : undefined,
-        data: { full_name: patient.full_name, kind: 'patient' },
-      });
-      if (inviteErr) return json({ error: inviteErr.message });
-      await admin.from('patients').update({ portal_user_id: invited.user.id }).eq('id', patient.id);
-      await admin.from('audit_log').insert({ table_name: 'patients', row_id: patient.id, action: 'PORTAL_INVITE', actor: caller });
-      return json({ ok: true });
+      const result = await invitePatient({ admin, can, caller, domain: STAFF_DOMAIN, siteUrl: SITE_URL }, body);
+      return json(result.body, result.status);
     }
 
     if (action === 'create_patient_login' || action === 'reset_patient_password' || action === 'portal_login_info') {

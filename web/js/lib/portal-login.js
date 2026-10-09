@@ -39,6 +39,8 @@ export function portalUsername(fullName, mr) {
     const mrPart = portalMrPart(mr);
     return mrPart ? `${portalNamePart(fullName)}-${mrPart}` : '';
 }
+/** What staff are told when a patient's Mr# cannot make a username (no Mr#, or a Mr# with no number in it). */
+export const NO_USERNAME_MESSAGE = 'This patient has no usable Mr# (it needs a number in it), so a username cannot be made.';
 /** "alirashid-1705@dralirashid.com", or '' when there is no usable Mr#. */
 export function portalLoginEmail(fullName, mr, domain) {
     const username = portalUsername(fullName, mr);
@@ -78,14 +80,54 @@ export function checkPortalPassword(password) {
         return `The password can be at most ${PASSWORD_MAX} characters.`;
     return null;
 }
-// Short, easy words. None has the letters i, l or o, and the digits below skip 0 and 1, so nothing in a password
-// can be mistaken for something else when it is read off a slip (l / 1 / I, o / 0).
+/** A first password typed by staff (the one on the slip) needs at least this many characters. The patient's own later password only needs PASSWORD_MIN. */
+export const SLIP_PASSWORD_MIN = 10;
+/**
+ * The problem with a first password that staff typed for a patient, or null when it is fine. Stricter than checkPortalPassword
+ * because it is printed, handed over and valid until the patient first logs in: at least SLIP_PASSWORD_MIN characters and not
+ * only digits (a phone number or "12345678"). The edge function applies the same rule, so a changed page cannot get round it.
+ */
+export function checkSlipPassword(password) {
+    const text = String(password ?? '');
+    if (text.length > PASSWORD_MAX)
+        return `The password can be at most ${PASSWORD_MAX} characters.`;
+    if (text.length < SLIP_PASSWORD_MIN)
+        return `The password needs at least ${SLIP_PASSWORD_MIN} characters.`;
+    if (/^\d+$/.test(text))
+        return 'The password cannot be only digits. Use the suggested password, or add letters.';
+    return null;
+}
+// Short, easy, neutral words: 3 to 5 letters, none with the letters i, l or o, and the digits below skip 0 and 1, so nothing in a
+// password can be mistaken for something else when it is read off a slip (l / 1 / I, o / 0). Three words from this list and
+// four digits give log2(PASSWORD_WORDS.length ^ 3 * 8 ^ 4) bits, more than 37 with the words below. A test fails if the
+// list ever shrinks below 256 words (36 bits), has a duplicate or a word with a look-alike letter.
 export const PASSWORD_WORDS = [
     'sunny', 'happy', 'bread', 'peach', 'grape', 'zebra', 'sheep', 'berry', 'brave', 'bunny', 'candy', 'dusty', 'fresh', 'jumpy',
     'navy', 'peace', 'queen', 'range', 'sweet', 'tasty', 'water', 'zesty', 'stars', 'smart', 'green', 'grass', 'dream', 'cream',
     'crane', 'chase', 'dance', 'fence', 'bench', 'beach', 'chess', 'chart', 'charm', 'cheer', 'dawn', 'dune', 'farm', 'fern',
-    'gate', 'hare', 'hunt', 'jade', 'keep', 'nest', 'pear', 'pump', 'rush', 'sand', 'seed', 'tent', 'tree', 'tuna', 'vase',
-    'wave', 'yarn', 'yard', 'zest', 'cage', 'cake', 'camp', 'cave', 'dare',
+    'gate', 'hare', 'hunt', 'jade', 'keep', 'nest', 'pear', 'pump', 'rush', 'sand', 'seed', 'tent', 'tree', 'tuna',
+    'vase', 'wave', 'yarn', 'yard', 'zest', 'cage', 'cake', 'camp', 'cave', 'dare', 'baby', 'bake', 'bark', 'barn',
+    'base', 'bath', 'bead', 'beam', 'bean', 'beat', 'beef', 'bend', 'best', 'bank', 'band', 'baker', 'brass', 'brush',
+    'busy', 'buzz', 'cane', 'card', 'care', 'cart', 'case', 'cash', 'cedar', 'cheek', 'chest', 'chunk', 'cube', 'cure',
+    'curve', 'cute', 'carry', 'cause', 'chat', 'chef', 'chew', 'crab', 'crepe', 'crew', 'dash', 'data', 'deck', 'deep',
+    'deer', 'desk', 'dandy', 'daze', 'dent', 'dense', 'drape', 'draw', 'dress', 'drum', 'duck', 'duke', 'each', 'earn',
+    'ease', 'east', 'easy', 'edge', 'eager', 'ember', 'enemy', 'entry', 'extra', 'face', 'fact', 'fade', 'fame', 'fang',
+    'fare', 'fast', 'fate', 'feast', 'feed', 'feet', 'fetch', 'fever', 'fund', 'funny', 'frame', 'frank', 'furry', 'gaze',
+    'gear', 'gust', 'grand', 'graze', 'greet', 'grey', 'grub', 'guard', 'guess', 'guest', 'hand', 'hard', 'harp', 'heap',
+    'heart', 'heat', 'hedge', 'herb', 'herd', 'huge', 'hurry', 'hush', 'jeep', 'jump', 'jury', 'just', 'keen', 'kept',
+    'kayak', 'knee', 'knack', 'made', 'mane', 'many', 'march', 'mask', 'mast', 'mate', 'maze', 'mean', 'meat', 'mend',
+    'mess', 'muse', 'must', 'math', 'mare', 'merry', 'mercy', 'name', 'near', 'neat', 'neck', 'need', 'nerve', 'next',
+    'nurse', 'pace', 'pack', 'page', 'pane', 'park', 'part', 'party', 'pass', 'past', 'path', 'pause', 'peak', 'perch',
+    'prune', 'puff', 'pure', 'push', 'purse', 'punch', 'quake', 'quart', 'queue', 'quest', 'quack', 'race', 'rack', 'raft',
+    'rage', 'rake', 'ramp', 'rank', 'rare', 'rate', 'reach', 'rear', 'rent', 'rest', 'rune', 'rust', 'ranch', 'raven',
+    'ready', 'reef', 'safe', 'sage', 'same', 'sank', 'save', 'scarf', 'seat', 'sent', 'serve', 'shade', 'shake', 'shape',
+    'share', 'shark', 'sharp', 'shed', 'sheet', 'shrub', 'snack', 'snake', 'snap', 'sneak', 'spare', 'spark', 'speak', 'speed',
+    'spent', 'stack', 'staff', 'stage', 'stamp', 'stand', 'star', 'start', 'state', 'stay', 'steam', 'steer', 'stem', 'step',
+    'stew', 'stump', 'such', 'sugar', 'sure', 'surf', 'swan', 'sweep', 'swarm', 'sway', 'tack', 'take', 'tame', 'tank',
+    'tape', 'task', 'team', 'tend', 'term', 'test', 'thank', 'that', 'thaw', 'them', 'then', 'they', 'thump', 'tuck',
+    'tune', 'turn', 'tray', 'treat', 'trend', 'tread', 'trap', 'truck', 'trust', 'truth', 'urge', 'used', 'user', 'vary',
+    'vast', 'veer', 'verb', 'very', 'vest', 'vane', 'wade', 'wage', 'wake', 'wand', 'warm', 'warn', 'wash', 'weed',
+    'went', 'west', 'what', 'wheat', 'when', 'wedge', 'yeast', 'yawn', 'zany',
 ];
 export const PASSWORD_DIGITS = '23456789';
 /** A random whole number from 0 to n-1 from the system's secure random numbers (no modulo bias). */
@@ -97,11 +139,11 @@ export function secureRandomInt(n) {
     } while (one[0] >= limit);
     return one[0] % n;
 }
-/** Two short words and four digits, like "sunny-grape-4827": easy to read out, type and remember for the few minutes it is needed. */
+/** Three short words and four digits, like "sunny-grape-zebra-4827": about 37 bits, still easy to read out and type for the few minutes it is needed. */
 export function generatePortalPassword(randomInt = secureRandomInt) {
     const word = () => PASSWORD_WORDS[randomInt(PASSWORD_WORDS.length)];
     let digits = '';
     for (let i = 0; i < 4; i += 1)
         digits += PASSWORD_DIGITS[randomInt(PASSWORD_DIGITS.length)];
-    return `${word()}-${word()}-${digits}`;
+    return `${word()}-${word()}-${word()}-${digits}`;
 }

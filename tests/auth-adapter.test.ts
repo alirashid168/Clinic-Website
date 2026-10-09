@@ -988,3 +988,141 @@ test('an error of the function reaches the screen in its own words, also when it
   f.invokeAnswer = { data: null, error: Object.assign(new Error('Failed to send a request to the Edge Function'), { context: {} }) };
   await assert.rejects(() => data.resetPatientPassword('pat-1', 'peach-zebra-5936'), /Failed to send a request/);
 });
+
+// ---- the session of a patient whose login the clinic made, with the real login watcher (auth-watch.js) wired the way main.js wires it
+const { authChangeHandler, endedNotice } = await import('../web/js/auth-watch.js');
+const { readFileSync } = await import('node:fs');
+
+/** What main.js does with a tab's login events: keep the refreshed login, or leave the screen with a notice. `shown` is state.session. */
+function screenOf(tab: { data: any }, shown: any) {
+  const screen: any = { session: shown, ended: [] as any[], notices: [] as string[], accepted: [] as any[] };
+  const watch = authChangeHandler({
+    data: tab.data,
+    current: () => screen.session,
+    busy: () => false,
+    accept: (s: any) => { screen.session = s; screen.accepted.push(s); },
+    ended: (reason: any) => { screen.ended.push(reason); screen.notices.push(endedNotice(reason, { patient: screen.session?.kind === 'patient' })); screen.session = null; },
+  });
+  tab.data.onAuthChange(watch);
+  return screen;
+}
+/** Lets every lookup an event started run to its end (the stand-ins answer at once, so a few turns of the event loop are plenty). */
+const settle = async () => { for (let i = 0; i < 5; i += 1) await nextTick(); };
+const clinicPatientTab = async (flag: boolean | undefined) => {
+  fresh();
+  const tab = await openTab();
+  tab.f.tables.staff = [];
+  tab.f.tables.patients = [patientRow];
+  tab.f.session = loginOf('pu1');
+  tab.f.user = patientUser(flag === undefined ? { kind: 'patient' } : { kind: 'patient', must_change_password: flag });
+  return tab;
+};
+
+test('a patient login with must_change_password=true reaches the forced-change screen, and stays there through the events of a busy tab', async () => {
+  const tab = await clinicPatientTab(true);
+  const session = await tab.data.signIn('alirashid-1705@dralirashid.com', 'sunny-grape-zebra-4827');
+  assert.equal(session.kind, 'patient');
+  assert.equal(session.mustChangePassword, true, 'signIn hands the screen the flag: portal.js shows "Choose your own password" for it');
+  assert.equal((await tab.data.getSession()).mustChangePassword, true, 'and so does the first look of a reloaded page (state.js)');
+  // portal.js decides by this flag, before it loads anything of the patient
+  const portal = readFileSync(new URL('../web/js/views/portal.js', import.meta.url), 'utf8');
+  const decide = portal.indexOf('if (state.session?.mustChangePassword) return renderChoosePassword(root, signOut);');
+  assert.ok(decide > 0 && decide < portal.indexOf("loading(root, 'Loading your account"), 'decided before anything of the patient is loaded');
+  // The tab is focused again, a token is refreshed: none of it lets the patient past the screen or logs them out.
+  const screen = screenOf(tab, session);
+  tab.f.emit('SIGNED_IN', tab.f.session);
+  await settle();
+  tab.f.session = loginOf('pu1', 'tok-pu1-newer');
+  tab.f.emit('TOKEN_REFRESHED', tab.f.session);
+  await settle();
+  assert.deepEqual(screen.ended, []);
+  assert.equal(screen.session.mustChangePassword, true, 'still the forced-change screen');
+  assert.equal(screen.session.patient.id, 'pat-1');
+  assert.ok(screen.accepted.length >= 2 && screen.accepted.every((s: any) => s.mustChangePassword === true));
+});
+
+test('changePassword, and the USER_UPDATED and TOKEN_REFRESHED events it causes, neither log the patient out nor show a "logged out" message, and the person stays the same', async () => {
+  const tab = await clinicPatientTab(true);
+  const { f, data } = tab;
+  const screen = screenOf(tab, await data.getSession());
+  assert.equal(screen.session.mustChangePassword, true);
+  // What the login server and auth-js do for updateUser: the user is changed (the flag is off in the server's answers from now on),
+  // then USER_UPDATED is sent, and the library may refresh the token right after.
+  f.auth.updateUser = async (attrs: any) => {
+    f.userUpdates.push(attrs);
+    f.user = patientUser({ kind: 'patient', must_change_password: false });
+    f.emit('USER_UPDATED', f.session);
+    f.session = loginOf('pu1', 'tok-pu1-after-update');
+    f.emit('TOKEN_REFRESHED', f.session);
+    return { data: { user: { id: 'pu1' } }, error: null };
+  };
+  await data.changePassword('my-own-pass-77');
+  await settle();
+  assert.deepEqual(f.userUpdates, [{ password: 'my-own-pass-77', data: { must_change_password: false } }], 'one update: the password and the flag together');
+  assert.deepEqual(screen.ended, [], 'the screen was never left');
+  assert.deepEqual(screen.notices, [], 'no "You were logged out" message');
+  assert.deepEqual(f.signOuts, [], 'no logout was sent');
+  assert.deepEqual(tab.heard.map(([event]: [string]) => event), ['USER_UPDATED', 'TOKEN_REFRESHED'], 'and no SIGNED_OUT was heard');
+  assert.equal(screen.session.kind, 'patient');
+  assert.equal(screen.session.patient.id, 'pat-1', 'the same person');
+  assert.equal(screen.session.mustChangePassword, false, 'and the portal opens from now on');
+  assert.ok(screen.accepted.length >= 1 && screen.accepted.every((s: any) => s.patient.id === 'pat-1'));
+  assert.equal((await data.getSession()).mustChangePassword, false, 'a reload shows the portal, not the forced screen');
+});
+
+test('the password change is a plain updateUser: if it fails, the flag stays on and the patient stays on the forced-change screen, logged in', async () => {
+  const tab = await clinicPatientTab(true);
+  const { f, data } = tab;
+  const screen = screenOf(tab, await data.getSession());
+  f.auth.updateUser = async () => ({ data: {}, error: Object.assign(new Error('New password should be different from the old password.'), { name: 'AuthApiError', status: 422, code: 'same_password' }) });
+  await assert.rejects(() => data.changePassword('sunny-grape-zebra-4827'), (e: any) => e.code === 'same_password');
+  f.emit('SIGNED_IN', f.session);
+  await settle();
+  assert.deepEqual(screen.ended, []);
+  assert.equal(screen.session.mustChangePassword, true);
+});
+
+test('a staff session never carries mustChangePassword, whatever its own user_metadata says, also through login events', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.user = { data: { user: { id: 'u1', user_metadata: { kind: 'patient', must_change_password: true } } }, error: null }; // a staff member can edit their own metadata
+  const first = await data.getSession();
+  assert.equal(first.kind, 'staff');
+  assert.ok(!('mustChangePassword' in first));
+  const screen = screenOf({ data }, first);
+  for (const event of ['SIGNED_IN', 'TOKEN_REFRESHED', 'USER_UPDATED']) { f.emit(event, f.session); await settle(); }
+  assert.deepEqual(screen.ended, []);
+  assert.ok(screen.accepted.length >= 3);
+  for (const s of screen.accepted) { assert.equal(s.kind, 'staff'); assert.ok(!('mustChangePassword' in s)); }
+  const signedIn = await data.signIn('reception@dralirashid.com', 'a-long-enough-pass');
+  assert.ok(!('mustChangePassword' in signedIn));
+});
+
+test('a staff member who is also linked to a patient record is still staff: no forced screen', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.tables.patients = [patientRow]; // a bad link: a patient row points at this staff login
+  f.user = { data: { user: { id: 'u1', user_metadata: { must_change_password: true } } }, error: null };
+  const s = await data.getSession();
+  assert.equal(s.kind, 'staff');
+  assert.ok(!('mustChangePassword' in s));
+});
+
+test('"Unknown action" from a function that was not redeployed becomes "Update the admin-users function first." for all three patient login calls', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  const calls: Array<() => Promise<unknown>> = [
+    () => data.createPatientLogin('pat-1', 'sunny-grape-zebra-4827'),
+    () => data.resetPatientPassword('pat-1', 'sunny-grape-zebra-4827'),
+    () => data.portalLoginInfo('pat-1'),
+  ];
+  for (const call of calls) {
+    f.invokeAnswer = { data: { error: 'Unknown action' }, error: null }; // the function answered 200 with the error in the body
+    await assert.rejects(call, (e: any) => e.message === 'Update the admin-users function first.');
+    const refused = Object.assign(new Error('Edge Function returned a non-2xx status code'), { context: { json: async () => ({ error: 'Unknown action' }) } }); // or 400
+    f.invokeAnswer = { data: null, error: refused };
+    await assert.rejects(call, (e: any) => e.message === 'Update the admin-users function first.');
+  }
+  f.invokeAnswer = { data: { error: 'This patient already has a portal login.' }, error: null };
+  await assert.rejects(calls[0], /already has a portal login/, 'other messages are left as they are');
+});

@@ -603,11 +603,13 @@ export async function createSupabaseAdapter() {
     if (error) {
       let message = error.message;
       try { const sent = await error.context?.json?.(); if (sent?.error) message = sent.error; } catch { /* keep the generic text */ }
-      throw new Error(message);
+      throw new Error(oldFunction(message));
     }
-    if (data?.error) throw new Error(data.error);
+    if (data?.error) throw new Error(oldFunction(data.error));
     return data;
   }
+  /** A function that was not redeployed with the website does not know the new actions and answers "Unknown action": say what to do. */
+  const oldFunction = (message) => (/^unknown action$/i.test(String(message).trim()) ? 'Update the admin-users function first.' : message);
 
   async function duesFor(ids) {
     if (!ids.length) return {};
@@ -726,7 +728,9 @@ export async function createSupabaseAdapter() {
     async updatePassword(password) { check(await sb.auth.updateUser({ password })); },
     /**
      * The logged-in patient chooses their own password. Also clears the "must change" flag of a login the clinic made, so the
-     * portal opens from now on. (The flag is the patient's own to change: it asks for a new password, it is not a lock.)
+     * portal opens from now on. The flag lives in user_metadata, which the patient can edit: it is a prompt, not a lock. A patient
+     * who clears it without changing the password only weakens their own account (nothing else is protected by it), so it is
+     * deliberately not enforced anywhere on the server.
      */
     async changePassword(password) {
       check(await sb.auth.updateUser({ password, data: { must_change_password: false } }));

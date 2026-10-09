@@ -68,7 +68,12 @@ function renderChoosePassword(root, signOut) {
       // The password is saved; the flag is off on the server now. Nothing else to ask the network before opening the portal.
       state.session = { ...state.session, mustChangePassword: false };
       toast('Your password is saved.', 'ok');
-      try { await renderPortal(root, signOut); } catch (err) { console.error(err); toast(patientError(err), 'error'); }
+      // Opening the portal needs the network again. If that fails there is no router error page here (this screen was drawn by
+      // the portal itself), so a card says so, with a way to try again or to log out, instead of a "Loading…" that never ends.
+      const open = async () => {
+        try { await renderPortal(root, signOut); } catch (err) { renderLoadFailed(root, err, open, signOut); }
+      };
+      await open();
     },
   }, fields.body, problem, submit);
   mount(root, h('div', { class: 'login-wrap' },
@@ -78,6 +83,19 @@ function renderChoosePassword(root, signOut) {
       form,
       h('p', { style: { marginTop: '16px' } }, h('button', { type: 'button', class: 'link-btn', onclick: signOut }, 'Log out')))));
   fields.next.focus();
+}
+
+/** The portal could not be opened right after the new password was saved: what went wrong in plain words, Try again, and Log out. */
+function renderLoadFailed(root, err, retry, signOut) {
+  console.error(err);
+  mount(root, h('div', { class: 'login-wrap' },
+    h('main', { class: 'login-card' },
+      h('h1', { tabindex: '-1' }, 'We could not open your account'),
+      h('p', { role: 'alert' }, 'Your new password is saved. ', patientError(err)),
+      h('p', { class: 'inline' },
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: () => retry() }, 'Try again'),
+        h('button', { type: 'button', class: 'btn', onclick: signOut }, 'Log out')))));
+  root.querySelector('h1')?.focus();
 }
 
 function loading(root, text) {

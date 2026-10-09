@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import {
   portalNamePart, portalMrPart, portalUsername, portalLoginEmail, isPatientLoginName, normalizeLoginInput,
-  checkPortalPassword, generatePortalPassword, secureRandomInt, PASSWORD_WORDS, PASSWORD_DIGITS, NAME_PART_MAX, MR_PART_MAX,
+  checkPortalPassword, checkSlipPassword, generatePortalPassword, secureRandomInt, PASSWORD_WORDS, PASSWORD_DIGITS, NAME_PART_MAX, MR_PART_MAX, SLIP_PASSWORD_MIN, NO_USERNAME_MESSAGE,
 } from '../src/lib/portal-login.ts';
 
 const DOMAIN = 'dralirashid.com';
@@ -115,6 +115,13 @@ test('every username the builder can make is recognised as patient-shaped, and a
   }
 });
 
+test('a Mr# with no digit gives an address outside the patient shape, which is why create_patient_login (and the dialog) refuse it', () => {
+  assert.equal(portalLoginEmail('Ali Rashid', 'abc', DOMAIN), 'alirashid-abc@dralirashid.com');
+  assert.equal(isPatientLoginName(portalLoginEmail('Ali Rashid', 'abc', DOMAIN), DOMAIN), false);
+  assert.equal(isPatientLoginName(portalLoginEmail('Ali Rashid', 'a1', DOMAIN), DOMAIN), true);
+  assert.match(NO_USERNAME_MESSAGE, /Mr#/);
+});
+
 test('nothing in the database grants access by the address of a login: staff are the staff table, patients are portal_user_id', () => {
   const dir = new URL('../supabase/migrations/', import.meta.url);
   for (const file of readdirSync(dir).filter((f) => f.endsWith('.sql'))) {
@@ -154,7 +161,7 @@ test('login input: a typed username is read as the same login the builder made',
 });
 
 // ---------------------------------------------------------------- passwords
-test('password rules: 8 to 72 characters', () => {
+test('password rules (a patient\'s own password): 8 to 72 characters', () => {
   assert.equal(checkPortalPassword('1234567'), 'The password needs at least 8 characters.');
   assert.equal(checkPortalPassword('12345678'), null);
   assert.equal(checkPortalPassword('x'.repeat(72)), null);
@@ -162,12 +169,28 @@ test('password rules: 8 to 72 characters', () => {
   assert.equal(checkPortalPassword(undefined as unknown as string), 'The password needs at least 8 characters.');
 });
 
-test('generated passwords: two short words and four digits, and nothing that can be misread', () => {
+test('a first password staff type for a patient: at least 10 characters and not only digits (the edge function applies the same rule)', () => {
+  assert.equal(SLIP_PASSWORD_MIN, 10);
+  assert.equal(checkSlipPassword('abcdefghi'), 'The password needs at least 10 characters.');
+  assert.equal(checkSlipPassword('12345678'), 'The password needs at least 10 characters.');
+  assert.equal(checkSlipPassword(''), 'The password needs at least 10 characters.');
+  assert.equal(checkSlipPassword(undefined as unknown as string), 'The password needs at least 10 characters.');
+  assert.match(checkSlipPassword('1234567890') as string, /only digits/);
+  assert.match(checkSlipPassword('03001234567') as string, /only digits/);
+  assert.equal(checkSlipPassword('abcdefghij'), null);
+  assert.equal(checkSlipPassword('1234567890a'), null);
+  assert.equal(checkSlipPassword('sunny-grape-zebra-4827'), null);
+  assert.match(checkSlipPassword('x'.repeat(73)) as string, /at most 72/);
+  assert.equal(checkPortalPassword('12345678'), null, 'the patient\'s own later password keeps its 8 character rule');
+});
+
+test('generated passwords: three short words and four digits, and nothing that can be misread', () => {
   const seen = new Set<string>();
   for (let i = 0; i < 400; i += 1) {
     const pw = generatePortalPassword();
-    assert.match(pw, /^[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[2-9]{4}$/, pw);
+    assert.match(pw, /^[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[2-9]{4}$/, pw);
     assert.equal(checkPortalPassword(pw), null);
+    assert.equal(checkSlipPassword(pw), null, 'a generated password passes the stricter rule');
     seen.add(pw);
   }
   assert.ok(seen.size > 390, 'passwords differ from one another');
@@ -176,10 +199,18 @@ test('generated passwords: two short words and four digits, and nothing that can
   assert.doesNotMatch(PASSWORD_DIGITS, /[01]/);
 });
 
+test('generated passwords: at least 36 bits (three words from at least 256, four digits from 8), so an unused slip cannot be guessed online', () => {
+  assert.ok(PASSWORD_WORDS.length >= 256, `only ${PASSWORD_WORDS.length} words`);
+  const bits = 3 * Math.log2(PASSWORD_WORDS.length) + 4 * Math.log2(PASSWORD_DIGITS.length);
+  assert.ok(bits >= 36, `${bits.toFixed(1)} bits`);
+  const longest = Math.max(...Array.from({ length: 300 }, () => generatePortalPassword().length));
+  assert.ok(longest <= 5 * 3 + 3 + 4, 'still short enough to read out and type (at most 22 characters)');
+});
+
 test('generated passwords: the random source decides every pick (and an out-of-range source cannot break it)', () => {
-  assert.equal(generatePortalPassword(() => 0), `${PASSWORD_WORDS[0]}-${PASSWORD_WORDS[0]}-2222`);
+  assert.equal(generatePortalPassword(() => 0), `${PASSWORD_WORDS[0]}-${PASSWORD_WORDS[0]}-${PASSWORD_WORDS[0]}-2222`);
   const last = (n: number) => n - 1;
-  assert.equal(generatePortalPassword(last), `${PASSWORD_WORDS.at(-1)}-${PASSWORD_WORDS.at(-1)}-9999`);
+  assert.equal(generatePortalPassword(last), `${PASSWORD_WORDS.at(-1)}-${PASSWORD_WORDS.at(-1)}-${PASSWORD_WORDS.at(-1)}-9999`);
   for (let i = 0; i < 2000; i += 1) {
     const n = secureRandomInt(PASSWORD_WORDS.length);
     assert.ok(Number.isInteger(n) && n >= 0 && n < PASSWORD_WORDS.length);
@@ -194,7 +225,7 @@ test('the copies of portal-login.ts (browser and Edge Function) are the current 
   assert.match(copy.split('\n')[0], /^\/\/ COPY of src\/lib\/portal-login\.ts/);
   const browser = readFileSync(new URL('../web/js/lib/portal-login.js', import.meta.url), 'utf8');
   assert.match(browser.split('\n')[0], /^\/\/ GENERATED from src\/lib/);
-  for (const name of ['portalUsername', 'portalLoginEmail', 'normalizeLoginInput', 'generatePortalPassword', 'isPatientLoginName', 'checkPortalPassword']) {
+  for (const name of ['portalUsername', 'portalLoginEmail', 'normalizeLoginInput', 'generatePortalPassword', 'isPatientLoginName', 'checkPortalPassword', 'checkSlipPassword']) {
     assert.match(browser, new RegExp(`export function ${name}\\b`), `web/js/lib/portal-login.js lacks ${name}: run scripts/build-lib.sh`);
   }
 });
