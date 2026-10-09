@@ -441,11 +441,70 @@ await step('A user manager has no Branches button on their own row, and the data
     }, id);
     assert.match(await tryChange('s-coord'), /cannot change your own/);
     assert.match(await tryChange('s-admin'), /Only admin/);
+    // The same for the Role button: not on their own row nor an admin's, and the data layer refuses it as the database does.
+    const roleButtons = (name) => p7.locator('tr', { hasText: name }).getByRole('button', { name: /^Role,/ }).count();
+    assert.equal(await roleButtons('Clinic coordinator (sample)'), 0, 'no Role button on their own row');
+    assert.equal(await roleButtons('Dr. Ali Rashid'), 0, 'no Role button on the admin row');
+    assert.equal(await roleButtons('Front desk (Gulshan)'), 1, "Role button on other people's rows");
+    const tryRole = (id, role) => p7.evaluate(async ([who, to]) => {
+      const { state } = await import('/js/state.js');
+      try { await state.data.updateStaffRole(who, to); return 'saved'; } catch (e) { return e.message; }
+    }, [id, role]);
+    assert.match(await tryRole('s-coord', 'front_desk'), /cannot change your own/);
+    assert.match(await tryRole('s-admin', 'front_desk'), /Only admin can change an admin/);
+    assert.match(await tryRole('s-fd-gul', 'admin'), /Only admin can create or promote/);
+    assert.equal(await tryRole('s-fd-gul', 'assistant'), 'saved', 'a user manager may change someone else\'s role');
+    assert.equal(await tryRole('s-fd-gul', 'front_desk'), 'saved');
   } finally {
     // Pass or fail, the steps after this one need Dr. Ali signed in and the coordinator back to normal.
     if (await p7.getByRole('button', { name: 'Try another role' }).count()) await logOut();
     await loginAs(p7, 'Dr. Ali Rashid');
     await setManage(null);
+  }
+});
+await step('Dr. Ali changes the role of a staff member (front desk to assistant), the table follows, personal access stays', async () => {
+  await p7.goto(BASE + '#/staff/admin?tab=staff');
+  await p7.waitForSelector(`tr:has-text("${branchLogin}")`);
+  const row = p7.locator('tr', { hasText: branchLogin });
+  const roleCell = () => row.locator('td').nth(2);
+  const idOf = () => p7.evaluate(async (email) => { const { state } = await import('/js/state.js'); return (await state.data.staffList()).find((s) => s.email === email).id; }, branchLogin);
+  // The Role button sits next to Branches, on exactly the rows that have Branches (not the admin row, not your own).
+  assert.equal(await p7.getByRole('button', { name: /^Role,/ }).count(), await p7.getByRole('button', { name: /^Branches,/ }).count(), 'Role is shown wherever Branches is');
+  assert.equal(await p7.locator('tr', { hasText: 'Dr. Ali Rashid' }).getByRole('button', { name: /^Role,/ }).count(), 0, 'no Role button on the admin row');
+  const labels = await row.getByRole('button').allInnerTexts();
+  assert.equal(labels.indexOf('Role'), labels.indexOf('Branches') + 1, 'Role comes right after Branches');
+  assert.equal((await roleCell().textContent()).trim(), 'Front desk');
+  // A personal access tick set before the change must still be there after it.
+  const id = await idOf();
+  await p7.evaluate(async (who) => { const { state } = await import('/js/state.js'); await state.data.setOverride(who, 'billing.view', true); }, id);
+  try {
+    let m;
+    const openRole = async () => { await row.getByRole('button', { name: /^Role,/ }).click(); m = p7.locator('.modal'); return m.locator('select'); };
+    let sel = await openRole();
+    assert.deepEqual(await sel.locator('option').allInnerTexts(), ['Front desk', 'Assistant', 'Doctor', 'Clinic coordinator', 'Accountant'], 'the five working roles, never Admin');
+    assert.equal(await sel.inputValue(), 'front_desk', 'pre-selected with the current role');
+    assert.match(await m.innerText(), /Their menus and permissions change to the Front desk ones; personal access ticks stay/);
+    // Save with the current role changes nothing and says so.
+    await m.getByRole('button', { name: 'Save' }).click();
+    await p7.waitForSelector('.toast:has-text("Nothing changed")');
+    assert.ok(await m.isVisible(), 'the dialog stays open');
+    assert.equal((await roleCell().textContent()).trim(), 'Front desk');
+    await sel.selectOption('assistant');
+    assert.match(await m.innerText(), /Their menus and permissions change to the Assistant ones; personal access ticks stay/, 'the note names the chosen role');
+    await m.getByRole('button', { name: 'Save' }).click();
+    await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("Assistant")`);
+    await p7.waitForSelector('.toast:has-text("is now Assistant")');
+    assert.equal(await p7.locator('.modal').count(), 0, 'the dialog closes after saving');
+    const stays = await p7.evaluate(async (who) => { const { state } = await import('/js/state.js'); const g = await state.data.permissionGrid(); return g.overrides[who]?.['billing.view']; }, id);
+    assert.equal(stays, true, 'the personal access tick stayed through the role change');
+    // Reopened, the dialog is pre-selected from the saved role. Put the account back to front desk.
+    sel = await openRole();
+    assert.equal(await sel.inputValue(), 'assistant', 'pre-selected from the saved role');
+    await sel.selectOption('front_desk');
+    await m.getByRole('button', { name: 'Save' }).click();
+    await p7.waitForSelector(`tr:has-text("${branchLogin}") td:text-is("Front desk")`);
+  } finally {
+    await p7.evaluate(async (who) => { const { state } = await import('/js/state.js'); await state.data.setOverride(who, 'billing.view', null); }, id);
   }
 });
 await step('Admin → Audit log lists sign-ins', async () => {

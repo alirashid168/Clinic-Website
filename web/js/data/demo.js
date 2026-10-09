@@ -984,6 +984,21 @@ export function createDemoAdapter() {
       Object.assign(s, { branch_ids: ids, restrict_to_branches: ids.length > 0, home_branch_id: ids.length && !ids.includes(home) ? ids[0] : home });
       audit('staff', 'UPDATE', s);
     },
+    async updateStaffRole(id, role, fromRole) {
+      need('users.manage');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      // Same as the live adapter: only if the row still has the role the dialog showed; a doctor's braces group goes with the doctor role.
+      if (fromRole && s.role !== fromRole) fail('The role was not saved: it may have been changed meanwhile. Reload the page and try again.');
+      if (role !== 'doctor' && role !== 'admin') s.doctor_group_id = null;
+      if (!ROLES.includes(role)) fail(`invalid input value for enum staff_role: "${role}"`);
+      // The database trigger's rules: only an admin may create or promote an admin, change an admin account, or change their own role.
+      if (me().role !== 'admin' && role === 'admin') fail('Only admin can create or promote admin accounts');
+      if (me().role !== 'admin' && s.role === 'admin') fail('Only admin can change an admin account');
+      if (me().role !== 'admin' && s.id === me().id && role !== s.role) fail('You cannot change your own role, branches or active flag');
+      s.role = role;
+      audit('staff', 'UPDATE', s);
+    },
     async reactivateStaff(id) { need('users.manage'); db.staff.find((x) => x.id === id).active = true; },
     async setSetting(key, value) { if (me()?.role !== 'admin') fail('Only admin can change settings'); db.settings[key] = value; },
     async discountCaps() { return clone(db.discount_caps); },
