@@ -70,7 +70,7 @@ export function cellDate(v) {
   if (v === null || v === undefined || v === '') return null;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : iso(v.getFullYear(), v.getMonth() + 1, v.getDate());
   if (typeof v === 'number') {
-    if (v < 42000 || v > 80000) return null;                   // serials for 2015–2119 only; tokens and Mr# are far smaller
+    if (v < 42000 || v > 80000) return null;                   // serials for 2015–2119 only; tokens and Healthwire Mr# are far smaller; the website's Mr# (50000 up) are handled in readTab
     return new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000).toISOString().slice(0, 10);
   }
   let s = String(v).trim().toLowerCase().replace(/^(date|dated|day)\s*[:\-]?\s*/, '')
@@ -126,9 +126,13 @@ export function readTab(rows, opts = {}) {
       if (out.headerAt < 0) { out.headerAt = idx; out.headers = r.map((c) => text(c)); out.columns = cols; }
       return;
     }
-    // A day row: only a date on it (and maybe a word or two), no patient name.
+    // A day row: only a date on it (and maybe a word or two), no patient name. A number of 50000 or more in the Mr# column is a
+    // Mr#, not a date: the website's Mr# start at 50000, which is also an Excel date serial (24 Nov 2036), and a row with a Mr#
+    // typed but no name yet must not become a day row (every row after it would be dated 2036 and skipped as "future").
+    // Below 50000 it stays a date (real serials: 2015 to 2036), whatever else is on the row.
     if (cells.length <= 3) {
-      const d = cells.map(cellDate).find(Boolean);
+      const dateOf = (c, i) => (typeof c === 'number' && cols && i === cols.mr && c >= 50000 ? null : cellDate(c));
+      const d = r.map(dateOf).find(Boolean);
       const nameCell = cols && cols.name !== undefined ? text(r[cols.name]) : '';
       if (d && (!nameCell || cellDate(r[cols.name]) === d)) { currentDate = d; out.dateMode = out.dateMode === 'column' ? 'column' : 'rows'; return; }
     }

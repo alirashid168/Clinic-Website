@@ -10,7 +10,8 @@
 //     without the password;
 //   - a first password typed by staff has at least 10 characters and is not only digits (checked here, on the server);
 //   - the link to the patient is conditional, and a login made for a patient who was linked in the meantime is deleted again;
-//   - invite_patient refuses an address at the clinic domain;
+//   - invite_patient refuses an address at the clinic domain, or one that already has a login, links the patient only if the patient
+//     still has no login (and says so when it did not), and audits the address the invitation went to;
 //   - nothing here lets an address pass for a staff login (and create_staff / update_login refuse the patient shape).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -431,9 +432,46 @@ test('invite: a real email still gets the invitation, linked and audited as befo
   const [, sent] = admin.calls.find(([k]: [string]) => k === 'inviteUserByEmail');
   assert.deepEqual(sent, { email: 'ali@gmail.com', redirectTo: 'https://www.dralirashid.com/reset-password.html', data: { full_name: 'Ali Rashid', kind: 'patient' } });
   assert.equal(admin.tables.patients[0].portal_user_id, 'user-1');
-  assert.deepEqual(admin.tables.audit_log, [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_INVITE', actor: 'staff-1' }]);
+  assert.deepEqual(admin.tables.audit_log, [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_INVITE', actor: 'staff-1', new_data: { email: 'ali@gmail.com' } }]);
   // an invited login is never a clinic login: its password is reset by email
   assert.equal((await portalLoginInfo(deps(admin), { patient_id: 'pat-1' })).body.clinic_login, false);
+});
+
+test('invite: an address that already has a login (a pending invitation of another patient, say) is refused before anything is sent', async () => {
+  for (const existing of ['ali@gmail.com', 'ALI@Gmail.com']) {
+    const admin = fakeAdmin({ patients: [{ ...ali(), email: 'ali@gmail.com' }, { id: 'pat-2', full_name: 'Sara', mr_number: '1706', portal_user_id: 'user-x', email: existing }], users: [{ id: 'user-x', email: existing }] });
+    const res = await invitePatient({ ...deps(admin), siteUrl: 'https://www.dralirashid.com' }, { patient_id: 'pat-1' });
+    assert.deepEqual(res.body, { error: 'That email address already has a login. Nothing was sent.' }, existing);
+    assert.ok(!admin.calls.some(([k]: [string]) => k === 'inviteUserByEmail'), 'no invitation was sent');
+    assert.equal(admin.tables.patients[0].portal_user_id, null, 'the patient was not linked to the other login');
+    assert.equal(admin.tables.audit_log.length, 0);
+  }
+});
+
+test('invite: when the list of existing logins cannot be read, nothing is sent (never "no login")', async () => {
+  const admin = fakeAdmin({ patients: [{ ...ali(), email: 'ali@gmail.com' }] });
+  admin.auth.admin.listUsers = async () => ({ data: null, error: { message: 'down' } });
+  const res = await invitePatient({ ...deps(admin), siteUrl: 'https://www.dralirashid.com' }, { patient_id: 'pat-1' });
+  assert.deepEqual(res.body, { error: 'down' });
+  assert.ok(!admin.calls.some(([k]: [string]) => k === 'inviteUserByEmail'));
+  assert.equal(admin.tables.audit_log.length, 0);
+});
+
+test('invite: the link to the patient is conditional; when it does not happen nothing is audited and the staff member is told', async () => {
+  // another request linked the patient between the check and the link: their link stays
+  const raced = fakeAdmin({ patients: [{ ...ali(), email: 'ali@gmail.com' }] });
+  raced.beforeLink = () => { raced.tables.patients[0].portal_user_id = 'other-login'; };
+  const res = await invitePatient({ ...deps(raced), siteUrl: 'https://www.dralirashid.com' }, { patient_id: 'pat-1' });
+  assert.match(String(res.body.error), /could not be linked/);
+  assert.equal(raced.tables.patients[0].portal_user_id, 'other-login', 'the other link is kept');
+  assert.equal(raced.tables.audit_log.length, 0, 'no PORTAL_INVITE row for an invitation that is linked to nobody');
+  // the update itself fails
+  const broken = fakeAdmin({ patients: [{ ...ali(), email: 'ali@gmail.com' }] });
+  broken.failLink = true;
+  const res2 = await invitePatient({ ...deps(broken), siteUrl: 'https://www.dralirashid.com' }, { patient_id: 'pat-1' });
+  assert.match(String(res2.body.error), /could not be linked/);
+  assert.equal(broken.tables.audit_log.length, 0);
+  assert.equal(broken.tables.patients[0].portal_user_id, null);
 });
 
 test('invite: no permission, no email, an existing login and an unknown patient are refused as before', async () => {

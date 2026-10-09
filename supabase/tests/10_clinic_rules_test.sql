@@ -50,7 +50,8 @@ insert into public.staff (id, full_name, email, role, restrict_to_branches, bran
    array[(select id from public.branches where code = 'NN')], (select id from public.branches where code = 'NN'));
 update public.clinicians set staff_id = :admin where display_name = 'Dr. Ali Rashid';
 
--- Legacy patients from Healthwire keep their numbers.
+-- Legacy patients from Healthwire keep their numbers. The website's own numbers start at 50000, whatever Healthwire has reached
+-- (20261009000400: sync_mr_sequence() ignores everything below 50000).
 insert into public.patients (mr_number, full_name, phone, legacy_source, legacy_name)
 values ('9840', 'Shuhrad', '03001234567', 'healthwire', 'Shuhrad'),
        ('347-1', 'Shahzain Tariq', '03007654321', 'aaj_ki_list', 'Shahzain Tariq');
@@ -64,13 +65,13 @@ set role authenticated;
 
 insert into public.patients (full_name, phone, first_branch_id)
 values ('  Aiza   Azeem ', '0300-111 2222', (select id from public.branches where code = 'NN'));
-select pg_temp.check((select mr_number from public.patients where full_name = 'Aiza Azeem') = '9841',
-  'new patient gets next Mr# after highest legacy number (9841), name cleaned');
+select pg_temp.check((select mr_number from public.patients where full_name = 'Aiza Azeem') = '50000',
+  'new patient gets the first website Mr# (50000, not after the highest Healthwire number 9840), name cleaned');
 select pg_temp.check((select phone from public.patients where full_name = 'Aiza Azeem') = '03001112222',
   'phone number normalised');
 insert into public.patients (full_name, phone) values ('Maham Habib', '03002223333');
-select pg_temp.check((select mr_number from public.patients where full_name = 'Maham Habib') = '9842',
-  'second new patient gets 9842');
+select pg_temp.check((select mr_number from public.patients where full_name = 'Maham Habib') = '50001',
+  'second new patient gets 50001');
 select pg_temp.check((select count(*) from public.patients where mr_number = '347-1') = 1,
   'odd legacy Mr# 347-1 kept as is');
 select pg_temp.expect_error($$update public.patients set mr_number = '1' where full_name = 'Maham Habib'$$,
@@ -312,7 +313,7 @@ select pg_temp.check((select count(*) from public.patients) = 1, 'patient sees o
 select pg_temp.check((select count(*) from public.invoices) = 2 and
   (select bool_and(patient_id = public.current_patient_id()) from public.invoices), 'patient sees only own issued invoices');
 select pg_temp.check((select count(*) from public.photos) = 0, 'patient cannot see raw photos');
-select pg_temp.expect_error($$select public.patient_dues((select id from public.patients p where p.mr_number = '9842'))$$,
+select pg_temp.expect_error($$select public.patient_dues((select id from public.patients p where p.mr_number = '50001'))$$,
   'not allowed', 'patient cannot look up someone else''s dues (even by id)');
 insert into public.complaints (patient_id, subject, body)
 values (public.current_patient_id(), 'Waiting time', 'Waited 2 hours on Saturday');

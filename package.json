@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Dr. Ali Rashid's Dental Clinic: website, patient portal and clinic management system",
   "scripts": {
-    "test": "node --test src/lib/*.test.ts tests/*.test.ts && node tests/healthwire.test.mjs && node tests/aaj.test.mjs",
+    "test": "node --test src/lib/*.test.ts tests/*.test.ts && node tests/healthwire.test.mjs && node tests/aaj.test.mjs && node tests/mr-50000-migration.test.mjs",
     "test:db": "./supabase/tests/run_local.sh",
     "test:ui": "node tests/ui.spec.mjs http://localhost:8765/",
     "serve": "cd web && python3 -m http.server 8765",

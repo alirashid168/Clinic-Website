@@ -174,12 +174,19 @@ export async function invitePatient({ admin, can, caller, domain, siteUrl }: Act
   if (!patient.email) return refuse('Add the patient\'s email first.');
   const email = String(patient.email).trim().toLowerCase();
   if (email.endsWith('@' + String(domain).trim().toLowerCase())) return refuse('Use Create portal login for clinic usernames.');
+  // Inviting an address that already has a login (another patient's invitation nobody has confirmed yet, say) hands back THAT login.
+  let existing: any;
+  try { existing = await findLoginByEmail(admin, email); } catch (e) { return refuse((e as Error).message || 'The existing logins could not be checked.'); }
+  if (existing) return refuse('That email address already has a login. Nothing was sent.');
   const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
     redirectTo: siteUrl ? `${siteUrl}/reset-password.html` : undefined,
     data: { full_name: patient.full_name, kind: 'patient' },
   });
-  if (inviteErr) return refuse(inviteErr.message);
-  await admin.from('patients').update({ portal_user_id: invited.user.id }).eq('id', patient.id);
-  await admin.from('audit_log').insert({ table_name: 'patients', row_id: patient.id, action: 'PORTAL_INVITE', actor: caller });
+  if (inviteErr || !invited?.user) return refuse(inviteErr?.message || 'The invitation could not be sent.');
+  // Only link a patient who still has no login, and say so when the link did not happen (the invited login is left alone: it may not be ours).
+  const { data: linked, error: linkErr } = await admin.from('patients').update({ portal_user_id: invited.user.id }).eq('id', patient.id).is('portal_user_id', null).select('id').maybeSingle();
+  if (linkErr || !linked) return refuse('The invitation could not be linked to this patient. Reload the page to see whether they have a login now, or ask Dr. Ali.');
+  // The address is audited: front desk can edit a patient's email, so the log must say where the invitation went.
+  await admin.from('audit_log').insert({ table_name: 'patients', row_id: patient.id, action: 'PORTAL_INVITE', actor: caller, new_data: { email } });
   return ok({});
 }

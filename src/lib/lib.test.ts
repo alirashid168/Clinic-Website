@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { guidance, canTreat, canCheck, protocolFor, parseMonthCell, BRACES_PROTOCOL } from './protocol.ts';
 import { parseAmount, cleanLegacyName, parseTreatmentDetails, summariseDetails, matchClinician, splitPeople } from './legacy.ts';
-import { defaultGrid, hasPermission, discountNeedsApproval, PERMISSIONS } from './permissions.ts';
+import { defaultGrid, hasPermission, discountNeedsApproval, PERMISSIONS, type Role } from './permissions.ts';
 import { AutosaveQueue, PermanentSaveError, clearForUser, type PendingEdit, type SaveState } from './autosave.ts';
 
 // ---------------------------------------------------------------- protocol
@@ -141,6 +141,9 @@ test('permission grid defaults', () => {
   assert.equal(hasPermission('coordinator', 'complaints.view', grid), true);
   assert.equal(hasPermission('front_desk', 'complaints.view', grid), false);
   assert.equal(hasPermission('admin', 'anything.at.all', grid), true);
+  // Owner decision, 9 Oct 2026: front desk, coordinator and admin may create and reset patient portal logins (same as the database grid).
+  const mayMakeLogins = ['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'portal.invite', grid));
+  assert.deepEqual(mayMakeLogins, ['front_desk', 'coordinator', 'admin']);
   assert.equal(hasPermission(null, 'patients.view', grid), false);
   assert.equal(new Set(PERMISSIONS.map((p) => p.key)).size, PERMISSIONS.length, 'no duplicate keys');
 });

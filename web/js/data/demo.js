@@ -130,7 +130,7 @@ function seed() {
     photo_consent_public: i % 4 === 0, created_at: daysAgo(400 - i * 10), notes: null, portal_user_id: null,
   }));
   db.patients[0].portal_user_id = 'p-demo';
-  db.mr_next = 9841;
+  db.mr_next = 50000; // the website gives its own numbers from 50000; Healthwire (the demo patients above) keeps counting in the 9800s
 
   // Braces cases with history
   db.braces_cases = [];

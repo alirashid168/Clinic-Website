@@ -121,4 +121,35 @@ test('rows for import: people matched through aliases, tokens not repeated, toda
   assert.deepEqual(twos.map((r) => r[0]), ['2025-10-06', '2025-10-07'], 'one patient\'s rows sit together, in date order');
 });
 
+// The website's own Mr# start at 50000, which is also an Excel date serial (24 Nov 2036). A Mr# typed on a row whose name is not filled
+// in yet must not turn that row into a day row, or every row after it would be dated 2036 and skipped as "future".
+const MINI = ['Mr #', 'Patient Name', 'Treatment', "Doctor's Name", 'Token No'];
+test('a website Mr# (50000 and up) on a row without a name is not read as a day, so the rows after it keep their day', () => {
+  const rows = [MINI, ['08/10/2026'], [9846, 'Hw Patient', 'Checkup', '', 1], [50003, '', '', '', 2], [50003], [50001, 'Web Patient A', 'Scaling', '', 3], [9850, 'Hw Patient B', 'Filling', '', 4]];
+  const t = readTab(rows);
+  assert.deepEqual(t.rows.map((r) => [r.mr, r.date]), [['9846', '2026-10-08'], ['50001', '2026-10-08'], ['9850', '2026-10-08']]);
+  assert.deepEqual(t.days, ['2026-10-08']);
+  assert.equal(t.issues.length, 0);
+  const { rows: imp, summary } = buildImport([{ name: 'Gulshan', branchId: 1, read: t }], [], [], '2026-10-09');
+  assert.equal(imp.length, 3);
+  assert.equal(summary.future, 0, 'nothing is dated 2036 and skipped');
+  assert.equal(summary.to, '2026-10-08');
+});
+
+test('a day row that holds only a date serial still works after the header, in the Mr# column or in the name column', () => {
+  const rows = [MINI, [serial('2026-10-07')], [9846, 'Hw Patient', 'Checkup', '', 1], ['', serial('2026-10-08')], [50001, 'Web Patient A', 'Scaling', '', 2]];
+  const t = readTab(rows);
+  assert.deepEqual(t.rows.map((r) => [r.mr, r.date]), [['9846', '2026-10-07'], ['50001', '2026-10-08']]);
+  assert.deepEqual(t.days, ['2026-10-07', '2026-10-08']);
+});
+
+// A day row may carry a word or two next to the date; a date serial in the Mr# column is still a date then (only 50000 and up is a Mr#).
+test('a day row with a date serial in the Mr# column and a word in another column is still a day row', () => {
+  const rows = [MINI, [serial('2026-10-06')], [9846, 'Hw Patient', 'Checkup', '', 1], [serial('2026-10-07'), '', '', 'Tuesday'], [9850, 'Hw Patient B', 'Filling', '', 2],
+    ['Date', serial('2026-10-08')], [9851, 'Hw Patient C', 'Filling', '', 3], [serial('2026-10-09'), '', 'Date'], [9852, 'Hw Patient D', 'Filling', '', 4]];
+  const t = readTab(rows);
+  assert.deepEqual(t.rows.map((r) => [r.mr, r.date]), [['9846', '2026-10-06'], ['9850', '2026-10-07'], ['9851', '2026-10-08'], ['9852', '2026-10-09']]);
+  assert.deepEqual(t.days, ['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09']);
+});
+
 console.log(`${passed} passed`);
