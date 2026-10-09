@@ -20,7 +20,7 @@ const HOME_DESC = descMeta?.getAttribute('content') || '';
 const CLINICS_DESC = "Clinic locations, opening hours and Dr. Ali Rashid's days at each clinic in Karachi, Lahore and Islamabad.";
 
 const STAFF_TITLES = {
-  today: 'Today', sheet: 'Aaj ki List', queue: 'Queue board', patients: 'Patients', patient: 'Patient record',
+  today: 'Today', sheet: 'Aaj ki List', queue: 'Queue board', checkups: 'Checkups', patients: 'Patients', patient: 'Patient record',
   billing: 'Billing', accounts: 'Accounts', reports: 'Reports', coordinator: 'Coordinator', stock: 'Stock',
   complaints: 'Complaints', review: "Dr. Ali's list", log: 'Doctor log', admin: 'Admin',
 };

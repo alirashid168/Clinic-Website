@@ -8,9 +8,17 @@ import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
+import { dayListCheckups } from '../../lib/checkups.js';
+import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
-const FIELD_NAMES = { treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes' };
+const FIELD_NAMES = {
+  treatment_label: 'Treatment', details_text: 'Treatment details', notes: 'Notes',
+  // checkup patients (the rows without an Mr#)
+  patient_name: 'Name', phone: 'Phone', checkup_for: 'Treatment', doctors: "Doctor's name", details: 'Treatment details', token: 'Token',
+};
+// What a checkup patient's day status can be (the database has no "Scheduled" for them), plus "Not set" for a row that has none.
+const DAY_STATUSES = ['waiting', 'in_treatment', 'completed', 'cancelled', 'no_show'];
 
 // Whether a request's answer was lost (the connection dropped, it timed out, or a gateway gave up) is decided by
 // isLostAnswer() in ui/dom.js, the one test shared with invoice.js and friendlyError(); there is no list to keep in
@@ -25,6 +33,13 @@ const notSaved = (e, still) => {
   if (isLostAnswer(e)) return 'The server did not answer, so this may not have been saved. Reload the page to check, then try again.';
   return friendlyError(e);
 };
+
+// Checkup rows go after the visit rows: by branch (all-branches view), then by the token written on the sheet when it is
+// a number, then by when they were added.
+const tokenNo = (c) => (/^\d+$/.test(String(c.token ?? '').trim()) ? Number(c.token) : Infinity);
+const byToken = (a, b) => (a.branch_id ?? 0) - (b.branch_id ?? 0)
+  || (tokenNo(a) === tokenNo(b) ? 0 : tokenNo(a) < tokenNo(b) ? -1 : 1)
+  || String(a.created_at || '').localeCompare(String(b.created_at || ''));
 
 // ---------------------------------------------------------------- offline queue
 // One queue per signed-in staff member: autosave.js stores their typed edits under a key that
@@ -75,7 +90,10 @@ function getQueue() {
       // Signed out, or someone else signed in: stop, keep the edit for its owner and send nothing.
       if (currentUser() !== uid) { q.dispose(); throw new Error('Signed out: the change is kept on this device.'); }
       try {
-        await state.data.updateVisit(edit.rowId, edit.changes);
+        if (edit.table === 'checkups') {
+          // null = the checkup was removed meanwhile (or is not visible any more): nothing is left to save, the list is refreshed.
+          if ((await state.data.updateCheckup(edit.rowId, edit.changes)) === null) document.dispatchEvent(new CustomEvent('sheet-reload'));
+        } else await state.data.updateVisit(edit.rowId, edit.changes);
       } catch (e) {
         // Lost connection or no answer: the queue retries quietly (with backoff, and gives up after a few tries).
         // Anything else is the server's "no".
@@ -115,6 +133,10 @@ export async function renderSheet(root, params, signal) {
   let branchId = Number(params.get('branch')) || defaultBranchId();
   let date = params.get('date') || localISO();
   let rows = [];
+  let checkups = []; // the day's checkup patients (no Mr#); see lib/checkups.js dayListCheckups for which of them are shown
+  let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Checkup patient"
+  let checkupsWarn = ''; // why the checkups could not be loaded (the visits still show)
+  let checkupsKey = ''; // branch and day the `checkups` above belong to
   let filter = '';
 
   const tableBody = h('tbody', {});
@@ -140,7 +162,7 @@ export async function renderSheet(root, params, signal) {
     }
   }
   const ui = {
-    nameOf: (id) => rows.find((r) => String(r.id) === String(id))?.patient.full_name,
+    nameOf: (id) => rows.find((r) => String(r.id) === String(id))?.patient.full_name || checkups.find((c) => String(c.id) === String(id))?.patient_name,
     update(s, pending, failed) {
       saveStatus.dataset.state = s;
       saveStatus.classList.toggle('is-error', s === 'error');
@@ -218,25 +240,61 @@ export async function renderSheet(root, params, signal) {
     && (!groupFilter || String(r.doctor_group_id || '') === groupFilter || r.staff.some((x) => String(groupOf(x.clinician_id) || '') === groupFilter))
     && (!duesOnly || r.dues > 0) && (!bracesOnly || !!r.braces_month)
     && (!textFilter || `${r.patient.full_name} ${r.patient.mr_number} ${r.patient.phone || ''} ${r.treatment_label || ''}`.toLowerCase().includes(textFilter));
+  // The same filters for the checkup rows: the status filter means the day status, the doctor filter looks for the name in
+  // the doctors written on the row, and the filters that need a patient file (group, dues, braces) hide them.
+  const checkupMatches = (c) => {
+    const doctor = doctorFilter ? (state.ref.clinicians.find((x) => x.id === doctorFilter)?.display_name || '').toLowerCase() : '';
+    return (!filter || (c.day_status || '') === filter)
+      && (!doctorFilter || (!!doctor && String(c.doctors || '').toLowerCase().includes(doctor)))
+      && !groupFilter && !duesOnly && !bracesOnly
+      && (!textFilter || `${c.patient_name} ${c.phone || ''} ${c.checkup_for || ''} checkup`.toLowerCase().includes(textFilter));
+  };
+  const shownCheckups = () => dayListCheckups(checkups, rows).filter(checkupMatches).sort(byToken);
   const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}`);
+
+  // The checkup patients of the day. They never hide the visits: a failure (other than "not switched on yet") shows a small
+  // warning and the visits carry on. When it fails, the checkups already on screen stay if they are for this same list.
+  async function loadCheckups() {
+    const key = `${branchId}|${date}`;
+    if (!d.listDayCheckups) { checkupsMissing = true; checkupsWarn = ''; return []; }
+    try {
+      const list = await d.listDayCheckups({ branchId: branchId || null, date });
+      checkupsMissing = !!list.missing;
+      checkupsWarn = '';
+      checkupsKey = key;
+      return list;
+    } catch (e) {
+      checkupsWarn = friendlyError(e);
+      return key === checkupsKey ? checkups : [];
+    }
+  }
 
   async function load() {
     try {
-      rows = await d.listVisits({ branchId: branchId || null, date });
+      const [visitRows, checkupRows] = await Promise.all([d.listVisits({ branchId: branchId || null, date }), loadCheckups()]);
+      rows = visitRows;
+      checkups = checkupRows;
       if (!branchId) rows.sort((a, b) => a.branch_id - b.branch_id || (a.token_no ?? 999) - (b.token_no ?? 999));
       draw();
     } catch (e) { toast(friendlyError(e), 'error'); }
   }
 
-  // The day's list as a spreadsheet file (for the clinic cloud or printing).
+  // The day's list as a spreadsheet file (for the clinic cloud or printing). Checkup patients are added after the
+  // patients, marked in the "type" column (all of the day's checkups, whatever the filters on screen: the patient rows are unfiltered too).
   function download() {
     const name = (branchId ? branchName(branchId) : 'all-branches').replace(/\W+/g, '-');
-    downloadCSV(`aaj-ki-list_${name}_${date}.csv`, rows.map((r) => ({
+    const patientRows = rows.map((r) => ({
       token: r.token_no ?? '', patient: r.patient.full_name, mr_number: r.patient.mr_number, branch: branchName(r.branch_id),
       braces_month: r.braces_month ?? '', treatment: r.treatment_label || '', status: STATUS_LABELS[r.status],
       doctors: r.staff.map((x) => (x.role === 'checker' ? '✓ ' : '') + x.name).join(', '), details: r.details_text || '',
-      dues: can('dues.view') ? r.dues : '', notes: r.notes || '', phone: r.patient.phone || '',
-    })));
+      dues: can('dues.view') ? r.dues : '', notes: r.notes || '', phone: r.patient.phone || '', type: 'Patient',
+    }));
+    const checkupRows = dayListCheckups(checkups, rows).sort(byToken).map((c) => ({
+      token: c.token || '', patient: c.patient_name, mr_number: '', branch: branchName(c.branch_id),
+      braces_month: '', treatment: c.checkup_for || '', status: c.day_status ? STATUS_LABELS[c.day_status] : '',
+      doctors: c.doctors || '', details: c.details || '', dues: '', notes: c.notes || '', phone: c.phone || '', type: 'Checkup',
+    }));
+    downloadCSV(`aaj-ki-list_${name}_${date}.csv`, [...patientRows, ...checkupRows]);
   }
 
   // ---------------------------------------------------------------- cells
@@ -246,6 +304,56 @@ export async function renderSheet(root, params, signal) {
   function save(row, fieldName, value) {
     row[fieldName] = value;
     q.edit('visits', row.id, fieldName, value);
+  }
+
+  // ---- checkup patients (rows without an Mr#). Typed cells go through the same queue as the visits.
+  function saveCheckup(c, fieldName, value) {
+    c[fieldName] = value;
+    q.edit('checkups', c.id, fieldName, typeof value === 'string' && value.trim() === '' ? null : value);
+  }
+
+  async function changeCheckupStatus(c, value, ctl) {
+    const before = c.day_status || '';
+    const who = c.patient_name;
+    try {
+      if ((await d.updateCheckup(c.id, { day_status: value || null })) === null) { toast(`${who} is no longer on the list.`, 'error'); load(); return; }
+      c.day_status = value || null;
+      redrawRow(c, checkupRowEl);
+      announce(`Saved: ${who} is ${STATUS_LABELS[c.day_status] || 'not set'}.`);
+    } catch (e) {
+      ctl.set(before);
+      toast(notSaved(e, `${who} is still "${STATUS_LABELS[before] || 'Not set'}".`), 'error', 10000);
+    }
+  }
+
+  // The dialog behind "Options" on a checkup row: follow-up status, patient file, the checkup list, remove.
+  function checkupOptions(c) {
+    const who = c.patient_name;
+    const mr = registeredMr(c);
+    let dialog = null;
+    const follow = followUpSelect(c, async (value, ctl, previous) => {
+      try {
+        if ((await d.updateCheckup(c.id, { follow_up: value })) === null) { toast(`${who} is no longer on the list.`, 'error'); load(); return; }
+        c.follow_up = value;
+        announce(`Saved: ${who} is "${value}".`);
+      } catch (e) { ctl.set(previous); toast(notSaved(e, `${who} is still "${previous}".`), 'error', 8000); }
+    }, { disabled: !canEdit });
+    const digits = String(c.phone || '').replace(/\D/g, '');
+    const inCheckupList = `#/staff/checkups?q=${encodeURIComponent(digits.length >= 4 ? digits : who)}`;
+    const actions = [
+      c.patient_id
+        ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
+        : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
+      h('a', { class: 'btn', href: inCheckupList }, 'Open in the checkup list'),
+      canRemoveCheckup(c) ? h('button', { type: 'button', class: 'btn btn-danger', onclick: () => { dialog?.close(); removeCheckupModal(c, { onDone: () => { checkups = checkups.filter((x) => x.id !== c.id); draw(); } }); } }, 'Remove from the list') : null,
+    ];
+    dialog = modal(`${who} · Checkup patient`, h('div', {},
+      h('p', { class: 'muted' }, c.patient_id ? 'Has a patient file now.' : 'No Mr# yet. A checkup patient gets a patient file when they start treatment.'),
+      h('div', { class: 'form-grid' },
+        h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Name'), h('div', {}, who)),
+        h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Phone'), h('div', {}, c.phone || '–')),
+        field('Follow-up status', follow)),
+      h('div', { class: 'inline', style: { marginTop: '10px' } }, actions)), [{ label: 'Done', primary: true }]);
   }
 
   async function changeStatus(row, value, ctl) {
@@ -443,6 +551,60 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, h('div', { class: 'cell muted nowrap' }, row.patient.phone)));
   }
 
+  // A checkup patient: the same columns as a visit row (so the arrow keys keep working), but no Mr#, no braces month,
+  // no doctor chips, no dues. Every cell saves through the queue or, for the status, at once.
+  function checkupRowEl(c) {
+    const who = c.patient_name;
+    const mr = registeredMr(c);
+    const nameIn = h('input', {
+      class: 'cell-input', value: who, disabled: !canEdit, maxlength: 200, autocomplete: 'off', 'aria-label': `Name of checkup patient ${who}`,
+      dataset: { focus: 'name', field: 'patient_name' },
+      onchange: (e) => {
+        const v = e.target.value.trim().replace(/\s+/g, ' ');
+        if (!v) { e.target.value = c.patient_name; toast('A checkup patient needs a name. The old name is back.', 'error'); return; }
+        if (v === c.patient_name) return;
+        e.target.value = v;
+        e.target.setAttribute('aria-label', `Name of checkup patient ${v}`);
+        saveCheckup(c, 'patient_name', v);
+      },
+    });
+    // The token of a checkup is free text: the sheet's checkups keep the number written there, a website checkup has none until
+    // someone types one (patients get their number from the list, so two people could otherwise be called with the same number).
+    const tokenIn = h('input', {
+      class: 'token-input', value: c.token || '', disabled: !canEdit, maxlength: 40, autocomplete: 'off', placeholder: '\u2013', 'aria-label': `Token of checkup patient ${who}`,
+      dataset: { focus: 'token', field: 'token' },
+      onchange: (e) => { const v = e.target.value.trim(); e.target.value = v; if (v !== (c.token || '')) saveCheckup(c, 'token', v); },
+    });
+    const hint = c.patient_id
+      ? (mr ? h('a', { class: 'mr', href: `#/staff/patient/${c.patient_id}` }, `Mr# ${mr}`) : h('span', {}, 'Has a patient file'))
+      : h('span', {}, 'Checkup · no Mr#');
+    const status = h('select', {
+      class: `status-chip status-${c.day_status || 'unset'}`, 'aria-label': `Status for ${who}`, 'aria-describedby': canEdit ? 'sheet-status-hint' : null,
+      disabled: !canEdit, dataset: { focus: 'status' },
+    }, (c.day_status ? DAY_STATUSES : ['', ...DAY_STATUSES]).map((value) => h('option', { value, selected: value === (c.day_status || '') }, value ? STATUS_LABELS[value] : 'Not set')));
+    const ctl = commitOnFinish(status, (value) => changeCheckupStatus(c, value, ctl), (value) => { status.className = `status-chip status-${value || 'unset'}`; });
+    const text = (fieldName, label, props = {}) => h('input', {
+      class: 'cell-input', value: c[fieldName] || '', disabled: !canEdit, 'aria-label': `${label} for ${who}`, autocomplete: 'off',
+      dataset: { focus: fieldName, field: fieldName }, oninput: (e) => saveCheckup(c, fieldName, e.target.value), ...props,
+    });
+    return h('tr', { class: 'is-checkup', dataset: { id: c.id, kind: 'checkup' } },
+      !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(c.branch_id))) : null,
+      h('th', { scope: 'row', class: 'frozen row-head' }, h('div', { class: 'cell' },
+        tokenIn,
+        h('div', { class: 'checkup-name' }, nameIn, h('div', { class: 'muted field-hint' }, hint)))),
+      h('td', {}, h('div', { class: 'cell row-flags' },
+        h('span', { class: 'badge badge-checkup' }, 'Checkup'),
+        h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, dataset: { focus: 'options' }, onclick: () => checkupOptions(c) }, 'Options'))),
+      h('td', {}, h('div', { class: 'cell' }, h('span', { class: 'muted' }, h('span', { 'aria-hidden': 'true' }, '–'), srOnly('Not braces')))),
+      h('td', { style: { minWidth: '150px' } }, text('checkup_for', 'Treatment', { list: 'sheet-treatments' })),
+      h('td', {}, h('div', { class: 'cell' }, status)),
+      h('td', { style: { minWidth: '250px' } }, text('doctors', "Doctor's name", { list: 'sheet-doctors' })),
+      h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
+      h('td', { class: 'right' }, h('div', { class: 'cell' }, '')),
+      h('td', { style: { minWidth: '160px' } }, text('notes', 'Notes')),
+      h('td', {}, text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null })));
+  }
+
   // Redraws replace rows, so remember the focused control (row id + data-focus key + caret) and
   // put focus back on the same control in the new row, or on "+ add" when a removed chip had it.
   function rememberFocus() {
@@ -456,17 +618,17 @@ export async function renderSheet(root, params, signal) {
     const tr = saved && [...tableBody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === saved.rowId);
     if (!tr) return;
     const target = (saved.key && [...tr.querySelectorAll('[data-focus]')].find((el) => el.dataset.focus === saved.key))
-      || tr.querySelector('[data-focus="add-person"]') || tr.querySelector('[data-focus="patient"]');
+      || tr.querySelector('[data-focus="add-person"]') || tr.querySelector('[data-focus="patient"]') || tr.querySelector('[data-focus="name"]');
     target?.focus({ preventScroll: true });
     if (saved.caret && target?.setSelectionRange) { try { target.setSelectionRange(saved.caret[0], saved.caret[1]); } catch { /* not a text field */ } }
   }
 
-  // Replace one row after a save.
-  function redrawRow(row) {
+  // Replace one row after a save (make = rowEl for a visit, checkupRowEl for a checkup patient).
+  function redrawRow(row, make = rowEl) {
     const old = tableBody.querySelector(`tr[data-id="${row.id}"]`);
     if (old) {
       const saved = old.contains(document.activeElement) ? rememberFocus() : null;
-      old.replaceWith(rowEl(row));
+      old.replaceWith(make(row));
       restoreFocus(saved);
     }
     drawCounts();
@@ -475,15 +637,23 @@ export async function renderSheet(root, params, signal) {
 
   function drawCounts() {
     const by = (s) => rows.filter((r) => r.status === s).length;
-    counts.textContent = `${rows.length} patients · ${by('waiting')} waiting · ${by('in_treatment')} in treatment · ${by('completed')} completed`;
+    const people = checkupsMissing ? '' : ` · ${shownCheckups().length} checkups`;
+    counts.textContent = `${rows.length} patients · ${by('waiting')} waiting · ${by('in_treatment')} in treatment · ${by('completed')} completed${people}`;
   }
 
   function draw() {
     const shown = rows.filter(matches);
+    const shownChecks = shownCheckups();
     branchHead.hidden = !!branchId;
     addPanel.hidden = !branchId || !search;
+    // "+ Checkup patient" only where checkups exist (the database update has been run) and for today or an earlier day.
+    checkupBtn.hidden = checkupsMissing || date > localISO() || !can('sheet.edit');
+    addHint.textContent = checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
+    warnBox.hidden = !checkupsWarn;
+    warnBox.textContent = checkupsWarn ? `Checkup patients could not be loaded: ${checkupsWarn}` : '';
     const saved = rememberFocus();
-    mount(tableBody, shown.length ? shown.map(rowEl) : h('tr', {}, h('td', { colspan: 11 }, h('div', { class: 'empty' }, branchId ? `No patients on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients on any list for this day.'))));
+    mount(tableBody, shown.length || shownChecks.length ? [...shown.map(rowEl), ...shownChecks.map(checkupRowEl)]
+      : h('tr', {}, h('td', { colspan: 11 }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients or checkups on any list for this day.'))));
     restoreFocus(saved);
     drawCounts();
     markInvalid();
@@ -492,7 +662,7 @@ export async function renderSheet(root, params, signal) {
   // Arrow keys / Enter move between cells like a spreadsheet.
   function onKey(e) {
     if (!['ArrowUp', 'ArrowDown', 'Enter'].includes(e.key) || !e.target.classList.contains('cell-input')) return;
-    const td = e.target.closest('td');
+    const td = e.target.closest('td, th'); // (the name of a checkup patient sits in the row header)
     const tr = td.parentElement;
     const col = [...tr.children].indexOf(td);
     const target = e.key === 'ArrowUp' ? tr.previousElementSibling : tr.nextElementSibling;
@@ -500,10 +670,11 @@ export async function renderSheet(root, params, signal) {
     if (next) { e.preventDefault(); next.focus(); next.select?.(); }
   }
 
-  async function addPatient(p) {
+  // (treatment: what a person who was a checkup patient came for, when they are put on the list as a patient)
+  async function addPatient(p, treatment) {
     try {
       const braces = !!p.braces_active;
-      const row = await d.addVisit({ patient_id: p.id, branch_id: branchId, visit_date: date, treatment_label: braces ? 'Monthly' : 'Checkup', braces, status: date === localISO() ? 'waiting' : 'scheduled' });
+      const row = await d.addVisit({ patient_id: p.id, branch_id: branchId, visit_date: date, treatment_label: braces ? 'Monthly' : (treatment || 'Checkup'), braces, status: date === localISO() ? 'waiting' : 'scheduled' });
       rows.push(row);
       draw();
       toast(`${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
@@ -519,22 +690,41 @@ export async function renderSheet(root, params, signal) {
   }) : null;
 
   const branchHead = h('th', { scope: 'col', hidden: true }, 'Branch');
+  // A person who only comes for a checkup gets no Mr#: "+ Checkup patient" puts them on this list (and on the Checkups page).
+  // A patient who starts treatment and is new gets an Mr# with "+ New walk-in".
+  const ADD_HINT_PLAIN = 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.';
+  const ADD_HINT_CHECKUP = 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Checkup patient" (no Mr#).';
+  const addHint = h('span', { class: 'muted' }, ADD_HINT_PLAIN);
+  const checkupBtn = h('button', { class: 'btn', type: 'button', hidden: true, 'aria-haspopup': 'dialog', onclick: async () => {
+    const res = await checkupFormModal({ branchId, date, fixedDay: true });
+    if (!res) return;
+    if (res.patient) { addPatient(res.patient); return; } // the person already has a patient file: put that file on the list instead
+    checkups = [...checkups, res];
+    draw();
+    toast(`${res.patient_name} added as a checkup patient.`, 'ok');
+  } }, '+ Checkup patient');
   const addPanel = search ? h('div', { class: 'add-panel' },
     h('div', { class: 'add-panel-text' },
       h('strong', {}, 'Add a patient to this list'),
-      h('span', { class: 'muted' }, 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.')),
+      addHint),
     search,
-    can('patients.create') ? h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => { const p = await newPatientModal('', branchId); if (p) addPatient(p); } }, '+ New walk-in') : null) : h('div', { hidden: true });
+    can('patients.create') ? h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => { const p = await newPatientModal('', branchId); if (p) addPatient(p); } }, '+ New walk-in') : null,
+    checkupBtn) : h('div', { hidden: true });
+  const warnBox = h('div', { class: 'alert alert-warning', role: 'status', hidden: true });
   document.addEventListener('sheet-reload', () => load(), { signal: life.signal });
   const userIsBusy = () => q.pendingCount || tableBody.contains(document.activeElement) || document.querySelector('.modal');
   // Live: reload the moment anyone changes this branch's list (unless this person is typing,
   // or the tab is hidden; then the next check, or coming back to the tab, picks it up).
   let liveTimer = null;
   let stopLive = null;
+  let stopLiveCheckups = null; // the Google Sheet sync (and other staff) add and change checkup rows too
   const onLive = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!document.hidden && !userIsBusy()) load(); }, 300); };
-  const listen = () => { stopLive?.(); stopLive = d.subscribeVisits ? d.subscribeVisits(branchId || null, onLive) : null; };
+  const listen = () => {
+    stopLive?.(); stopLiveCheckups?.();
+    stopLive = d.subscribeVisits ? d.subscribeVisits(branchId || null, onLive) : null;
+    stopLiveCheckups = d.subscribeCheckups && !checkupsMissing ? d.subscribeCheckups(branchId || null, onLive) : null;
+  };
   branchSel.addEventListener('change', listen);
-  listen();
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !userIsBusy()) load(); }, { signal: life.signal });
   // Safety net: also check every 20 seconds while the tab is visible and nobody is typing.
   const poll = setInterval(() => {
@@ -548,6 +738,8 @@ export async function renderSheet(root, params, signal) {
     clearTimeout(undoTimer);
     stopLive?.();
     stopLive = null;
+    stopLiveCheckups?.();
+    stopLiveCheckups = null;
     if (saveUI === ui) saveUI = null;
     if (stopPrevious === stop) stopPrevious = null;
   }
@@ -562,6 +754,7 @@ export async function renderSheet(root, params, signal) {
       saveStatus),
     failBox,
     undoBox,
+    warnBox,
     statusHint,
     h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel, doctorSel, groupSel, findBox,
       h('label', { class: 'inline', style: { gap: '4px' } }, duesBox, 'With dues'), h('label', { class: 'inline', style: { gap: '4px' } }, bracesBox, 'Braces only'),
@@ -570,6 +763,7 @@ export async function renderSheet(root, params, signal) {
       can('export.data') || can('finance.view') ? h('button', { class: 'btn', onclick: download }, 'Download') : null),
     addPanel,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
+    h('datalist', { id: 'sheet-doctors' }, state.ref.clinicians.filter((c) => c.is_doctor).map((c) => h('option', { value: c.display_name }))),
     h('div', { class: 'sheet-wrap', onkeydown: onKey },
       h('table', { class: 'sheet' },
         h('thead', {}, h('tr', {},
@@ -580,6 +774,7 @@ export async function renderSheet(root, params, signal) {
         tableBody)));
 
   await load();
+  if (!signal?.aborted) listen(); // after the first load, which tells whether checkups exist at all
   q.setOnline(navigator.onLine);
   $$('.cell-input', root)[0]?.blur();
 }

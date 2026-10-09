@@ -15,6 +15,8 @@ const openChangePassword = lazy(passwordDialogModule, 'openChangePassword');
 // Fetched as soon as the account menu or the phone drawer is opened, so the first click on "Change password" is not a silent wait
 // (offline it is left alone: a failed module load is remembered by the browser, and the click itself then reports the problem).
 const warmPasswordDialog = () => { if (navigator.onLine) passwordDialogModule().catch(() => {}); };
+// What the top search box is carried over to the Checkups page as: the digits of a phone number (4 or more), otherwise the text as typed.
+const checkupQuery = (t) => { const text = String(t || '').trim(); const digits = text.replace(/\D/g, ''); return /^[\d\s+()-]+$/.test(text) && digits.length >= 4 ? digits : text; };
 const pagesModule = () => import('./pages.js');
 const patientsModule = () => import('./patients.js');
 const renderPatient = lazy(patientsModule, 'renderPatient');
@@ -24,6 +26,7 @@ const PAGES = {
   today: { render: lazy(pagesModule, 'renderDashboard'), show: () => true },
   sheet: { render: lazy(() => import('./sheet.js'), 'renderSheet'), show: () => can('sheet.view') },
   queue: { render: lazy(pagesModule, 'renderQueue'), show: () => can('sheet.view') },
+  checkups: { render: lazy(() => import('./checkups.js'), 'renderCheckups'), show: () => can('sheet.view') },
   patients: { render: lazy(patientsModule, 'renderPatients'), show: () => can('patients.view') },
   billing: { render: lazy(pagesModule, 'renderBilling'), show: () => can('billing.view') || can('discount.approve') },
   accounts: { render: lazy(() => import('./accounts.js'), 'renderAccounts'), show: () => can('finance.view') || can('cash.close') || can('cash.verify') },
@@ -42,7 +45,7 @@ function menu() {
   const link = (label, path, key = path.split('?')[0]) => ({ label, href: `#/staff/${path}`, key, show: () => show(key) });
   const M = [
     link('Today', 'today'),
-    { label: 'Aaj ki List', key: 'sheet', show: () => show('sheet'), items: [link('Aaj ki List', 'sheet'), link('Queue board', 'queue')] },
+    { label: 'Aaj ki List', key: 'sheet', show: () => show('sheet'), items: [link('Aaj ki List', 'sheet'), link('Queue board', 'queue'), link('Checkups', 'checkups')] },
     link('Patients', 'patients'),
     link('Billing', 'billing'),
     { label: 'Reports', key: 'reports', show: () => show('reports') || show('accounts'), items: [
@@ -73,7 +76,7 @@ function menu() {
       { ...link('Clinic setup', 'admin?tab=setup'), show: () => isAdmin() },
       { ...link("Dr. Ali's calendar", 'admin?tab=calendar'), show: () => can('schedule.manage') },
       { ...link('Download data', 'admin?tab=export'), show: () => can('export.data') },
-      { ...link('Import (Healthwire, Aaj ki List)', 'admin?tab=import'), show: () => isAdmin() },
+      { ...link('Import (Healthwire, Aaj ki List, checkups)', 'admin?tab=import'), show: () => isAdmin() },
       { ...link('Duplicate patients', 'admin?tab=duplicates'), show: () => isAdmin() },
       { ...link('Audit log', 'admin?tab=audit'), show: () => can('audit.view') },
     ] },
@@ -130,7 +133,7 @@ export async function renderStaff(root, path, params, signOut) {
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
-  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports');
+  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet');
   const items = menu();
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
@@ -188,9 +191,11 @@ export async function renderStaff(root, path, params, signOut) {
         can('dues.view') && Number(p.dues) > 0 ? h('span', { class: 'badge badge-dues' }, h('span', { 'aria-hidden': 'true' }, '$$ '), srOnly('Dues '), rupees(p.dues)) : null),
       onPick: (p) => { input.value = ''; location.hash = `#/staff/patient/${p.id}`; },
       onEnter: (t) => { location.hash = `#/staff/patients?q=${encodeURIComponent(t)}`; },
+      // A checkup patient has no Mr#, so this search cannot find them: say where they are before anyone makes a second record for them.
       note: (t, rows) => (rows.length ? null : h('div', { class: 'muted', style: { padding: '10px 12px' } }, 'No patient matches.',
-        can('patients.create') ? h('a', { href: '#/staff/patients?new=1', style: { marginLeft: '8px' } }, 'Register a new patient') : null)),
-      count: (rows) => (rows.length ? `${rows.length} patient${rows.length === 1 ? '' : 's'} found. Use the up and down arrows to choose, then Enter to open.` : 'No patient matches.'),
+        can('patients.create') ? h('a', { href: '#/staff/patients?new=1', style: { marginLeft: '8px' } }, 'Register a new patient') : null,
+        can('sheet.view') ? h('div', { style: { marginTop: '6px' } }, 'Checkup patients have no Mr#. ', h('a', { href: `#/staff/checkups?q=${encodeURIComponent(checkupQuery(t))}` }, 'Look on the Checkups page')) : null)),
+      count: (rows) => (rows.length ? `${rows.length} patient${rows.length === 1 ? '' : 's'} found. Use the up and down arrows to choose, then Enter to open.` : `No patient matches.${can('sheet.view') ? ' Checkup patients have no Mr#: the list has a link to the Checkups page.' : ''}`),
     });
     return wrap;
   })() : null;
@@ -269,7 +274,7 @@ export async function renderStaff(root, path, params, signOut) {
   // Load-shedding: say so at the top, and say exactly what keeps working. Only typed cells on the
   // Aaj ki List (treatment, details, notes) are kept on the device; everything else needs the connection.
   const offlineBanner = h('div', { class: 'offline-banner', hidden: navigator.onLine },
-    h('strong', {}, 'No internet connection. '), 'Typing in the Treatment, Treatment details and Notes cells of the Aaj ki List is kept on this device and sent when the connection is back. Status and doctor changes, new patients, payments, invoices and all other entries are not saved until you are online again.');
+    h('strong', {}, 'No internet connection. '), 'Typing in the cells of the Aaj ki List (treatment, details, notes and the checkup rows) and in the Notes of the Checkups page is kept on this device and sent when the connection is back. Status and doctor changes, new patients, payments, invoices and all other entries are not saved until you are online again.');
   on(window, 'online', () => { offlineBanner.hidden = true; announce('Back online.'); });
   on(window, 'offline', () => { offlineBanner.hidden = false; announce('No internet connection. Only typing in the Aaj ki List cells is kept on this device; other changes are not saved until you are online again.', { assertive: true }); });
 
