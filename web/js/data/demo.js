@@ -14,7 +14,8 @@ import { todayISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
-import { summarizePayments, summarizeVisits, thumbPathFor } from './supabase.js';
+import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
+import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -35,6 +36,28 @@ function samplePhoto(label, bg) {
     `<text x="200" y="278" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="18" fill="#5b5048">${label} · sample photo</text></svg>`;
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
+
+// A checkup row (the columns of public.checkups) with the database's defaults.
+function chk(over) {
+  const now = new Date().toISOString();
+  return { id: uid(), checkup_date: null, date_is_month: false, branch_id: null, patient_name: '', phone: null, city: null, doctors: null, checkup_for: null,
+    details: null, token: null, day_status: null, est_fee: null, follow_up: 'Not Contacted', notes: null, source: 'website', source_tab: null, sheet_key: null,
+    patient_id: null, created_by: null, created_at: now, updated_at: now, ...over };
+}
+// The limits of the checkups table (its check constraints), so the demo refuses what the database refuses.
+const CHECKUP_LIMITS = { patient_name: [1, 200], phone: [0, 40], city: [0, 80], doctors: [0, 300], checkup_for: [0, 300], details: [0, 2000], token: [0, 40], notes: [0, 2000], follow_up: [1, 60] };
+function checkValid(c) {
+  for (const [col, [min, max]] of Object.entries(CHECKUP_LIMITS)) {
+    const v = c[col];
+    if (v === null || v === undefined) { if (col === 'patient_name' || col === 'follow_up') fail(`null value in column "${col}" of relation "checkups" violates not-null constraint`); continue; }
+    const n = String(col === 'patient_name' ? String(v).trim() : v).length;
+    if (n < min || n > max) fail(`new row for relation "checkups" violates check constraint "checkups_${col}_check"`);
+  }
+  if (c.est_fee !== null && c.est_fee !== undefined && !(c.est_fee >= 0)) fail('new row for relation "checkups" violates check constraint "checkups_est_fee_check"');
+  if (c.day_status !== null && c.day_status !== undefined && !DAY_STATUSES.includes(c.day_status)) fail('new row for relation "checkups" violates check constraint "checkups_day_status_check"');
+}
+/** 'YYYY-MM' -> the first day of the month after it. */
+const monthAfter = (ym) => (ym.slice(5, 7) === '12' ? `${Number(ym.slice(0, 4)) + 1}-01-01` : `${ym.slice(0, 4)}-${String(Number(ym.slice(5, 7)) + 1).padStart(2, '0')}-01`);
 
 // ---------------------------------------------------------------- seed
 function seed() {
@@ -227,6 +250,32 @@ function seed() {
     { id: uid(), branch_id: 4, on_date: daysAgo(-3), start_time: '12:00', end_time: '21:00' },
     { id: uid(), branch_id: 5, on_date: daysAgo(-9), start_time: '16:00', end_time: '22:00' },
   ];
+  // Checkup patients (no patient file, no Mr#): 64 rows of an old follow-up list (months over the last 14, every status, a few without a
+  // month) and today's checkups. All made up: names from a fixed pool, phones 0300-555xxxx.
+  const firstNames = ['Hoor', 'Wajiha', 'Sabeen', 'Komal', 'Areej', 'Tuba', 'Mubeen', 'Yusra', 'Haris', 'Arham', 'Zohaib', 'Fahad', 'Noman', 'Salman', 'Danish'];
+  const lastNames = ['Anwar', 'Saeed', 'Bukhari', 'Lodhi', 'Memon', 'Pasha', 'Raza', 'Sheikh'];
+  const monthStart = (back) => { const d = new Date(today + 'T12:00:00Z'); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - back); return d.toISOString().slice(0, 10); };
+  const cityOf = (branchId) => db.cities.find((c) => c.id === db.branches.find((b) => b.id === branchId)?.city_id)?.name || null;
+  db.checkups = [];
+  for (let i = 0; i < 64; i++) {
+    const branch = [1, 2, 3, 4, 5, null][i % 6];
+    db.checkups.push(chk({
+      checkup_date: [10, 30, 50].includes(i) ? null : monthStart(i % 14), date_is_month: true, branch_id: branch,
+      patient_name: `${firstNames[i % 15]} ${lastNames[Math.floor(i / 8) % 8]}`, phone: '0300-555' + (1000 + i), city: branch ? cityOf(branch) : null,
+      doctors: i % 3 === 0 ? 'Dr. Hina (sample)' : null, checkup_for: ['Checkup', 'Scaling', 'Braces checkup', 'Whitening'][i % 4],
+      est_fee: i % 9 === 0 ? 8000 + i * 1000 : null, follow_up: FOLLOW_UP_STATUSES[i % 11], notes: i % 4 === 0 ? 'Called, will let us know' : null,
+      source: 'archive', source_tab: 'Sample tab ' + 'ABC'[i % 3], created_at: daysAgo(3) + 'T10:00:00.000Z' }));
+  }
+  db.checkups[4].patient_id = db.patients[2].id;   // one old-list row already has a patient file
+  db.checkups[4].follow_up = 'Started';
+  const at = (n) => new Date(Date.now() + n).toISOString();
+  db.checkups.push(
+    chk({ checkup_date: today, branch_id: 2, patient_name: 'Bareera Khalid', phone: '0300-5550701', city: 'Karachi', doctors: 'Dr. Rabia (sample)', checkup_for: 'Checkup',
+      day_status: 'waiting', source: 'website', created_at: at(1) }),
+    chk({ checkup_date: today, branch_id: 2, patient_name: 'Salma Nadeem', phone: '0300-5550702', city: 'Karachi', doctors: 'Dr. Hina (sample)', checkup_for: 'Scaling',
+      details: 'Scaling advised', token: '7', day_status: 'completed', source: 'google_sheet', sheet_key: 'S-demo00000001', created_at: at(2) }),
+    chk({ checkup_date: today, branch_id: 1, patient_name: 'Imtiaz Gill', phone: '0300-5550703', city: 'Karachi', doctors: null, checkup_for: 'Checkup',
+      day_status: 'waiting', source: 'website', created_at: at(3) }));
   db.audit = [];
   // The demo's stand-in for the login server: logins the clinic made for patients ({ patient_id, email, password, must_change }).
   // Kept apart from every patient row, and never returned by any method, like the real login server's passwords.
@@ -264,6 +313,30 @@ export function createDemoAdapter() {
       staff: db.visit_staff.filter((s) => s.visit_id === v.id).map((s) => ({ ...s, name: clinician(s.clinician_id)?.display_name })),
       dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id) };
   };
+
+  // Checkups (patients without a patient file): which rows this person may see, how a row is shown, and the Checkups page's filters.
+  const checkupBranchOk = (c) => c.branch_id === null || c.branch_id === undefined || branchOk(c.branch_id);
+  const checkupVisible = (c) => (can('sheet.view') || can('patients.view')) && checkupBranchOk(c);
+  const checkupView = (c) => ({ ...clone(c), phone_key: checkupPhone(c.phone), mr_number: c.patient_id && can('patients.view') ? patient(c.patient_id)?.mr_number ?? null : null });
+  const monthText = (iso, withDay) => (withDay ? iso.slice(8, 10) + ' ' : '') + monthLabel(iso);
+  function checkupMatches({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '' } = {}) {
+    const text = String(q || '').replace(/[%,()*\\"]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const digits = text.replace(/[^0-9]/g, '');
+    const keys = [];
+    if (digits.length >= 4) keys.push(digits);
+    if (digits.startsWith('92') && digits.length - 2 >= 4) keys.push(digits.slice(2));
+    const month = /^[0-9]{4}-(0[1-9]|1[0-2])$/;
+    return db.checkups.filter((c) => checkupVisible(c)
+      && (!text || c.patient_name.toLowerCase().includes(text) || keys.some((k) => (checkupPhone(c.phone) || '').includes(k)))
+      && (branchId === 'none' ? c.branch_id === null : branchId === null || branchId === undefined || branchId === '' || c.branch_id === Number(branchId))
+      && (!month.test(from || '') || (c.checkup_date !== null && c.checkup_date >= from + '-01'))
+      && (!month.test(to || '') || (c.checkup_date !== null && c.checkup_date < monthAfter(to)))
+      && (!followUp || c.follow_up === followUp)
+      && (!['website', 'google_sheet', 'archive'].includes(source) || c.source === source)
+      && (registered !== 'yes' || c.patient_id) && (registered !== 'no' || !c.patient_id))
+      .sort((a, b) => (a.checkup_date === b.checkup_date ? 0 : a.checkup_date === null ? 1 : b.checkup_date === null ? -1 : a.checkup_date < b.checkup_date ? 1 : -1)
+        || (a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1) || (a.id < b.id ? -1 : 1));
+  }
 
   function applyVisitRules(v, prev) {
     if (v.braces_month && (!prev || prev.braces_month !== v.braces_month)) {
@@ -579,6 +652,131 @@ export function createDemoAdapter() {
       }
       if (role === 'checker') v.checked_by = clinicianId;
       return enrichVisit(v);
+    },
+
+    // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
+    // The same rules as the database: read = sheet.view or patients.view; add and change = sheet.edit; all within the person's branches
+    // (a row with no branch is open to everyone who may read); delete = admin, or sheet.edit on a row that is not from the old list.
+    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', page = 0, pageSize = 50 } = {}) {
+      const rows = checkupMatches({ q, branchId, from, to, followUp, source, registered });
+      const first = Math.max(0, Number(page) || 0) * pageSize;
+      return { rows: rows.slice(first, first + pageSize).map(checkupView), total: rows.length };
+    },
+    async exportCheckups(filters = {}) {
+      const rows = checkupMatches(filters);
+      const out = rows.slice(0, 20000).map(checkupView);
+      if (rows.length > 20000) { out.truncated = true; out.cap = 20000; }
+      return out;
+    },
+    async listDayCheckups({ branchId = null, date }) {
+      return db.checkups.filter((c) => c.checkup_date === date && !c.date_is_month && (!branchId || c.branch_id === Number(branchId)) && checkupVisible(c))
+        .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)).map(checkupView);
+    },
+    subscribeCheckups() { return () => {}; },
+    async addCheckup(row) {
+      need('sheet.edit');
+      const c = chk({ checkup_date: row.checkup_date || todayISO(), source: 'website', created_by: me().id, ...checkupPatch(row), est_fee: null });
+      if (!c.follow_up) c.follow_up = 'Not Contacted';
+      if (!checkupBranchOk(c)) fail('new row violates row-level security policy (branch)');
+      checkValid(c);
+      db.checkups.push(c); audit('checkups', 'INSERT', c);
+      return checkupView(c);
+    },
+    async updateCheckup(id, changes) {
+      const c = db.checkups.find((x) => x.id === id);
+      if (!c || !checkupVisible(c) || !can('sheet.edit') || !checkupBranchOk(c)) return null;   // as in the database: the update reaches no row
+      const next = { ...c, ...checkupPatch(changes), updated_at: new Date().toISOString() };
+      if (!checkupBranchOk(next)) fail('new row violates row-level security policy (branch)');
+      checkValid(next);
+      Object.assign(c, next); audit('checkups', 'UPDATE', c);
+      return checkupView(c);
+    },
+    async deleteCheckup(id) {
+      const c = db.checkups.find((x) => x.id === id);
+      if (!c || !checkupVisible(c) || !(me()?.role === 'admin' || (can('sheet.edit') && checkupBranchOk(c) && c.source !== 'archive'))) {
+        fail('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).');
+      }
+      db.checkups = db.checkups.filter((x) => x.id !== id); audit('checkups', 'DELETE', c);
+    },
+    async registerCheckupAsPatient(id) {
+      // Registering also links the checkup and moves its follow-up status, which is editing the list: both rights are needed (as in the database).
+      if (!(can('patients.create') && can('sheet.edit'))) fail('NOT_ALLOWED: registering a patient needs "Register new patients" and "Add and edit Aaj ki List entries" in the access list.');
+      const c = db.checkups.find((x) => x.id === id);
+      if (!c || !checkupVisible(c)) fail('NOT_FOUND: this checkup is not on your list.');
+      const name = c.patient_name.trim().replace(/\s+/g, ' ');
+      if (c.patient_id) fail(`ALREADY_REGISTERED: ${name} already has a patient file (Mr# ${patient(c.patient_id)?.mr_number ?? '?'}).`);
+      if (name.length < 2) fail('NAME_TOO_SHORT: write the full name on the checkup first.');
+      const phone = (c.phone || '').replace(/[^0-9+]/g, '');
+      const branch = db.branches.find((b) => b.id === c.branch_id);
+      const city = db.cities.find((x) => x.name.toLowerCase() === (c.city || '').trim().toLowerCase()) || db.cities.find((x) => x.id === branch?.city_id) || null;
+      const when = !c.checkup_date ? 'date not recorded' : c.date_is_month ? monthText(c.checkup_date, false) : monthText(c.checkup_date, true);
+      while (db.patients.some((p) => p.mr_number === String(db.mr_next))) db.mr_next++;
+      const p = { id: uid(), mr_number: String(db.mr_next++), full_name: name, phone: phone.length >= 7 ? phone : null, email: null, gender: null, date_of_birth: null,
+        first_branch_id: c.branch_id, city_id: city?.id ?? null, referral_source: null, photo_consent_public: false,
+        notes: 'From the checkup list: checkup ' + when + (branch ? ' at ' + branch.name : '') + (c.checkup_for ? ', for ' + c.checkup_for : ''), created_at: new Date().toISOString() };
+      db.patients.push(p); audit('patients', 'INSERT', p);
+      c.patient_id = p.id;
+      if (!['Started', 'Completed'].includes(c.follow_up)) c.follow_up = 'Started';
+      c.updated_at = new Date().toISOString(); audit('checkups', 'UPDATE', c);
+      return { patient_id: p.id, mr_number: p.mr_number, full_name: p.full_name };
+    },
+    async linkCheckupToPatient(id, patientId) {
+      if (!(can('sheet.edit') && can('patients.view'))) fail('NOT_ALLOWED: linking a checkup to a patient file needs "Add and edit Aaj ki List entries" and "View patient profiles" in the access list.');
+      const c = db.checkups.find((x) => x.id === id);
+      if (!c || !checkupVisible(c)) fail('NOT_FOUND: this checkup is not on your list.');
+      const p = patient(patientId);
+      if (!p) fail('NOT_FOUND: that patient file does not exist.');
+      if (c.patient_id && c.patient_id !== p.id) {
+        fail(`ALREADY_REGISTERED: ${c.patient_name.trim().replace(/\s+/g, ' ')} already has a patient file (Mr# ${patient(c.patient_id)?.mr_number ?? '?'}).`);
+      }
+      if (!c.patient_id) {
+        c.patient_id = p.id;
+        if (!['Started', 'Completed'].includes(c.follow_up)) c.follow_up = 'Started';
+        c.updated_at = new Date().toISOString(); audit('checkups', 'UPDATE', c);
+      }
+      return { patient_id: p.id, mr_number: p.mr_number, full_name: p.full_name };
+    },
+    // Admin: the old checkup list, with the database's rules (same key, fill or overwrite, the same counts).
+    async importCheckups(rows, { overwrite = false } = {}) {
+      if (me()?.role !== 'admin') fail('NOT_ALLOWED: only Dr. Ali can import the checkup list.');
+      if (!Array.isArray(rows)) fail('BAD_ROWS: send the rows as a list.');
+      if (rows.length > 500) fail('TOO_MANY_ROWS: send at most 500 rows at a time.');
+      const out = { given: rows.length, inserted: 0, updated: 0, unchanged: 0, kept: 0, skipped: [], skipped_count: 0 };
+      const skip = (row, reason) => { out.skipped_count++; if (out.skipped.length < 100) out.skipped.push({ row, reason }); };
+      const text = (v, max) => cleanText(v === undefined ? null : v, max).value;
+      const archiveKey = (c) => checkupKey({ phone: c.phone, name: c.patient_name, month: c.checkup_date });
+      const existing = new Map(db.checkups.filter((c) => c.source === 'archive').map((c) => [archiveKey(c), c]));
+      const firstRow = new Map();
+      rows.forEach((raw, n) => {
+        const w = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+        const rowNo = /^[0-9]{1,9}$/.test(String(w.row ?? '')) ? Number(w.row) : n + 1;
+        const name = text(w.name, 200);
+        if (name === null) return skip(rowNo, 'No patient name');
+        const month = typeof w.month === 'string' && /^[0-9]{4}-(0[1-9]|1[0-2])-[0-9]{2}$/.test(w.month) && !w.month.startsWith('0000') ? w.month.slice(0, 7) + '-01' : null;
+        const phone = text(w.phone, 40);
+        const key = checkupKey({ phone, name, month });
+        if (firstRow.has(key)) return skip(rowNo, `Same person and month as row ${firstRow.get(key)}`);
+        firstRow.set(key, rowNo);
+        const status = text(w.follow_up, 60) ?? 'Not Contacted';
+        const notes = text(w.notes, 2000);
+        const hit = existing.get(key);
+        if (hit) {
+          const nextStatus = overwrite ? status : hit.follow_up === 'Not Contacted' ? status : hit.follow_up;
+          const nextNotes = overwrite || !(hit.notes || '').trim() ? notes ?? hit.notes : hit.notes;
+          if (nextStatus !== hit.follow_up || nextNotes !== hit.notes) {
+            hit.follow_up = nextStatus; hit.notes = nextNotes; hit.updated_at = new Date().toISOString(); audit('checkups', 'UPDATE', hit); out.updated++;
+          } else if (status !== hit.follow_up || (notes !== null && notes !== hit.notes)) out.kept++;
+          else out.unchanged++;
+          return;
+        }
+        const fee = typeof w.est_fee === 'number' && Number.isFinite(w.est_fee) ? Math.round(w.est_fee * 100) / 100 : null;
+        const branchCode = String(w.branch ?? '').trim().toUpperCase();
+        const c = chk({ checkup_date: month, date_is_month: true, branch_id: db.branches.find((b) => b.code.toUpperCase() === branchCode)?.id ?? null, patient_name: name, phone,
+          city: text(w.city, 80), doctors: text(w.doctors, 300), checkup_for: text(w.checkup_for, 300), est_fee: fee !== null && fee >= 0 && fee <= 9999999999.99 ? fee : null,
+          follow_up: status, notes, source: 'archive', source_tab: text(w.source_tab, 120), created_by: me().id });
+        db.checkups.push(c); existing.set(key, c); audit('checkups', 'INSERT', c); out.inserted++;
+      });
+      return out;
     },
 
     // ------------------------------------------------------------ photos

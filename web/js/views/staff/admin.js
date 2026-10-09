@@ -23,7 +23,7 @@ export async function renderAdmin(root, params) {
     isAdmin() && ['setup', 'Clinic setup'],
     can('schedule.manage') && ['calendar', "Dr. Ali's calendar"],
     can('export.data') && ['export', 'Download data'],
-    isAdmin() && ['import', 'Import from Healthwire'],
+    isAdmin() && ['import', 'Import'],
     isAdmin() && ['duplicates', 'Duplicate patients'],
     can('audit.view') && ['audit', 'Audit log'],
   ].filter(Boolean);

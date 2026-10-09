@@ -12,6 +12,7 @@ import { todayISO, addDaysISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { isPatientLoginName } from '../lib/portal-login.js';
+import { checkupPhone } from '../lib/checkups.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
 // is allowed by the site's Content-Security-Policy (script-src and connect-src), so there is no
@@ -54,6 +55,75 @@ function keepFlags(from, to) {
 function capped(rows, cap) {
   if (rows.length > cap) { rows.length = cap; rows.truncated = true; rows.cap = cap; }
   return rows;
+}
+
+// ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
+// They live in public.checkups and are read through the view checkup_list (migrations 20261009000250 and ...260). While those are
+// not applied, PostgREST answers PGRST205 / PGRST202 (or 42P01 / 42883, or a 404): the list then says "not switched on yet".
+const CHECKUPS_MISSING_CODES = new Set(['PGRST205', 'PGRST202', '42P01', '42883']);
+const CHECKUPS_MISSING_TEXT = 'CHECKUPS_MISSING: the checkup list is not switched on yet. It appears once the database update has been run.';
+const checkupsMissing = (e) => !!e && (CHECKUPS_MISSING_CODES.has(e.code) || e.status === 404);
+/** Runs a checkups request; "not installed" comes out as one error with the code CHECKUPS_MISSING. */
+async function checkupsCall(run) {
+  try { return await run(); } catch (e) { throw checkupsMissing(e) ? plainError(CHECKUPS_MISSING_TEXT, 'CHECKUPS_MISSING') : e; }
+}
+const CHECKUP_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+const CHECKUP_SOURCES = ['website', 'google_sheet', 'archive'];
+/** 'YYYY-MM' -> the first day of the month after it. */
+function nextMonthStart(ym) {
+  const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+}
+/** The filters of the Checkups page (and of its Excel file) put on a query of the view checkup_list. */
+export function checkupFilters(query, { q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '' } = {}) {
+  let out = query;
+  const text = String(q || '').replace(/[%,()*\\"]/g, '').replace(/\s+/g, ' ').trim();   // these characters would break the or() list
+  if (text) {
+    const digits = text.replace(/[^0-9]/g, '');
+    const ors = [`patient_name.ilike.%${text}%`];
+    // phone_key is the number as digits with a leading 0 (0300...), so +92 300... and 300... are looked for without their prefix
+    const keys = new Set();
+    if (digits.length >= 4) keys.add(digits);
+    if (digits.startsWith('92') && digits.length - 2 >= 4) keys.add(digits.slice(2));
+    for (const k of keys) ors.push(`phone_key.ilike.%${k}%`);
+    out = out.or(ors.join(','));
+  }
+  if (branchId === 'none') out = out.is('branch_id', null);
+  else if (branchId !== null && branchId !== undefined && branchId !== '') out = out.eq('branch_id', Number(branchId));
+  if (CHECKUP_MONTH.test(from || '')) out = out.gte('checkup_date', from + '-01');
+  if (CHECKUP_MONTH.test(to || '')) out = out.lt('checkup_date', nextMonthStart(to));
+  if (followUp) out = out.eq('follow_up', followUp);
+  if (CHECKUP_SOURCES.includes(source)) out = out.eq('source', source);
+  if (registered === 'yes') out = out.not('patient_id', 'is', null);
+  else if (registered === 'no') out = out.is('patient_id', null);
+  return out;
+}
+// The columns staff may change after a checkup exists, and how each is stored (empty text is "nothing").
+const CHECKUP_EDITABLE = ['patient_name', 'phone', 'city', 'doctors', 'checkup_for', 'details', 'day_status', 'follow_up', 'notes', 'est_fee', 'branch_id', 'token'];
+function checkupValue(key, v) {
+  const empty = v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
+  switch (key) {
+    case 'patient_name': case 'follow_up': return String(v ?? '').trim();
+    case 'phone': case 'city': case 'token': return empty ? null : String(v).trim();
+    case 'est_fee': return empty || Number.isNaN(Number(v)) ? null : Number(v);
+    case 'branch_id': return empty || v === 'none' ? null : Number(v);
+    default: return empty ? null : v;       // doctors, checkup_for, details, notes, day_status: as typed
+  }
+}
+/** { key: value } of the editable columns present in `changes`, ready to send. */
+export function checkupPatch(changes) {
+  const out = {};
+  for (const key of CHECKUP_EDITABLE) if (changes && changes[key] !== undefined) out[key] = checkupValue(key, changes[key]);
+  return out;
+}
+/** A row of the table checkups in the shape of the view checkup_list: phone_key, and the Mr# of the linked patient file (when it may be read). */
+async function checkupListRow(sb, row) {
+  let mr = null;
+  if (row.patient_id) {
+    const res = await sb.from('patients').select('mr_number').eq('id', row.patient_id).maybeSingle();
+    mr = res.error ? null : res.data?.mr_number ?? null;
+  }
+  return { ...row, phone_key: checkupPhone(row.phone), mr_number: mr };
 }
 
 // ------------------------------------------------------------ loading the SDK
@@ -1115,6 +1185,88 @@ export async function createSupabaseAdapter() {
         if (role === 'checker') check(await sb.from('visits').update({ checked_by: null, checked_at: null }).eq('id', visitId).eq('checked_by', clinicianId));
       }
       return visitById(visitId);
+    },
+
+    // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
+    // A checkup row = the columns of public.checkups + phone_key + mr_number (the linked patient file's Mr#). While the database update
+    // is not run: listDayCheckups resolves [] with .missing = true; every other method throws an Error with code 'CHECKUPS_MISSING'.
+    /** One page of the Checkups page, newest first. -> { rows, total } */
+    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', page = 0, pageSize = 50 } = {}) {
+      return checkupsCall(async () => {
+        const filters = { q, branchId, from, to, followUp, source, registered };
+        const first = Math.max(0, Number(page) || 0) * pageSize;
+        const res = await checkupFilters(sb.from('checkup_list').select('*', { count: 'exact' }), filters)
+          .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id')
+          .range(first, first + pageSize - 1);
+        if (res.error?.code === 'PGRST103') {   // a page past the end (rows were removed meanwhile): no rows, but the right total
+          const head = await checkupFilters(sb.from('checkup_list').select('*', { count: 'exact', head: true }), filters);
+          check(head);
+          return { rows: [], total: head.count ?? 0 };
+        }
+        const rows = check(res);
+        return { rows, total: res.count ?? rows.length };
+      });
+    },
+    /** Every row matching the filters, for the Excel file (1000 per request, at most 20000; rows.truncated says when that cut it). */
+    async exportCheckups(filters = {}) {
+      return checkupsCall(() => fetchPaged(() => checkupFilters(sb.from('checkup_list').select('*'), filters)
+        .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id'), 20000));
+    },
+    /** The checkups of one day (exact-day rows only), oldest first. branchId null = every branch the reader may see. */
+    async listDayCheckups({ branchId = null, date }) {
+      try {
+        let q = sb.from('checkup_list').select('*').eq('checkup_date', date).eq('date_is_month', false);
+        if (branchId) q = q.eq('branch_id', Number(branchId));
+        return check(await q.order('created_at', { ascending: true }).order('id'));
+      } catch (e) {
+        if (!checkupsMissing(e)) throw e;
+        const none = [];
+        none.missing = true;
+        return none;
+      }
+    },
+    // Live updates: calls onChange the moment a checkup (at this branch, or at any) changes. Returns a function that stops listening.
+    subscribeCheckups(branchId, onChange) {
+      const ch = sb.channel(`checkups-${branchId || 'all'}-${Math.random().toString(36).slice(2)}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'checkups', ...(branchId ? { filter: `branch_id=eq.${Number(branchId)}` } : {}) }, onChange)
+        .subscribe();
+      return () => { sb.removeChannel(ch); };
+    },
+    /** Adds a checkup. The source is always 'website' (the database default too); keys other than the listed ones are dropped. */
+    async addCheckup(row) {
+      return checkupsCall(async () => {
+        const insert = { checkup_date: row.checkup_date || todayISO(), date_is_month: false, source: 'website', ...checkupPatch(row) };
+        if (!('follow_up' in insert) || !insert.follow_up) insert.follow_up = 'Not Contacted';
+        delete insert.est_fee;
+        return checkupListRow(sb, check(await sb.from('checkups').insert(insert).select().single()));
+      });
+    },
+    /** Changes a checkup (only patient_name, phone, city, doctors, checkup_for, details, day_status, follow_up, notes, est_fee, branch_id, token are sent). -> the row, or null when no row was changed (removed, or not visible). */
+    async updateCheckup(id, changes) {
+      return checkupsCall(async () => {
+        const patch = checkupPatch(changes);
+        if (!Object.keys(patch).length) return null;
+        const rows = check(await sb.from('checkups').update(patch).eq('id', id).select());
+        return rows[0] ? checkupListRow(sb, rows[0]) : null;
+      });
+    },
+    async deleteCheckup(id) {
+      return checkupsCall(async () => {
+        const rows = check(await sb.from('checkups').delete().eq('id', id).select('id'));
+        if (!rows.length) throw plainError('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).', 'NOT_REMOVED');
+      });
+    },
+    /** Gives the person a patient file with the next Mr# and links it. -> { patient_id, mr_number, full_name } */
+    async registerCheckupAsPatient(id) {
+      return checkupsCall(async () => check(await sb.rpc('register_checkup_as_patient', { p_checkup: id })));
+    },
+    /** Links the checkup to a patient file that already exists. -> { patient_id, mr_number, full_name } */
+    async linkCheckupToPatient(id, patientId) {
+      return checkupsCall(async () => check(await sb.rpc('link_checkup_to_patient', { p_checkup: id, p_patient: patientId })));
+    },
+    /** Admin: adds up to 500 rows of the old checkup list (the rows readCheckupList() makes). -> { given, inserted, updated, unchanged, kept, skipped: [{ row, reason }], skipped_count } */
+    async importCheckups(rows, { overwrite = false } = {}) {
+      return checkupsCall(async () => check(await sb.rpc('import_checkups', { p_rows: rows, p_overwrite: !!overwrite })));
     },
 
     // ------------------------------------------------------------ photos

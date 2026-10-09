@@ -691,14 +691,22 @@ export function tabs({ label, items = [], current, onChange, panel, class: extra
   return { el, panel: panelEl, panelId: panelEl.id, setCurrent(id) { selected = known(id) ? id : items[0]?.id; paint(); } };
 }
 
+/**
+ * One cell of a CSV file. A cell that starts with = or @ (or a tab or carriage return), or with + or - followed by anything but
+ * digits and number punctuation, is read as a FORMULA when the file is opened in Excel or Google Sheets (a patient called
+ * =HYPERLINK(...) could send the phone numbers of a whole list to a stranger). Such a cell gets a leading apostrophe and
+ * shows as plain text. Numbers and phone numbers (+92 300 5550142, -5) are not formulas and stay as they are.
+ */
+export function csvCell(v) {
+  let s = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  if (/^[=@\t\r]/.test(s) || (/^[+-]/.test(s) && !/^[+-][\d\s().,+-]*$/.test(s))) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
 export function downloadCSV(filename, rows) {
   if (!rows.length) return toast('Nothing to download yet.');
   const cols = Object.keys(rows[0]);
-  const esc = (v) => {
-    const s = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  };
-  const csv = [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n');
+  const csv = [cols.join(','), ...rows.map((r) => cols.map((c) => csvCell(r[c])).join(','))].join('\n');
   const a = h('a', { href: URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })), download: filename });
   document.body.append(a);
   a.click();

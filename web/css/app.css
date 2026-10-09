@@ -96,6 +96,9 @@
   --status-info-bg: var(--info-soft);
   --status-neutral-text: var(--muted); /* 4.9:1 on its bg */
   --status-neutral-bg: var(--neutral-soft);
+  --checkup-text: #0f5560;         /* 7.3:1 on --checkup-bg, 8.4:1 on #fff */
+  --checkup-bg: #e2f2f4;
+  --checkup-line: #5aa4ae;         /* the accent edge of a checkup row (the badge text says what it is) */
 
   /* on-dark text and lines (ratios on --aubergine-deep) */
   --on-dark-strong: #ffffff;       /* 17.3:1 */
@@ -240,6 +243,8 @@ p { margin: 0 0 .8em; }
 html:has(.topbar) { scroll-padding-top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--space-4)); }
 html:has(.mobile-bar) { scroll-padding-top: calc(var(--bar-h) + env(safe-area-inset-top, 0px) + var(--space-4)); }
 html:has(.has-fab) { scroll-padding-bottom: calc(var(--fab-space) + env(safe-area-inset-bottom, 0px)); }
+/* The paging bar of the Checkups page sticks to the bottom: a control reached with Tab must scroll above it, not stay under it. */
+html:has(.pager) { scroll-padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px)); }
 @media (min-width: 721px) and (min-height: 501px) {
   html:has(.sample-banner) { scroll-padding-top: 5.5rem; }
 }
@@ -788,6 +793,63 @@ select.cell-input { cursor: pointer; }
 .add-panel-text { display: grid; gap: 2px; flex: 1 1 260px; min-width: 0; }
 .add-panel-text .muted { font-size: var(--fs-sm); }
 .add-panel .btn-primary { white-space: nowrap; }
+
+/* ------------------------------------------------------------ checkups (no Mr#): Aaj ki List rows, the Checkups page */
+.badge-checkup { background: var(--checkup-bg); color: var(--checkup-text); border-color: var(--checkup-line); }
+/* A left edge in the row header: colour only repeats what the "Checkup" badge says. */
+table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--checkup-line), 1px 0 0 var(--border-strong); }
+.checkup-name { flex: 1 1 auto; min-width: 0; }
+.checkup-name .cell-input { min-height: 32px; padding-inline: var(--space-1); font-weight: 600; }
+.checkup-name .field-hint { padding-inline: var(--space-1); }
+.token-input { flex: 0 0 auto; width: 3.5rem; min-height: 32px; padding: 2px var(--space-1); text-align: center; font-size: var(--fs-sm); font-weight: 800; color: var(--text-accent); }
+/* Follow-up status and the day status of a checkup: one colour family per group; the text always names the status. */
+.status-unset, .status-chip.tone-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
+.status-chip.tone-ok { background: var(--status-ok-bg); color: var(--status-ok-text); }
+.status-chip.tone-info { background: var(--status-info-bg); color: var(--status-info-text); }
+.status-chip.tone-warn { background: var(--status-warn-bg); color: var(--status-warn-text); }
+.dup-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); }
+.dup-line + .dup-line { margin-top: var(--space-2); }
+.registered-mr { margin: var(--space-2) 0; font-size: var(--fs-3xl); font-weight: 800; letter-spacing: -.01em; color: var(--text-accent); }
+.registered-mr:focus-visible { outline-offset: 4px; }
+
+/* the Checkups page */
+.page-head-actions { gap: var(--space-3); }
+.checkup-filters {
+  display: grid; gap: var(--space-2) var(--space-3); align-items: end; margin-bottom: var(--space-4); padding: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+  border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface);
+}
+.filter-field { display: grid; gap: var(--space-1); min-width: 0; }
+.filter-label { font-size: var(--fs-xs); font-weight: 600; color: var(--text-muted); }
+.filter-field input, .filter-field select { min-width: 0; }
+.filter-hint { font-size: var(--fs-xs); font-weight: 400; color: var(--text-muted); }
+.filter-wide { grid-column: 1 / -1; } /* the search box takes a whole line on a phone */
+@media (min-width: 720px) { .checkup-filters { padding-inline: var(--space-4); } .filter-wide { grid-column: span 2; } }
+/* The less-used filters (branch, months, source, patient file) sit behind one line, so a phone shows results sooner. */
+.checkup-more { grid-column: 1 / -1; }
+.checkup-more > summary { display: inline-block; min-height: var(--target); padding: var(--space-2) 0; font-weight: 600; font-size: var(--fs-ui); color: var(--text-accent); cursor: pointer; }
+.checkup-more-grid { display: grid; gap: var(--space-2) var(--space-3); align-items: end; padding-top: var(--space-2); grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); }
+.checkup-table { min-width: 940px; }
+.checkup-table thead th { white-space: nowrap; }
+.checkup-table tbody th.checkup-who { min-width: 180px; padding: var(--space-2); border-bottom: 1px solid var(--border); font-size: var(--fs-ui); font-weight: 600; color: var(--text); text-align: left; vertical-align: top; }
+.checkup-table tbody tr:last-child th.checkup-who { border-bottom: 0; }
+/* The Patient column stays in sight while the other columns scroll sideways (as on the Aaj ki List), so a status or a note is never changed without the name. */
+.checkup-table th.checkup-who { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--border-strong); }
+.checkup-table thead th.checkup-who { z-index: 2; background: var(--surface); }
+.saved-mark { font-size: var(--fs-xs); font-weight: 700; color: var(--status-ok-text); white-space: nowrap; }
+.checkup-name-text { overflow-wrap: anywhere; }
+.checkup-table td { vertical-align: top; }
+.checkup-table td.cell-td { min-width: 220px; padding: var(--space-1) var(--space-2); }
+.checkup-table .cell-input { border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--control-bg); }
+.checkup-table .cell { min-height: 32px; padding: 0; }
+.row-actions { display: flex; flex-wrap: nowrap; gap: var(--space-2); } /* Register and Edit side by side: the rows stay short */
+.checkup-table tbody tr:hover td, .checkup-table tbody tr:hover th { background: var(--surface-hover); }
+.pager {
+  position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-3); padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow);
+}
+.pager-info { font-size: var(--fs-ui); font-weight: 600; }
 
 /* queue board */
 .queue { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
