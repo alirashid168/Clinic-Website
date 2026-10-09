@@ -175,7 +175,7 @@ test('create: a password under 10 characters (or none) is refused before anythin
 });
 
 test('create: a password of only digits is refused on the server, however long (a phone number, 12345678...)', async () => {
-  for (const bad of ['1234567890', '03001234567', '12345678901234567890']) {
+  for (const bad of ['1234567890', '03001234567', '12345678901234567890', '0300-1234567', '+92 300 1234567']) {
     const admin = fakeAdmin({ patients: [ali()] });
     const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password: bad });
     assert.match(String(res.body.error), /only digits/, bad);

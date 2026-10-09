@@ -505,7 +505,7 @@ await step('staff create a portal login: the username, an easy password, and a l
   await m.locator('.field-error', { hasText: 'at least 10 characters' }).waitFor();
   await m.getByLabel('Password').fill('0300123456789');
   await m.getByRole('button', { name: 'Create login' }).click();
-  await m.locator('.field-error', { hasText: 'cannot be only digits' }).waitFor();
+  await m.locator('.field-error', { hasText: 'only digits' }).waitFor();
   slip = { username: 'hamzaqureshi-9812@dralirashid.com', password: 'sunny-grape-4827' };
   await m.getByLabel('Password').fill(slip.password);
   await m.getByRole('button', { name: 'Create login' }).click();
@@ -663,7 +663,7 @@ await step('staff reset the password of a login made at the clinic: same usernam
   assert.equal(await m.locator('input[readonly]').inputValue(), slip.username);
   // Honest about what a reset does: it does not end a session that is already open.
   const said = await m.innerText();
-  assert.match(said, /The old password stops working for new logins\. If a phone was lost, also ask the patient to log out there\./);
+  assert.match(said, /Saving signs the patient out everywhere: the old password stops working at once/);
   assert.doesNotMatch(said, /stops working as soon as you save/);
   slip.password = 'peach-zebra-5936';
   await m.getByLabel('Password').fill(slip.password);

@@ -177,6 +177,10 @@ test('a first password staff type for a patient: at least 10 characters and not 
   assert.equal(checkSlipPassword(undefined as unknown as string), 'The password needs at least 10 characters.');
   assert.match(checkSlipPassword('1234567890') as string, /only digits/);
   assert.match(checkSlipPassword('03001234567') as string, /only digits/);
+  // A phone number written the usual ways is still a phone number.
+  for (const phone of ['0300-1234567', '+92 300 1234567', '(021) 34567890', '0300.123.4567', '0300/1234567'])
+    assert.match(checkSlipPassword(phone) as string, /phone number or only digits/, phone);
+  assert.equal(checkSlipPassword('0300-1234567a'), null, 'a letter makes it a password');
   assert.equal(checkSlipPassword('abcdefghij'), null);
   assert.equal(checkSlipPassword('1234567890a'), null);
   assert.equal(checkSlipPassword('sunny-grape-zebra-4827'), null);

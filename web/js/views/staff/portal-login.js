@@ -75,7 +75,7 @@ export function portalLoginModal(p, { mode, username = '', onDone } = {}) {
   const copyName = h('button', { type: 'button', class: 'btn btn-small', onclick: async () => { try { await navigator.clipboard.writeText(address); toast('Username copied.', 'ok', 1500); } catch { shown.select(); } } }, 'Copy');
   const body = h('div', {},
     h('p', { class: 'muted' }, reset
-      ? 'Use this when the patient has forgotten their password. The old password stops working for new logins. If a phone was lost, also ask the patient to log out there. The patient chooses a new password at their next login.'
+      ? 'Use this when the patient has forgotten their password or lost a phone. Saving signs the patient out everywhere: the old password stops working at once, and a phone or computer that was logged in is signed out within the hour. The patient chooses a new password at their next login.'
       : 'The patient logs in with this username and password. No email is sent. They choose their own password the first time they log in.'),
     field('Username', h('div', { class: 'inline' }, shown, copyName), reset
       ? 'The username does not change.'

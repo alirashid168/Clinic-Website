@@ -19,7 +19,8 @@
 // invite_patient and the three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts.
 //
 // Deploy: supabase functions deploy admin-users
-import { createClient } from 'npm:@supabase/supabase-js@2';
+// The same release the website pins (web/js/data/supabase.js SDK_VERSION); bump both on purpose, after testing.
+import { createClient } from 'npm:@supabase/supabase-js@2.117.2';
 import { createPatientLogin, findLoginByEmail, invitePatient, portalLoginInfo, resetPatientPassword } from './patient-login-actions.ts';
 import { isPatientLoginName } from './portal-login.ts';
 

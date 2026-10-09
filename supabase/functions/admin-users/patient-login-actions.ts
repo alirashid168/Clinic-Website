@@ -140,8 +140,8 @@ export async function resetPatientPassword({ admin, can, caller, domain }: Actio
     return refuse('This patient logs in with their own email address. They can set a new password with "Forgot password" on the login page.');
   }
 
-  // This sets the password for NEW logins only. It does not end sessions that are already open (that would need a database
-  // function); a patient whose phone was lost is asked to log out there. Known limit, written in docs/GO-LIVE.md.
+  // GoTrue's admin password update deletes every session of this login (UpdatePassword(tx, nil) -> Logout), so all refresh tokens die
+  // now; an access token already issued keeps working until it expires (at most an hour). The reset dialog and docs/GO-LIVE.md say so.
   const { error } = await admin.auth.admin.updateUserById(user.id, {
     password,
     user_metadata: { ...(user.user_metadata ?? {}), must_change_password: true }, // a prompt, see createPatientLogin

@@ -104,7 +104,7 @@ let handler: (req: Request) => Promise<Response>;
 (globalThis as any).__fakeCreateClient = (_url: string, key: string) => (key === 'service-key' ? adminClient() : callerClient());
 registerHooks({
   resolve(spec, ctx, nextResolve) {
-    if (spec === 'npm:@supabase/supabase-js@2') return { url: 'data:text/javascript,export const createClient = (...a) => globalThis.__fakeCreateClient(...a);', shortCircuit: true };
+    if (spec.startsWith('npm:@supabase/supabase-js@2')) return { url: 'data:text/javascript,export const createClient = (...a) => globalThis.__fakeCreateClient(...a);', shortCircuit: true };
     return nextResolve(spec, ctx);
   },
 });

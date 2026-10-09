@@ -99,7 +99,8 @@ export function checkSlipPassword(password: string): string | null {
   const text = String(password ?? '');
   if (text.length > PASSWORD_MAX) return `The password can be at most ${PASSWORD_MAX} characters.`;
   if (text.length < SLIP_PASSWORD_MIN) return `The password needs at least ${SLIP_PASSWORD_MIN} characters.`;
-  if (/^\d+$/.test(text)) return 'The password cannot be only digits. Use the suggested password, or add letters.';
+  // A phone number keeps its separators ("0300-1234567", "+92 300 1234567", "(021) 3456789"), so they are ignored here.
+  if (/^\d+$/.test(text.replace(/[\s+().\/-]/g, ''))) return 'The password cannot be a phone number or only digits. Use the suggested password, or add letters.';
   return null;
 }
 
