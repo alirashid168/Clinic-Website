@@ -21,7 +21,7 @@ export const MR_PART_MAX = 30;
 export function portalNamePart(fullName: string): string {
   const letters = String(fullName ?? '')
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '') // combining accent marks
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '')
     .slice(0, NAME_PART_MAX);
