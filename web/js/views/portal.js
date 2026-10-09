@@ -1,8 +1,9 @@
 // Patient portal: invoices, dues, X-rays and photos, visit history, the
 // "see Dr. Ali" message, ratings and the complaint button.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors } from '../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors, announce } from '../ui/dom.js';
 import { state, branchName } from '../state.js';
 import { signThumbs } from '../ui/photos.js';
+import { checkPortalPassword, PASSWORD_MIN } from '../lib/portal-login.js';
 
 // Invoice printing and installment tables live with the staff invoice screens;
 // they load only when a patient has a plan or opens an invoice.
@@ -10,6 +11,92 @@ const invoiceModule = () => import('./staff/invoice.js');
 
 /** Patients never see staff instructions or database text (see friendlyError in ui/dom.js). */
 const patientError = (err) => friendlyError(err, { audience: 'public' });
+
+/** What went wrong with a new password, in the patient's words. */
+function passwordProblem(err) {
+  const msg = err?.message || '';
+  if (err?.code === 'same_password' || /different from the old password/i.test(msg)) return 'Choose a password that is different from your current one.';
+  if (err?.code === 'weak_password' || /weak|easy to guess|pwned|compromised/i.test(msg)) return 'That password is too easy to guess. Choose a longer or less common one.';
+  if (/reauthenticat|recent login/i.test(msg)) return 'For your safety, log out and log in again, then change your password.';
+  return patientError(err);
+}
+
+/** Two password boxes (the new one, and again) with their checks. read() returns the password, or null after marking what to fix. */
+function newPasswordFields() {
+  const next = h('input', { type: 'password', autocomplete: 'new-password', required: true });
+  const again = h('input', { type: 'password', autocomplete: 'new-password', required: true });
+  const body = h('div', {}, field('New password', next, `At least ${PASSWORD_MIN} characters.`, { required: true }), field('Type it again', again, null, { required: true }));
+  const read = () => {
+    clearFieldErrors(body);
+    const problem = checkPortalPassword(next.value);
+    const errors = [];
+    if (problem) errors.push({ input: next, message: problem });
+    else if (again.value !== next.value) errors.push({ input: again, message: 'The two passwords are different. Type them again.' });
+    if (errors.length) { showFormErrors(body, errors); return null; }
+    return next.value;
+  };
+  return { body, next, read };
+}
+
+/**
+ * The first screen after a login the clinic made: the patient chooses their own password before anything else (no
+ * patient data is loaded until they have). Then the portal opens.
+ */
+function renderChoosePassword(root, signOut) {
+  const d = state.data;
+  const fields = newPasswordFields();
+  const problem = h('p', { class: 'field-error', role: 'alert', hidden: true });
+  const submit = h('button', { class: 'btn btn-primary', type: 'submit', style: { width: '100%' } }, 'Save my password');
+  const form = h('form', {
+    novalidate: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      if (submit.disabled) return;
+      problem.hidden = true;
+      const password = fields.read();
+      if (!password) return;
+      submit.disabled = true;
+      try {
+        await d.changePassword(password);
+      } catch (err) {
+        problem.textContent = passwordProblem(err);
+        problem.hidden = false;
+        announce(problem.textContent, { assertive: true });
+        submit.disabled = false;
+        return;
+      }
+      // The password is saved; the flag is off on the server now. Nothing else to ask the network before opening the portal.
+      state.session = { ...state.session, mustChangePassword: false };
+      toast('Your password is saved.', 'ok');
+      // Opening the portal needs the network again. If that fails there is no router error page here (this screen was drawn by
+      // the portal itself), so a card says so, with a way to try again or to log out, instead of a "Loading…" that never ends.
+      const open = async () => {
+        try { await renderPortal(root, signOut); } catch (err) { renderLoadFailed(root, err, open, signOut); }
+      };
+      await open();
+    },
+  }, fields.body, problem, submit);
+  mount(root, h('div', { class: 'login-wrap' },
+    h('main', { class: 'login-card' },
+      h('h1', {}, 'Choose your own password'),
+      h('p', {}, 'The clinic gave you a first password to get in. Choose a new one that only you know. You will use it every time you log in.'),
+      form,
+      h('p', { style: { marginTop: '16px' } }, h('button', { type: 'button', class: 'link-btn', onclick: signOut }, 'Log out')))));
+  fields.next.focus();
+}
+
+/** The portal could not be opened right after the new password was saved: what went wrong in plain words, Try again, and Log out. */
+function renderLoadFailed(root, err, retry, signOut) {
+  console.error(err);
+  mount(root, h('div', { class: 'login-wrap' },
+    h('main', { class: 'login-card' },
+      h('h1', { tabindex: '-1' }, 'We could not open your account'),
+      h('p', { role: 'alert' }, 'Your new password is saved. ', patientError(err)),
+      h('p', { class: 'inline' },
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: () => retry() }, 'Try again'),
+        h('button', { type: 'button', class: 'btn', onclick: signOut }, 'Log out')))));
+  root.querySelector('h1')?.focus();
+}
 
 function loading(root, text) {
   mount(root, h('main', { class: 'public-main', 'aria-busy': 'true' }, h('p', { class: 'empty', role: 'status' }, text)));
@@ -20,6 +107,8 @@ export async function renderPortal(root, signOut) {
   const me = state.session?.patient;
   // The route guard checked the login, but it can end (another tab signed out) while this page's code was loading.
   if (!me) { location.replace('#/login/patient'); return; }
+  // A login the clinic made: the patient chooses their own password before anything else.
+  if (state.session?.mustChangePassword) return renderChoosePassword(root, signOut);
   loading(root, 'Loading your account…');
   const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
   return portalPage(root, { d, p, ratings, signOut, preview: false });
@@ -157,6 +246,20 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
     ], { initialFocus: buttons[0] });
   };
 
+  /** "Change password" in the portal menu, for any time after the first login. */
+  const changePassword = () => {
+    const fields = newPasswordFields();
+    modal('Change your password', fields.body, [
+      { label: 'Cancel' },
+      { label: 'Save password', primary: true, onClick: async () => {
+        const password = fields.read();
+        if (!password) return false;
+        try { await d.changePassword(password); } catch (e) { toast(passwordProblem(e), 'error'); return false; }
+        toast('Your password has been changed.', 'ok');
+      } },
+    ], { initialFocus: fields.next });
+  };
+
   const messagesHost = h('div', {});
   const drawMessages = () => mount(messagesHost, complaints.length ? h('section', { class: 'panel' },
     h('h2', {}, 'Your messages to Dr. Ali'),
@@ -205,7 +308,9 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
       h('span', { class: 'nowrap' }, h('a', { class: 'btn btn-small btn-primary', href: '#/login/patient' }, 'Patient login'), ' ', h('a', { class: 'btn btn-small', href: '#/' }, 'Home'))) : null,
     preview ? null : h('header', { class: 'mobile-bar' },
       h('strong', {}, "Dr. Ali Rashid's Dental Clinic"),
-      h('button', { type: 'button', class: 'link-btn', onclick: signOut }, 'Log out')),
+      h('span', { class: 'inline', style: { gap: 'var(--space-4)' } },
+        typeof d.changePassword === 'function' ? h('button', { type: 'button', class: 'link-btn', onclick: changePassword }, 'Change password') : null,
+        h('button', { type: 'button', class: 'link-btn', onclick: signOut }, 'Log out'))),
     h('main', { class: 'public-main stack', style: { paddingTop: '24px' } },
       h('div', { class: 'page-head' },
         h('div', {}, h('h1', {}, `Hello, ${p.full_name.split(' ')[0]}`), h('p', {}, `Mr# ${p.mr_number}`)),

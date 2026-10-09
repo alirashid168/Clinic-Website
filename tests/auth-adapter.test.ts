@@ -72,6 +72,7 @@ function fakeClient() {
     signOuts: [] as any[], getUserCalls: 0, getUserJwts: [] as any[], reads: [] as string[], readAuth: [] as Array<[string, string | undefined]>,
     updates: [] as any[], listeners: new Set<Function>(), fetchOption: null as any,
     signInResult: { data: {}, error: null } as any,
+    invokes: [] as any[], invokeAnswer: { data: null, error: null } as any, userUpdates: [] as any[], resets: [] as any[],
   };
   f.emit = (event: string, session: any = null) => { for (const cb of [...f.listeners]) cb(event, session); };
   f.auth = {
@@ -81,6 +82,8 @@ function fakeClient() {
     async signOut(opts: any) { f.signOuts.push(opts); f.session = null; store.delete(KEY); f.emit('SIGNED_OUT'); return { error: null }; }, // auth-js sends SIGNED_OUT before it answers
     onAuthStateChange(cb: Function) { f.listeners.add(cb); return { data: { subscription: { unsubscribe: () => f.listeners.delete(cb) } } }; },
     async signInWithPassword() { return f.signInResult; },
+    async updateUser(attrs: any) { f.userUpdates.push(attrs); return { data: {}, error: null }; },
+    async resetPasswordForEmail(email: string) { f.resets.push(email); return { data: {}, error: null }; },
     stopAutoRefresh() {},
   };
   f.from = (table: string) => {
@@ -106,7 +109,7 @@ function fakeClient() {
   f.client = (options: any) => {
     f.fetchOption = options?.global?.fetch;
     const rpc = () => { const r: any = Promise.resolve({ data: [], error: null }); r.abortSignal = () => r; return r; };
-    return { auth: f.auth, from: f.from, rpc, functions: { invoke: async () => ({ data: null, error: null }) }, storage: { from: () => ({}) } };
+    return { auth: f.auth, from: f.from, rpc, functions: { invoke: async (name: string, opts: any) => { f.invokes.push([name, opts.body]); return typeof f.invokeAnswer === 'function' ? f.invokeAnswer() : f.invokeAnswer; } }, storage: { from: () => ({}) } };
   };
   return f;
 }
@@ -898,4 +901,228 @@ test('the first look says nothing when the page opened with nobody stored, when 
   store.delete(KEY);
   f.session = null;
   assert.equal(await data.getSession(), null, 'and that was the first look');
+});
+
+// ---- patient logins made at the clinic
+const patientUser = (metadata: any) => ({ data: { user: { id: 'pu1', user_metadata: metadata } }, error: null });
+const patientRow = { id: 'pat-1', full_name: 'Ali Rashid', mr_number: '1705', portal_user_id: 'pu1' };
+
+test('a patient login the clinic made reports mustChangePassword from the metadata of the login, read fresh each time; staff never carry the flag', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.tables.staff = [];
+  f.tables.patients = [patientRow];
+  f.session = loginOf('pu1'); // the stored login is the patient's own (getSession checks it is the same person the server confirms)
+  f.user = patientUser({ kind: 'patient', must_change_password: true });
+  const first = await data.getSession();
+  assert.equal(first.kind, 'patient');
+  assert.equal(first.mustChangePassword, true);
+  f.user = patientUser({ kind: 'patient', must_change_password: false });
+  assert.equal((await data.getSession()).mustChangePassword, false, 'the cached profile does not keep an old flag');
+  f.user = patientUser(undefined);
+  assert.equal((await data.getSession()).mustChangePassword, false, 'an invited patient (no flag) is never held back');
+  f.user = GOOD_USER;
+  f.session = loginOf('u1');
+  f.tables.staff = [{ id: 'u1', role: 'admin', active: true }];
+  const staff = await data.getSession();
+  assert.equal(staff.kind, 'staff');
+  assert.ok(!('mustChangePassword' in staff));
+});
+
+test('changePassword sets the new password and clears the must-change flag in one update, and forgets the cached session', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.tables.staff = [];
+  f.tables.patients = [patientRow];
+  f.session = loginOf('pu1');
+  f.user = patientUser({ kind: 'patient', must_change_password: true });
+  assert.equal((await data.getSession()).mustChangePassword, true);
+  await data.changePassword('my-own-pass-77');
+  assert.deepEqual(f.userUpdates, [{ password: 'my-own-pass-77', data: { must_change_password: false } }]);
+  f.user = patientUser({ kind: 'patient', must_change_password: false });
+  assert.equal((await data.getSession()).mustChangePassword, false);
+});
+
+test('a clinic username has no inbox: it is not a staff address, and password reset refuses it (no email) with the clinic wording', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  // the clinic domain comes from config.js
+  assert.equal(data.isPortalLoginName('alirashid-1705@dralirashid.com'), true);
+  assert.equal(data.isStaffEmail('alirashid-1705@dralirashid.com'), false, 'a patient address is not a staff address');
+  assert.equal(data.isStaffEmail('reception@dralirashid.com'), true);
+  assert.equal(data.isPortalLoginName('reception@dralirashid.com'), false);
+  assert.equal(data.isStaffEmail('sara@gmail.com'), false);
+  await assert.rejects(() => data.sendPasswordReset('AliRashid-1705@dralirashid.com'), (e: any) => e.code === 'CLINIC_RESET' && e.message === 'Ask the clinic to reset your password.');
+  await assert.rejects(() => data.sendPasswordReset('reception@dralirashid.com'), (e: any) => e.code === 'STAFF_RESET');
+  assert.deepEqual(f.resets, [], 'no email was requested for either');
+  (globalThis as any).location = { origin: 'https://www.dralirashid.com' };
+  try {
+    await data.sendPasswordReset(' Sara@Gmail.com ');
+    assert.deepEqual(f.resets, ['sara@gmail.com'], 'a real email keeps the email reset');
+  } finally { delete (globalThis as any).location; }
+});
+
+test('the staff calls for patient logins go to the admin-users function and resolve only what the screen needs (never the password)', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.invokeAnswer = { data: { ok: true, username: 'alirashid-1705@dralirashid.com' }, error: null };
+  assert.deepEqual(await data.createPatientLogin('pat-1', 'sunny-grape-4827'), { username: 'alirashid-1705@dralirashid.com' });
+  assert.deepEqual(await data.resetPatientPassword('pat-1', 'peach-zebra-5936'), { username: 'alirashid-1705@dralirashid.com' });
+  f.invokeAnswer = { data: { ok: true, has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' }, error: null };
+  assert.deepEqual(await data.portalLoginInfo('pat-1'), { has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' });
+  assert.deepEqual(f.invokes, [
+    ['admin-users', { action: 'create_patient_login', patient_id: 'pat-1', password: 'sunny-grape-4827' }],
+    ['admin-users', { action: 'reset_patient_password', patient_id: 'pat-1', password: 'peach-zebra-5936' }],
+    ['admin-users', { action: 'portal_login_info', patient_id: 'pat-1' }],
+  ]);
+});
+
+test('an error of the function reaches the screen in its own words, also when it came with a non-2xx status', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.invokeAnswer = { data: { error: 'This patient already has a portal login.' }, error: null };
+  await assert.rejects(() => data.createPatientLogin('pat-1', 'sunny-grape-4827'), /already has a portal login/);
+  const refused = Object.assign(new Error('Edge Function returned a non-2xx status code'), { context: { json: async () => ({ error: 'You are not allowed to create patient logins.' }) } });
+  f.invokeAnswer = { data: null, error: refused };
+  await assert.rejects(() => data.createPatientLogin('pat-1', 'sunny-grape-4827'), /You are not allowed to create patient logins/);
+  f.invokeAnswer = { data: null, error: Object.assign(new Error('Failed to send a request to the Edge Function'), { context: {} }) };
+  await assert.rejects(() => data.resetPatientPassword('pat-1', 'peach-zebra-5936'), /Failed to send a request/);
+});
+
+// ---- the session of a patient whose login the clinic made, with the real login watcher (auth-watch.js) wired the way main.js wires it
+const { authChangeHandler, endedNotice } = await import('../web/js/auth-watch.js');
+const { readFileSync } = await import('node:fs');
+
+/** What main.js does with a tab's login events: keep the refreshed login, or leave the screen with a notice. `shown` is state.session. */
+function screenOf(tab: { data: any }, shown: any) {
+  const screen: any = { session: shown, ended: [] as any[], notices: [] as string[], accepted: [] as any[] };
+  const watch = authChangeHandler({
+    data: tab.data,
+    current: () => screen.session,
+    busy: () => false,
+    accept: (s: any) => { screen.session = s; screen.accepted.push(s); },
+    ended: (reason: any) => { screen.ended.push(reason); screen.notices.push(endedNotice(reason, { patient: screen.session?.kind === 'patient' })); screen.session = null; },
+  });
+  tab.data.onAuthChange(watch);
+  return screen;
+}
+/** Lets every lookup an event started run to its end (the stand-ins answer at once, so a few turns of the event loop are plenty). */
+const settle = async () => { for (let i = 0; i < 5; i += 1) await nextTick(); };
+const clinicPatientTab = async (flag: boolean | undefined) => {
+  fresh();
+  const tab = await openTab();
+  tab.f.tables.staff = [];
+  tab.f.tables.patients = [patientRow];
+  tab.f.session = loginOf('pu1');
+  tab.f.user = patientUser(flag === undefined ? { kind: 'patient' } : { kind: 'patient', must_change_password: flag });
+  return tab;
+};
+
+test('a patient login with must_change_password=true reaches the forced-change screen, and stays there through the events of a busy tab', async () => {
+  const tab = await clinicPatientTab(true);
+  const session = await tab.data.signIn('alirashid-1705@dralirashid.com', 'sunny-grape-zebra-4827');
+  assert.equal(session.kind, 'patient');
+  assert.equal(session.mustChangePassword, true, 'signIn hands the screen the flag: portal.js shows "Choose your own password" for it');
+  assert.equal((await tab.data.getSession()).mustChangePassword, true, 'and so does the first look of a reloaded page (state.js)');
+  // portal.js decides by this flag, before it loads anything of the patient
+  const portal = readFileSync(new URL('../web/js/views/portal.js', import.meta.url), 'utf8');
+  const decide = portal.indexOf('if (state.session?.mustChangePassword) return renderChoosePassword(root, signOut);');
+  assert.ok(decide > 0 && decide < portal.indexOf("loading(root, 'Loading your account"), 'decided before anything of the patient is loaded');
+  // The tab is focused again, a token is refreshed: none of it lets the patient past the screen or logs them out.
+  const screen = screenOf(tab, session);
+  tab.f.emit('SIGNED_IN', tab.f.session);
+  await settle();
+  tab.f.session = loginOf('pu1', 'tok-pu1-newer');
+  tab.f.emit('TOKEN_REFRESHED', tab.f.session);
+  await settle();
+  assert.deepEqual(screen.ended, []);
+  assert.equal(screen.session.mustChangePassword, true, 'still the forced-change screen');
+  assert.equal(screen.session.patient.id, 'pat-1');
+  assert.ok(screen.accepted.length >= 2 && screen.accepted.every((s: any) => s.mustChangePassword === true));
+});
+
+test('changePassword, and the USER_UPDATED and TOKEN_REFRESHED events it causes, neither log the patient out nor show a "logged out" message, and the person stays the same', async () => {
+  const tab = await clinicPatientTab(true);
+  const { f, data } = tab;
+  const screen = screenOf(tab, await data.getSession());
+  assert.equal(screen.session.mustChangePassword, true);
+  // What the login server and auth-js do for updateUser: the user is changed (the flag is off in the server's answers from now on),
+  // then USER_UPDATED is sent, and the library may refresh the token right after.
+  f.auth.updateUser = async (attrs: any) => {
+    f.userUpdates.push(attrs);
+    f.user = patientUser({ kind: 'patient', must_change_password: false });
+    f.emit('USER_UPDATED', f.session);
+    f.session = loginOf('pu1', 'tok-pu1-after-update');
+    f.emit('TOKEN_REFRESHED', f.session);
+    return { data: { user: { id: 'pu1' } }, error: null };
+  };
+  await data.changePassword('my-own-pass-77');
+  await settle();
+  assert.deepEqual(f.userUpdates, [{ password: 'my-own-pass-77', data: { must_change_password: false } }], 'one update: the password and the flag together');
+  assert.deepEqual(screen.ended, [], 'the screen was never left');
+  assert.deepEqual(screen.notices, [], 'no "You were logged out" message');
+  assert.deepEqual(f.signOuts, [], 'no logout was sent');
+  assert.deepEqual(tab.heard.map(([event]: [string]) => event), ['USER_UPDATED', 'TOKEN_REFRESHED'], 'and no SIGNED_OUT was heard');
+  assert.equal(screen.session.kind, 'patient');
+  assert.equal(screen.session.patient.id, 'pat-1', 'the same person');
+  assert.equal(screen.session.mustChangePassword, false, 'and the portal opens from now on');
+  assert.ok(screen.accepted.length >= 1 && screen.accepted.every((s: any) => s.patient.id === 'pat-1'));
+  assert.equal((await data.getSession()).mustChangePassword, false, 'a reload shows the portal, not the forced screen');
+});
+
+test('the password change is a plain updateUser: if it fails, the flag stays on and the patient stays on the forced-change screen, logged in', async () => {
+  const tab = await clinicPatientTab(true);
+  const { f, data } = tab;
+  const screen = screenOf(tab, await data.getSession());
+  f.auth.updateUser = async () => ({ data: {}, error: Object.assign(new Error('New password should be different from the old password.'), { name: 'AuthApiError', status: 422, code: 'same_password' }) });
+  await assert.rejects(() => data.changePassword('sunny-grape-zebra-4827'), (e: any) => e.code === 'same_password');
+  f.emit('SIGNED_IN', f.session);
+  await settle();
+  assert.deepEqual(screen.ended, []);
+  assert.equal(screen.session.mustChangePassword, true);
+});
+
+test('a staff session never carries mustChangePassword, whatever its own user_metadata says, also through login events', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.user = { data: { user: { id: 'u1', user_metadata: { kind: 'patient', must_change_password: true } } }, error: null }; // a staff member can edit their own metadata
+  const first = await data.getSession();
+  assert.equal(first.kind, 'staff');
+  assert.ok(!('mustChangePassword' in first));
+  const screen = screenOf({ data }, first);
+  for (const event of ['SIGNED_IN', 'TOKEN_REFRESHED', 'USER_UPDATED']) { f.emit(event, f.session); await settle(); }
+  assert.deepEqual(screen.ended, []);
+  assert.ok(screen.accepted.length >= 3);
+  for (const s of screen.accepted) { assert.equal(s.kind, 'staff'); assert.ok(!('mustChangePassword' in s)); }
+  const signedIn = await data.signIn('reception@dralirashid.com', 'a-long-enough-pass');
+  assert.ok(!('mustChangePassword' in signedIn));
+});
+
+test('a staff member who is also linked to a patient record is still staff: no forced screen', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.tables.patients = [patientRow]; // a bad link: a patient row points at this staff login
+  f.user = { data: { user: { id: 'u1', user_metadata: { must_change_password: true } } }, error: null };
+  const s = await data.getSession();
+  assert.equal(s.kind, 'staff');
+  assert.ok(!('mustChangePassword' in s));
+});
+
+test('"Unknown action" from a function that was not redeployed becomes "Update the admin-users function first." for all three patient login calls', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  const calls: Array<() => Promise<unknown>> = [
+    () => data.createPatientLogin('pat-1', 'sunny-grape-zebra-4827'),
+    () => data.resetPatientPassword('pat-1', 'sunny-grape-zebra-4827'),
+    () => data.portalLoginInfo('pat-1'),
+  ];
+  for (const call of calls) {
+    f.invokeAnswer = { data: { error: 'Unknown action' }, error: null }; // the function answered 200 with the error in the body
+    await assert.rejects(call, (e: any) => e.message === 'Update the admin-users function first.');
+    const refused = Object.assign(new Error('Edge Function returned a non-2xx status code'), { context: { json: async () => ({ error: 'Unknown action' }) } }); // or 400
+    f.invokeAnswer = { data: null, error: refused };
+    await assert.rejects(call, (e: any) => e.message === 'Update the admin-users function first.');
+  }
+  f.invokeAnswer = { data: { error: 'This patient already has a portal login.' }, error: null };
+  await assert.rejects(calls[0], /already has a portal login/, 'other messages are left as they are');
 });

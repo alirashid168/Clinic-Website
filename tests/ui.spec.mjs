@@ -11,6 +11,8 @@ if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined });
 const errors = [];
 let passed = 0;
+// A step that makes the app fail on purpose (a function that is too old, a dropped connection) expects the console.error the app writes for it.
+const expectErrors = (re) => { for (let i = errors.length - 1; i >= 0; i -= 1) if (re.test(errors[i])) errors.splice(i, 1); };
 
 async function newPage(viewport = { width: 1366, height: 860 }, options = {}) {
   const page = await browser.newPage({ viewport, ...options });
@@ -451,6 +453,393 @@ await step('Admin → Audit log lists sign-ins', async () => {
   await p7.waitForSelector('h2:text("Logins")');
   await p7.waitForSelector('table.list tr:has-text("Dr. Ali Rashid")');
   assert.ok(await p7.locator('h2:text("Recent changes")').count());
+});
+
+// ------------------------------------------------------------- portal login made at the clinic
+// The demo keeps its "login server" in the page's memory, so the staff member and the patient share one page (hash changes only).
+const pl = await newPage();
+let slip = {};
+// Logging out finishes by sending the page to the home page: wait for that, or it lands on top of whatever the test opened next.
+const logOut = async ({ staff = false } = {}) => {
+  if (staff) await pl.getByRole('button', { name: /^Account menu/ }).click();
+  await pl.getByRole('button', { name: 'Log out' }).click();
+  await pl.waitForFunction(() => location.hash === '#/');
+  await pl.waitForSelector('.door');
+};
+const openPatient = async (name) => {
+  await pl.goto(BASE + `#/staff/patients?q=${encodeURIComponent(name)}`);
+  await pl.locator('table.list tbody tr', { hasText: name }).locator('a').first().click();
+  await pl.waitForSelector(`h1:has-text("${name}")`);
+};
+await step('portal login buttons: "Create portal login" for a patient with none, the email invitation only when there is an email', async () => {
+  await loginAs(pl, 'Dr. Ali Rashid');
+  await openPatient('Hamza Qureshi'); // no email on file
+  await pl.getByRole('button', { name: 'Create portal login' }).waitFor();
+  assert.equal(await pl.getByRole('button', { name: 'Invite to patient portal' }).count(), 0, 'no email: nothing to invite');
+  await pl.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor();
+  await openPatient('Zainab Rizvi'); // has an email
+  await pl.getByRole('button', { name: 'Create portal login' }).waitFor();
+  await pl.getByRole('button', { name: 'Invite to patient portal' }).waitFor();
+  await pl.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor();
+  await openPatient('Areeba Siddiqui'); // already has a login with her own email
+  await pl.waitForSelector('h1:has-text("Areeba Siddiqui")');
+  assert.equal(await pl.getByRole('button', { name: 'Create portal login' }).count(), 0);
+  await pl.locator('.portal-login-line', { hasText: 'Portal login: own email (invited)' }).waitFor();
+  assert.equal(await pl.getByRole('button', { name: 'Reset portal password' }).count(), 0, 'a login with the patient\'s own email is reset by email, not here');
+});
+await step('staff create a portal login: the username, an easy password, and a login slip that prints on one small page', async () => {
+  await openPatient('Hamza Qureshi');
+  await pl.getByRole('button', { name: 'Create portal login' }).click();
+  const m = pl.locator('.modal');
+  assert.equal(await m.locator('input[readonly]').inputValue(), 'hamzaqureshi-9812@dralirashid.com');
+  const generated = await m.getByLabel('Password').inputValue();
+  assert.match(generated, /^[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[2-9]{4}$/, 'three short words and four digits, nothing that can be misread');
+  await m.getByRole('button', { name: 'New one' }).click();
+  assert.notEqual(await m.getByLabel('Password').inputValue(), generated, '"New one" gives another');
+  // Copy is for the username only: the slip is how the password is handed over (a copied password stays in the clipboard history of the front desk).
+  assert.equal(await m.getByRole('button', { name: 'Copy' }).count(), 1, 'one Copy button');
+  assert.equal(await m.locator('.inline:has(input[readonly]) button', { hasText: 'Copy' }).count(), 1, 'and it is the username\'s');
+  assert.deepEqual(await m.locator('.inline:has(input[autocomplete=off]) button').allInnerTexts(), ['New one'], 'the password box has only "New one"');
+  await m.getByLabel('Password').fill('short');
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await m.locator('.field-error', { hasText: 'at least 10 characters' }).waitFor();
+  await m.getByLabel('Password').fill('0300123456789');
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await m.locator('.field-error', { hasText: 'only digits' }).waitFor();
+  slip = { username: 'hamzaqureshi-9812@dralirashid.com', password: 'sunny-grape-4827' };
+  await m.getByLabel('Password').fill(slip.password);
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await pl.waitForSelector('.login-slip');
+  const text = await pl.locator('.login-slip').innerText();
+  for (const part of ['Dr. Ali Rashid\'s Dental Clinic', 'www.dralirashid.com', slip.username, slip.password, 'Hamza Qureshi', 'Mr# 9812', 'You will be asked to choose your own password the first time you log in']) assert.ok(text.includes(part), `slip shows "${part}"`);
+  assert.equal(await pl.locator('.modal').count(), 1, 'only the slip dialog is open');
+  await shot(pl, '15-login-slip');
+  // Print: the slip is the only thing on the paper, and it is one page.
+  await pl.evaluate(() => { window.__print = []; window.print = () => { window.__print.push({ printing: document.body.classList.contains('printing'), areas: [...document.querySelectorAll('.print-area')].map((a) => a.className) }); window.dispatchEvent(new Event('afterprint')); }; });
+  await pl.getByRole('button', { name: 'Print login slip' }).click();
+  const printed = await pl.evaluate(() => ({ calls: window.__print, still: document.body.classList.contains('printing') }));
+  assert.equal(printed.calls.length, 1);
+  assert.equal(printed.calls[0].printing, true, 'the print rules were switched on for the slip');
+  assert.deepEqual(printed.calls[0].areas, ['login-slip print-area'], 'only the slip is a print area');
+  assert.equal(printed.still, false, 'and switched off again afterwards');
+  const pdf = await pl.pdf({ preferCSSPageSize: true, printBackground: true });
+  const pages = (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
+  assert.equal(pages, 1, 'the slip prints on one page');
+  const box = pdf.toString('latin1').match(/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/);
+  assert.ok(box && Math.abs(Number(box[1]) - 297.6) < 3 && Math.abs(Number(box[2]) - 419.5) < 3, `the page is A6 (105 x 148 mm), not ${box?.slice(1, 3).join(' x ')}`);
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+  await pl.waitForSelector('h1:has-text("Hamza Qureshi")');
+  await pl.getByRole('button', { name: 'Reset portal password' }).waitFor();
+  assert.equal(await pl.getByRole('button', { name: 'Create portal login' }).count(), 0, 'the login exists now');
+  // The password was shown only in the dialog and on the slip: it is not left anywhere on the page.
+  assert.equal((await pl.locator('main, #app').first().innerText()).includes(slip.password), false);
+  // The patient record now says which login it is (and the username to tell the patient again without a reset).
+  await pl.locator('.portal-login-line', { hasText: 'Portal login: ' + slip.username }).waitFor();
+});
+await step('the Portal login line says "could not check" with a retry when the function cannot be asked, and "Update the admin-users function first." when it is old', async () => {
+  const stub = (message) => pl.evaluate(async (m) => {
+    const { state } = await import('/js/state.js');
+    window.__realInfo ||= state.data.portalLoginInfo;
+    state.data.portalLoginInfo = m === null ? window.__realInfo : async () => { throw new Error(m); };
+  }, message);
+  await stub('Update the admin-users function first.'); // what the website says when the function does not know the action yet
+  await openPatient('Hamza Qureshi');
+  const line = pl.locator('.portal-login-line');
+  await line.getByText('could not check').waitFor();
+  assert.match(await line.innerText(), /Update the admin-users function first\./);
+  assert.equal(await pl.getByRole('button', { name: 'Reset portal password' }).count(), 0, 'no reset button on a login that could not be checked');
+  await stub(null); // the function answers again
+  await line.getByRole('button', { name: 'Try again' }).click();
+  await line.getByText(slip.username).waitFor();
+  await pl.getByRole('button', { name: 'Reset portal password' }).waitFor();
+  expectErrors(/Update the admin-users function first/);
+});
+await step('the patient logs in with just the short username, must choose their own password first, then lands in the portal', async () => {
+  await logOut({ staff: true });
+  await pl.setViewportSize({ width: 390, height: 844 });
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').waitFor();
+  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
+  await form.locator('input[type=password]').fill('not-the-password-1');
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await pl.locator('.field-error', { hasText: 'username (or email) and password do not match' }).waitFor();
+  await form.locator('input[name=username]').fill('  HamzaQureshi-9812 ');
+  await form.locator('input[type=password]').fill(slip.password);
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await pl.waitForSelector('h1:has-text("Choose your own password")');
+  assert.equal(await pl.locator('h1:has-text("Hello")').count(), 0, 'nothing of the portal before the new password');
+  assert.equal(await pl.locator('.photo-grid, .stat-row').count(), 0);
+  await shot(pl, '16-choose-password');
+  const next = pl.locator('input[autocomplete=new-password]');
+  const save = pl.getByRole('button', { name: 'Save my password' });
+  await next.nth(0).fill('abc');
+  await next.nth(1).fill('abc');
+  await save.click();
+  await pl.locator('.field-error', { hasText: 'at least 8 characters' }).waitFor();
+  await next.nth(0).fill('my-own-pass-77');
+  await next.nth(1).fill('my-own-pass-78');
+  await save.click();
+  await pl.locator('.field-error', { hasText: 'two passwords are different' }).waitFor();
+  await next.nth(0).fill(slip.password);
+  await next.nth(1).fill(slip.password);
+  await save.click();
+  await pl.locator('[role=alert]', { hasText: 'different from your current one' }).first().waitFor();
+  await next.nth(0).fill('my-own-pass-77');
+  await next.nth(1).fill('my-own-pass-77');
+  await save.click();
+  await pl.waitForSelector('h1:has-text("Hello, Hamza")');
+  await pl.getByRole('button', { name: 'Change password' }).waitFor();
+  await shot(pl, '17-portal-after-first-login');
+});
+await step('the patient can change the password later from the portal menu, and the old one stops working', async () => {
+  await pl.getByRole('button', { name: 'Change password' }).click();
+  const dlg = pl.locator('.modal');
+  await dlg.getByLabel('New password').fill('later-pass-4455');
+  await dlg.getByLabel('Type it again').fill('later-pass-9999');
+  await dlg.getByRole('button', { name: 'Save password' }).click();
+  await dlg.locator('.field-error', { hasText: 'two passwords are different' }).waitFor();
+  await dlg.getByLabel('New password').fill('later-pass-4455');
+  await dlg.getByLabel('Type it again').fill('later-pass-4455');
+  await dlg.getByRole('button', { name: 'Save password' }).click();
+  await pl.waitForSelector('.toast:has-text("Your password has been changed")');
+  await logOut();
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').fill(slip.username); // the whole address works too
+  await form.locator('input[type=password]').fill('my-own-pass-77');
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await pl.locator('.field-error', { hasText: 'do not match' }).waitFor();
+  await form.locator('input[type=password]').fill('later-pass-4455');
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await pl.waitForSelector('h1:has-text("Hello, Hamza")'); // no "choose a password" screen again
+  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0);
+});
+await step('"Forgot password" for a clinic username says to ask the clinic (no email); a staff address is told the staff way', async () => {
+  await logOut();
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.getByRole('button', { name: 'Forgot password?' }).click();
+  await pl.locator('.field-error', { hasText: 'Type your username or email address first' }).waitFor();
+  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
+  await form.getByRole('button', { name: 'Forgot password?' }).click();
+  await pl.locator('p.muted', { hasText: 'Ask the clinic to reset your password' }).waitFor();
+  await form.locator('input[name=username]').fill('someone@example.com');
+  await form.getByRole('button', { name: 'Forgot password?' }).click();
+  await pl.locator('.field-error', { hasText: 'Something went wrong' }).waitFor(); // a real email goes to the email reset (the demo has none, so it fails the way any failed reset does)
+});
+await step('the patient login page points to the slip and to the clinic, for the hint and for "Forgot password" (WhatsApp link included)', async () => {
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').waitFor();
+  const text = await form.innerText();
+  assert.match(text, /Use the username on the slip the clinic gave you\. Patients who were invited by email use that email address\./);
+  assert.doesNotMatch(text, /If you gave the clinic your email address/, 'no longer sends a clinic-made login to the real email');
+  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
+  await form.getByRole('button', { name: 'Forgot password?' }).click();
+  const note = form.locator('p.muted', { hasText: 'Ask the clinic to reset your password' });
+  await note.waitFor();
+  const wa = note.getByRole('link', { name: /message the clinic on WhatsApp/ });
+  assert.match(await wa.getAttribute('href'), /^https:\/\/wa\.me\/92\d{10}\?text=/, 'the clinic\'s WhatsApp chat');
+  assert.equal(await wa.getAttribute('target'), '_blank');
+  assert.match(await wa.getAttribute('rel'), /noopener/);
+  // A real email: the reset email goes out (stand-in here), and the note says what to do if the login came from the clinic.
+  await pl.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.sendPasswordReset = async () => {}; });
+  await form.locator('input[name=username]').fill('hamza@example.com');
+  await form.getByRole('button', { name: 'Forgot password?' }).click();
+  const emailNote = form.locator('p.muted', { hasText: 'a link to set a new password is on its way' });
+  await emailNote.waitFor();
+  assert.match(await emailNote.innerText(), /If the clinic gave you a username on a slip, no link will come: use that username here instead, or message the clinic on WhatsApp/);
+  assert.equal(await emailNote.getByRole('link', { name: /WhatsApp/ }).count(), 1);
+});
+await step('staff reset the password of a login made at the clinic: same username, a new slip, and the patient must choose again', async () => {
+  await pl.setViewportSize({ width: 1366, height: 860 });
+  await pl.goto(BASE + '#/login/staff');
+  await pl.getByRole('button', { name: /Dr. Ali Rashid/ }).click();
+  await pl.waitForSelector('.topbar');
+  await openPatient('Hamza Qureshi');
+  await pl.getByRole('button', { name: 'Reset portal password' }).click();
+  const m = pl.locator('.modal');
+  assert.equal(await m.locator('input[readonly]').inputValue(), slip.username);
+  // Honest about what a reset does: it does not end a session that is already open.
+  const said = await m.innerText();
+  assert.match(said, /Saving signs the patient out everywhere: the old password stops working at once/);
+  assert.doesNotMatch(said, /stops working as soon as you save/);
+  slip.password = 'peach-zebra-5936';
+  await m.getByLabel('Password').fill(slip.password);
+  await m.getByRole('button', { name: 'Reset password' }).click();
+  await pl.waitForSelector('.login-slip');
+  assert.ok((await pl.locator('.login-slip').innerText()).includes(slip.password));
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+  await logOut({ staff: true });
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
+  await form.locator('input[type=password]').fill('later-pass-4455'); // the old password no longer works
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await pl.locator('.field-error', { hasText: 'do not match' }).waitFor();
+  await form.locator('input[type=password]').fill(slip.password);
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await pl.waitForSelector('h1:has-text("Choose your own password")');
+});
+await step('a staff login cannot be given a name that looks like a patient login', async () => {
+  await logOut();
+  await pl.goto(BASE + '#/login/staff');
+  await pl.getByRole('button', { name: /Dr. Ali Rashid/ }).click();
+  await pl.waitForSelector('.topbar');
+  await pl.goto(BASE + '#/staff/admin?tab=staff');
+  await pl.getByRole('button', { name: 'New staff account' }).click();
+  const m = pl.locator('.modal');
+  await m.getByPlaceholder('Full name').fill('Patient Lookalike');
+  await m.locator('input[type=email]').fill('lookalike-1705@dralirashid.com');
+  await m.getByRole('button', { name: 'Create account' }).click();
+  await pl.locator('.toast', { hasText: 'shape of a patient login' }).waitFor();
+});
+
+await step('the invitation by email is refused for an address at the clinic domain, and still works for a real one', async () => {
+  await pl.keyboard.press('Escape').catch(() => {});
+  const ids = await pl.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const mk = async (full_name, email) => (await state.data.createPatient({ full_name, phone: '0300 1112223', email, first_branch_id: 1 })).id;
+    return { planted: await mk('Planted Address', 'newdoc@dralirashid.com'), real: await mk('Real Address', 'real.address@example.com') };
+  });
+  await pl.goto(BASE + `#/staff/patient/${ids.planted}`);
+  await pl.waitForSelector('h1:has-text("Planted Address")');
+  await pl.getByRole('button', { name: 'Invite to patient portal' }).click();
+  await pl.locator('.toast', { hasText: 'Use Create portal login for clinic usernames.' }).waitFor();
+  await pl.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor(); // nothing was linked
+  await pl.goto(BASE + `#/staff/patient/${ids.real}`);
+  await pl.waitForSelector('h1:has-text("Real Address")');
+  await pl.getByRole('button', { name: 'Invite to patient portal' }).click();
+  await pl.locator('.toast', { hasText: 'Invitation sent to real.address@example.com' }).waitFor();
+  await pl.locator('.portal-login-line', { hasText: 'Portal login: own email (invited)' }).waitFor();
+  expectErrors(/Use Create portal login for clinic usernames/);
+});
+
+await step('the login slip keeps the username in one piece before the @, sets a long one smaller, and even the longest username prints on one A6 page', async () => {
+  const name = 'Muhammad Abdul Rehman Siddiqui Al Hashmi'; // the name part is cut to 24 letters
+  const cases = [['Ali Rashid', '1705'], [name, '1705'], [name, '9'.repeat(10)], [name, '9'.repeat(30)]]; // 14, 29, 35 and 55 characters before the @
+  const measured = await pl.evaluate(async ({ cases }) => {
+    const { loginSlip } = await import('/js/views/staff/portal-login.js');
+    const holder = document.createElement('div');
+    holder.style.cssText = 'position:fixed;left:0;top:0;width:351px;background:#fff;z-index:99999'; // an A6 page between its 6 mm margins, on screen
+    document.body.append(holder);
+    const rows = [];
+    for (const [fullName, mr] of cases) {
+      const username = fullName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 24) + '-' + mr + '@dralirashid.com';
+      const slip = loginSlip({ full_name: fullName, mr_number: mr }, username, 'queen-sheep-zebra-9876');
+      holder.replaceChildren(slip);
+      const user = slip.querySelector('.slip-user');
+      const parts = [...user.querySelectorAll('.slip-nowrap')];
+      const edge = slip.getBoundingClientRect().right - parseFloat(getComputedStyle(slip).paddingRight);
+      const pw = [...slip.querySelectorAll('.slip-value')].at(-1);
+      rows.push({
+        username, text: user.textContent, font: parseFloat(getComputedStyle(user).fontSize), lines: parts.map((s) => s.getClientRects().length),
+        inside: parts.every((s) => s.getBoundingClientRect().right <= edge + 0.5), passwordFits: pw.scrollWidth <= pw.clientWidth + 0.5,
+        domainBelow: parts.length === 2 ? parts[1].getBoundingClientRect().top >= parts[0].getBoundingClientRect().bottom - 1 : null,
+      });
+    }
+    holder.remove();
+    return rows;
+  }, { cases });
+  for (const r of measured) {
+    assert.equal(r.text, r.username, 'the markup does not change the text');
+    assert.deepEqual(r.lines, [1, 1], `${r.username}: the name, dash and Mr# never split over two lines (and the domain stays whole)`);
+    assert.ok(r.inside, `${r.username} fits inside the slip`);
+    assert.ok(r.passwordFits, `the password of a slip with ${r.username} fits too`);
+  }
+  const sizes = measured.map((r) => r.font);
+  assert.ok(sizes[0] > sizes[1] && sizes[1] > sizes[2] && sizes[2] > sizes[3], `a longer username is set smaller: ${sizes.join(' > ')}`);
+  assert.ok(measured[3].domainBelow || measured[3].domainBelow === false, 'the longest wraps (or not) only between the name part and the @');
+  // The longest one on the real slip dialog prints on one A6 page.
+  await pl.evaluate(async ({ username }) => {
+    const { showLoginSlip } = await import('/js/views/staff/portal-login.js');
+    showLoginSlip({ full_name: 'Muhammad Abdul Rehman Siddiqui Al Hashmi', mr_number: '9'.repeat(30) }, username, 'queen-sheep-zebra-9876');
+  }, { username: measured[3].username });
+  await pl.waitForSelector('.login-slip');
+  const pdf = await pl.pdf({ preferCSSPageSize: true, printBackground: true });
+  const pages = (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
+  assert.equal(pages, 1, 'the longest username still prints on one page');
+  const box = pdf.toString('latin1').match(/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/);
+  assert.ok(box && Math.abs(Number(box[1]) - 297.6) < 3 && Math.abs(Number(box[2]) - 419.5) < 3, 'and it is A6');
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+});
+
+// Makes a portal login for a new patient the way the front desk does, and returns what is on the slip.
+const makeLoginFor = async (fullName) => {
+  await pl.evaluate(async (n) => { const { state } = await import('/js/state.js'); await state.data.createPatient({ full_name: n, phone: '0300 1112223', first_branch_id: 1 }); }, fullName);
+  await openPatient(fullName);
+  await pl.getByRole('button', { name: 'Create portal login' }).click();
+  const m = pl.locator('.modal');
+  const made = { username: await m.locator('input[readonly]').inputValue(), password: await m.getByLabel('Password').inputValue() };
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await pl.waitForSelector('.login-slip');
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+  return made;
+};
+// Logs a patient in with the slip and fills the "Choose your own password" screen (with the stand-in for getPatient already in place when asked).
+const firstLogin = async (made, { failPortal = false, next = 'my-own-pass-88' } = {}) => {
+  await logOut({ staff: true });
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').fill(made.username.split('@')[0]);
+  await form.locator('input[type=password]').fill(made.password);
+  await form.locator('input[type=password]').press('Enter');
+  await pl.waitForSelector('h1:has-text("Choose your own password")');
+  if (failPortal) {
+    await pl.evaluate(async () => {
+      const { state } = await import('/js/state.js');
+      window.__realGetPatient ||= state.data.getPatient;
+      state.data.getPatient = async () => { throw new Error('Failed to fetch'); }; // the connection drops right after the password is saved
+    });
+  }
+  const fields = pl.locator('input[autocomplete=new-password]');
+  await fields.nth(0).fill(next);
+  await fields.nth(1).fill(next);
+  await pl.getByRole('button', { name: 'Save my password' }).click();
+};
+const restorePortal = () => pl.evaluate(async () => { const { state } = await import('/js/state.js'); if (window.__realGetPatient) state.data.getPatient = window.__realGetPatient; });
+
+await step('after the forced new password, a portal that cannot load shows a card with "Try again" instead of a "Loading your account…" that never ends', async () => {
+  const made = await makeLoginFor('Retry Card');
+  await firstLogin(made, { failPortal: true });
+  await pl.getByRole('heading', { name: 'We could not open your account' }).waitFor();
+  const card = await pl.locator('.login-card').innerText();
+  assert.match(card, /Your new password is saved\./);
+  assert.match(card, /We could not reach the clinic system/, 'in the patient\'s words, no database text');
+  assert.equal(await pl.getByText('Loading your account').count(), 0, 'not a stuck loading screen');
+  assert.equal(await pl.getByRole('button', { name: 'Try again' }).count(), 1);
+  assert.equal(await pl.getByRole('button', { name: 'Log out' }).count(), 1);
+  assert.ok(await pl.evaluate(() => document.activeElement?.tagName === 'H1'), 'the heading has the focus');
+  await shot(pl, '18-portal-could-not-open');
+  await pl.getByRole('button', { name: 'Try again' }).click(); // still failing: the card comes back
+  await pl.getByRole('heading', { name: 'We could not open your account' }).waitFor();
+  await restorePortal();
+  await pl.getByRole('button', { name: 'Try again' }).click(); // the connection is back
+  await pl.waitForSelector('h1:has-text("Hello, Retry")');
+  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0);
+  expectErrors(/Failed to fetch/);
+});
+await step('the same card has a Log out button that leaves the account', async () => {
+  await logOut();
+  await pl.goto(BASE + '#/login/staff');
+  await pl.getByRole('button', { name: /Dr. Ali Rashid/ }).click();
+  await pl.waitForSelector('.topbar');
+  const made = await makeLoginFor('Logout Card');
+  await firstLogin(made, { failPortal: true });
+  await pl.getByRole('heading', { name: 'We could not open your account' }).waitFor();
+  await pl.getByRole('button', { name: 'Log out' }).click();
+  await pl.waitForFunction(() => location.hash === '#/');
+  await pl.waitForSelector('.door');
+  await restorePortal();
+  // The password was saved before the connection dropped: the new one works and opens the portal directly.
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').fill(made.username);
+  await form.locator('input[type=password]').fill('my-own-pass-88');
+  await form.locator('input[type=password]').press('Enter');
+  await pl.waitForSelector('h1:has-text("Hello, Logout")');
+  expectErrors(/Failed to fetch/);
 });
 
 await step('Dr. Ali imports a Healthwire transactions export on the Import page', async () => {

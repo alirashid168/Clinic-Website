@@ -13,7 +13,7 @@ The full plan is in `docs/Clinic_Website_Master_Blueprint.pdf`, with open questi
 | Part | What | Where |
 |---|---|---|
 | Database | Supabase (Postgres). All rules and permissions are enforced inside the database with row-level security, so the website cannot show or change anything a person is not allowed to. | `supabase/migrations/` |
-| Logins | Supabase Auth. Staff get name@dralirashid.com logins by invitation; patients are invited from their profile. | `supabase/functions/admin-users/` |
+| Logins | Supabase Auth. Staff get name@dralirashid.com logins. A patient's portal login is made at the clinic from the patient profile (**Create portal login**): the username is the name and Mr# (alirashid-1705@dralirashid.com), staff hand over a printed slip with the username and a first password, and the patient chooses their own password at the first login (and can change it from the portal menu). A patient with a real email can still be invited by email. | `supabase/functions/admin-users/` |
 | Website | Plain HTML, CSS and JavaScript modules. No build step, so it is simple to host and maintain. | `web/` |
 | Shared rules | Braces protocol, permission grid, old-data parsing, auto-save queue. Written in TypeScript, copied to `web/js/lib/` by `scripts/build-lib.sh`. | `src/lib/` |
 | Hosting | Vercel serves the `web/` folder with security headers. | `vercel.json` |

@@ -837,6 +837,24 @@ table.invoice-lines td { padding: var(--space-1) var(--space-2) var(--space-1) 0
 table.invoice-lines input { min-width: 0; }
 .invoice-sheet.thermal, .print-thermal .invoice-sheet, .invoice-sheet.print-thermal { max-width: 300px; font-size: var(--fs-xs); padding: var(--space-3); }
 
+/* login slip: the username and password handed to a patient, one small (A6) page */
+.login-slip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s); padding: var(--space-5); max-width: 380px; margin-top: var(--space-3); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.login-slip p { margin: 0 0 var(--space-2); }
+.login-slip h3 { margin: 0 0 var(--space-1); }
+.slip-clinic { font-weight: 700; color: var(--aubergine); border-bottom: 3px solid var(--aubergine); padding-bottom: var(--space-2); margin-bottom: var(--space-3) !important; }
+.slip-who { font-size: var(--fs-ui); color: var(--text-muted); }
+.slip-row { display: grid; gap: 2px; padding: var(--space-2) 0; border-top: 1px dashed var(--border); }
+.slip-label { font-size: var(--fs-xs); color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+.slip-value { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-lg); overflow-wrap: anywhere; }
+/* The username is one piece before the @ (the dash and the Mr# never split over two lines); the only break is right before the @.
+   The longer it is, the smaller the type, so that the longest username that can be made (24 + 1 + 30 characters) still fits an A6 page. */
+.slip-nowrap { white-space: nowrap; }
+.slip-user-md { font-size: var(--fs-ui); }
+.slip-user-sm { font-size: .6875rem; }
+.slip-user-xs { font-size: .5625rem; }
+.slip-hint { font-size: var(--fs-xs); color: var(--text-muted); overflow-wrap: anywhere; }
+.slip-note { margin-top: var(--space-3) !important; font-size: var(--fs-ui); }
+
 /* ------------------------------------------------------------ reports */
 .report-groups { border-bottom: 2px solid var(--border); margin-bottom: var(--space-2); }
 .report-groups .tab { font-size: var(--fs-base); font-weight: 700; padding: var(--space-2) var(--space-4); }
@@ -1183,6 +1201,8 @@ table.invoice-lines input { min-width: 0; }
 /* 80mm thermal roll. "size: 80mm auto" is not valid CSS, so the 297mm declaration (the usual
    80mm roll driver page) is the one browsers keep; the second line documents the intent. */
 @page thermal { size: 80mm 297mm; size: 80mm auto; margin: 4mm; }
+/* A login slip is one small A6 page (105 x 148 mm; written as lengths because the A6 keyword is not honoured everywhere). */
+@page slip { size: 105mm 148mm; margin: 6mm; }
 
 @media print {
   .wa-float, .toasts, .skip-link, .drawer-scrim, .menu-toggle { display: none !important; }
@@ -1207,6 +1227,9 @@ table.invoice-lines input { min-width: 0; }
 
   /* Thermal template: the whole job uses the 80mm page. */
   .print-thermal, .print-thermal body, body:has(.print-thermal), body:has(.print-area.thermal) { page: thermal; }
+  /* Login slip: the whole job uses the small A6 page. */
+  body:has(.print-area.login-slip) { page: slip; }
+  .print-area.login-slip { font-size: var(--fs-ui); break-inside: avoid; }
 }
 @supports not selector(:has(*)) {
   @media print { /* older browsers: the previous visibility approach */

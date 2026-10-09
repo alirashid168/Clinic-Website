@@ -13,6 +13,7 @@ import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval }
 import { todayISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
+import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor } from './supabase.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
@@ -24,6 +25,8 @@ const daysAgo = (n) => {
   return d.toISOString().slice(0, 10);
 };
 const fail = (msg) => { throw new Error(msg); };
+// Same wording as the admin-users Edge Function: a staff login name never has the shape of a patient username.
+const PATIENT_SHAPE_ERROR = 'That login name has the shape of a patient login (a name, a dash and a number). Choose a staff name such as reception@' + CONFIG.STAFF_EMAIL_DOMAIN + '.';
 // A labelled placeholder "progress photo" (a drawn smile, not a real picture) for the sample patient.
 function samplePhoto(label, bg) {
   const teeth = [-84, -60, -36, -12, 12, 36, 60].map((x, i) => `<rect x="${200 + x - 10}" y="${150 + Math.abs(i - 3) * 6}" width="22" height="${30 - Math.abs(i - 3) * 4}" rx="6" fill="#fffdf7" stroke="#d9cbb8"/>`).join('');
@@ -225,13 +228,16 @@ function seed() {
     { id: uid(), branch_id: 5, on_date: daysAgo(-9), start_time: '16:00', end_time: '22:00' },
   ];
   db.audit = [];
+  // The demo's stand-in for the login server: logins the clinic made for patients ({ patient_id, email, password, must_change }).
+  // Kept apart from every patient row, and never returned by any method, like the real login server's passwords.
+  db.portal_logins = [];
   return db;
 }
 
 // ---------------------------------------------------------------- adapter
 export function createDemoAdapter() {
   let db = seed();
-  let session = null; // { staff } | { patient }
+  let session = null; // { staff } | { patient, login? }  (login: the portal login row that signed in)
   const ownPasswords = new Map(); // account id -> the password that account chose in changeOwnPassword() on this page (demo accounts have no real one)
   const saved = new Map(); // idempotency key -> what that save produced (a retried save returns it instead of saving twice)
 
@@ -314,8 +320,22 @@ export function createDemoAdapter() {
       return { staff: db.staff.map((s) => ({ id: s.id, full_name: s.full_name, email: s.email, role: s.role, active: s.active, last_sign_in_at: s.last_sign_in_at || null,
           sign_ins_30d: (db.login_events || []).filter((e) => e.name === s.full_name).length })), events: clone(db.login_events || []) };
     },
-    async signIn() { fail('In demo mode, pick an account from the list.'); },
-    async sendPasswordReset() { fail('Password reset emails are not sent in the demo.'); },
+    // Staff and the sample patient sign in from the list of demo accounts; a login a staff member made for a patient also works here.
+    async signIn(email, password) {
+      const address = normalizeLoginInput(email, CONFIG.STAFF_EMAIL_DOMAIN);
+      const login = db.portal_logins.find((l) => l.email === address && l.password === String(password));
+      const p = login && patient(login.patient_id);
+      if (!p) fail('Invalid login credentials');
+      session = { patient: p, login };
+      db.login_events ||= [];
+      db.login_events.unshift({ at: new Date().toISOString(), kind: 'patient', name: p.full_name, role: null, user_agent: 'This browser' });
+      return this.getSession();
+    },
+    isPortalLoginName(email) { return isPatientLoginName(email, CONFIG.STAFF_EMAIL_DOMAIN); },
+    async sendPasswordReset(email) {
+      if (this.isPortalLoginName(email)) throw Object.assign(new Error('Ask the clinic to reset your password.'), { code: 'CLINIC_RESET' });
+      fail('Password reset emails are not sent in the demo.');
+    },
     /**
      * Same rules and the same failures as the live adapter. A demo account has no real password, so the first time any non-empty
      * current password is accepted; the new one is remembered in memory (until the page is reloaded or the demo is reset), and from
@@ -329,13 +349,24 @@ export function createDemoAdapter() {
       if (ownPasswords.has(id) && ownPasswords.get(id) !== currentPassword) throw passwordError('WRONG_PASSWORD');
       ownPasswords.set(id, newPassword);
     },
+    /** The logged-in patient chooses their own password (clears the "must change" flag of a login the clinic made). */
+    async changePassword(password) {
+      if (!session?.patient) fail('Please log in again.');
+      const problem = checkPortalPassword(password);
+      if (problem) fail(problem);
+      if (session.login) {
+        if (session.login.password === password) fail('New password should be different from the old password.');
+        session.login.password = password;
+        session.login.must_change = false;
+      }
+    },
     async signOut() { session = null; return true; },
     // The demo has one login in one page: no other tab or computer can end it and it never expires, so no login event ever
     // arrives. Same call as the live adapter (fn(eventName, reason)); returns the function that stops listening.
     onAuthChange() { return () => {}; },
     async getSession() {
       if (!session) return null;
-      if (session.patient) return { kind: 'patient', patient: clone(session.patient), perms: new Set() };
+      if (session.patient) return { kind: 'patient', patient: clone(session.patient), perms: new Set(), mustChangePassword: !!session.login?.must_change };
       const s = db.staff.find((x) => x.id === session.staff.id);
       if (!s?.active) { session = null; return null; }
       return { kind: 'staff', staff: clone(s), perms: permsFor(s) };
@@ -402,7 +433,47 @@ export function createDemoAdapter() {
       const p = patient(id);
       if (!p.email) fail("Add the patient's email first.");
       if (p.portal_user_id) fail('This patient already has a portal login.');
+      if (String(p.email).trim().toLowerCase().endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Use Create portal login for clinic usernames.');
       p.portal_user_id = 'p-' + id;
+    },
+    /** Staff make the patient's portal login at the clinic. Resolves { username }. */
+    async createPatientLogin(id, password) {
+      need('portal.invite');
+      const p = patient(id);
+      if (!p) fail('Patient not found.');
+      if (p.portal_user_id) fail('This patient already has a portal login.');
+      const problem = checkSlipPassword(password);
+      if (problem) fail(problem);
+      const email = portalLoginEmail(p.full_name, p.mr_number, CONFIG.STAFF_EMAIL_DOMAIN);
+      if (!email || !isPatientLoginName(email, CONFIG.STAFF_EMAIL_DOMAIN)) fail(NO_USERNAME_MESSAGE);
+      if (db.portal_logins.some((l) => l.email === email) || db.staff.some((x) => x.email === email)) fail('That username is already used by another login.');
+      db.portal_logins.push({ patient_id: id, email, password: String(password), must_change: true });
+      p.portal_user_id = 'p-' + id;
+      audit('patients', 'PORTAL_LOGIN_CREATED', p);
+      return { username: email };
+    },
+    /** Staff set a new password for a login made that way; the patient must choose their own again. Resolves { username }. */
+    async resetPatientPassword(id, password) {
+      need('portal.invite');
+      const p = patient(id);
+      if (!p) fail('Patient not found.');
+      if (!p.portal_user_id) fail('This patient has no portal login yet. Create one first.');
+      const problem = checkSlipPassword(password);
+      if (problem) fail(problem);
+      const login = db.portal_logins.find((l) => l.patient_id === id);
+      if (!login) fail('This patient logs in with their own email address. They can set a new password with "Forgot password" on the login page.');
+      login.password = String(password);
+      login.must_change = true;
+      audit('patients', 'PORTAL_PASSWORD_RESET', p);
+      return { username: login.email };
+    },
+    /** { has_login, clinic_login, username } */
+    async portalLoginInfo(id) {
+      need('portal.invite');
+      const p = patient(id);
+      if (!p) fail('Patient not found.');
+      const login = db.portal_logins.find((l) => l.patient_id === id);
+      return { has_login: !!p.portal_user_id, clinic_login: !!login, username: login?.email || null };
     },
     async getPatient(id) {
       const s = await this.getSession();
@@ -875,6 +946,7 @@ export function createDemoAdapter() {
     async createStaff(row) {
       need('users.manage');
       if (!row.email?.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Staff emails must end with @' + CONFIG.STAFF_EMAIL_DOMAIN);
+      if (isPatientLoginName(row.email, CONFIG.STAFF_EMAIL_DOMAIN)) fail(PATIENT_SHAPE_ERROR);
       if (db.staff.some((s) => s.email === row.email)) fail('A staff account with this email already exists.');
       const { password, ...rest } = row;
       if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
@@ -894,6 +966,7 @@ export function createDemoAdapter() {
       const e = (email || '').trim().toLowerCase();
       if (e && e !== s.email) {
         if (!e.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Staff emails must end with @' + CONFIG.STAFF_EMAIL_DOMAIN);
+        if (isPatientLoginName(e, CONFIG.STAFF_EMAIL_DOMAIN)) fail(PATIENT_SHAPE_ERROR);
         if (db.staff.some((x) => x.email === e && x.id !== id)) fail('That login email is already used. Pick another.');
         s.email = e; audit('staff', 'UPDATE', s);
       }
