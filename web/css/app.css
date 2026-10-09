@@ -713,11 +713,13 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   .sidebar, .topnav-layout > .sidebar {
     display: flex; position: fixed; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px)); bottom: 0; left: 0; height: auto;
     width: min(280px, 86vw); z-index: var(--z-drawer);
-    padding-left: max(var(--space-3), env(safe-area-inset-left)); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom));
+    padding-left: max(var(--space-3), env(safe-area-inset-left)); padding-bottom: 0; /* (the bottom padding is the foot's, below) */
     overscroll-behavior: contain; transform: translateX(-100%); visibility: hidden;
     transition: transform .2s ease, visibility 0s linear .2s;
   }
   .sidebar.open, body.drawer-open .sidebar { transform: none; visibility: visible; box-shadow: var(--shadow-lg); transition: transform .2s ease, visibility 0s; }
+  /* Change password and Log out stay on screen at the bottom of the drawer while the links above them scroll (a phone is too short for all of them). */
+  .sidebar-foot { position: sticky; bottom: 0; background: var(--surface-inverse); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
   body.drawer-open .drawer-scrim, .sidebar.open ~ .drawer-scrim { display: block; }
   body.drawer-open { overflow: hidden; }
   .topnav { display: none; }
@@ -1131,6 +1133,7 @@ table.invoice-lines input { min-width: 0; }
   .person button, .chip-remove { min-width: 32px; min-height: 32px; margin-block: -7px; }
   .quick-tap { width: var(--target); height: var(--target); }
   .menu-list a, .menu-list .menu-btn { min-height: var(--target); }
+  .show-passwords { min-height: var(--target); }
   .toast-close { min-width: var(--target); min-height: var(--target); }
   .phone-link a { min-width: var(--target); min-height: var(--target); }
 }

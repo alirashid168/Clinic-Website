@@ -12,8 +12,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH 
 const errors = [];
 let passed = 0;
 
-async function newPage(viewport = { width: 1366, height: 860 }) {
-  const page = await browser.newPage({ viewport });
+async function newPage(viewport = { width: 1366, height: 860 }, options = {}) {
+  const page = await browser.newPage({ viewport, ...options });
   // Demo mode needs nothing from the internet; outside hosts (fonts, CDN) are cut off so a slow network cannot hang the test.
   await page.route((url) => !/^(localhost|127\.0\.0\.1)$/.test(url.hostname) && url.protocol.startsWith('http'), (r) => r.abort());
   // The live site has its Supabase keys filled in; the test always runs the made-up DEMO data instead.
@@ -574,6 +574,185 @@ await step('sheet works on a phone', async () => {
   await p6.goto(BASE + '#/staff/sheet');
   await p6.waitForSelector('table.sheet tbody tr');
   await shot(p6, '10-sheet-mobile');
+});
+
+// ------------------------------------------------------------- change password (account menu and phone drawer)
+// The demo has no real passwords: the first current password is accepted whatever it is, the one chosen is remembered for the page.
+const pw = await newPage();
+const changeDialog = (pg) => pg.locator('.modal');
+const changeField = (pg, label) => changeDialog(pg).locator(`.field:has(label:text-is("${label}"))`);
+const changeFill = async (pg, current, next, again) => {
+  await changeDialog(pg).getByLabel('Current password', { exact: true }).fill(current);
+  await changeDialog(pg).getByLabel('New password', { exact: true }).fill(next);
+  await changeDialog(pg).getByLabel('Type the new password again', { exact: true }).fill(again);
+};
+const changeSubmit = (pg) => changeDialog(pg).getByRole('button', { name: 'Change password', exact: true }).click();
+const changeOpen = async (pg, { wait = true } = {}) => {
+  await pg.locator('.user-menu > button').click();
+  await pg.locator('.user-menu .menu-list button:has-text("Change password")').click();
+  if (wait) await pg.waitForSelector('.modal h2:has-text("Change password")');
+};
+await step('staff: "Change password" is in the account menu above "Log out" and opens the dialog with its three fields', async () => {
+  await loginAs(pw, 'Front desk \\(Gulshan\\)');
+  await pw.locator('.user-menu > button').click();
+  const items = (await pw.locator('.user-menu .menu-list button').allTextContents()).map((t) => t.trim());
+  assert.deepEqual(items, ['Change password', 'Log out']);
+  await pw.locator('.user-menu .menu-list button:has-text("Change password")').click();
+  await pw.waitForSelector('.modal h2:has-text("Change password")');
+  assert.equal(await pw.locator('.user-menu.open').count(), 0, 'the menu closed behind the dialog');
+  assert.equal(await changeDialog(pw).getByLabel('Current password', { exact: true }).getAttribute('autocomplete'), 'current-password');
+  assert.equal(await changeDialog(pw).getByLabel('New password', { exact: true }).getAttribute('autocomplete'), 'new-password');
+  assert.equal(await changeDialog(pw).getByLabel('Type the new password again', { exact: true }).getAttribute('autocomplete'), 'new-password');
+  assert.match(await changeField(pw, 'New password').innerText(), /At least 8 characters/);
+  assert.equal(await changeDialog(pw).locator('input[type=password]').count(), 3);
+  await changeDialog(pw).getByLabel('Show the new password').check();
+  assert.equal(await changeDialog(pw).locator('input[type=password]').count(), 1, 'the box shows the two new passwords as typed');
+  assert.equal(await changeDialog(pw).getByLabel('Current password', { exact: true }).getAttribute('type'), 'password',
+    'the current password stays hidden (a browser may have filled in a saved one)');
+  await changeDialog(pw).getByLabel('Show the new password').uncheck();
+  assert.equal(await changeDialog(pw).locator('input[type=password]').count(), 3);
+  await shot(pw, '14-change-password');
+  await pw.keyboard.press('Escape');
+  await pw.waitForSelector('.modal', { state: 'detached' });
+  assert.ok(await pw.evaluate(() => document.activeElement?.closest('.user-menu') !== null), 'focus is back on the account button');
+});
+await step('empty, short and mismatching entries are refused next to the field, nothing is sent', async () => {
+  await changeOpen(pw);
+  await changeSubmit(pw);
+  for (const label of ['Current password', 'New password', 'Type the new password again']) assert.ok(await changeField(pw, label).locator('.field-error').count(), `${label} says what is missing`);
+  await changeFill(pw, 'old-pass-1', 'short', 'short');
+  await changeSubmit(pw);
+  assert.match(await changeField(pw, 'New password').locator('.field-error').innerText(), /at least 8 characters/);
+  await changeFill(pw, 'old-pass-1', 'brand-new-pass-1', 'brand-new-pass-2');
+  await changeSubmit(pw);
+  assert.match(await changeField(pw, 'Type the new password again').locator('.field-error').innerText(), /not the same/);
+  assert.equal(await changeField(pw, 'New password').locator('.field-error').count(), 0, 'the error is next to the field that is wrong');
+  assert.equal(await pw.locator('.toast:has-text("Password changed")').count(), 0);
+  assert.ok(await changeDialog(pw).count(), 'the dialog is still open');
+});
+await step('success: the dialog closes, the toast says what to do next time, and the person stays logged in', async () => {
+  await changeFill(pw, 'old-pass-1', 'brand-new-pass-1', 'brand-new-pass-1');
+  await changeSubmit(pw);
+  await pw.waitForSelector('.toast:has-text("Password changed. Use the new password next time you log in.")');
+  await pw.waitForSelector('.modal', { state: 'detached' });
+  assert.ok(await pw.locator('.topbar').isVisible());
+  assert.match(pw.url(), /#\/staff\//);
+  await shot(pw, '15-password-changed');
+});
+await step('a wrong current password says "not right" next to that field; the same new password is refused; the right current one works', async () => {
+  await changeOpen(pw);
+  await changeFill(pw, 'wrong-old-9', 'second-pass-22', 'second-pass-22');
+  await changeSubmit(pw);
+  assert.match(await changeField(pw, 'Current password').locator('.field-error').innerText(), /not right/);
+  assert.ok(await changeDialog(pw).count(), 'still open, nothing changed');
+  await changeFill(pw, 'brand-new-pass-1', 'brand-new-pass-1', 'brand-new-pass-1');
+  await changeSubmit(pw);
+  assert.match(await changeField(pw, 'New password').locator('.field-error').innerText(), /different/);
+  await changeFill(pw, 'brand-new-pass-1', 'second-pass-22', 'second-pass-22');
+  await changeDialog(pw).getByLabel('Type the new password again', { exact: true }).press('Enter'); // Enter sends it, like the button
+  await pw.waitForSelector('.modal', { state: 'detached' });
+  assert.ok(await pw.locator('.toast:has-text("Password changed")').count());
+  assert.ok(await pw.locator('.topbar').isVisible(), 'still logged in');
+});
+const pwPhone = await newPage({ width: 390, height: 844 });
+await step('at phone width the drawer shows "Change password" next to "Log out", and the dialog opens from it', async () => {
+  await loginAs(pwPhone, 'Front desk \\(Gulshan\\)');
+  await pwPhone.locator('.menu-toggle').click();
+  await pwPhone.waitForSelector('#staff-drawer.open');
+  const items = (await pwPhone.locator('.sidebar-foot button').allTextContents()).map((t) => t.trim());
+  assert.deepEqual(items, ['Change password', 'Log out']);
+  await shot(pwPhone, '16-drawer-change-password');
+  await pwPhone.locator('.sidebar-foot button:has-text("Change password")').click();
+  await pwPhone.waitForSelector('.modal h2:has-text("Change password")');
+  assert.equal(await pwPhone.locator('#staff-drawer.open').count(), 0, 'the drawer closed behind the dialog');
+  const box = await changeDialog(pwPhone).boundingBox();
+  assert.ok(box.x >= 0 && box.x + box.width <= 390, 'the dialog fits the screen');
+  await changeFill(pwPhone, 'old-pass-1', 'phone-pass-11', 'phone-pass-11');
+  await changeSubmit(pwPhone);
+  await pwPhone.waitForSelector('.toast:has-text("Password changed")');
+  await pwPhone.waitForSelector('.modal', { state: 'detached' });
+  assert.ok(await pwPhone.evaluate(() => document.activeElement?.classList.contains('menu-toggle')), 'focus is back on the menu button');
+});
+
+// ------------------------------------------------------------- change password: loading, closing, password managers, the phone drawer
+const pwLate = await newPage();
+const dialogRequests = [];
+pwLate.on('request', (r) => { if (/\/js\/ui\/password-dialog\.js/.test(r.url())) dialogRequests.push(r.url()); });
+await pwLate.route('**/js/ui/password-dialog.js', async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.continue(); }); // a slow connection
+await step('the dialog code is fetched when the account menu opens, and two clicks while it loads make ONE dialog', async () => {
+  await loginAs(pwLate, 'Front desk \\(Gulshan\\)');
+  assert.equal(dialogRequests.length, 0, 'not fetched before the menu is used');
+  await pwLate.locator('.user-menu > button').click();
+  for (let i = 0; i < 20 && !dialogRequests.length; i++) await pwLate.waitForTimeout(50);
+  assert.equal(dialogRequests.length, 1, 'fetched as the menu opened, before any click on the item');
+  await pwLate.locator('.user-menu .menu-list button:has-text("Change password")').click();
+  await pwLate.waitForTimeout(200);
+  assert.equal(await pwLate.locator('.modal').count(), 0, 'still loading');
+  await changeOpen(pwLate, { wait: false }); // the impatient second click
+  await pwLate.waitForSelector('.modal h2:has-text("Change password")');
+  await pwLate.waitForTimeout(500);
+  assert.equal(await pwLate.locator('.modal').count(), 1, 'one dialog, not two stacked ones');
+});
+await step('the dialog gives password managers the login name, starts on the current password, and warns about other devices', async () => {
+  const dialog = changeDialog(pwLate);
+  const login = dialog.locator('input[autocomplete="username"]');
+  assert.equal(await login.count(), 1);
+  assert.equal(await login.inputValue(), 'demo.frontdesk2@example.com');
+  assert.equal(await login.getAttribute('readonly'), '');
+  assert.equal(await login.getAttribute('aria-hidden'), 'true');
+  assert.equal(await login.getAttribute('tabindex'), '-1');
+  assert.equal(await pwLate.evaluate(() => document.activeElement?.getAttribute('autocomplete')), 'current-password');
+  assert.equal(await dialog.locator('form').count(), 1);
+  assert.match(await dialog.innerText(), /other computers or phones, they will be logged out and need the new password/);
+});
+await step('while the change is being sent the dialog cannot be closed (Escape, the x, a click outside), and says it is working', async () => {
+  await pwLate.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const original = state.data.changeOwnPassword.bind(state.data);
+    state.data.changeOwnPassword = async (...args) => { await new Promise((r) => setTimeout(r, 1500)); return original(...args); };
+  });
+  await changeFill(pwLate, 'old-pass-1', 'late-pass-11', 'late-pass-11');
+  await changeSubmit(pwLate);
+  await pwLate.waitForSelector('.modal[aria-busy="true"]');
+  assert.equal((await changeDialog(pwLate).locator('.btn-primary').innerText()).trim(), 'Changing…');
+  await pwLate.keyboard.press('Escape');
+  await changeDialog(pwLate).getByRole('button', { name: 'Close' }).click();
+  await pwLate.mouse.click(4, 4); // the grey area outside
+  await pwLate.waitForTimeout(300);
+  assert.equal(await changeDialog(pwLate).count(), 1, 'still open while sending');
+  await pwLate.waitForSelector('.toast:has-text("Password changed")');
+  await pwLate.waitForSelector('.modal', { state: 'detached' });
+  assert.equal(await pwLate.locator('.modal').count(), 0);
+});
+await step('when the change fails the label is back and the dialog can be closed again', async () => {
+  await changeOpen(pwLate);
+  await changeFill(pwLate, 'not-the-one', 'again-pass-22', 'again-pass-22');
+  await changeSubmit(pwLate);
+  await changeField(pwLate, 'Current password').locator('.field-error').waitFor();
+  assert.equal((await changeDialog(pwLate).locator('.btn-primary').innerText()).trim(), 'Change password');
+  assert.equal(await changeDialog(pwLate).getAttribute('aria-busy'), null);
+  await pwLate.keyboard.press('Escape');
+  await pwLate.waitForSelector('.modal', { state: 'detached' });
+});
+// A phone: touch input, so the touch sizes of the stylesheet apply. The admin has the longest menu, so the drawer scrolls.
+const pwTouch = await newPage({ width: 375, height: 812 }, { isMobile: true, hasTouch: true });
+await step('on a phone the drawer keeps "Change password" and "Log out" on screen, well apart, and "Show the new password" is a full-size tap target', async () => {
+  await loginAs(pwTouch, 'Dr. Ali Rashid');
+  await pwTouch.locator('.menu-toggle').tap();
+  await pwTouch.waitForSelector('#staff-drawer.open');
+  const drawer = await pwTouch.locator('#staff-drawer').evaluate((el) => ({ scrolls: el.scrollHeight > el.clientHeight + 1 }));
+  assert.ok(drawer.scrolls, 'the menu is longer than the screen, so this checks the sticky foot');
+  const change = await pwTouch.locator('.sidebar-foot button:has-text("Change password")').boundingBox();
+  const out = await pwTouch.locator('.sidebar-foot button:has-text("Log out")').boundingBox();
+  assert.ok(change.y + change.height <= 812 && out.y + out.height <= 812, `both are on screen without scrolling (at ${Math.round(change.y)} and ${Math.round(out.y)} of 812)`);
+  assert.ok(out.x - (change.x + change.width) >= 24, 'a slip of the finger on "Change password" does not log out');
+  await shot(pwTouch, '17-drawer-sticky-foot');
+  await pwTouch.locator('.sidebar-foot button:has-text("Change password")').tap();
+  await pwTouch.waitForSelector('.modal h2:has-text("Change password")');
+  const row = await changeDialog(pwTouch).locator('label.show-passwords').boundingBox();
+  assert.ok(row.height >= 44, `the "Show the new password" row is ${Math.round(row.height)}px tall`);
+  await pwTouch.keyboard.press('Escape');
+  await pwTouch.waitForSelector('.modal', { state: 'detached' });
 });
 
 await browser.close();

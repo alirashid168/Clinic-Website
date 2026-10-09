@@ -12,6 +12,7 @@ import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '.
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
 import { todayISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
+import { passwordProblems, passwordError } from '../password-rules.js';
 import { summarizePayments, summarizeVisits, thumbPathFor } from './supabase.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
@@ -231,6 +232,7 @@ function seed() {
 export function createDemoAdapter() {
   let db = seed();
   let session = null; // { staff } | { patient }
+  const ownPasswords = new Map(); // account id -> the password that account chose in changeOwnPassword() on this page (demo accounts have no real one)
   const saved = new Map(); // idempotency key -> what that save produced (a retried save returns it instead of saving twice)
 
   const me = () => session?.staff || null;
@@ -314,6 +316,19 @@ export function createDemoAdapter() {
     },
     async signIn() { fail('In demo mode, pick an account from the list.'); },
     async sendPasswordReset() { fail('Password reset emails are not sent in the demo.'); },
+    /**
+     * Same rules and the same failures as the live adapter. A demo account has no real password, so the first time any non-empty
+     * current password is accepted; the new one is remembered in memory (until the page is reloaded or the demo is reset), and from
+     * then on the current password must match it.
+     */
+    async changeOwnPassword(currentPassword, newPassword) {
+      const id = session?.staff?.id || (session?.patient ? 'p-demo' : null);
+      if (!id) throw passwordError('NOT_LOGGED_IN');
+      const problem = passwordProblems({ current: currentPassword, next: newPassword })[0];
+      if (problem) throw passwordError('PASSWORD_RULE', problem.message);
+      if (ownPasswords.has(id) && ownPasswords.get(id) !== currentPassword) throw passwordError('WRONG_PASSWORD');
+      ownPasswords.set(id, newPassword);
+    },
     async signOut() { session = null; return true; },
     // The demo has one login in one page: no other tab or computer can end it and it never expires, so no login event ever
     // arrives. Same call as the live adapter (fn(eventName, reason)); returns the function that stops listening.
@@ -325,7 +340,7 @@ export function createDemoAdapter() {
       if (!s?.active) { session = null; return null; }
       return { kind: 'staff', staff: clone(s), perms: permsFor(s) };
     },
-    async resetDemo() { db = seed(); session = null; },
+    async resetDemo() { db = seed(); session = null; ownPasswords.clear(); },
 
     // ------------------------------------------------------------ reference
     async branches() { return clone(db.branches.filter((b) => b.active)); },

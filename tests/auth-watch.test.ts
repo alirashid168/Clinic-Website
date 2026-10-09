@@ -69,6 +69,28 @@ test('repeated "nobody" answers never log out, with or without an event name', a
   assert.equal(t.session, ali);
 });
 
+test('USER_UPDATED (the person changed their own password) is the same person: kept, refreshed, nothing ended; a tab that hears it by broadcast does the same', async () => {
+  const refreshed = { kind: 'staff', staff: { id: 'staff-1' }, perms: new Set(['sheet.view']) }; // a new object for the same person
+  const here = tab(ali, [refreshed]);
+  await here.fire('USER_UPDATED');
+  assert.equal(here.ended, 0, 'no logout, so no "logged out in another tab" notice and nothing cleared');
+  assert.deepEqual(here.reasons, []);
+  assert.deepEqual(here.accepted, [refreshed]);
+  assert.equal(here.session, refreshed);
+  assert.deepEqual(here.askedWith, [[{ strict: true }]], 'looked up like any other event');
+  const other = tab(ali, [refreshed]); // the other tabs of the browser get the same event from the library
+  await other.fire('USER_UPDATED');
+  assert.equal(other.ended, 0);
+  assert.equal(other.session, refreshed);
+  // the lookups around the update that find nothing (the library's lock, a network blip) change nothing either
+  const quiet = tab(ali, [null, new Error('Failed to fetch'), ali]);
+  const spoken = console.error;
+  console.error = () => {};
+  try { for (const event of ['USER_UPDATED', 'USER_UPDATED', 'TOKEN_REFRESHED']) await quiet.fire(event); } finally { console.error = spoken; }
+  assert.equal(quiet.ended, 0);
+  assert.equal(quiet.session, ali);
+});
+
 test('the SIGNED_OUT event ends the login, once, without asking the data layer', async () => {
   const t = tab(ali, [ali]);
   await t.fire('SIGNED_OUT');
