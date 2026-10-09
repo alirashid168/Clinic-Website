@@ -1708,6 +1708,17 @@ export async function createSupabaseAdapter() {
       }).eq('id', id).select('id'));
       if (!saved?.length) throw new Error('The branches were not saved. Try again.');
     },
+    async updateStaffRole(id, role, fromRole) {
+      // A plain update of public.staff.role. The staff guard (a trigger) decides who may: only admin makes, promotes or changes an admin account,
+      // and nobody but admin changes their own role. Row-level security (users.manage) decides whose row can be reached at all.
+      // fromRole: the role the dialog showed; the row is changed only if it still has it, so a change made meanwhile (another tab) is never undone.
+      // A braces doctor group belongs to doctors only (doctor_group_only_for_doctors), so it is cleared when the role stops being a doctor's.
+      const changes = role === 'doctor' || role === 'admin' ? { role } : { role, doctor_group_id: null };
+      let q = sb.from('staff').update(changes).eq('id', id);
+      if (fromRole) q = q.eq('role', fromRole);
+      const saved = check(await q.select('id'));
+      if (!saved?.length) throw new Error('The role was not saved: it may have been changed meanwhile. Reload the page and try again.');
+    },
     async deactivateStaff(id) {
       check(await sb.rpc('deactivate_staff', { p_staff: id }));
       await sb.functions.invoke('admin-users', { body: { action: 'ban_user', user_id: id } });

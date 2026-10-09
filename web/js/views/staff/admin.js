@@ -221,6 +221,28 @@ async function staff(root, redraw) {
     ]);
   };
 
+  // Which role an existing account has: the five working roles, never Admin (only Dr. Ali's own account is admin, and the database refuses anyone else making one).
+  const changeRole = (s) => {
+    const role = select(Object.entries(ROLE_LABELS).filter(([k]) => k !== 'admin').map(([value, label]) => ({ value, label })), s.role);
+    const effect = (value) => `Their menus and permissions change to the ${ROLE_LABELS[value]} ones; personal access ticks stay.`;
+    const roleField = field('Role', role, effect(role.value));
+    const effectEl = roleField.querySelector('.field-hint');
+    role.addEventListener('change', () => { effectEl.textContent = effect(role.value); });
+    const body = h('div', {},
+      h('p', { class: 'muted' }, `Current role: ${ROLE_LABELS[s.role]}. Pick the role this person should have instead.`),
+      roleField);
+    modal(`Role · ${s.full_name}`, body, [
+      { label: 'Cancel' },
+      { label: 'Save', primary: true, onClick: async () => {
+        if (role.value === s.role) { toast('Nothing changed.'); return false; }
+        try {
+          await d.updateStaffRole(s.id, role.value, s.role);
+          toast(`Saved. ${s.full_name} is now ${ROLE_LABELS[role.value]}.`, 'ok'); await redraw();
+        } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } },
+    ]);
+  };
+
   const personal = (s) => {
     const mine = overrides[s.id] || {};
     modal(`Personal access · ${s.full_name}`, h('div', {},
@@ -259,8 +281,11 @@ async function staff(root, redraw) {
         h('td', {}, s.role !== 'admin' && Object.keys(overrides[s.id] || {}).length ? h('span', { class: 'badge badge-warn' }, 'Personal changes') : null),
         h('td', { class: 'right nowrap' },
           s.role !== 'admin' ? h('button', { class: 'btn btn-small', 'aria-label': `Personal access, ${s.full_name}`, onclick: () => personal(s) }, 'Personal access') : null, ' ',
-          // Not on an admin row (admin always has every branch) nor on your own row (the database refuses a non-admin changing their own branches).
-          s.role !== 'admin' && s.id !== state.session?.staff?.id ? h('button', { class: 'btn btn-small', 'aria-label': `Branches, ${s.full_name}`, onclick: () => branchAccess(s) }, 'Branches') : null, ' ',
+          // Not on an admin row (admin always has every branch and the one admin role) nor on your own row (the database refuses a non-admin changing their own branches or role).
+          s.role !== 'admin' && s.id !== state.session?.staff?.id ? [
+            h('button', { class: 'btn btn-small', 'aria-label': `Branches, ${s.full_name}`, onclick: () => branchAccess(s) }, 'Branches'), ' ',
+            h('button', { class: 'btn btn-small', 'aria-label': `Role, ${s.full_name}`, onclick: () => changeRole(s) }, 'Role'),
+          ] : null, ' ',
           s.active && (s.role !== 'admin' || isAdmin()) ? h('button', { class: 'btn btn-small', 'aria-label': `Login and password, ${s.full_name}`, onclick: () => loginDetails(s) }, 'Login and password') : null, ' ',
           s.role === 'admin' ? null : s.active
             ? h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Switch off ${s.full_name}`, onclick: () => switchOff(s) }, 'Switch off')
