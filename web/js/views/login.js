@@ -3,13 +3,15 @@
 import { h, mount, field, friendlyError, announce, busy, showFormErrors, clearFieldErrors } from '../ui/dom.js';
 import { state } from '../state.js';
 import { ROLE_LABELS } from '../lib/permissions.js';
+import { normalizeLoginInput } from '../lib/portal-login.js';
+import { CONFIG } from '../config.js';
 
 function loginProblem(err, isStaff) {
   const msg = err?.message || '';
   if (msg === 'NOT_LINKED') {
     return isStaff ? 'This login is not linked to a staff account yet. Ask Dr. Ali or an admin.' : 'This login is not linked to a patient record yet. Please contact the clinic.';
   }
-  if (/invalid login credentials/i.test(msg)) return 'That email and password do not match. Check both and try again.';
+  if (/invalid login credentials/i.test(msg)) return isStaff ? 'That email and password do not match. Check both and try again.' : 'That username (or email) and password do not match. Check both and try again.';
   if (/email not confirmed/i.test(msg)) return 'Your email address is not confirmed yet. Open the link in the email we sent you, then log in.';
   if (/rate limit|too many/i.test(msg)) return 'Too many tries. Wait a minute, then try again.';
   return friendlyError(err, isStaff ? undefined : { audience: 'public' });
@@ -20,7 +22,11 @@ export async function renderLogin(root, who, onSignedIn) {
   const isStaff = who !== 'patient';
   const title = isStaff ? 'Staff login' : 'Patient login';
 
-  const email = h('input', { type: 'email', name: 'email', autocomplete: 'username', required: true, placeholder: isStaff ? 'name@dralirashid.com' : 'Your email address' });
+  // Staff type their whole email. A patient types the username from the clinic's slip (the part before the @ is enough) or their own email.
+  const email = isStaff
+    ? h('input', { type: 'email', name: 'email', autocomplete: 'username', required: true, placeholder: 'name@dralirashid.com' })
+    : h('input', { type: 'text', name: 'username', autocomplete: 'username', required: true, inputmode: 'email', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', placeholder: 'For example alirashid-1705' });
+  const typedAddress = () => (isStaff ? email.value.trim() : normalizeLoginInput(email.value, CONFIG.STAFF_EMAIL_DOMAIN));
   const password = h('input', { type: 'password', name: 'password', autocomplete: 'current-password', required: true });
   const submit = h('button', { class: 'btn btn-primary', type: 'submit', style: { width: '100%' } }, 'Log in');
   // A problem with the login as a whole (wrong password, no connection). Field problems go under their field.
@@ -51,9 +57,17 @@ export async function renderLogin(root, who, onSignedIn) {
         type: 'button', class: 'link-btn',
         onclick: busy(async () => {
           clearProblems();
-          if (!email.value.trim()) return showFormErrors(form, [{ input: email, message: 'Type your email address first, then choose "Forgot password" again.' }]);
+          const address = typedAddress();
+          if (!address) return showFormErrors(form, [{ input: email, message: 'Type your username or email address first, then choose "Forgot password" again.' }]);
+          // A username made at the clinic has no inbox: no email is sent, the clinic sets a new password.
+          if (address.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) {
+            note.textContent = 'Ask the clinic to reset your password. The front desk can give you a new one, in person or by phone.';
+            note.hidden = false;
+            announce(note.textContent);
+            return undefined;
+          }
           try {
-            await d.sendPasswordReset(email.value);
+            await d.sendPasswordReset(address);
             note.textContent = 'If this email has a patient account, a link to set a new password is on its way. Check your inbox (and spam folder).';
             note.hidden = false;
             announce(note.textContent);
@@ -71,10 +85,10 @@ export async function renderLogin(root, who, onSignedIn) {
       e.preventDefault();
       if (submit.disabled) return;
       clearProblems();
-      const address = email.value.trim();
+      const address = typedAddress();
       const errors = [];
-      if (!address) errors.push({ input: email, message: 'Type your email address.' });
-      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) errors.push({ input: email, message: 'Type the whole email address, for example name@example.com.' });
+      if (!address) errors.push({ input: email, message: isStaff ? 'Type your email address.' : 'Type your username or email address.' });
+      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) errors.push({ input: email, message: isStaff ? 'Type the whole email address, for example name@example.com.' : 'Type your username exactly as on your slip, for example alirashid-1705, or the whole email address.' });
       if (!password.value) errors.push({ input: password, message: 'Type your password.' });
       if (errors.length) { showFormErrors(form, errors); return; }
       submit.disabled = true;
@@ -90,7 +104,7 @@ export async function renderLogin(root, who, onSignedIn) {
       }
     },
   },
-  field('Email', email),
+  isStaff ? field('Email', email) : field('Username or email', email, 'On the slip the clinic gave you. If you gave the clinic your email address, you can use that instead.'),
   field('Password', password),
   problem,
   submit,
@@ -114,7 +128,8 @@ export async function renderLogin(root, who, onSignedIn) {
     h('main', { class: 'login-card' },
       h('p', {}, h('a', { class: 'login-link', href: '#/' }, h('span', { 'aria-hidden': 'true' }, '← '), "Dr. Ali Rashid's Dental Clinic")),
       h('h1', {}, title),
-      demo || form,
+      // The demo's patient page also takes a login a staff member made, so the whole first-login path can be tried.
+      isStaff ? (demo || form) : h('div', {}, demo, demo ? h('h2', { style: { fontSize: 'var(--fs-lg)', margin: 'var(--space-4) 0 var(--space-2)' } }, 'Or log in with a username and password') : null, form),
       !isStaff && !demo ? h('div', { class: 'login-demo' },
         h('p', { class: 'muted' }, 'Not sure what your account shows? Your visits, invoices and dues, progress photos and X-rays, your next appointment and a direct line to Dr. Ali.'),
         h('a', { class: 'btn', href: '#/patient/demo', style: { width: '100%' } }, 'See a sample patient account')) : null,

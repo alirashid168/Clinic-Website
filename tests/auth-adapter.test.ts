@@ -72,6 +72,7 @@ function fakeClient() {
     signOuts: [] as any[], getUserCalls: 0, getUserJwts: [] as any[], reads: [] as string[], readAuth: [] as Array<[string, string | undefined]>,
     updates: [] as any[], listeners: new Set<Function>(), fetchOption: null as any,
     signInResult: { data: {}, error: null } as any,
+    invokes: [] as any[], invokeAnswer: { data: null, error: null } as any, userUpdates: [] as any[], resets: [] as any[],
   };
   f.emit = (event: string, session: any = null) => { for (const cb of [...f.listeners]) cb(event, session); };
   f.auth = {
@@ -81,6 +82,8 @@ function fakeClient() {
     async signOut(opts: any) { f.signOuts.push(opts); f.session = null; store.delete(KEY); f.emit('SIGNED_OUT'); return { error: null }; }, // auth-js sends SIGNED_OUT before it answers
     onAuthStateChange(cb: Function) { f.listeners.add(cb); return { data: { subscription: { unsubscribe: () => f.listeners.delete(cb) } } }; },
     async signInWithPassword() { return f.signInResult; },
+    async updateUser(attrs: any) { f.userUpdates.push(attrs); return { data: {}, error: null }; },
+    async resetPasswordForEmail(email: string) { f.resets.push(email); return { data: {}, error: null }; },
     stopAutoRefresh() {},
   };
   f.from = (table: string) => {
@@ -106,7 +109,7 @@ function fakeClient() {
   f.client = (options: any) => {
     f.fetchOption = options?.global?.fetch;
     const rpc = () => { const r: any = Promise.resolve({ data: [], error: null }); r.abortSignal = () => r; return r; };
-    return { auth: f.auth, from: f.from, rpc, functions: { invoke: async () => ({ data: null, error: null }) }, storage: { from: () => ({}) } };
+    return { auth: f.auth, from: f.from, rpc, functions: { invoke: async (name: string, opts: any) => { f.invokes.push([name, opts.body]); return typeof f.invokeAnswer === 'function' ? f.invokeAnswer() : f.invokeAnswer; } }, storage: { from: () => ({}) } };
   };
   return f;
 }
@@ -898,4 +901,90 @@ test('the first look says nothing when the page opened with nobody stored, when 
   store.delete(KEY);
   f.session = null;
   assert.equal(await data.getSession(), null, 'and that was the first look');
+});
+
+// ---- patient logins made at the clinic
+const patientUser = (metadata: any) => ({ data: { user: { id: 'pu1', user_metadata: metadata } }, error: null });
+const patientRow = { id: 'pat-1', full_name: 'Ali Rashid', mr_number: '1705', portal_user_id: 'pu1' };
+
+test('a patient login the clinic made reports mustChangePassword from the metadata of the login, read fresh each time; staff never carry the flag', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.tables.staff = [];
+  f.tables.patients = [patientRow];
+  f.session = loginOf('pu1'); // the stored login is the patient's own (getSession checks it is the same person the server confirms)
+  f.user = patientUser({ kind: 'patient', must_change_password: true });
+  const first = await data.getSession();
+  assert.equal(first.kind, 'patient');
+  assert.equal(first.mustChangePassword, true);
+  f.user = patientUser({ kind: 'patient', must_change_password: false });
+  assert.equal((await data.getSession()).mustChangePassword, false, 'the cached profile does not keep an old flag');
+  f.user = patientUser(undefined);
+  assert.equal((await data.getSession()).mustChangePassword, false, 'an invited patient (no flag) is never held back');
+  f.user = GOOD_USER;
+  f.session = loginOf('u1');
+  f.tables.staff = [{ id: 'u1', role: 'admin', active: true }];
+  const staff = await data.getSession();
+  assert.equal(staff.kind, 'staff');
+  assert.ok(!('mustChangePassword' in staff));
+});
+
+test('changePassword sets the new password and clears the must-change flag in one update, and forgets the cached session', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.tables.staff = [];
+  f.tables.patients = [patientRow];
+  f.session = loginOf('pu1');
+  f.user = patientUser({ kind: 'patient', must_change_password: true });
+  assert.equal((await data.getSession()).mustChangePassword, true);
+  await data.changePassword('my-own-pass-77');
+  assert.deepEqual(f.userUpdates, [{ password: 'my-own-pass-77', data: { must_change_password: false } }]);
+  f.user = patientUser({ kind: 'patient', must_change_password: false });
+  assert.equal((await data.getSession()).mustChangePassword, false);
+});
+
+test('a clinic username has no inbox: it is not a staff address, and password reset refuses it (no email) with the clinic wording', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  // the clinic domain comes from config.js
+  assert.equal(data.isPortalLoginName('alirashid-1705@dralirashid.com'), true);
+  assert.equal(data.isStaffEmail('alirashid-1705@dralirashid.com'), false, 'a patient address is not a staff address');
+  assert.equal(data.isStaffEmail('reception@dralirashid.com'), true);
+  assert.equal(data.isPortalLoginName('reception@dralirashid.com'), false);
+  assert.equal(data.isStaffEmail('sara@gmail.com'), false);
+  await assert.rejects(() => data.sendPasswordReset('AliRashid-1705@dralirashid.com'), (e: any) => e.code === 'CLINIC_RESET' && e.message === 'Ask the clinic to reset your password.');
+  await assert.rejects(() => data.sendPasswordReset('reception@dralirashid.com'), (e: any) => e.code === 'STAFF_RESET');
+  assert.deepEqual(f.resets, [], 'no email was requested for either');
+  (globalThis as any).location = { origin: 'https://www.dralirashid.com' };
+  try {
+    await data.sendPasswordReset(' Sara@Gmail.com ');
+    assert.deepEqual(f.resets, ['sara@gmail.com'], 'a real email keeps the email reset');
+  } finally { delete (globalThis as any).location; }
+});
+
+test('the staff calls for patient logins go to the admin-users function and resolve only what the screen needs (never the password)', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.invokeAnswer = { data: { ok: true, username: 'alirashid-1705@dralirashid.com' }, error: null };
+  assert.deepEqual(await data.createPatientLogin('pat-1', 'sunny-grape-4827'), { username: 'alirashid-1705@dralirashid.com' });
+  assert.deepEqual(await data.resetPatientPassword('pat-1', 'peach-zebra-5936'), { username: 'alirashid-1705@dralirashid.com' });
+  f.invokeAnswer = { data: { ok: true, has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' }, error: null };
+  assert.deepEqual(await data.portalLoginInfo('pat-1'), { has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' });
+  assert.deepEqual(f.invokes, [
+    ['admin-users', { action: 'create_patient_login', patient_id: 'pat-1', password: 'sunny-grape-4827' }],
+    ['admin-users', { action: 'reset_patient_password', patient_id: 'pat-1', password: 'peach-zebra-5936' }],
+    ['admin-users', { action: 'portal_login_info', patient_id: 'pat-1' }],
+  ]);
+});
+
+test('an error of the function reaches the screen in its own words, also when it came with a non-2xx status', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  f.invokeAnswer = { data: { error: 'This patient already has a portal login.' }, error: null };
+  await assert.rejects(() => data.createPatientLogin('pat-1', 'sunny-grape-4827'), /already has a portal login/);
+  const refused = Object.assign(new Error('Edge Function returned a non-2xx status code'), { context: { json: async () => ({ error: 'You are not allowed to create patient logins.' }) } });
+  f.invokeAnswer = { data: null, error: refused };
+  await assert.rejects(() => data.createPatientLogin('pat-1', 'sunny-grape-4827'), /You are not allowed to create patient logins/);
+  f.invokeAnswer = { data: null, error: Object.assign(new Error('Failed to send a request to the Edge Function'), { context: {} }) };
+  await assert.rejects(() => data.resetPatientPassword('pat-1', 'peach-zebra-5936'), /Failed to send a request/);
 });
