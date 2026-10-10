@@ -9,7 +9,11 @@
 //     then patient rows; a day's rows are introduced by a row holding only the date,
 //   - or a "Date" column on every row,
 //   - or no dates at all (today's list): the date is given on the import page.
-// Header names vary between tabs ("Waiting" vs "Status", "Month" vs "Monthly", "Column 13").
+// Header names vary between tabs ("Waiting" vs "Status", "Month" vs "Months" vs "Monthly", "Column 13").
+//
+// readRow() and the small readers it uses (firstPhone, tokenOf, groupOf, liveStatus, mrOf, givenName) are ALSO
+// copied into the Google Apps Script apps-script/AajSync.js (the two-way sync), which cannot import this file.
+// tests/aaj-sync-script.test.mjs reads every fixture row with both copies and fails on any difference: change both together.
 import { cleanLegacyName, splitPeople, matchClinician } from './legacy.js';
 import { parseMonthCell } from './protocol.js';
 import { phoneOf, treatmentFor, chunk } from './healthwire.js';
@@ -23,7 +27,7 @@ const ALIASES = {
   date: ['date', 'day', 'visit date'],
   mr: ['mr #', 'mr#', 'mr', 'mr no', 'mr no.', 'mr number', 'mrn', 'mr num'],
   name: ['patient name', 'name', 'patient', 'patients name', "patient's name"],
-  month: ['month', 'monthly', 'braces month', 'month no'],
+  month: ['month', 'months', 'monthly', 'braces month', 'month no'],
   treatment: ['treatment', 'treatments', 'procedure', 'work'],
   token: ['token no', 'token #', 'token', 'token number', 'token no.'],
   status: ['waiting', 'status', 'waiting / status', 'waiting status'],
@@ -106,6 +110,77 @@ const STATUS = (raw) => {
   return 'completed';
 };
 const text = (c) => (c === null || c === undefined ? '' : (c instanceof Date ? '' : String(c).trim()));
+
+/** A Contact cell with two numbers ("0300 1111111 / 0321 2222222") -> the first number (the cell used to be glued into one 22-digit number). */
+export function firstPhone(cell) {
+  for (const part of String(cell ?? '').split(/[,;\/]|\s{2,}|\bor\b/i)) {
+    const t = part.trim();
+    if (t) return phoneOf(t);
+  }
+  return null;
+}
+
+/** Token cell: only a whole number 1..999 is a token ("Kit 80k", "1 pfm", "4 Zirconia", "Dr Verda" are not: they were read as 80, 1, 4). */
+export function tokenOf(t) {
+  const m = String(t ?? '').match(/^\s*(\d{1,3})(?:\.0+)?\s*$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 1 && n <= 999 ? n : null;
+}
+
+/** "Group 3" -> '3' (a string); "Group 4" -> null; "Group 1, Group 2" -> '1'. */
+export function groupOf(t) {
+  const m = String(t ?? '').match(/(?:^|[^0-9])([1-3])(?![0-9])/);
+  return m ? m[1] : null;
+}
+
+/** The live list's status words (the inverse of what the website writes). Empty or unknown -> null: the website's status is left alone. */
+export function liveStatus(raw) {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return null;
+  if (/cancel/.test(s)) return 'cancelled';
+  if (/no\s*-?\s*show|not\s*came|not\s*come|didn|absent|\bleft\b|went\s*back/.test(s)) return 'no_show';
+  if (/complet|\bdone\b|finish/.test(s)) return 'completed';
+  if (/treat|chair|progress|start/.test(s)) return 'in_treatment';
+  if (/wait|arriv|present|\bcame\b|\bhere\b/.test(s)) return 'waiting';
+  if (/sched|appoint|book|coming|later/.test(s)) return 'scheduled';
+  return null;
+}
+
+/** Mr# cell -> { mr, isNew }. "NEW" asks for a new patient; "98 51" or "abc" is not a Mr# (mr null, isNew false). A stray dot or space after it ("8602.") is ignored. */
+export function mrOf(t) {
+  const s = String(t ?? '').trim().replace(/\.0$/, '').replace(/[.\s]+$/, '');
+  if (/^new$/i.test(s)) return { mr: null, isNew: true };
+  if (/^[\w-]+$/.test(s) && /\d/.test(s)) return { mr: s, isNew: false };
+  return { mr: null, isNew: false };
+}
+
+const NAME_STOP = new Set('m mr mrs ms miss dr md muhammad mohammad muhammed mohammed mohd syed syeda sayed hafiz haji baby master kid'.split(' '));
+/** First real name: "M Umer" and "Muhammad Umer" both give "umer" (private.aaj_given_name in the database). */
+export function givenName(t) {
+  const tokens = String(t ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const list = tokens ? tokens.split(' ') : [];
+  let i = 0;
+  while (i < list.length && NAME_STOP.has(list[i])) i++;
+  if (i < list.length) return list[i];
+  return list.length ? list[list.length - 1] : '';
+}
+
+/** One row of cells + the detected columns -> what the row says. The live sync (apps-script/AajSync.js) has a copy of this function. */
+export function readRow(r, cols) {
+  const get = (f) => (cols[f] === undefined ? '' : text(r[cols[f]]));
+  const rawName = get('name');
+  const cl = cleanLegacyName(rawName);
+  const mr = mrOf(get('mr'));
+  const pm = parseMonthCell(get('month'));
+  return {
+    mr: mr.mr, isNew: mr.isNew, name: cl.name, legacyName: rawName.trim(), suffixBranch: cl.branch,
+    phone: firstPhone(get('phone')), month: pm.month && pm.month <= 60 ? pm.month : null, photoMarked: pm.photoMarked,
+    treatment: get('treatment') || null, token: tokenOf(get('token')), status: STATUS(get('status')),
+    liveStatus: liveStatus(get('status')), group: groupOf(get('group')), people: splitPeople(get('doctors')),
+    details: get('details') || null, reminder: get('reminder') || null, pp: get('pp') || null, healthwire: get('healthwire') || null,
+  };
+}
 const nonEmpty = (row) => (row || []).filter((c) => text(c) !== '' || c instanceof Date || typeof c === 'number');
 
 /**
@@ -139,17 +214,7 @@ export function readTab(rows, opts = {}) {
     let date = currentDate;
     if (cols.date !== undefined) { const d = cellDate(r[cols.date]); if (d) { date = d; out.dateMode = 'column'; } }
     if (!date && opts.fixedDate) { date = opts.fixedDate; if (out.dateMode === 'none') out.dateMode = 'fixed'; }
-    const { name, branch: suffixBranch } = cleanLegacyName(rawName);
-    const mrRaw = get('mr').replace(/\.0$/, '');
-    const { month, photoMarked } = parseMonthCell(get('month'));
-    const tokenNum = Number(get('token').replace(/\D/g, ''));
-    out.rows.push({
-      line: idx + 1, date, mr: /^[\w-]+$/.test(mrRaw) && /\d/.test(mrRaw) ? mrRaw : null, name, legacyName: rawName.trim(), suffixBranch,
-      phone: phoneOf(get('phone')), month: month && month <= 60 ? month : null, photoMarked,
-      treatment: get('treatment') || null, token: Number.isInteger(tokenNum) && tokenNum > 0 && tokenNum < 1000 ? tokenNum : null,
-      status: STATUS(get('status')), group: (get('group').match(/[123]/) || [null])[0], people: splitPeople(get('doctors')),
-      details: get('details') || null, reminder: get('reminder') || null,
-    });
+    out.rows.push({ line: idx + 1, date, ...readRow(r, cols) });
     if (date) { out.days.add(date); seenDates.add(date); }
   });
   if (out.headerAt < 0) out.issues.push('No header row found (a row with "Patient Name" and "Treatment" or "Doctor\'s Name").');

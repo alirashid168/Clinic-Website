@@ -1,6 +1,6 @@
 // Aaj ki List (Google Sheet) reader: node tests/aaj.test.mjs
 import assert from 'node:assert/strict';
-import { detectColumns, isHeaderRow, cellDate, tabBranch, readTab, buildImport } from '../web/js/lib/aaj.js';
+import { detectColumns, isHeaderRow, cellDate, tabBranch, readTab, buildImport, tokenOf, groupOf, firstPhone, liveStatus, mrOf, givenName } from '../web/js/lib/aaj.js';
 
 let passed = 0;
 const test = (name, fn) => { try { fn(); passed++; console.log('ok -', name); } catch (e) { console.log('FAIL -', name, '\n   ', e.message.split('\n')[0]); process.exitCode = 1; } };
@@ -119,6 +119,59 @@ test('rows for import: people matched through aliases, tokens not repeated, toda
   assert.deepEqual(later.rows.find((r) => r[3] === 'Sample Person Two' && r[0] === '2025-10-07')[12], ['hira'], 'assistants are sent separately from doctors');
   const twos = later.rows.filter((r) => r[2] === '9694');
   assert.deepEqual(twos.map((r) => r[0]), ['2025-10-06', '2025-10-07'], 'one patient\'s rows sit together, in date order');
+});
+
+// ---- the strict readers the live sync shares with this import (apps-script/AajSync.js has a copy; tests/aaj-sync-script.test.mjs compares the two)
+test('the "Months" header (Gulshan) is the month column', () => {
+  const m = detectColumns(['MR #', 'Patients Name', 'Months', 'Treatment', 'Token', 'Waiting', 'Group', 'Doctor Name']);
+  assert.equal(m.month, 2);
+  assert.equal(readTab([['MR #', 'Patients Name', 'Months', 'Treatment', 'Doctor Name'], ['9701', 'Sample Person', '5', 'Monthly', 'Dr Haniya']]).rows[0].month, 5);
+});
+
+test('token: only a whole number 1..999 is a token; kit text is not read as one', () => {
+  for (const [text, want] of [['121', 121], [' 12 ', 12], ['1.0', 1], ['999', 999], ['Kit 80k', null], ['Kit 55k', null], ['1 pfm', null], ['4 Zirconia', null], ['Dr Verda', null], ['0', null], ['1000', null], ['12.5', null], ['', null]]) {
+    assert.equal(tokenOf(text), want, `tokenOf(${JSON.stringify(text)})`);
+  }
+  const row = readTab([HEADER, ['', 'Kit Person', '', 'Zirconia', 'Kit 80k', 'Completed', '', '', '', '', '', '', '']]).rows;
+  assert.equal(row[0].token, null);
+});
+
+test('group: Group 1-3 give the digit, Group 4 and "Group" nothing, several groups the first', () => {
+  for (const [text, want] of [['Group 1', '1'], ['Group 3', '3'], ['Group 4', null], ['Group', null], ['Group 1, Group 2', '1'], ['Group 2, Group 1', '2'], ['12', null], ['2', '2'], ['', null]]) {
+    assert.equal(groupOf(text), want, `groupOf(${JSON.stringify(text)})`);
+  }
+});
+
+test('phone: a cell with two numbers gives the first one, not one 22-digit number', () => {
+  assert.equal(firstPhone('03001110003 / 03211110003'), '03001110003');
+  assert.equal(firstPhone('0300 1111111 or 0321 2222222'), '03001111111');
+  assert.equal(firstPhone('3001234567'), '03001234567');
+  assert.equal(firstPhone('call mother'), null);
+  assert.equal(readTab([HEADER, ['9701', 'Two Numbers', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03001110003 / 03211110003', '']]).rows[0].phone, '03001110003');
+});
+
+test('live status: Waiting, Treatment, Scheduled are never Completed; an empty or unknown word is null; the history reading is unchanged', () => {
+  for (const [text, want] of [['Waiting', 'waiting'], ['Treatment', 'in_treatment'], ['In treatment', 'in_treatment'], ['Scheduled', 'scheduled'], ['Completed', 'completed'], ['Cancelled', 'cancelled'], ['No show', 'no_show'], ['', null], ['Banana', null]]) {
+    assert.equal(liveStatus(text), want, `liveStatus(${JSON.stringify(text)})`);
+  }
+  const r = readTab([HEADER, ['9701', 'Some One', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '', '']]).rows[0];
+  assert.equal(r.status, 'completed', 'Admin -> Import still reads a history row as completed');
+  assert.equal(r.liveStatus, 'waiting');
+});
+
+test('Mr# cell: a number, NEW, or nothing; "98 51" is not an Mr#; the given name skips titles', () => {
+  assert.deepEqual(mrOf('146.0'), { mr: '146', isNew: false });
+  assert.deepEqual(mrOf('8602.'), { mr: '8602', isNew: false }, 'a stray dot after the Mr# is ignored (seen in the real sheet)');
+  assert.deepEqual(mrOf(' 8602. '), { mr: '8602', isNew: false });
+  assert.deepEqual(mrOf('8602..'), { mr: '8602', isNew: false });
+  assert.deepEqual(mrOf('.'), { mr: null, isNew: false });
+  assert.deepEqual(mrOf('NEW'), { mr: null, isNew: true });
+  assert.deepEqual(mrOf('98 51'), { mr: null, isNew: false });
+  assert.deepEqual(mrOf(''), { mr: null, isNew: false });
+  assert.equal(givenName('M Umer'), 'umer');
+  assert.equal(givenName('Muhammad Umer'), 'umer');
+  assert.equal(givenName('Dr. Sara Khan'), 'sara');
+  assert.equal(givenName(''), '');
 });
 
 console.log(`${passed} passed`);

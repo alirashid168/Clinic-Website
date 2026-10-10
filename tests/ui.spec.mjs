@@ -53,6 +53,7 @@ await step('home shows the smile, three doors and calendar', async () => {
   await page.waitForSelector('.smile-stage.has-card canvas, .smile-stage:not(.has-card) .tooth');
   assert.equal(await page.locator('.tooth').count(), 24);
   for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count());
+  await page.locator('.sx-day').nth(6).waitFor();      // the calendar is drawn a moment after the hero: wait for it instead of counting at once
   assert.equal(await page.locator('.sx-day').count(), 7);
   await shot(page, '01-home');
 });
