@@ -96,6 +96,9 @@
   --status-info-bg: var(--info-soft);
   --status-neutral-text: var(--muted); /* 4.9:1 on its bg */
   --status-neutral-bg: var(--neutral-soft);
+  --checkup-text: #0f5560;         /* 7.3:1 on --checkup-bg, 8.4:1 on #fff */
+  --checkup-bg: #e2f2f4;
+  --checkup-line: #5aa4ae;         /* the accent edge of a checkup row (the badge text says what it is) */
 
   /* on-dark text and lines (ratios on --aubergine-deep) */
   --on-dark-strong: #ffffff;       /* 17.3:1 */
@@ -240,6 +243,8 @@ p { margin: 0 0 .8em; }
 html:has(.topbar) { scroll-padding-top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--space-4)); }
 html:has(.mobile-bar) { scroll-padding-top: calc(var(--bar-h) + env(safe-area-inset-top, 0px) + var(--space-4)); }
 html:has(.has-fab) { scroll-padding-bottom: calc(var(--fab-space) + env(safe-area-inset-bottom, 0px)); }
+/* The paging bar of the Checkups page sticks to the bottom: a control reached with Tab must scroll above it, not stay under it. */
+html:has(.pager) { scroll-padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px)); }
 @media (min-width: 721px) and (min-height: 501px) {
   html:has(.sample-banner) { scroll-padding-top: 5.5rem; }
 }
@@ -713,11 +718,13 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   .sidebar, .topnav-layout > .sidebar {
     display: flex; position: fixed; top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px)); bottom: 0; left: 0; height: auto;
     width: min(280px, 86vw); z-index: var(--z-drawer);
-    padding-left: max(var(--space-3), env(safe-area-inset-left)); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom));
+    padding-left: max(var(--space-3), env(safe-area-inset-left)); padding-bottom: 0; /* (the bottom padding is the foot's, below) */
     overscroll-behavior: contain; transform: translateX(-100%); visibility: hidden;
     transition: transform .2s ease, visibility 0s linear .2s;
   }
   .sidebar.open, body.drawer-open .sidebar { transform: none; visibility: visible; box-shadow: var(--shadow-lg); transition: transform .2s ease, visibility 0s; }
+  /* Change password and Log out stay on screen at the bottom of the drawer while the links above them scroll (a phone is too short for all of them). */
+  .sidebar-foot { position: sticky; bottom: 0; background: var(--surface-inverse); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
   body.drawer-open .drawer-scrim, .sidebar.open ~ .drawer-scrim { display: block; }
   body.drawer-open { overflow: hidden; }
   .topnav { display: none; }
@@ -787,6 +794,63 @@ select.cell-input { cursor: pointer; }
 .add-panel-text .muted { font-size: var(--fs-sm); }
 .add-panel .btn-primary { white-space: nowrap; }
 
+/* ------------------------------------------------------------ checkups (no Mr#): Aaj ki List rows, the Checkups page */
+.badge-checkup { background: var(--checkup-bg); color: var(--checkup-text); border-color: var(--checkup-line); }
+/* A left edge in the row header: colour only repeats what the "Checkup" badge says. */
+table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--checkup-line), 1px 0 0 var(--border-strong); }
+.checkup-name { flex: 1 1 auto; min-width: 0; }
+.checkup-name .cell-input { min-height: 32px; padding-inline: var(--space-1); font-weight: 600; }
+.checkup-name .field-hint { padding-inline: var(--space-1); }
+.token-input { flex: 0 0 auto; width: 3.5rem; min-height: 32px; padding: 2px var(--space-1); text-align: center; font-size: var(--fs-sm); font-weight: 800; color: var(--text-accent); }
+/* Follow-up status and the day status of a checkup: one colour family per group; the text always names the status. */
+.status-unset, .status-chip.tone-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
+.status-chip.tone-ok { background: var(--status-ok-bg); color: var(--status-ok-text); }
+.status-chip.tone-info { background: var(--status-info-bg); color: var(--status-info-text); }
+.status-chip.tone-warn { background: var(--status-warn-bg); color: var(--status-warn-text); }
+.dup-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); }
+.dup-line + .dup-line { margin-top: var(--space-2); }
+.registered-mr { margin: var(--space-2) 0; font-size: var(--fs-3xl); font-weight: 800; letter-spacing: -.01em; color: var(--text-accent); }
+.registered-mr:focus-visible { outline-offset: 4px; }
+
+/* the Checkups page */
+.page-head-actions { gap: var(--space-3); }
+.checkup-filters {
+  display: grid; gap: var(--space-2) var(--space-3); align-items: end; margin-bottom: var(--space-4); padding: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+  border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface);
+}
+.filter-field { display: grid; gap: var(--space-1); min-width: 0; }
+.filter-label { font-size: var(--fs-xs); font-weight: 600; color: var(--text-muted); }
+.filter-field input, .filter-field select { min-width: 0; }
+.filter-hint { font-size: var(--fs-xs); font-weight: 400; color: var(--text-muted); }
+.filter-wide { grid-column: 1 / -1; } /* the search box takes a whole line on a phone */
+@media (min-width: 720px) { .checkup-filters { padding-inline: var(--space-4); } .filter-wide { grid-column: span 2; } }
+/* The less-used filters (branch, months, source, patient file) sit behind one line, so a phone shows results sooner. */
+.checkup-more { grid-column: 1 / -1; }
+.checkup-more > summary { display: inline-block; min-height: var(--target); padding: var(--space-2) 0; font-weight: 600; font-size: var(--fs-ui); color: var(--text-accent); cursor: pointer; }
+.checkup-more-grid { display: grid; gap: var(--space-2) var(--space-3); align-items: end; padding-top: var(--space-2); grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); }
+.checkup-table { min-width: 940px; }
+.checkup-table thead th { white-space: nowrap; }
+.checkup-table tbody th.checkup-who { min-width: 180px; padding: var(--space-2); border-bottom: 1px solid var(--border); font-size: var(--fs-ui); font-weight: 600; color: var(--text); text-align: left; vertical-align: top; }
+.checkup-table tbody tr:last-child th.checkup-who { border-bottom: 0; }
+/* The Patient column stays in sight while the other columns scroll sideways (as on the Aaj ki List), so a status or a note is never changed without the name. */
+.checkup-table th.checkup-who { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--border-strong); }
+.checkup-table thead th.checkup-who { z-index: 2; background: var(--surface); }
+.saved-mark { font-size: var(--fs-xs); font-weight: 700; color: var(--status-ok-text); white-space: nowrap; }
+.checkup-name-text { overflow-wrap: anywhere; }
+.checkup-table td { vertical-align: top; }
+.checkup-table td.cell-td { min-width: 220px; padding: var(--space-1) var(--space-2); }
+.checkup-table .cell-input { border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--control-bg); }
+.checkup-table .cell { min-height: 32px; padding: 0; }
+.row-actions { display: flex; flex-wrap: nowrap; gap: var(--space-2); } /* Register and Edit side by side: the rows stay short */
+.checkup-table tbody tr:hover td, .checkup-table tbody tr:hover th { background: var(--surface-hover); }
+.pager {
+  position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-3); padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow);
+}
+.pager-info { font-size: var(--fs-ui); font-weight: 600; }
+
 /* queue board */
 .queue { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
 .queue-col { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); padding: var(--space-3); min-height: 180px; }
@@ -834,6 +898,24 @@ table.invoice-lines th:nth-child(3), table.invoice-lines td:nth-child(3) { width
 table.invoice-lines td { padding: var(--space-1) var(--space-2) var(--space-1) 0; vertical-align: middle; border-bottom: 0; }
 table.invoice-lines input { min-width: 0; }
 .invoice-sheet.thermal, .print-thermal .invoice-sheet, .invoice-sheet.print-thermal { max-width: 300px; font-size: var(--fs-xs); padding: var(--space-3); }
+
+/* login slip: the username and password handed to a patient, one small (A6) page */
+.login-slip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s); padding: var(--space-5); max-width: 380px; margin-top: var(--space-3); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.login-slip p { margin: 0 0 var(--space-2); }
+.login-slip h3 { margin: 0 0 var(--space-1); }
+.slip-clinic { font-weight: 700; color: var(--aubergine); border-bottom: 3px solid var(--aubergine); padding-bottom: var(--space-2); margin-bottom: var(--space-3) !important; }
+.slip-who { font-size: var(--fs-ui); color: var(--text-muted); }
+.slip-row { display: grid; gap: 2px; padding: var(--space-2) 0; border-top: 1px dashed var(--border); }
+.slip-label { font-size: var(--fs-xs); color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+.slip-value { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-lg); overflow-wrap: anywhere; }
+/* The username is one piece before the @ (the dash and the Mr# never split over two lines); the only break is right before the @.
+   The longer it is, the smaller the type, so that the longest username that can be made (24 + 1 + 30 characters) still fits an A6 page. */
+.slip-nowrap { white-space: nowrap; }
+.slip-user-md { font-size: var(--fs-ui); }
+.slip-user-sm { font-size: .6875rem; }
+.slip-user-xs { font-size: .5625rem; }
+.slip-hint { font-size: var(--fs-xs); color: var(--text-muted); overflow-wrap: anywhere; }
+.slip-note { margin-top: var(--space-3) !important; font-size: var(--fs-ui); }
 
 /* ------------------------------------------------------------ reports */
 .report-groups { border-bottom: 2px solid var(--border); margin-bottom: var(--space-2); }
@@ -1131,6 +1213,7 @@ table.invoice-lines input { min-width: 0; }
   .person button, .chip-remove { min-width: 32px; min-height: 32px; margin-block: -7px; }
   .quick-tap { width: var(--target); height: var(--target); }
   .menu-list a, .menu-list .menu-btn { min-height: var(--target); }
+  .show-passwords { min-height: var(--target); }
   .toast-close { min-width: var(--target); min-height: var(--target); }
   .phone-link a { min-width: var(--target); min-height: var(--target); }
 }
@@ -1180,6 +1263,8 @@ table.invoice-lines input { min-width: 0; }
 /* 80mm thermal roll. "size: 80mm auto" is not valid CSS, so the 297mm declaration (the usual
    80mm roll driver page) is the one browsers keep; the second line documents the intent. */
 @page thermal { size: 80mm 297mm; size: 80mm auto; margin: 4mm; }
+/* A login slip is one small A6 page (105 x 148 mm; written as lengths because the A6 keyword is not honoured everywhere). */
+@page slip { size: 105mm 148mm; margin: 6mm; }
 
 @media print {
   .wa-float, .toasts, .skip-link, .drawer-scrim, .menu-toggle { display: none !important; }
@@ -1204,6 +1289,9 @@ table.invoice-lines input { min-width: 0; }
 
   /* Thermal template: the whole job uses the 80mm page. */
   .print-thermal, .print-thermal body, body:has(.print-thermal), body:has(.print-area.thermal) { page: thermal; }
+  /* Login slip: the whole job uses the small A6 page. */
+  body:has(.print-area.login-slip) { page: slip; }
+  .print-area.login-slip { font-size: var(--fs-ui); break-inside: avoid; }
 }
 @supports not selector(:has(*)) {
   @media print { /* older browsers: the previous visibility approach */

@@ -3,6 +3,7 @@ import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select
 import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
 import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
+import { portalLoginModal } from './portal-login.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt } from './invoice.js';
 
 export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart condition', 'Bleeding disorder', 'Pregnancy', 'Asthma', 'Epilepsy', 'Thyroid', 'Hepatitis / HIV', 'Kidney disease'];
@@ -281,6 +282,29 @@ export async function renderPatient(root, id) {
   const mh = p.medical_history || {};
   const medicalLine = [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
 
+  // The "Portal login" line: the username for a login made at the clinic, "own email (invited)" for an invitation, "none yet", or
+  // "could not check" with a retry. "Reset portal password" appears once the login is known to be one made at the clinic (a patient who
+  // logs in with their own email resets it by email).
+  const resetSlot = h('span', { class: 'inline' });
+  const loginState = h('span', {}, 'checking…');
+  const loginLine = can('portal.invite') ? h('p', { class: 'muted portal-login-line', style: { margin: '4px 0 0' }, 'aria-live': 'polite' }, 'Portal login: ', loginState) : null;
+  const loadLoginLine = async () => {
+    if (!loginLine) return;
+    resetSlot.replaceChildren();
+    if (!p.portal_user_id) { loginState.textContent = 'none yet'; return; }
+    loginState.textContent = 'checking…';
+    try {
+      const info = await d.portalLoginInfo(id);
+      if (info.clinic_login) {
+        loginState.replaceChildren(h('strong', {}, info.username), ' (made at the clinic)');
+        resetSlot.append(h('button', { class: 'btn', onclick: () => portalLoginModal(p, { mode: 'reset', username: info.username, onDone: reload }) }, 'Reset portal password'));
+      } else loginState.textContent = 'own email (invited)';
+    } catch (e) {
+      console.error(e);
+      loginState.replaceChildren('could not check (', friendlyError(e), ') ', h('button', { type: 'button', class: 'link-btn', onclick: loadLoginLine }, 'Try again'));
+    }
+  };
+
   mount(root,
     h('p', {}, h('a', { href: '#/staff/patients' }, '← Patients')),
     h('div', { class: 'profile-head page-head' },
@@ -289,6 +313,7 @@ export async function renderPatient(root, id) {
         h('p', {}, h('span', { class: 'mr' }, `Mr# ${p.mr_number}`), ' · ', p.phone ? phoneLink(p.phone, `Assalam o Alaikum ${p.full_name.split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `) : 'No phone number', p.email ? ` · ${p.email}` : '', p.first_branch_id ? ` · ${branchName(p.first_branch_id)}` : '',
           p.referred_by_clinician ? ` · brought in by ${clinicianName(p.referred_by_clinician) || 'a doctor'}` : ''),
         (() => { const seen = [...new Set(p.visits.filter((v) => v.status === 'completed').map((v) => v.branch_id))].map(branchName).filter(Boolean); return seen.length > 1 ? h('p', { class: 'muted' }, `Visited: ${seen.join(', ')}`) : null; })(),
+        loginLine,
         h('div', { class: 'inline', style: { marginTop: '6px' } }, duesBadge(p.dues), aliBadge(!!p.flag),
           p.photo_consent_public ? h('span', { class: 'badge badge-ok' }, 'Photo consent') : h('span', { class: 'badge badge-muted' }, 'No public photo consent'),
           p.treatment_consent_at ? h('span', { class: 'badge badge-ok' }, 'Consent signed') : h('span', { class: 'badge badge-muted' }, 'No treatment consent on file'),
@@ -297,10 +322,12 @@ export async function renderPatient(root, id) {
       h('div', { class: 'inline' },
         can('patients.edit') ? h('button', { class: 'btn', onclick: editPatient }, 'Edit') : null,
         h('a', { class: 'btn', href: `#/staff/patient/${id}/portal`, title: 'See this record the way the patient sees it in their account' }, 'View as patient'),
-        can('portal.invite') && !p.portal_user_id ? h('button', { class: 'btn', onclick: busy(async () => {
-          if (!p.email) { toast("Add the patient's email first (Edit), then invite them."); return; }
+        // A login made at the clinic (username and password handed over on a slip), or, for a patient with a real email, an invitation by email.
+        can('portal.invite') && !p.portal_user_id ? h('button', { class: 'btn', onclick: () => portalLoginModal(p, { mode: 'create', onDone: reload }) }, 'Create portal login') : null,
+        can('portal.invite') && !p.portal_user_id && p.email ? h('button', { class: 'btn', onclick: busy(async () => {
           await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); await reload();
         }) }, 'Invite to patient portal') : null,
+        resetSlot,
         can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(p, { onDone: reload }) }, 'Upload photos') : null,
         can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
         can('billing.create') ? h('button', { class: 'btn btn-primary', onclick: () => paymentModal(p, { dues: p.dues, invoices: p.invoices, payments: p.payments, onDone: reload }) }, 'Take payment') : null)),
@@ -376,4 +403,5 @@ export async function renderPatient(root, id) {
             h('td', {}, shortDate(r.next_check_date), overdue ? [' ', h('span', { class: 'badge badge-dues badge-overdue' }, 'Overdue')] : null));
         }))))) : null);
   loadMissingLinks();
+  loadLoginLine();
 }

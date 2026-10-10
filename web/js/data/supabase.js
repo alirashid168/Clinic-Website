@@ -10,6 +10,9 @@
 import { CONFIG } from '../config.js';
 import { todayISO, addDaysISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
+import { passwordProblems, passwordError } from '../password-rules.js';
+import { isPatientLoginName } from '../lib/portal-login.js';
+import { checkupPhone } from '../lib/checkups.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
 // is allowed by the site's Content-Security-Policy (script-src and connect-src), so there is no
@@ -52,6 +55,75 @@ function keepFlags(from, to) {
 function capped(rows, cap) {
   if (rows.length > cap) { rows.length = cap; rows.truncated = true; rows.cap = cap; }
   return rows;
+}
+
+// ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
+// They live in public.checkups and are read through the view checkup_list (migrations 20261009000250 and ...260). While those are
+// not applied, PostgREST answers PGRST205 / PGRST202 (or 42P01 / 42883, or a 404): the list then says "not switched on yet".
+const CHECKUPS_MISSING_CODES = new Set(['PGRST205', 'PGRST202', '42P01', '42883']);
+const CHECKUPS_MISSING_TEXT = 'CHECKUPS_MISSING: the checkup list is not switched on yet. It appears once the database update has been run.';
+const checkupsMissing = (e) => !!e && (CHECKUPS_MISSING_CODES.has(e.code) || e.status === 404);
+/** Runs a checkups request; "not installed" comes out as one error with the code CHECKUPS_MISSING. */
+async function checkupsCall(run) {
+  try { return await run(); } catch (e) { throw checkupsMissing(e) ? plainError(CHECKUPS_MISSING_TEXT, 'CHECKUPS_MISSING') : e; }
+}
+const CHECKUP_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+const CHECKUP_SOURCES = ['website', 'google_sheet', 'archive'];
+/** 'YYYY-MM' -> the first day of the month after it. */
+function nextMonthStart(ym) {
+  const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+}
+/** The filters of the Checkups page (and of its Excel file) put on a query of the view checkup_list. */
+export function checkupFilters(query, { q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '' } = {}) {
+  let out = query;
+  const text = String(q || '').replace(/[%,()*\\"]/g, '').replace(/\s+/g, ' ').trim();   // these characters would break the or() list
+  if (text) {
+    const digits = text.replace(/[^0-9]/g, '');
+    const ors = [`patient_name.ilike.%${text}%`];
+    // phone_key is the number as digits with a leading 0 (0300...), so +92 300... and 300... are looked for without their prefix
+    const keys = new Set();
+    if (digits.length >= 4) keys.add(digits);
+    if (digits.startsWith('92') && digits.length - 2 >= 4) keys.add(digits.slice(2));
+    for (const k of keys) ors.push(`phone_key.ilike.%${k}%`);
+    out = out.or(ors.join(','));
+  }
+  if (branchId === 'none') out = out.is('branch_id', null);
+  else if (branchId !== null && branchId !== undefined && branchId !== '') out = out.eq('branch_id', Number(branchId));
+  if (CHECKUP_MONTH.test(from || '')) out = out.gte('checkup_date', from + '-01');
+  if (CHECKUP_MONTH.test(to || '')) out = out.lt('checkup_date', nextMonthStart(to));
+  if (followUp) out = out.eq('follow_up', followUp);
+  if (CHECKUP_SOURCES.includes(source)) out = out.eq('source', source);
+  if (registered === 'yes') out = out.not('patient_id', 'is', null);
+  else if (registered === 'no') out = out.is('patient_id', null);
+  return out;
+}
+// The columns staff may change after a checkup exists, and how each is stored (empty text is "nothing").
+const CHECKUP_EDITABLE = ['patient_name', 'phone', 'city', 'doctors', 'checkup_for', 'details', 'day_status', 'follow_up', 'notes', 'est_fee', 'branch_id', 'token'];
+function checkupValue(key, v) {
+  const empty = v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
+  switch (key) {
+    case 'patient_name': case 'follow_up': return String(v ?? '').trim();
+    case 'phone': case 'city': case 'token': return empty ? null : String(v).trim();
+    case 'est_fee': return empty || Number.isNaN(Number(v)) ? null : Number(v);
+    case 'branch_id': return empty || v === 'none' ? null : Number(v);
+    default: return empty ? null : v;       // doctors, checkup_for, details, notes, day_status: as typed
+  }
+}
+/** { key: value } of the editable columns present in `changes`, ready to send. */
+export function checkupPatch(changes) {
+  const out = {};
+  for (const key of CHECKUP_EDITABLE) if (changes && changes[key] !== undefined) out[key] = checkupValue(key, changes[key]);
+  return out;
+}
+/** A row of the table checkups in the shape of the view checkup_list: phone_key, and the Mr# of the linked patient file (when it may be read). */
+async function checkupListRow(sb, row) {
+  let mr = null;
+  if (row.patient_id) {
+    const res = await sb.from('patients').select('mr_number').eq('id', row.patient_id).maybeSingle();
+    mr = res.error ? null : res.data?.mr_number ?? null;
+  }
+  return { ...row, phone_key: checkupPhone(row.phone), mr_number: mr };
 }
 
 // ------------------------------------------------------------ loading the SDK
@@ -100,34 +172,54 @@ function timeoutError() {
 // deletes the stored login on any answer it does not know to be "try again later". A rate limit (429), a timeout (408) or an
 // error page from a proxy, firewall or captive portal (not JSON) says nothing about the login, so those are thrown like a
 // failed fetch: auth-js then keeps the login and asks again. Only a JSON answer from the login server itself counts (refresh
-// token not found or used up, session gone, account switched off or deleted).
+// token not found or used up, session gone, account switched off or deleted): a JSON answer without a login-server error code
+// ({"message":"Invalid API key"} from an API gateway, a WAF) is a proxy's, not the login server's, so it is kept the same way.
 const REFRESH_URL = /\/auth\/v1\/token\?(?:[^#]*&)?grant_type=refresh_token(?:[&#]|$)/;
-async function refreshFetch(input, init, onRefused) {
+const LOGOUT_URL = /\/auth\/v1\/logout(?:[?#]|$)/;
+const USER_URL = /\/auth\/v1\/user(?:[?#]|$)/;
+async function refreshFetch(input, init, hooks = {}) {
+  const asked = hooks.storedUser?.() ?? null; // whose stored login this refresh is for (the answer may come after somebody else has logged in)
   const res = await fetch(input, init);
   if (res.ok) return res;
   // Any 5xx counts as "no answer" too: auth-js only retries some of them, and Supabase's own 544 (upstream timeout)
-  // or a 507 would otherwise end a login whose refresh token is still good.
-  if (res.status >= 500 || res.status === 429 || res.status === 408 || !/json/i.test(res.headers.get('content-type') || '')) {
+  // or a 507 would otherwise end a login whose refresh token is still good. A 409 ("conflict") is GoTrue giving up on its row lock
+  // after too many refreshes of one session at once (two windows waking together, a slow database): "try again", not "this login is over".
+  if (res.status >= 500 || res.status === 429 || res.status === 408 || res.status === 409 || !/json/i.test(res.headers.get('content-type') || '')) {
     throw new TypeError(`The login server gave no usable answer (${res.status}); the login is kept.`);
   }
-  // The server's final word about the account is the reason for the SIGNED_OUT that auth-js sends next.
+  let code = null;
+  let fromLoginServer = false;
   try {
     const body = await res.clone().json();
-    const code = typeof body?.code === 'string' ? body.code : body?.error_code; // the answer names the error as "code" (API version 2024-01-01) or "error_code"
-    if (code === 'user_banned') onRefused?.('switched_off');
-    else if (code === 'user_not_found') onRefused?.('account_gone');
-  } catch { /* not readable: the generic reason applies */ }
+    code = typeof body?.code === 'string' ? body.code : body?.error_code; // the answer names the error as "code" (API version 2024-01-01) or "error_code"
+    fromLoginServer = (typeof code === 'string' && code !== '') || typeof body?.error_description === 'string'; // (the OAuth-style body of older GoTrue)
+  } catch { /* not readable: not a login server's answer */ }
+  if (!fromLoginServer) throw new TypeError(`The login server gave no usable answer (${res.status}); the login is kept.`);
+  // The server's final word about the account is the reason for the SIGNED_OUT that auth-js sends next. A deleted account's refresh is
+  // refused as refresh_token_not_found (its sessions and tokens went with it), which is also what an ended or expired login looks like:
+  // that answer alone keeps the generic wording, but onNotFound lets the adapter ask the login server about the access token, which
+  // while it is still valid tells the two apart (see askAfterRefusal()).
+  if (code === 'user_banned') hooks.onRefused?.('switched_off', asked);
+  else if (code === 'user_not_found') hooks.onRefused?.('account_gone', asked);
+  else if (code === 'refresh_token_not_found') hooks.onNotFound?.(asked);
   return res;
 }
 
 /** Reads give up after READ_TIMEOUT_MS instead of hanging; uploads and saves are left alone. */
-function timedFetch(input, init = {}, onRefused) {
+function timedFetch(input, init = {}, hooks = {}) {
   const method = String(init.method || 'GET').toUpperCase();
-  if (method === 'POST' && REFRESH_URL.test(String(input?.url ?? input))) return refreshFetch(input, init, onRefused);
-  if ((method !== 'GET' && method !== 'HEAD') || init.signal || typeof AbortController === 'undefined') return fetch(input, init);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
-  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  const url = String(input?.url ?? input);
+  if (method === 'POST' && REFRESH_URL.test(url)) return refreshFetch(input, init, hooks);
+  if (method === 'POST' && LOGOUT_URL.test(url) && hooks.logout) return hooks.logout(input, init);
+  if (method !== 'GET' && method !== 'HEAD') return fetch(input, init);
+  let request;
+  if (init.signal || typeof AbortController === 'undefined') request = fetch(input, init);
+  else {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(timeoutError()), READ_TIMEOUT_MS);
+    request = fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  }
+  return method === 'GET' && hooks.vetUser && USER_URL.test(url) ? request.then((res) => hooks.vetUser(init, res)) : request;
 }
 
 // Database functions that only read. They are sent as POST, which timedFetch leaves alone, so callRpc gives them
@@ -146,7 +238,87 @@ const ACCOUNT_ERRORS = {
   account_gone: { code: 'ACCOUNT_GONE', message: 'This login no longer belongs to an account here. Contact Dr. Ali.' },
 };
 const REASON_KEY = 'clinic-logout-reason'; // in localStorage, so the other tabs of this browser, which only see SIGNED_OUT, can say the same
-const REASON_TTL_MS = 30000;
+// How long a note stays good. A tab that was frozen in the background (a browser's memory or energy saver) hears the SIGNED_OUT
+// when it thaws, which can be minutes later. The note is also tied to one person and used once per tab, and goes with the next
+// sign-in or logout (see noteReason()), so a longer life cannot label a later logout.
+const REASON_TTL_MS = 5 * 60 * 1000;
+
+// ------------------------------------------------------------ a person changing their own password
+const PASSWORD_CHECK_TIMEOUT_MS = 15000; // asking the login server whether the current password is right
+const PASSWORD_REVOKE_TIMEOUT_MS = 5000; // ending the session that check opened
+const PASSWORD_UPDATE_TIMEOUT_MS = 30000; // setting the new one (the library's own request has no limit, and the dialog stays shut while it runs)
+
+/** fetch() that is aborted (not just ignored) after `ms`; the timeout ends it with the same error a slow read gets. */
+function fetchWithin(url, init, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(timeoutError()), ms);
+  return fetch(url, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+/** Waits for `promise` at most `ms`, then fails with the same error a slow read gets. The promise itself is not cancelled. */
+function within(promise, ms) {
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(timeoutError()), ms); });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
+const WEAK_PASSWORD_REASONS = {
+  length: 'it is too short',
+  characters: 'it needs a mix of capital and small letters, numbers and symbols',
+  pwned: 'it is a well-known password that appears in lists of leaked passwords',
+};
+
+/**
+ * The error for a refused check or password change, in words for the person. `e` is { status, code, message, reasons, name }: an auth-js
+ * error has all of them, and the check (a plain request) reads them from the answer's JSON. Nothing here ends the login or names a password.
+ * `sentToken` is false for the check, which sends no token of the person: a 401 there is the gateway or the API key, not "you are not logged in".
+ */
+function ownPasswordError({ status = 0, code, message, reasons, name } = {}, { sentToken = true } = {}) {
+  if (code === 'invalid_credentials' || code === 'invalid_grant') return passwordError('WRONG_PASSWORD');
+  if (status === 429 || code === 'over_request_rate_limit') return passwordError('RATE_LIMITED');
+  if (code === 'same_password') return passwordError('SAME_PASSWORD');
+  if (code === 'weak_password') {
+    const why = (Array.isArray(reasons) ? reasons : []).map((r) => WEAK_PASSWORD_REASONS[r]).filter(Boolean);
+    return passwordError('WEAK_PASSWORD', `That password is too easy to guess${why.length ? `: ${why.join('; ')}` : ''}. Choose a different one.`);
+  }
+  if (code === 'reauthentication_needed' || code === 'reauthentication_not_valid') return passwordError('REAUTH_NEEDED');
+  if (code === 'user_banned') return plainError('This account is switched off. Contact Dr. Ali.', 'ACCOUNT_OFF');
+  if (sentToken && (status === 401 || name === 'AuthSessionMissingError' || ['session_not_found', 'bad_jwt', 'refresh_token_not_found', 'no_authorization'].includes(code))) return passwordError('NOT_LOGGED_IN');
+  // No answer at all (status 0: the connection failed, the browser's own words are kept for friendlyError) or the server failed: the usual
+  // wording for a lost answer. The password may or may not have been changed; the person is told so.
+  if (!status) return Object.assign(new Error(message || 'Failed to fetch'), { status: 0 });
+  if (status >= 500) return Object.assign(plainError(`The clinic system did not respond (error ${status}). Try again in a few minutes.`, code), { status });
+  return plainError('The password could not be changed just now. Please try again in a few minutes.', code);
+}
+
+/**
+ * Asks the login server whether `password` is right for `email`, WITHOUT logging in on this page: a plain POST of its own, so the page's
+ * stored login is not touched, no login event reaches this page (the login watcher hears nothing) and nothing is stored. (It does count as a sign-in
+ * at the server: "last login" moves to now.) The server opens a session for the check; it is ended at once, and a failure to end it is
+ * ignored (it would only stay unused). The tokens of the check live in this function and nowhere else. (If the check itself times out, or its
+ * answer cannot be read, there is no token to end: a session the server may have opened stays unused in its table, and its tokens never
+ * reached this page. The next password change of the account removes it.)
+ * Resolves to { revoked, userId }: revoked is a promise that never rejects and settles when that session has been ended, userId is the
+ * account the server says the password belongs to.
+ */
+async function checkPassword(email, password) {
+  const base = `${String(CONFIG.SUPABASE_URL).replace(/\/+$/, '')}/auth/v1`;
+  const apikey = CONFIG.SUPABASE_ANON_KEY;
+  const res = await fetchWithin(`${base}/token?grant_type=password`, {
+    method: 'POST', headers: { apikey, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }),
+  }, PASSWORD_CHECK_TIMEOUT_MS);
+  let body = null;
+  try { body = await res.json(); } catch { /* not JSON: a proxy's page */ }
+  if (!res.ok) {
+    const text = (v) => (typeof v === 'string' ? v : undefined); // the answer names its error as "error_code", "code" (newer) or "error" (OAuth style)
+    throw ownPasswordError({ status: res.status, code: text(body?.error_code) || text(body?.code) || text(body?.error), message: text(body?.msg) || text(body?.message) }, { sentToken: false });
+  }
+  if (typeof body?.access_token !== 'string') throw ownPasswordError({ status: 500 }, { sentToken: false });
+  const token = body.access_token;
+  const revoked = fetchWithin(`${base}/logout?scope=local`, { method: 'POST', headers: { apikey, Authorization: `Bearer ${token}` } }, PASSWORD_REVOKE_TIMEOUT_MS)
+    .then(() => {}, () => {});
+  return { revoked, userId: typeof body.user?.id === 'string' ? body.user.id : null };
+}
 
 // ------------------------------------------------------------ report totals (pure; also used by demo.js)
 const KARACHI_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE || 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -247,31 +419,141 @@ const alertLevel = (text) => (STOP_WORDS.some((w) => text.includes(w)) ? 'stop' 
 
 export async function createSupabaseAdapter() {
   const { createClient } = await getSdk();
+  let cachedSession = null;
+  let endReason = null; // this tab's own note (see noteReason): only used when localStorage is blocked
+  let usedNoteId = null; // the note this tab has already put on a SIGNED_OUT
+  const hungLogouts = new Set(); // gives up each logout request still in flight (see logoutFetch, endSession)
+  let askedAfterRefusalAt = 0;
+  let startChecked = false; // getSession() looks for what this page's start-up found out only the first time
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true },
-    global: { fetch: (input, init) => timedFetch(input, init, noteReason) },
+    global: {
+      fetch: (input, init) => timedFetch(input, init, {
+        storedUser: storedUserId,
+        // An answer about the login that was stored when the request went out. If that login is not the stored one any more (it
+        // was ended, and somebody else signed in), the answer is nobody's business: it must not label the next person's logout.
+        onRefused: (reason, asked) => { if (asked !== storedUserId()) return; noteReason(reason, asked); askAfterRefusal(); },
+        onNotFound: (asked) => { if (asked === storedUserId()) askAfterRefusal(); },
+        logout: logoutFetch,
+        vetUser,
+      }),
+    },
   });
+  // The person whose login was stored when this page opened, i.e. the one its start-up refresh and first look are about.
+  const startUid = storedUserId();
 
-  let cachedSession = null;
-  let endReason = null; // { reason, at }: why the login is ending, read by the SIGNED_OUT event that follows
-
-  /** Remembers why the login is ending (also in localStorage, for the other tabs of this browser). */
-  function noteReason(reason) {
-    endReason = { reason, at: Date.now() };
+  /** Who the stored login belongs to, read from the stored session itself (best effort: null when there is none or it cannot be read). */
+  function storedUserId() {
+    try { return JSON.parse(localStorage.getItem(sb.auth.storageKey) || 'null')?.user?.id || null; } catch { return null; }
+  }
+  /** The claims of a JWT (the part between the dots), or null. */
+  function claimsOf(jwt) {
+    try { return JSON.parse(atob(String(jwt).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
+  }
+  /**
+   * The login server's answer about an access token (GET /user), before auth-js sees it. auth-js answers "session_not_found" by deleting
+   * whatever login is stored when the answer arrives, not the one the question was about: a slow answer for Ali's old token, arriving
+   * after Ali logged out and Sara logged in (on this tab or another one), would delete Sara's login, which stays valid on the
+   * server, and send every tab to the login page. So an answer about a session that is not the stored one any more (or when nobody is
+   * stored) is dropped like a lost connection: nothing is deleted, and the caller sees that the login changed (see confirmedLogin()).
+   * When the session cannot be told apart (storage blocked, a token without a session id) the answer goes through as it came.
+   */
+  async function vetUser(init, res) {
+    if (res.ok || res.status < 400 || res.status >= 500) return res;
+    let code;
+    try {
+      const body = await res.clone().json();
+      code = typeof body?.code === 'string' ? body.code : body?.error_code;
+    } catch { return res; }
+    if (code !== 'session_not_found') return res;
+    const headers = init?.headers;
+    const authorization = typeof headers?.get === 'function' ? headers.get('authorization') : headers && Object.entries(headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
+    const asked = claimsOf(String(authorization || '').replace(/^Bearer /i, ''))?.session_id;
+    let raw;
+    try { raw = localStorage.getItem(sb.auth.storageKey); } catch { return res; }
+    let stored = null;
+    if (raw) {
+      try { stored = JSON.parse(raw); } catch { return res; }
+      if (typeof claimsOf(stored?.access_token)?.session_id !== 'string') return res;
+    }
+    if (typeof asked !== 'string') return res;
+    if (stored && claimsOf(stored.access_token).session_id === asked) return res;
+    throw new TypeError('The login server answered about a login that is not the stored one any more; the answer is dropped.');
+  }
+  /**
+   * Remembers why the login is ending, in localStorage so the other tabs of this browser, which only see SIGNED_OUT, can say the same.
+   * A note is about ONE login: it names the person (when known), is put on one SIGNED_OUT per tab, and goes when somebody
+   * else signs in (on any tab), at the next sign-in here, at the next logout, or after REASON_TTL_MS, so it can never label a later logout.
+   */
+  function noteReason(reason, uid = storedUserId()) {
+    endReason = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, reason, at: Date.now(), uid };
     try { localStorage.setItem(REASON_KEY, JSON.stringify(endReason)); } catch { /* storage blocked: only this tab hears it */ }
   }
   function forgetReason() {
     endReason = null;
     try { localStorage.removeItem(REASON_KEY); } catch { /* storage blocked */ }
   }
-  /** The reason noted in the last REASON_TTL_MS by this tab or another one, or null. */
+  /** The note every tab shares (another tab's sign-in removes it for all of them); this tab's own one when storage is blocked. */
+  function readNote() {
+    let raw;
+    try { raw = localStorage.getItem(REASON_KEY); } catch { return endReason; }
+    try { return JSON.parse(raw || 'null'); } catch { return null; }
+  }
+  /** The reason of a note made in the last REASON_TTL_MS that this tab has not used yet, or null. Using it marks it used. */
   function currentReason() {
-    let latest = endReason;
-    try {
-      const saved = JSON.parse(localStorage.getItem(REASON_KEY) || 'null');
-      if (typeof saved?.reason === 'string' && Number.isFinite(saved.at) && (!latest || saved.at > latest.at)) latest = saved;
-    } catch { /* storage blocked or unreadable */ }
-    return latest && Date.now() - latest.at < REASON_TTL_MS ? latest.reason : null;
+    const note = readNote();
+    if (typeof note?.reason !== 'string' || !Number.isFinite(note.at) || note.id === usedNoteId) return null;
+    const age = Date.now() - note.at;
+    if (age < 0 || age >= REASON_TTL_MS) return null;
+    usedNoteId = note.id;
+    return note.reason;
+  }
+  /**
+   * `uid` is logged in now (an event of this tab, or one that another tab sent): a note that is not about this very person is no
+   * longer anybody's business, and must not label a later logout of theirs. (A note without a name goes too: it cannot be shown to be theirs.)
+   */
+  function forgetNoteOfOtherPerson(uid) {
+    const note = readNote();
+    if (note && (!note.uid || note.uid !== uid)) forgetReason();
+  }
+  /** The reason ('switched_off' / 'account_gone') of a fresh note about `uid`'s login, or null. Reading it does not use it up. */
+  function freshNoteAbout(uid) {
+    const note = readNote();
+    const age = Date.now() - note?.at;
+    return uid && note?.uid === uid && typeof note.reason === 'string' && age >= 0 && age < REASON_TTL_MS ? note.reason : null;
+  }
+  const endedJustNow = (reason, uid) => freshNoteAbout(uid) === reason;
+
+  /**
+   * The logout request, which can be given up on: auth-js waits for it while holding its lock and, when it finally ends, removes
+   * whatever login is stored then (a later person's included), so one that never answers must not be left hanging. Every request in
+   * flight is kept (two logouts can overlap), and endSession() gives them all up together.
+   */
+  function logoutFetch(input, init = {}) {
+    if (init.signal || typeof AbortController === 'undefined') return fetch(input, init);
+    const ctrl = new AbortController();
+    let drop = () => {};
+    const dropped = new Promise((_, reject) => { drop = () => { ctrl.abort(); reject(new TypeError('The logout was given up: the login server did not answer in time.')); }; });
+    dropped.catch(() => {}); // only the race below hands the rejection to auth-js
+    const request = fetch(input, { ...init, signal: ctrl.signal });
+    hungLogouts.add(drop);
+    const done = () => { hungLogouts.delete(drop); };
+    request.then(done, done);
+    return Promise.race([request, dropped]);
+  }
+
+  /**
+   * A token refresh was refused for a reason about the account (banned, deleted, or "refresh token not found", which is how a deleted
+   * account is refused too). auth-js only ends the login by itself when the access token has run out; a refresh that fires early (its 90 s
+   * margin) while the access token still works is refused and the login is kept, so nothing would notice until the token ran out. While
+   * the access token works, the login server tells the cases apart (403 user_banned / user_not_found), so ask it once, from outside
+   * auth-js's own lock, with the same strict rules as any other check (userId() ends only the login that is stored, only on such an
+   * answer). Once is enough: asking again would learn nothing new. If the login is already gone there is nothing to ask about.
+   */
+  function askAfterRefusal() {
+    if (Date.now() - askedAfterRefusalAt < 30000) return;
+    askedAfterRefusalAt = Date.now();
+    setTimeout(() => { userId().catch(() => { /* ended by userId() itself, or nothing to confirm: the next check looks again */ }); }, 0);
   }
   // Saves made with an idempotency key while the database functions are not installed:
   // key -> what the earlier attempt already wrote, so pressing Save again finishes that record instead of starting a new one.
@@ -379,13 +661,16 @@ export async function createSupabaseAdapter() {
    * Ends the stored login. The "local" scope of sb.auth.signOut goes through the same request, so it cannot rescue a hung one.
    * `reason` ('idle', ...) is passed on with the SIGNED_OUT event, here and in the other tabs of this browser.
    */
-  async function endSession({ scope = 'global', reason = null } = {}) {
+  async function endSession({ scope = 'global', reason = null, uid } = {}) {
     cachedSession = null;
     partial.clear();
-    if (reason) noteReason(reason);
+    if (reason) noteReason(reason, uid); else forgetReason(); // a logout without a reason must not inherit the note of an earlier one
     let confirmed = false;
     try { confirmed = !(await withTimeout(sb.auth.signOut({ scope }), SIGNOUT_TIMEOUT_MS))?.error; } catch { /* timed out, or no connection */ }
     if (!confirmed) {
+      // Requests that never answered are given up now (all of them, not only the latest): they would otherwise end whatever login is
+      // stored when they finally do.
+      for (const drop of [...hungLogouts]) drop();
       // Without this the tokens stay in localStorage, and a reload or a new tab is still signed in.
       Promise.resolve(sb.auth.stopAutoRefresh?.()).catch(() => {});
       const key = sb.auth.storageKey;
@@ -394,33 +679,87 @@ export async function createSupabaseAdapter() {
     return confirmed;
   }
 
+  /** True for an answer that says there is no usable login (as opposed to one that says nothing: no connection, a 5xx, a rate limit, a timeout). */
+  const isRefusal = (error) => error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
+
+  /**
+   * The stored login as { uid, jwt }, or null when there is none or the library's refresh of an expired token was refused. A refresh
+   * that failed for a reason that says nothing about the login (offline, 5xx, 429) throws instead, like any failed read.
+   */
+  async function storedLogin() {
+    const { data, error } = await sb.auth.getSession();
+    const session = data?.session;
+    if (session?.access_token && session.user?.id) return { uid: session.user.id, jwt: session.access_token };
+    if (error && !isRefusal(error)) check({ error, status: error.status });
+    return null;
+  }
+
   /**
    * The login server (or the staff record) said this account is switched off or gone: end the login on this computer (the
    * server decides about other computers) with the reason, then fail with the same words. Never called for a failed or
-   * slow answer.
+   * slow answer. `uid` is the person the answer was about: an answer that arrives late, after somebody else has logged in (or
+   * nobody is any more), is about a login that is already gone and must not end the stored one (nor label it), so then nothing is ended.
+   * One exception: nobody is stored any more, and a note of the last few minutes says this very login was ended for this very reason
+   * (another tab of this browser got there first): the answer is the same, so it is given as such (a page that was reloading then
+   * still learns why), and nothing is ended or noted again.
    */
-  async function endLogin(reason) {
-    await endSession({ scope: 'local', reason });
+  async function endLogin(reason, uid) {
+    let now;
+    try { now = (await storedLogin())?.uid ?? null; } catch { now = undefined; } // undefined: could not be told just now
+    if (now !== uid) {
+      if (now === null && endedJustNow(reason, uid)) throw plainError(ACCOUNT_ERRORS[reason].message, ACCOUNT_ERRORS[reason].code);
+      throw plainError('The login changed while it was being checked. Please try again.', 'LOGIN_CHANGED');
+    }
+    await endSession({ scope: 'local', reason, uid });
     throw plainError(ACCOUNT_ERRORS[reason].message, ACCOUNT_ERRORS[reason].code);
   }
 
   /**
-   * The logged-in user's id, or null when the server confirms there is no login (no session, or a token it refuses with a 4xx).
-   * A network failure, a 5xx or a rate limit is NOT "no login": it throws, so getSession() never reports a valid login as
-   * gone and created_by / received_by / uploaded_by are never written as null because one GET /user failed.
-   * The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE): GoTrue refuses even a still
-   * valid token of a switched-off account with 403 user_banned, and one of a deleted account with 403 user_not_found.
+   * The stored login as { uid, jwt } once the login server has confirmed that token, or null when the server confirms there is no
+   * login (no session, or a token it refuses with a 4xx). A network failure, a 5xx or a rate limit is NOT "no login": it throws, so
+   * getSession() never reports a valid login as gone and created_by / received_by / uploaded_by are never written as null
+   * because one GET /user failed. The two final answers about the account end the login (and throw ACCOUNT_OFF / ACCOUNT_GONE):
+   * GoTrue refuses even a still valid token of a switched-off account with 403 user_banned, and one of a deleted account with
+   * 403 user_not_found. The question is asked with the stored token itself (not with whatever the library holds when the request
+   * goes out), so the answer belongs to that person and only ever ends that person's login (see endLogin()). `email` is the login name
+   * the server has now (the stored copy is old after a rename, until the next refresh).
    */
-  async function userId() {
-    const { data, error } = await sb.auth.getUser();
+  async function confirmedLogin() {
+    const login = await storedLogin();
+    if (!login) return null;
+    const { data, error } = await sb.auth.getUser(login.jwt);
     if (error) {
-      if (error.code === 'user_banned') await endLogin('switched_off');
-      if (error.code === 'user_not_found') await endLogin('account_gone');
-      const refused = error.name === 'AuthSessionMissingError' || (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429);
-      if (!refused) check({ error, status: error.status });
+      if (error.code === 'user_banned') await endLogin('switched_off', login.uid);
+      if (error.code === 'user_not_found') await endLogin('account_gone', login.uid);
+      if (!isRefusal(error)) {
+        // A failed answer (a dropped one too, see vetUser()) about a login that is not the stored one any more is no news either.
+        const now = await storedLogin().then((l) => l?.uid ?? null, () => undefined);
+        if (now !== undefined && now !== login.uid) throw plainError('The login changed while it was being checked. Please try again.', 'LOGIN_CHANGED');
+        check({ error, status: error.status });
+      }
     }
-    return data?.user?.id || null;
+    // email: for the current-password check (changeOwnPassword); user: the login server's own answer about this person (its
+    // user_metadata carries must_change_password for clinic-made patient logins).
+    return data?.user?.id ? { uid: data.user.id, jwt: login.jwt, email: data.user.email || null, user: data.user } : null;
   }
+  async function userId() { return (await confirmedLogin())?.uid ?? null; }
+
+  /**
+   * Calls the admin-users Edge Function. A refused or failed call carries the function's own message in the body of its answer
+   * (supabase-js only says "non-2xx" itself), so that message is read out and thrown.
+   */
+  async function adminUsers(body) {
+    const { data, error } = await sb.functions.invoke('admin-users', { body });
+    if (error) {
+      let message = error.message;
+      try { const sent = await error.context?.json?.(); if (sent?.error) message = sent.error; } catch { /* keep the generic text */ }
+      throw new Error(oldFunction(message));
+    }
+    if (data?.error) throw new Error(oldFunction(data.error));
+    return data;
+  }
+  /** A function that was not redeployed with the website does not know the new actions and answers "Unknown action": say what to do. */
+  const oldFunction = (message) => (/^unknown action$/i.test(String(message).trim()) ? 'Update the admin-users function first.' : message);
 
   async function duesFor(ids) {
     if (!ids.length) return {};
@@ -477,17 +816,23 @@ export async function createSupabaseAdapter() {
     return q;
   }
 
-  /** The staff or patient record of a login, or null when it has none. A switched-off staff account ends the login. */
-  async function loadProfile(uid) {
-    const staff = check(await sb.from('staff').select('*').eq('id', uid).maybeSingle());
+  /**
+   * The staff or patient record of the login `uid` (whose token is `jwt`), or null when it has none. A switched-off staff account
+   * ends the login. Every read is sent with exactly that token, never with whatever the library holds when the request goes out:
+   * a refresh in flight, or one that failed, makes it send the anonymous key, and an anonymous read comes back empty for a
+   * person who does have a record.
+   */
+  async function loadProfile(uid, jwt) {
+    const as = (query) => query.setHeader('Authorization', `Bearer ${jwt}`);
+    const staff = check(await as(sb.from('staff').select('*').eq('id', uid)).maybeSingle());
     if (staff) {
-      if (!staff.active) await endLogin('switched_off');
+      if (!staff.active) await endLogin('switched_off', uid);
       let perms;
       if (staff.role === 'admin') perms = new Set(PERMISSIONS.map((p) => p.key));
       else {
         const [grid, overrides] = await Promise.all([
-          sb.from('role_permissions').select('permission_key,allowed').eq('role', staff.role).then(check),
-          sb.from('staff_permission_overrides').select('permission_key,allowed').eq('staff_id', uid).then(check),
+          as(sb.from('role_permissions').select('permission_key,allowed').eq('role', staff.role)).then(check),
+          as(sb.from('staff_permission_overrides').select('permission_key,allowed').eq('staff_id', uid)).then(check),
         ]);
         const map = Object.fromEntries(grid.map((g) => [g.permission_key, g.allowed]));
         for (const o of overrides) map[o.permission_key] = o.allowed;
@@ -495,7 +840,7 @@ export async function createSupabaseAdapter() {
       }
       return { kind: 'staff', staff, perms };
     }
-    const patient = check(await sb.from('patients').select('*').eq('portal_user_id', uid).maybeSingle());
+    const patient = check(await as(sb.from('patients').select('*').eq('portal_user_id', uid)).maybeSingle());
     return patient ? { kind: 'patient', patient, perms: new Set() } : null;
   }
 
@@ -517,17 +862,70 @@ export async function createSupabaseAdapter() {
       try { if (session) await sb.from('login_events').insert({ user_id: await userId(), kind: session.kind, user_agent: navigator.userAgent.slice(0, 300) }); } catch { /* the log never blocks a login */ }
       return session;
     },
-    /** True for staff login names (@STAFF_EMAIL_DOMAIN). They need no real inbox, so they get no reset emails. */
+    /** True for staff login names (@STAFF_EMAIL_DOMAIN, not shaped like a patient username). They need no real inbox, so they get no reset emails. */
     isStaffEmail(email) {
       const domain = String(CONFIG.STAFF_EMAIL_DOMAIN || '').toLowerCase();
-      return !!domain && String(email || '').trim().toLowerCase().endsWith('@' + domain);
+      return !!domain && String(email || '').trim().toLowerCase().endsWith('@' + domain) && !this.isPortalLoginName(email);
     },
+    /** True for a patient's username made at the clinic (alirashid-1705@STAFF_EMAIL_DOMAIN). It has no inbox either: the clinic resets its password. */
+    isPortalLoginName(email) { return isPatientLoginName(email, CONFIG.STAFF_EMAIL_DOMAIN); },
     async sendPasswordReset(email) {
-      // Staff login emails do not need a real inbox: sending would bounce, and the person would wait for nothing.
+      // Staff login emails do not need a real inbox: sending would bounce, and the person would wait for nothing. Nor do patients' clinic usernames.
+      if (this.isPortalLoginName(email)) throw plainError('Ask the clinic to reset your password.', 'CLINIC_RESET');
       if (this.isStaffEmail(email)) throw plainError('Staff passwords are not reset by email. Ask Dr. Ali to set a new one under Admin → Staff accounts.', 'STAFF_RESET');
       check(await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo: location.origin + '/reset-password.html' }));
     },
     async updatePassword(password) { check(await sb.auth.updateUser({ password })); },
+    /**
+     * The logged-in person changes their own password. The login server first confirms who is logged in (confirmedLogin(): its own email,
+     * and a switched-off account ends the login right there), then the current password is checked (checkPassword(): a request of its
+     * own that leaves this page's login, login events and storage alone), then the page's own client sets the new one, which sends
+     * USER_UPDATED (the login watcher takes it as the same person). The new password goes to the account that was checked: if the stored
+     * login is another person's by then (somebody logged out and in on another tab during the check), nothing is changed (LOGIN_CHANGED).
+     * That look is the last step before the library's updateUser(), which takes no token of its own and acts on whatever login is stored
+     * when it reads it, so the gap that is left is only the two local reads between them, not the seconds of the network check.
+     * Fails with an error whose code is WRONG_PASSWORD, SAME_PASSWORD, WEAK_PASSWORD, RATE_LIMITED, REAUTH_NEEDED, NOT_LOGGED_IN,
+     * LOGIN_CHANGED, ACCOUNT_OFF, ACCOUNT_GONE or PASSWORD_RULE (words in password-rules.js), or with a connection / server error that
+     * friendlyError() words. No failure here ends the login, except that a switched-off or deleted account is ended the usual way. No
+     * password appears in any error, log or storage. A change that was sent but whose answer was lost (a timeout) may still have happened.
+     *
+     * Known limit, by design: the current password is checked in the browser only. The login server itself accepts a new password from
+     * a valid login without asking for the old one (its "secure password change" setting is off, which would ask for a fresh login after
+     * 24 hours), and updatePassword() above does exactly that for the reset page. So this protects against a person at an unlocked
+     * computer clicking through the app, not against someone who already holds the login's token (devtools, a stolen token).
+     */
+    async changeOwnPassword(currentPassword, newPassword) {
+      const problem = passwordProblems({ current: currentPassword, next: newPassword })[0];
+      if (problem) throw passwordError('PASSWORD_RULE', problem.message);
+      // Errors that already carry their own words; anything else from the login look-ups is a connection or server problem.
+      const worded = (promise) => promise.catch((e) => { throw ['ACCOUNT_OFF', 'ACCOUNT_GONE', 'LOGIN_CHANGED'].includes(e.code) ? e : ownPasswordError(e); });
+      try {
+        const login = await worded(confirmedLogin());
+        if (!login?.email) throw passwordError('NOT_LOGGED_IN');
+        const { revoked, userId: checkedUid } = await checkPassword(login.email, currentPassword);
+        try {
+          if (checkedUid !== login.uid || (await worded(storedLogin()))?.uid !== login.uid) throw plainError('The login changed while the password was being checked. Please try again.', 'LOGIN_CHANGED');
+          const res = await within(sb.auth.updateUser({ password: newPassword }), PASSWORD_UPDATE_TIMEOUT_MS);
+          if (res.error) throw ownPasswordError(res.error);
+        } finally {
+          await revoked;
+        }
+      } catch (e) {
+        // "Switched off" from the check or the update: let the usual look end the login on this computer now, not at the next recheck.
+        if (e.code === 'ACCOUNT_OFF') await confirmedLogin().catch(() => {});
+        throw e;
+      }
+    },
+    /**
+     * The logged-in patient chooses their own password. Also clears the "must change" flag of a login the clinic made, so the
+     * portal opens from now on. The flag lives in user_metadata, which the patient can edit: it is a prompt, not a lock. A patient
+     * who clears it without changing the password only weakens their own account (nothing else is protected by it), so it is
+     * deliberately not enforced anywhere on the server.
+     */
+    async changePassword(password) {
+      check(await sb.auth.updateUser({ password, data: { must_change_password: false } }));
+      cachedSession = null;
+    },
     /**
      * Always ends the login on this computer, even with no connection: the server gets SIGNOUT_TIMEOUT_MS to confirm
      * (scope 'global' ends every session of this login, 'local' only this browser's), then the stored login is removed
@@ -539,26 +937,54 @@ export async function createSupabaseAdapter() {
      * server cannot be asked right now (a failed request throws instead). A switched-off or deleted account ends the login
      * and throws ACCOUNT_OFF / ACCOUNT_GONE. { strict: true } (the login watcher) also treats a login that the server knows but
      * that has neither a staff nor a patient record any more as that final answer: asked twice, then checked once more.
+     * { fresh: true } reads the record again instead of answering from the one remembered since the last login event.
+     * The answer is about the login the server confirmed: if another person is logged in by the time it is complete, the
+     * lookup fails with LOGIN_CHANGED instead of reporting the earlier person. A lookup that finds the login in motion (its token was
+     * replaced while the empty answers came in) fails with LOGIN_UNCONFIRMED: no proof either way, the next event looks again.
+     * The first look of a page (state.js, while loading) that finds nobody stored also reports an account that was switched off or
+     * deleted: the login this page opened with was just ended for that reason (the page's own start-up refresh was refused as banned,
+     * or another tab got there first), which is the same ACCOUNT_OFF / ACCOUNT_GONE failure as when the look itself ends the login.
      */
-    async getSession({ strict = false } = {}) {
-      const uid = await userId();
-      if (!uid) return null;
-      if (cachedSession?.uid === uid && (cachedSession.value || !strict)) return cachedSession.value;
-      let value = await loadProfile(uid);
-      if (!value && strict) {
-        // A read that went out without the person's token would answer empty as well, so one empty answer is not proof.
-        value = await loadProfile(uid);
-        if (!value && (await userId()) === uid) await endLogin('account_gone');
+    async getSession({ strict = false, fresh = false } = {}) {
+      const first = !startChecked;
+      startChecked = true;
+      const login = await confirmedLogin();
+      if (!login) {
+        const why = first ? freshNoteAbout(startUid) : null;
+        if (ACCOUNT_ERRORS[why]) throw plainError(ACCOUNT_ERRORS[why].message, ACCOUNT_ERRORS[why].code);
+        return null;
       }
+      const { uid, jwt } = login;
+      // A login the clinic made for a patient asks for a new password first (user_metadata.must_change_password, read fresh from the
+      // login server's answer each time, never from the remembered record).
+      const flagged = (v) => (v?.kind === 'patient' ? { ...v, mustChangePassword: login.user?.user_metadata?.must_change_password === true } : v);
+      if (!fresh && cachedSession?.uid === uid && (cachedSession.value || !strict)) return flagged(cachedSession.value);
+      let value = await loadProfile(uid, jwt);
+      if (!value && strict) {
+        value = await loadProfile(uid, jwt);
+        if (!value) {
+          // The empty answers were sent with this one token (see loadProfile()), so the server judged them as this person. They are proof
+          // only if the login server still confirms the CURRENT stored login as this person's, on this same token: a refresh that landed
+          // meanwhile, or another person's login, means these answers describe a login that is no longer the stored one.
+          const now = await confirmedLogin();
+          if (now?.uid === uid && now.jwt === jwt) await endLogin('account_gone', uid);
+          throw plainError('The login could not be confirmed just now.', 'LOGIN_UNCONFIRMED');
+        }
+      }
+      if ((await storedLogin().catch(() => null))?.uid !== uid) throw plainError('The login changed while it was being checked. Please try again.', 'LOGIN_CHANGED');
       cachedSession = { uid, value };
-      return value;
+      return flagged(value);
     },
     // fn(eventName, reason) runs after every login event (SIGNED_IN, TOKEN_REFRESHED, SIGNED_OUT ...); reason comes with SIGNED_OUT only
     // (see ACCOUNT_ERRORS). Its result is deliberately not returned: auth-js waits for this callback before it carries on, so handing
     // back fn's promise would make it wait for the app's own network calls (and deadlock when a lock is held and fn asks for the session).
     // Returns the function that stops listening.
     onAuthChange(fn) {
-      const { data } = sb.auth.onAuthStateChange((event) => { cachedSession = null; fn(event, event === 'SIGNED_OUT' ? currentReason() : null); });
+      const { data } = sb.auth.onAuthStateChange((event, session) => {
+        cachedSession = null;
+        if (session?.user?.id) forgetNoteOfOtherPerson(session.user.id); // somebody is logged in: a note about anybody else is over
+        fn(event, event === 'SIGNED_OUT' ? currentReason() : null);
+      });
       // A tab that logs out without a connection (or whose logout request hangs) removes the stored login by hand, and then sends
       // the other tabs no event at all. That removal arrives here as a storage event (only in the other tabs, never the one doing it).
       const onStorage = (e) => {
@@ -635,6 +1061,21 @@ export async function createSupabaseAdapter() {
       const { data, error } = await sb.functions.invoke('admin-users', { body: { action: 'invite_patient', patient_id: id } });
       if (error) throw new Error(error.message);
       if (data?.error) throw new Error(data.error);
+    },
+    /** Staff make the patient's portal login at the clinic. Resolves { username } (the full address); the password is not kept anywhere here. */
+    async createPatientLogin(id, password) {
+      const { username } = await adminUsers({ action: 'create_patient_login', patient_id: id, password });
+      return { username };
+    },
+    /** Staff set a new password for a login made that way; the patient is asked to choose their own again. Resolves { username }. */
+    async resetPatientPassword(id, password) {
+      const { username } = await adminUsers({ action: 'reset_patient_password', patient_id: id, password });
+      return { username };
+    },
+    /** { has_login, clinic_login, username }: whether the patient has a portal login, and (for a clinic one) its username. */
+    async portalLoginInfo(id) {
+      const { has_login, clinic_login, username } = await adminUsers({ action: 'portal_login_info', patient_id: id });
+      return { has_login: !!has_login, clinic_login: !!clinic_login, username: username || null };
     },
     /**
      * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (the stored thumbnail
@@ -744,6 +1185,88 @@ export async function createSupabaseAdapter() {
         if (role === 'checker') check(await sb.from('visits').update({ checked_by: null, checked_at: null }).eq('id', visitId).eq('checked_by', clinicianId));
       }
       return visitById(visitId);
+    },
+
+    // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
+    // A checkup row = the columns of public.checkups + phone_key + mr_number (the linked patient file's Mr#). While the database update
+    // is not run: listDayCheckups resolves [] with .missing = true; every other method throws an Error with code 'CHECKUPS_MISSING'.
+    /** One page of the Checkups page, newest first. -> { rows, total } */
+    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', page = 0, pageSize = 50 } = {}) {
+      return checkupsCall(async () => {
+        const filters = { q, branchId, from, to, followUp, source, registered };
+        const first = Math.max(0, Number(page) || 0) * pageSize;
+        const res = await checkupFilters(sb.from('checkup_list').select('*', { count: 'exact' }), filters)
+          .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id')
+          .range(first, first + pageSize - 1);
+        if (res.error?.code === 'PGRST103') {   // a page past the end (rows were removed meanwhile): no rows, but the right total
+          const head = await checkupFilters(sb.from('checkup_list').select('*', { count: 'exact', head: true }), filters);
+          check(head);
+          return { rows: [], total: head.count ?? 0 };
+        }
+        const rows = check(res);
+        return { rows, total: res.count ?? rows.length };
+      });
+    },
+    /** Every row matching the filters, for the Excel file (1000 per request, at most 20000; rows.truncated says when that cut it). */
+    async exportCheckups(filters = {}) {
+      return checkupsCall(() => fetchPaged(() => checkupFilters(sb.from('checkup_list').select('*'), filters)
+        .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id'), 20000));
+    },
+    /** The checkups of one day (exact-day rows only), oldest first. branchId null = every branch the reader may see. */
+    async listDayCheckups({ branchId = null, date }) {
+      try {
+        let q = sb.from('checkup_list').select('*').eq('checkup_date', date).eq('date_is_month', false);
+        if (branchId) q = q.eq('branch_id', Number(branchId));
+        return check(await q.order('created_at', { ascending: true }).order('id'));
+      } catch (e) {
+        if (!checkupsMissing(e)) throw e;
+        const none = [];
+        none.missing = true;
+        return none;
+      }
+    },
+    // Live updates: calls onChange the moment a checkup (at this branch, or at any) changes. Returns a function that stops listening.
+    subscribeCheckups(branchId, onChange) {
+      const ch = sb.channel(`checkups-${branchId || 'all'}-${Math.random().toString(36).slice(2)}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'checkups', ...(branchId ? { filter: `branch_id=eq.${Number(branchId)}` } : {}) }, onChange)
+        .subscribe();
+      return () => { sb.removeChannel(ch); };
+    },
+    /** Adds a checkup. The source is always 'website' (the database default too); keys other than the listed ones are dropped. */
+    async addCheckup(row) {
+      return checkupsCall(async () => {
+        const insert = { checkup_date: row.checkup_date || todayISO(), date_is_month: false, source: 'website', ...checkupPatch(row) };
+        if (!('follow_up' in insert) || !insert.follow_up) insert.follow_up = 'Not Contacted';
+        delete insert.est_fee;
+        return checkupListRow(sb, check(await sb.from('checkups').insert(insert).select().single()));
+      });
+    },
+    /** Changes a checkup (only patient_name, phone, city, doctors, checkup_for, details, day_status, follow_up, notes, est_fee, branch_id, token are sent). -> the row, or null when no row was changed (removed, or not visible). */
+    async updateCheckup(id, changes) {
+      return checkupsCall(async () => {
+        const patch = checkupPatch(changes);
+        if (!Object.keys(patch).length) return null;
+        const rows = check(await sb.from('checkups').update(patch).eq('id', id).select());
+        return rows[0] ? checkupListRow(sb, rows[0]) : null;
+      });
+    },
+    async deleteCheckup(id) {
+      return checkupsCall(async () => {
+        const rows = check(await sb.from('checkups').delete().eq('id', id).select('id'));
+        if (!rows.length) throw plainError('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).', 'NOT_REMOVED');
+      });
+    },
+    /** Gives the person a patient file with the next Mr# and links it. -> { patient_id, mr_number, full_name } */
+    async registerCheckupAsPatient(id) {
+      return checkupsCall(async () => check(await sb.rpc('register_checkup_as_patient', { p_checkup: id })));
+    },
+    /** Links the checkup to a patient file that already exists. -> { patient_id, mr_number, full_name } */
+    async linkCheckupToPatient(id, patientId) {
+      return checkupsCall(async () => check(await sb.rpc('link_checkup_to_patient', { p_checkup: id, p_patient: patientId })));
+    },
+    /** Admin: adds up to 500 rows of the old checkup list (the rows readCheckupList() makes). -> { given, inserted, updated, unchanged, kept, skipped: [{ row, reason }], skipped_count } */
+    async importCheckups(rows, { overwrite = false } = {}) {
+      return checkupsCall(async () => check(await sb.rpc('import_checkups', { p_rows: rows, p_overwrite: !!overwrite })));
     },
 
     // ------------------------------------------------------------ photos
@@ -1174,6 +1697,27 @@ export async function createSupabaseAdapter() {
       const { data, error } = await sb.functions.invoke('admin-users', { body: { action: 'update_login', user_id: id, email, password } });
       if (error) throw new Error(error.message);
       if (data?.error) throw new Error(data.error);
+    },
+    async updateStaffBranches(id, branchIds) {
+      // An empty list means all branches. The home branch stays if it is still allowed, else the first allowed one.
+      const ids = [...new Set((branchIds || []).map(Number))];
+      const current = check(await sb.from('staff').select('home_branch_id').eq('id', id).single());
+      const home = current.home_branch_id ?? null;
+      const saved = check(await sb.from('staff').update({
+        branch_ids: ids, restrict_to_branches: ids.length > 0, home_branch_id: ids.length && !ids.includes(home) ? ids[0] : home,
+      }).eq('id', id).select('id'));
+      if (!saved?.length) throw new Error('The branches were not saved. Try again.');
+    },
+    async updateStaffRole(id, role, fromRole) {
+      // A plain update of public.staff.role. The staff guard (a trigger) decides who may: only admin makes, promotes or changes an admin account,
+      // and nobody but admin changes their own role. Row-level security (users.manage) decides whose row can be reached at all.
+      // fromRole: the role the dialog showed; the row is changed only if it still has it, so a change made meanwhile (another tab) is never undone.
+      // A braces doctor group belongs to doctors only (doctor_group_only_for_doctors), so it is cleared when the role stops being a doctor's.
+      const changes = role === 'doctor' || role === 'admin' ? { role } : { role, doctor_group_id: null };
+      let q = sb.from('staff').update(changes).eq('id', id);
+      if (fromRole) q = q.eq('role', fromRole);
+      const saved = check(await q.select('id'));
+      if (!saved?.length) throw new Error('The role was not saved: it may have been changed meanwhile. Reload the page and try again.');
     },
     async deactivateStaff(id) {
       check(await sb.rpc('deactivate_staff', { p_staff: id }));

@@ -1,26 +1,28 @@
-// Admin → Import from Healthwire. Dr. Ali exports from Healthwire (emailed
-// Excel files and the expenses PDF) and drops the files here; the page reads
-// them in the browser, shows what it found, and writes through the
-// import_healthwire() function in batches. Running the same file twice adds
-// nothing. Nothing from the files leaves the browser except these batches.
+// Admin → Import. Dr. Ali exports from Healthwire (emailed Excel files and the
+// expenses PDF), from the Aaj ki List sheet and from the checkup list, and drops
+// the files here; the page reads them in the browser, shows what it found, and
+// writes through the import functions in batches. Running the same file twice
+// adds nothing. Nothing from the files leaves the browser except these batches.
 import { h, mount, toast, friendlyError, rupees, field, todayISO, select, downloadCSV, shortDate } from '../../ui/dom.js';
 import { state, branchName } from '../../state.js';
+import { loadSheetJS } from '../../lib/sheetjs.js';
 
 // The Healthwire and Aaj ki List readers (with the old-sheet helpers they use) are large and only
 // needed once a file is dropped, so they load then, not when the page opens.
 let hwLib = null;
 let aajLib = null;
+let checkupsLib = null;
 const healthwire = async () => (hwLib ||= await import('../../lib/healthwire.js'));
 const aaj = async () => (aajLib ||= await import('../../lib/aaj.js'));
+const checkupMapping = async () => (checkupsLib ||= await import('../../lib/checkups.js'));
 
-const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/xlsx.mjs';
 const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs';
 const PDF_WORKER_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
 const BATCH = 150;
 
 async function fileToRows(file) {
   if (/\.csv$/i.test(file.name)) return (await healthwire()).parseCSV(await file.text());
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL);
+  const XLSX = await loadSheetJS();
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
   const ws = wb.Sheets[wb.SheetNames[0]];
   // Healthwire's Excel writer declares the sheet narrower than it is (12 columns while rows hold 16),
@@ -34,7 +36,7 @@ async function fileToRows(file) {
 /** Every tab of a workbook (or a CSV as one tab) -> [{ name, rows }]. */
 async function fileToTabs(file) {
   if (/\.csv$/i.test(file.name)) return [{ name: file.name.replace(/\.csv$/i, ''), rows: (await healthwire()).parseCSV(await file.text()) }];
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL);
+  const XLSX = await loadSheetJS();
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
   return wb.SheetNames.map((name) => {
     const ws = wb.Sheets[name];
@@ -82,7 +84,9 @@ async function runImport(kind, rows, progress, label) {
 }
 
 function filePicker(accept, onFile) {
-  const input = h('input', { type: 'file', accept, onchange: () => { if (input.files[0]) onFile(input.files[0]); } });
+  // The box is emptied once the file is in hand: choosing the very same file again (to check that nothing doubles, as the page
+  // promises) must fire `change` again, and a browser stays silent when the chosen file is the one already in the box.
+  const input = h('input', { type: 'file', accept, onchange: () => { const file = input.files[0]; if (!file) return; input.value = ''; onFile(file); } });
   return input;
 }
 
@@ -279,13 +283,19 @@ export async function renderImport(root) {
         try {
           const parts = chunk(built.rows, 200);
           const total = { future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, cases: {}, unmatched: {} };
-          for (let i = 0; i < parts.length; i++) {
-            progress.textContent = `Importing: ${Math.min((i + 1) * 200, built.rows.length)} of ${built.rows.length} visits…`;
-            document.dispatchEvent(new Event('app:activity'));
-            const r = await d.importAajSheet(parts[i], createBox.checked);
+          const add = (r) => {
             for (const k of ['future', 'patients_created', 'visits_inserted', 'visits_updated', 'staff_added', 'cases_created', 'tokens', 'rows_unmatched']) total[k] += Number(r?.[k] || 0);
             for (const [k, v] of Object.entries(r?.cases || {})) total.cases[k] = (total.cases[k] || 0) + Number(v);
             for (const u of r?.unmatched || []) { const k = `${u.name}|${u.mr || ''}|${u.phone || ''}`; const cur = total.unmatched[k] || { ...u, rows: 0 }; cur.rows += Number(u.rows || 0); cur.last = u.last > (cur.last || '') ? u.last : cur.last; total.unmatched[k] = cur; }
+          };
+          for (let i = 0; i < parts.length; i++) {
+            progress.textContent = `Importing: ${Math.min((i + 1) * 200, built.rows.length)} of ${built.rows.length} visits…`;
+            document.dispatchEvent(new Event('app:activity'));
+            // A row without an Mr# is a checkup patient: it is matched to a patient file that already exists, but never gets a new one.
+            const withMr = parts[i].filter((row) => row[2]);
+            const withoutMr = parts[i].filter((row) => !row[2]);
+            if (withMr.length) add(await d.importAajSheet(withMr, createBox.checked));
+            if (withoutMr.length) add(await d.importAajSheet(withoutMr, false));
           }
           progress.textContent = '';
           const un = Object.values(total.unmatched).sort((a, b) => b.rows - a.rows);
@@ -305,13 +315,94 @@ export async function renderImport(root) {
       };
 
       mount(aajOut, cards, summaryBox,
-        h('label', { class: 'inline', style: { margin: '8px 0' } }, createBox, ' Add patient records for names not on the website yet (only rows that carry an Mr# or a phone number)'),
+        h('label', { class: 'inline', style: { margin: '8px 0' } }, createBox, ' Add patient records for rows with an Mr# that is not on the website yet. Rows without an Mr# are checkup patients and never get a patient file.'),
         h('div', { style: { marginTop: '8px' } }, btn), progress, result);
       draw(); rebuild();
     } catch (e) { mount(aajOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
   });
 
-  // ------------------------------------------------------------ 5. check a month
+  // ------------------------------------------------------------ 5. checkup list
+  // The old "Checkup karwaliya" list: people who came for a checkup (no Mr#), with their follow-up status and notes.
+  // A row is matched by phone + name + month, so the same file again adds nothing.
+  const number = (n) => Number(n || 0).toLocaleString('en-PK');
+  const count = (n, one, many) => `${number(n)} ${n === 1 ? one : many}`;
+  const ckOut = h('div', {});
+  const ckInput = filePicker('.xlsx,.xls,.csv', async (file) => {
+    mount(ckOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
+    try {
+      const { findCheckupSheet, readCheckupList, IMPORT_BATCH, CLINIC_BRANCH, monthLabel } = await checkupMapping();
+      const tab = findCheckupSheet(await fileToTabs(file));
+      if (!tab) throw new Error('No checkup list found in this file: it needs a header row with Patient Name and Phone.');
+      const read = readCheckupList(tab.rows);
+      if (read.missing?.length) throw new Error(`The checkup list needs a column called ${read.missing.map((x) => `"${x}"`).join(' and ')}. Check the header row.`);
+      const s = read.summary;
+      const branchOfClinic = (text) => {
+        const code = CLINIC_BRANCH[String(text).toLowerCase().replace(/\s+/g, ' ').trim()];
+        return state.ref.branches.find((b) => b.code === code)?.name || null;
+      };
+      const listOf = (obj) => { const e = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]); return e.slice(0, 12).map(([t, n]) => `${t} (${n})`).join(', ') + (e.length > 12 ? ', …' : ''); };
+      const unknownClinics = Object.keys(s.unknownClinics || {}).length;
+      const unknownStatuses = Object.keys(s.unknownStatuses || {}).length;
+      const progress = h('p', { class: 'muted', 'aria-live': 'polite' });
+      const result = h('div', {});
+      const overwriteBox = h('input', { type: 'checkbox' });
+      const btn = h('button', { class: 'btn btn-primary', disabled: !read.rows.length }, `Import ${number(read.rows.length)} checkups`);
+      btn.onclick = async () => {
+        btn.disabled = true;
+        const total = { inserted: 0, updated: 0, unchanged: 0, kept: 0, skipped: 0 };
+        let sent = 0;
+        try {
+          for (let i = 0; i < read.rows.length; i += IMPORT_BATCH) {
+            const part = read.rows.slice(i, i + IMPORT_BATCH);
+            progress.textContent = `Checkups: ${number(Math.min(i + IMPORT_BATCH, read.rows.length))} of ${number(read.rows.length)}…`;
+            document.dispatchEvent(new Event('app:activity')); // a long import counts as activity (no idle logout half-way)
+            const r = await d.importCheckups(part, { overwrite: overwriteBox.checked });
+            for (const k of ['inserted', 'updated', 'unchanged', 'kept']) total[k] += Number(r?.[k] || 0);
+            // skipped_count counts every skipped row; the skipped list shows at most 100 of them.
+            total.skipped += Number(r?.skipped_count ?? (Array.isArray(r?.skipped) ? r.skipped.length : r?.skipped) ?? 0);
+            sent = i + part.length;
+          }
+          progress.textContent = '';
+          mount(result, h('div', { class: 'alert alert-info' },
+            h('div', {}, `Checkup list: ${number(total.inserted)} added, ${number(total.updated)} updated, ${number(total.unchanged)} already there, ${number(total.kept)} kept${total.kept ? " (the website has a different status or notes; tick the box above to use the file's)" : ''}, ${number(read.skipped.length + total.skipped)} skipped.`),
+            h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/checkups' }, 'Open the checkup list →'))));
+          toast('Checkup list imported.', 'ok');
+        } catch (e) {
+          btn.disabled = false; progress.textContent = '';
+          if (sent) mount(result, h('div', { class: 'alert alert-warning' }, `${number(sent)} of ${number(read.rows.length)} checkups were sent before the error. Import the same file again: rows that are already on the website are not added twice.`));
+          toast(friendlyError(e), 'error', 8000);
+        }
+      };
+      mount(ckOut,
+        h('div', { class: 'stat-row', style: { margin: '12px 0' } },
+          stat(number(s.ready), 'ready to import'),
+          stat(s.from ? `${monthLabel(`${s.from}-01`)} to ${monthLabel(`${s.to}-01`)}` : 'No months', 'months in the file'),
+          stat(number(s.noMonth), 'without a month'), stat(number(s.withFee), 'with a fee'), stat(number(s.skipped), 'skipped')),
+        h('div', { class: 'inline', style: { alignItems: 'flex-start', gap: '24px' } },
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '520px' } },
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Clinic in the file'), h('th', { scope: 'col' }, 'Branch on the website'), h('th', { scope: 'col', class: 'right' }, 'Rows'))),
+            h('tbody', {}, Object.entries(s.perClinic || {}).sort((a, b) => b[1] - a[1]).map(([clinic, n]) => {
+              const b = branchOfClinic(clinic);
+              return h('tr', {}, h('td', {}, clinic), h('td', {}, b || h('span', { class: 'muted' }, 'No branch')), h('td', { class: 'right' }, number(n)));
+            })))),
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '360px' } },
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col', class: 'right' }, 'Rows'))),
+            h('tbody', {}, Object.entries(s.perStatus || {}).sort((a, b) => b[1] - a[1]).map(([status, n]) => h('tr', {}, h('td', {}, status), h('td', { class: 'right' }, number(n)))))))),
+        unknownClinics ? h('div', { class: 'alert alert-warning' }, `${count(unknownClinics, 'clinic name is', 'clinic names are')} not one of our branches: ${listOf(s.unknownClinics)}. ${unknownClinics === 1 ? 'Its rows are' : 'Their rows are'} imported without a branch.`) : null,
+        unknownStatuses ? h('div', { class: 'alert alert-warning' }, `${count(unknownStatuses, 'status is', 'statuses are')} not in the usual list: ${listOf(s.unknownStatuses)}. ${unknownStatuses === 1 ? 'It is' : 'They are'} kept as written.`) : null,
+        s.badMonth ? h('div', { class: 'alert alert-warning' }, `${count(s.badMonth, 'row has', 'rows have')} a month that could not be read. ${s.badMonth === 1 ? 'It is' : 'They are'} imported without a month.`) : null,
+        s.cut ? h('div', { class: 'alert alert-warning' }, `${count(s.cut, 'cell is', 'cells are')} longer than the website allows and ${s.cut === 1 ? 'is' : 'are'} cut short.`) : null,
+        read.skipped.length ? h('details', { style: { margin: '8px 0' } }, h('summary', {}, `${count(read.skipped.length, 'row is', 'rows are')} skipped`),
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '520px' } },
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Row in the file'), h('th', { scope: 'col' }, 'Why'))),
+            h('tbody', {}, read.skipped.slice(0, 20).map((x) => h('tr', {}, h('td', {}, x.row), h('td', {}, x.reason))))),
+          read.skipped.length > 20 ? h('p', { class: 'muted' }, `…and ${number(read.skipped.length - 20)} more.`) : null)) : null,
+        h('label', { class: 'inline', style: { margin: '8px 0' } }, overwriteBox, " The file is newer than the website: replace follow-up status and notes on the website with the file's"),
+        h('div', { style: { marginTop: '8px' } }, btn), progress, result);
+    } catch (e) { mount(ckOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
+  });
+
+  // ------------------------------------------------------------ check a month
   const monthInput = h('input', { type: 'month', value: todayISO().slice(0, 7) });
   const checkOut = h('div', {});
   const check = async () => {
@@ -331,12 +422,14 @@ export async function renderImport(root) {
         h('li', {}, h('strong', {}, 'Payments: '), 'Reports → Financial → set the dates → Email → Excel. The file "Transactions Report.xlsx" arrives in your Gmail.'),
         h('li', {}, h('strong', {}, 'Expenses: '), 'Expenses → set the dates → Print. Save the "Expenses Report.pdf".'),
         h('li', {}, h('strong', {}, 'Patients (optional): '), 'Patients → Excel → emailed to you. Adds gender, date of birth and address; names, phones and branches already come with the payments file.'),
-        h('li', {}, h('strong', {}, 'Aaj ki List: '), 'open the Google Sheet → File → Download → Microsoft Excel (.xlsx). Every branch tab comes in the one file.')),
+        h('li', {}, h('strong', {}, 'Aaj ki List: '), 'open the Google Sheet → File → Download → Microsoft Excel (.xlsx). Every branch tab comes in the one file.'),
+        h('li', {}, h('strong', {}, 'Checkup list: '), 'the Excel file with the columns Month, Patient Name, Phone, City, Clinic, Doctor, Treatment / Checkup For, Est. Fee (Rs), Status, Notes, Source Tab.')),
       h('p', { class: 'muted', style: { marginTop: '8px' } }, 'Any date range works — a month to test, or the whole history in one file. Dropping a file twice changes nothing.')),
     h('section', { class: 'panel' }, h('h2', {}, '1. Payments and invoices'), field('Transactions Report (.xlsx)', txInput, 'The Excel attachment from the "Email excel" message in your Gmail — not a PDF.'), txOut),
     h('section', { class: 'panel' }, h('h2', {}, '2. Expenses'), field('Expenses Report (.pdf)', exInput), exOut),
     h('section', { class: 'panel' }, h('h2', {}, '3. Patient details (optional)'), field('Patients list (.xlsx)', ptInput), ptOut),
     h('section', { class: 'panel' }, h('h2', {}, '4. Aaj ki List history'), field('Aaj ki List (.xlsx, all tabs)', aajInput, 'Doctors, assistants, wires and details, tokens and braces months for every day on the sheet. Payments come from Healthwire, so nothing here changes the money.'), aajOut),
+    h('section', { class: 'panel' }, h('h2', {}, '5. Checkup list'), field('Checkup list (.xlsx or .csv)', ckInput, 'Rows already on the website are not added again.'), ckOut),
     h('section', { class: 'panel' }, h('h2', {}, 'Check a month'), field('Month', monthInput), checkOut));
   await check();
 }

@@ -88,6 +88,8 @@ function fakeClient() {
   f.client = () => ({
     auth: {
       storageKey: 'sb-test-auth-token',
+      // userId() reads the stored login first, then has the login server confirm that token.
+      async getSession() { return { data: { session: { access_token: 'jwt-u1', user: { id: 'u1' } } }, error: null }; },
       async getUser() { return { data: { user: { id: 'u1' } }, error: null }; },
       async signOut() { return { error: null }; },
       onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },

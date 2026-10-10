@@ -350,6 +350,9 @@ function focusEl(el, options) {
  * opts.destructive: start on the Cancel (non-primary) button, or the title if there is none.
  * opts.initialFocus: the element to start on. opts.alert: an alertdialog (urgent).
  * opts.onClose(): called once, however the dialog closes.
+ * opts.lockWhileWorking: Escape, the × button and a click outside do nothing while an action is working (for an action that goes
+ * ahead even when its dialog is gone, such as changing a password). The action buttons are disabled then too, so such an action
+ * must have a time limit of its own, or the dialog could not be closed for as long as it hangs.
  * Focus stays inside the dialog and returns to the button that opened it.
  */
 export function modal(title, body, actions = [], opts = {}) {
@@ -394,15 +397,18 @@ export function modal(title, body, actions = [], opts = {}) {
   },
   h('div', { class: 'modal-head' },
     heading,
-    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => close() }, '×')),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => dismiss() }, '×')),
   h('div', { class: 'modal-body', id: bodyId }, body),
   buttons.length ? h('div', { class: 'modal-actions' }, buttons) : null,
   h('div', { class: 'sr-only' }, polite, assertive));
-  const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) close(); } }, dialog);
+  const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) dismiss(); } }, dialog);
+
+  // The person asks to close it (×, Escape, a click outside); close() is also what the code calls.
+  function dismiss() { if (!(opts.lockWhileWorking && working)) close(); }
 
   const onKey = (e) => {
     if (openModals[openModals.length - 1] !== entry) return; // only the dialog on top reacts
-    if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); close(); return; }
+    if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); dismiss(); return; }
     if (e.key !== 'Tab') return;
     const items = focusables(dialog);
     if (!items.length) { e.preventDefault(); return; }
@@ -685,14 +691,22 @@ export function tabs({ label, items = [], current, onChange, panel, class: extra
   return { el, panel: panelEl, panelId: panelEl.id, setCurrent(id) { selected = known(id) ? id : items[0]?.id; paint(); } };
 }
 
+/**
+ * One cell of a CSV file. A cell that starts with = or @ (or a tab or carriage return), or with + or - followed by anything but
+ * digits and number punctuation, is read as a FORMULA when the file is opened in Excel or Google Sheets (a patient called
+ * =HYPERLINK(...) could send the phone numbers of a whole list to a stranger). Such a cell gets a leading apostrophe and
+ * shows as plain text. Numbers and phone numbers (+92 300 5550142, -5) are not formulas and stay as they are.
+ */
+export function csvCell(v) {
+  let s = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  if (/^[=@\t\r]/.test(s) || (/^[+-]/.test(s) && !/^[+-][\d\s().,+-]*$/.test(s))) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
 export function downloadCSV(filename, rows) {
   if (!rows.length) return toast('Nothing to download yet.');
   const cols = Object.keys(rows[0]);
-  const esc = (v) => {
-    const s = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  };
-  const csv = [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n');
+  const csv = [cols.join(','), ...rows.map((r) => cols.map((c) => csvCell(r[c])).join(','))].join('\n');
   const a = h('a', { href: URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })), download: filename });
   document.body.append(a);
   a.click();
