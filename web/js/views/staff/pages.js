@@ -29,8 +29,9 @@ export async function renderDashboard(root) {
   const addCheckup = async () => {
     let form;
     try { form = await import('./checkup-actions.js'); } catch (e) { toast(friendlyError(e), 'error'); return; }
-    const row = await form.checkupFormModal({ branchId: defaultBranchId() });
+    const row = await form.checkupFormModal(); // at the person's home branch, else they choose it
     if (!row) return;
+    if (row.updated) { toast(`Answers saved on ${row.updated.patient_name}'s checkup.`, 'ok'); return; } // already on today's list: not one more
     if (checkupCount !== null && row.checkup_date === day) { checkupCount += 1; countEl.textContent = countText(); }
     toast(`${row.patient_name} added as a checkup patient.`, 'ok');
   };

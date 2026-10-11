@@ -359,6 +359,8 @@ function focusEl(el, options) {
  * opts.lockWhileWorking: Escape, the × button and a click outside do nothing while an action is working (for an action that goes
  * ahead even when its dialog is gone, such as changing a password). The action buttons are disabled then too, so such an action
  * must have a time limit of its own, or the dialog could not be closed for as long as it hangs.
+ * opts.confirmDismiss(): asked before Escape, the × button or a click outside closes the dialog (a long form that would lose what was
+ * typed); returning false, or a promise of false, keeps it open. The action buttons (Cancel included) do not ask.
  * Focus stays inside the dialog and returns to the button that opened it.
  */
 export function modal(title, body, actions = [], opts = {}) {
@@ -410,7 +412,17 @@ export function modal(title, body, actions = [], opts = {}) {
   const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) dismiss(); } }, dialog);
 
   // The person asks to close it (×, Escape, a click outside); close() is also what the code calls.
-  function dismiss() { if (!(opts.lockWhileWorking && working)) close(); }
+  let asking = false;
+  async function dismiss() {
+    if ((opts.lockWhileWorking && working) || asking) return;
+    if (opts.confirmDismiss) {
+      asking = true;
+      let ok = false;
+      try { ok = (await opts.confirmDismiss()) !== false; } catch (err) { console.error(err); } finally { asking = false; }
+      if (!ok) return;
+    }
+    close();
+  }
 
   const onKey = (e) => {
     if (openModals[openModals.length - 1] !== entry) return; // only the dialog on top reacts

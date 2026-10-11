@@ -4,7 +4,8 @@
 --   2. RLS: a branch-limited desk adds and changes a checkup with answers at its own branch only; the accountant reads but
 --      cannot change; a patient login and the public see nothing;
 --   3. the Google Sheet sync is unchanged: the row it sends (aaj_checkup_canon_row / aaj_day_list) is the same with or without
---      answers, a sheet edit keeps the answers, a row the sheet makes has none, a removed row comes back with its answers;
+--      answers, a sheet edit keeps the answers, a row the sheet makes has none, a removed row comes back with its answers, and a
+--      Completed checkup (the website saves the form as Completed, also on a checkup the sheet made) stays when its row is deleted;
 --   4. import_checkups and register_checkup_as_patient leave the answers alone.
 \set ON_ERROR_STOP 1
 \set admin  '''00000000-0000-0000-0000-000000003000'''
@@ -203,6 +204,42 @@ insert into f30_resp select 'back', pg_temp.f30_sync(pg_temp.f30_tab('[]', array
 select pg_temp.check((select ali_recommended and pricing_understood = 'needs_explanation' and wants_treatment and treatment_plan = 'Next month, after the exams'
                         and checkup_for = 'Braces consult' from pg_temp.f30_form()),
   'sync: the row put back in the sheet brings the checkup back with its four answers');
+
+-- The website saves a checkup from the form as Completed (the answers are given after the checkup), and the form saved on a checkup the
+-- sheet made (the person typed in on arrival, then interviewed) makes that one Completed too. A row deleted in the sheet then keeps the
+-- checkup and its answers (the removal rules are unchanged: they keep a Completed checkup).
+create temp table f30_canon as select private.aaj_checkup_canon_row(c) as j from public.checkups c where c.sheet_key = 'S-00000000f301';
+set role authenticated;
+do $$
+declare n int;
+begin
+  perform pg_temp.act_as(current_setting('test.fd'));
+  update public.checkups set day_status = 'completed' where id = (pg_temp.f30_form()).id;
+  update public.checkups set doctors = 'Dr. Sample (sample)', checkup_for = 'Braces', ali_recommended = false, pricing_understood = 'yes',
+         wants_treatment = false, treatment_plan = 'Will ask the family first', day_status = 'completed'
+   where sheet_key = 'S-00000000f301';
+  get diagnostics n = row_count;
+  perform pg_temp.check(n = 1 and (select source = 'google_sheet' and patient_name = 'Sample Sheet Person' and phone = '03120003001' and not wants_treatment
+                                     and treatment_plan = 'Will ask the family first' from public.checkups where sheet_key = 'S-00000000f301'),
+    'front desk: the form''s answers go on the checkup the sheet made (its name, phone, source and sheet key stay)');
+end $$;
+reset role;
+select pg_temp.check((select array_agg(k order by k) from f30_canon o, public.checkups c, jsonb_object_keys(o.j) k
+                       where c.sheet_key = 'S-00000000f301' and k <> 'updated_at' and o.j->k is distinct from private.aaj_checkup_canon_row(c)->k) = array['doctors', 'status', 'treatment']
+                     and (select private.aaj_checkup_canon_row(c)->>'status' from public.checkups c where c.sheet_key = 'S-00000000f301') = (select private.aaj_checkup_label('completed'))
+                     and (select position('family first' in private.aaj_checkup_canon_row(c)::text) = 0 from public.checkups c where c.sheet_key = 'S-00000000f301'),
+  'sync: the sheet gets the doctor, the treatment and the status Completed of that checkup, nothing of the four answers');
+insert into f30_resp select 'keep1', pg_temp.f30_sync(pg_temp.f30_tab('[]', array['S-00000000f301']), true);
+select pg_temp.check((select x->>'action' = 'restore' and x->>'message' like 'Not removed: this checkup is Completed on the website.%'
+                        from f30_resp, jsonb_array_elements(resp->'tabs'->0->'removed') x where n = 'keep1' and x->>'key' = 'W-' || (pg_temp.f30_form()).id)
+                     and (select day_status = 'completed' and ali_recommended and pricing_understood = 'needs_explanation' and wants_treatment
+                            and treatment_plan = 'Next month, after the exams' from pg_temp.f30_form()),
+  'sync: the row of a Completed checkup from the form deleted in the sheet: the checkup stays, answers and all, and the row is put back');
+insert into f30_resp select 'keep2', pg_temp.f30_sync(pg_temp.f30_tab('[]', array['W-' || (pg_temp.f30_form()).id]), true);
+select pg_temp.check((select x->>'action' = 'restore' and x->>'message' like 'Not removed: this checkup is Completed on the website.%'
+                        from f30_resp, jsonb_array_elements(resp->'tabs'->0->'removed') x where n = 'keep2' and x->>'key' = 'S-00000000f301')
+                     and (select not wants_treatment and treatment_plan = 'Will ask the family first' from public.checkups where sheet_key = 'S-00000000f301'),
+  'sync: the same for the sheet''s checkup that got the form''s answers');
 
 -- 4. The import of the old list and "Register as patient" leave the answers alone.
 do $$

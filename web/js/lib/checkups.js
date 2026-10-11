@@ -29,6 +29,8 @@ export const PRICING_LABELS = { yes: 'Yes', no: 'No', needs_explanation: 'Needs 
 export const yesNo = (v) => (v === true ? 'Yes' : v === false ? 'No' : '');
 /** Does the checkup hold any answer of the form? Rows from before it (and from the sheet or the old list) hold none. */
 export const hasFormAnswers = (c) => !!c && (typeof c.ali_recommended === 'boolean' || typeof c.wants_treatment === 'boolean' || !!c.pricing_understood || !!c.treatment_plan);
+/** Does the checkup hold all four answers, i.e. was the form filled in for it? One answer added later (after a follow-up call) is not the form. */
+export const formComplete = (c) => !!c && typeof c.ali_recommended === 'boolean' && !!c.pricing_understood && typeof c.wants_treatment === 'boolean' && !!c.treatment_plan;
 /** The columns of the Excel export, in order: the owner's eleven first, then the website's own, then the answers of the form. */
 export const EXPORT_HEADER = ['Month', 'Patient Name', 'Phone', 'City', 'Clinic', 'Doctor', 'Treatment / Checkup For', 'Est. Fee (Rs)', 'Status',
   'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on',

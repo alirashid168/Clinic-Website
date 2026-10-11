@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  FOLLOW_UP_STATUSES, DAY_STATUSES, SOURCE_LABELS, DAY_STATUS_LABELS, IMPORT_BATCH, CLINIC_BRANCH, EXPORT_HEADER, CHECKUP_FOR_CHOICES, PRICING_LABELS, yesNo, hasFormAnswers,
+  FOLLOW_UP_STATUSES, DAY_STATUSES, SOURCE_LABELS, DAY_STATUS_LABELS, IMPORT_BATCH, CLINIC_BRANCH, EXPORT_HEADER, CHECKUP_FOR_CHOICES, PRICING_LABELS, yesNo, hasFormAnswers, formComplete,
   isEmptyCell, cleanText, checkupPhone, checkupKey, excelSerialToISO, monthCell, feeCell, monthLabel, canonicalStatus,
   dayListCheckups, detectCheckupColumns, findHeader, findCheckupSheet, readCheckupList, checkupsToSheet,
 } from '../web/js/lib/checkups.js';
@@ -60,6 +60,13 @@ test('the checkup form (Checkup Patient Form 2.0): its "checkup for" choices, th
   assert.equal(hasFormAnswers({ patient_name: 'Sample' }), false, 'a row read before the database update (no answer columns at all)');
   assert.equal(hasFormAnswers(null), false);
   for (const one of [{ ali_recommended: false }, { wants_treatment: false }, { pricing_understood: 'no' }, { treatment_plan: 'soon' }]) assert.equal(hasFormAnswers(one), true, JSON.stringify(one));
+  // the form filled in: all four answers (Edit then asks for them again); one answer added after a follow-up call is not the form
+  const full = { ali_recommended: false, pricing_understood: 'yes', wants_treatment: false, treatment_plan: 'Will think about it' };
+  assert.equal(formComplete(full), true);
+  for (const key of Object.keys(full)) assert.equal(formComplete({ ...full, [key]: null }), false, 'without ' + key);
+  assert.equal(formComplete({ wants_treatment: true }), false, 'one answer');
+  assert.equal(formComplete({ ...full, treatment_plan: '' }), false);
+  assert.equal(formComplete(null), false);
 });
 
 test('keys: the strings the database gives for the same input (pinned in 27_checkups_test.sql too)', () => {

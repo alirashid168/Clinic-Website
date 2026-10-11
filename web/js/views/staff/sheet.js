@@ -8,8 +8,8 @@ import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
-import { dayListCheckups, hasFormAnswers, yesNo, PRICING_LABELS } from '../../lib/checkups.js';
-import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
+import { dayListCheckups, hasFormAnswers, formComplete, yesNo, PRICING_LABELS } from '../../lib/checkups.js';
+import { checkupFormModal, checkupAnswersModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = {
@@ -340,7 +340,7 @@ export async function renderSheet(root, params, signal) {
     }
   }
 
-  // The dialog behind "Options" on a checkup row: follow-up status, patient file, the checkup list, remove.
+  // The dialog behind "Options" on a checkup row: the checkup form, follow-up status, patient file, the checkup list, remove.
   function checkupOptions(c) {
     const who = c.patient_name;
     const mr = registeredMr(c);
@@ -355,6 +355,16 @@ export async function renderSheet(root, params, signal) {
     const digits = String(c.phone || '').replace(/\D/g, '');
     const inCheckupList = `#/staff/checkups?q=${encodeURIComponent(digits.length >= 4 ? digits : who)}`;
     const actions = [
+      // a checkup typed in on arrival (here or in the Google Sheet): the assistant fills in the form for it after the checkup
+      canEdit && !formComplete(c) ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: async () => {
+        dialog?.close();
+        const saved = await checkupAnswersModal(c);
+        if (saved === false) load(); // it is gone: read the list again
+        if (!saved) return;
+        checkups = checkups.map((x) => (x.id === saved.id ? saved : x));
+        draw();
+        toast(`Answers saved on ${saved.patient_name}'s checkup.`, 'ok');
+      } }, 'Fill in the checkup form') : null,
       c.patient_id
         ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
         : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
@@ -735,6 +745,12 @@ export async function renderSheet(root, params, signal) {
     const res = await checkupFormModal({ branchId, date, fixedDay: true });
     if (!res) return;
     if (res.patient) { addPatient(res.patient); return; } // the person already has a patient file: put that file on the list instead
+    if (res.updated) { // the person was on this list already: the answers went on that checkup
+      checkups = checkups.map((c) => (c.id === res.updated.id ? res.updated : c));
+      draw();
+      toast(`Answers saved on ${res.updated.patient_name}'s checkup.`, 'ok');
+      return;
+    }
     checkups = [...checkups, res];
     draw();
     toast(`${res.patient_name} added as a checkup patient.`, 'ok');

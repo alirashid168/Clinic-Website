@@ -6,7 +6,7 @@
 // The answers of the checkup form (Checkup Patient Form 2.0, 11 Oct 2026) show in two columns ("Wants to start", "When / why not") and,
 // so the list still fits a 1366 px screen, as two lines under the treatment ("Dr. Ali recommended", "Understood pricing").
 import { h, mount, toast, friendlyError, isLostAnswer, empty, modal, field, select, localISO, announce, shortDate, phoneLink, showFormErrors, clearFieldErrors, busy, srOnly, capFirst } from '../../ui/dom.js';
-import { state, can, isAdmin, myBranches, branchName, defaultBranchId } from '../../state.js';
+import { state, can, isAdmin, myBranches, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { FOLLOW_UP_STATUSES, SOURCE_LABELS, PRICING_LABELS, monthLabel, checkupsToSheet, yesNo } from '../../lib/checkups.js';
 import { loadSheetJS } from '../../lib/sheetjs.js';
@@ -351,10 +351,10 @@ export async function renderCheckups(root, params, signal) {
   function buildActions() {
     mount(actionsHost,
       canEdit ? h('button', { type: 'button', class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: async () => {
-        // the branch the list is filtered on, else the person's own
-        const row = await checkupFormModal({ branchId: f.branch && f.branch !== 'none' ? Number(f.branch) : defaultBranchId() });
+        // the branch the list is filtered on, else the person's home branch, else they choose it
+        const row = await checkupFormModal({ branchId: f.branch && f.branch !== 'none' ? Number(f.branch) : null });
         if (!row) return;
-        toast(`${row.patient_name} added as a checkup patient.`, 'ok');
+        toast(row.updated ? `Answers saved on ${row.updated.patient_name}'s checkup.` : `${row.patient_name} added as a checkup patient.`, 'ok');
         await load();
       } }, '+ Add checkup patient') : null,
       can('export.data') ? h('button', { type: 'button', class: 'btn', onclick: busy(download) }, 'Download Excel') : null);

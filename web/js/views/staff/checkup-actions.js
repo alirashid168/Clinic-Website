@@ -1,8 +1,8 @@
 // Pieces shared by the Aaj ki List, the Checkups page and the Today page. A checkup patient has a date, a branch, a name, a phone
 // and a treatment, but no Mr#: they get a patient file (and an Mr#) only when they start treatment.
 import { h, mount, modal, field, select, toast, friendlyError, announce, showFormErrors, clearFieldErrors, localISO, shortDate, busy } from '../../ui/dom.js';
-import { state, can, isAdmin, myBranches, defaultBranchId, branchName, cityName } from '../../state.js';
-import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, PRICING_LABELS, checkupPhone, hasFormAnswers } from '../../lib/checkups.js';
+import { state, can, isAdmin, myBranches, branchName, cityName } from '../../state.js';
+import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, PRICING_LABELS, checkupPhone, formComplete } from '../../lib/checkups.js';
 import { commitOnFinish } from './common.js';
 
 const digitsOf = (v) => String(v || '').replace(/\D/g, '');
@@ -85,19 +85,23 @@ function choiceSelect(label, choices, current, { otherLabel, required = false })
 }
 
 /**
- * The nine questions of the form, in its order, as fields. "+ Add checkup patient" (row = null: a new checkup, every question required)
- * and Edit on the Checkups page (row = the checkup: the same fields) use them. A checkup from before the form, from the sheet or from the
- * old list has no answers, so on Edit the four new questions are required only once the row has answers.
- * branchId: the branch to start with; branchFixed: shown, not asked (the branch's own Aaj ki List).
+ * The nine questions of the form, in its order, as fields. "+ Add checkup patient" (row = null: a new checkup), "Fill in the checkup form"
+ * on the Aaj ki List (row = a checkup on the list, fill = true) and Edit on the Checkups page (row = the checkup) use them. A new checkup
+ * and the form filled in for a checkup on the list need every question. A checkup from before the form, from the sheet or from the old
+ * list has no answers, and one answer may be added later (after a follow-up call), so Edit asks for the four new ones only when the form
+ * was filled in for that checkup (all four answered when the dialog opened).
+ * branchId: the branch to start with, else the person's home branch, else "Choose…" (a guessed branch would look answered);
+ * branchFixed: shown, not asked (the branch's own Aaj ki List).
  * -> { el, name, phone, branch, values(), errors() }
  */
-export function checkupQuestions({ row = null, branchId = null, branchFixed = false } = {}) {
-  const editing = !!row;
-  const needAnswers = !editing || hasFormAnswers(row);
+export function checkupQuestions({ row = null, branchId = null, branchFixed = false, fill = false } = {}) {
+  const editing = !!row && !fill;
+  const needAnswers = !editing || formComplete(row);
   const name = h('input', { autocomplete: 'off', maxlength: 200, value: row?.patient_name || '' });
   const phone = h('input', { type: 'tel', placeholder: '03xx xxxxxxx', maxlength: 40, value: row?.phone || '' });
 
-  // The branch: a drop-down of the person's branches, starting at theirs; fixed when they work at one branch only, or the list on screen is a branch's.
+  // The branch: a drop-down of the person's branches, starting at branchId or their home branch, else at "Choose…"; fixed when they work at
+  // one branch only, or the list on screen is a branch's.
   const mine = myBranches();
   let branch;
   let branchValue;
@@ -106,7 +110,7 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
     branch = h('input', { value: branchName(id), readonly: true, class: 'input-readonly' });
     branchValue = () => id;
   } else {
-    const startAt = editing ? row.branch_id : Number(branchId || defaultBranchId()) || null;
+    const startAt = editing ? row.branch_id : Number(branchId || state.session?.staff?.home_branch_id) || null;
     const choices = mine.map((b) => ({ value: b.id, label: b.name }));
     if (editing && row.branch_id && !choices.some((b) => b.value === Number(row.branch_id))) choices.push({ value: Number(row.branch_id), label: branchName(row.branch_id) || `Branch ${row.branch_id}` });
     const known = choices.some((b) => b.value === Number(startAt));
@@ -117,7 +121,9 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
   const doctors = state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => c.display_name);
   const doctor = choiceSelect('Who did your checkup?', doctors, row?.doctors, { otherLabel: 'Other: who did the checkup?', required: !editing });
   const ali = choiceQuestion('Did Dr. Ali recommend your treatment?', YES_NO, asYesNo(row?.ali_recommended), { required: needAnswers });
-  const checkupFor = choiceSelect('What was your checkup for?', CHECKUP_FOR_CHOICES, row?.checkup_for, { otherLabel: 'Other: what was the checkup for?', required: !editing });
+  // (the plain word "Checkup" that marks a checkup row in the sheet is no answer: filling in the form asks it)
+  const forNow = fill && /^checkup$/i.test(String(row.checkup_for ?? '').trim()) ? null : row?.checkup_for;
+  const checkupFor = choiceSelect('What was your checkup for?', CHECKUP_FOR_CHOICES, forNow, { otherLabel: 'Other: what was the checkup for?', required: !editing });
   const pricing = choiceQuestion('Did you understand the pricing details?', Object.entries(PRICING_LABELS), row?.pricing_understood || null, { required: needAnswers });
   const wants = choiceQuestion('Would you like to start the treatment?', YES_NO, asYesNo(row?.wants_treatment), { required: needAnswers });
   const plan = h('input', { maxlength: 500, autocomplete: 'off', value: row?.treatment_plan || '' });
@@ -163,11 +169,34 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
   return { el, name, phone, branch, values, errors };
 }
 
+// The form is a whole interview, filled in on phones all day: Escape, the × or a tap on the strip around the dialog asks before the
+// answers are thrown away. snapshot() is what the form holds; nothing is asked while it holds what it opened with.
+function discardGuard(snapshot) {
+  const start = snapshot();
+  return () => snapshot() === start || new Promise((resolve) => {
+    let discard = false;
+    modal('Discard this checkup form?', h('p', {}, 'The answers typed in it are not saved.'), [
+      { label: 'Keep filling in' },
+      { label: 'Discard', danger: true, onClick: () => { discard = true; } },
+    ], { destructive: true, onClose: () => resolve(discard) });
+  });
+}
+
+// Text typed under "More" for a checkup that already has some is added after it (cut to the column's 2,000 characters); undefined leaves it.
+function addedText(had, typed) {
+  const t = typed.trim();
+  if (!t || (had && had.includes(t))) return undefined;
+  return had ? Array.from(`${had}\n${t}`).slice(0, 2000).join('') : t;
+}
+
 /**
- * "+ Add checkup patient": the form for one checkup patient. Resolves the saved row, or { patient } when staff chose the existing patient
- * file of the same person instead (Aaj ki List only), or null when it was cancelled.
+ * "+ Add checkup patient": the form for one checkup patient. Resolves the saved row; { updated } (the row) when the same person was already
+ * on that day's list and the answers went on that checkup; { patient } when staff chose the existing patient file of the same person
+ * instead (Aaj ki List only); or null when it was cancelled.
  * fixedDay: the date and branch come from the list on screen and are not asked. Otherwise the checkup is for today at the person's
  * branch; another day (and the follow-up status) can be chosen under "More (optional)".
+ * The answers are given after the checkup, so the checkup is saved as Completed (also on the Aaj ki List and the Google Sheet, where a
+ * deleted row then does not take the checkup and its answers with it).
  */
 export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } = {}) {
   return new Promise((resolve) => {
@@ -189,6 +218,43 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     let done = false;
     let dupSeq = 0;
     let dialog = null;
+    let body = null;
+    let sameDayNow = []; // the checkups the warning names: the same phone on that day's list at that branch
+
+    // The same person already on that day's list (typed into the Google Sheet on arrival, or added at the desk): the answers go on that
+    // checkup instead of a second one. Its name and phone stay as they are. -> true once saved (the dialog is then closed).
+    const saveAnswersOn = async (c) => {
+      const errors = q.errors();
+      if (errors.length) return showFormErrors(body, errors);
+      clearFieldErrors(body);
+      const a = q.values();
+      if (checkupPhone(a.phone) !== checkupPhone(c.phone) || a.branch_id !== c.branch_id || (fixedDay ? date : dateIn.value) !== c.checkup_date) { checkDupes(); return false; }
+      const row = await state.data.updateCheckup(c.id, {
+        doctors: a.doctors, checkup_for: a.checkup_for, ali_recommended: a.ali_recommended, pricing_understood: a.pricing_understood,
+        wants_treatment: a.wants_treatment, treatment_plan: a.treatment_plan, day_status: 'completed',
+        details: addedText(c.details, details.value), notes: addedText(c.notes, notes.value),
+        follow_up: !fixedDay && followUp.value !== 'Not Contacted' ? followUp.value : undefined,
+      });
+      if (!row) { toast(`${c.patient_name} is no longer on the list.`, 'error'); checkDupes(); return false; }
+      done = true;
+      onSaved?.(row);
+      resolve({ updated: row });
+      dialog?.close();
+      return true;
+    };
+    // "Add checkup patient" pressed while the warning is there (above the questions, so out of sight on a phone by then): asked once more.
+    // -> 'back', 'add' (a different person with the same phone) or the checkup to save the answers on.
+    const sameDayChoice = (matches, day) => new Promise((answer) => {
+      const one = matches.length === 1 ? matches[0] : null;
+      let choice = 'back';
+      modal(`Already on the list for ${shortDate(day)}`, h('div', {},
+        h('p', {}, `${matches.map((c) => `${c.patient_name} (${c.phone})`).join(', ')} ${one ? 'is' : 'are'} already on the list for ${shortDate(day)} with this phone number.`),
+        h('p', {}, one ? 'Same person? Save the answers on that checkup, so they are not on the list twice.' : 'Same person? Go back and save the answers on their checkup, so they are not on the list twice.')), [
+        { label: 'Go back' },
+        { label: 'Add as a different person', onClick: () => { choice = 'add'; } },
+        ...(one ? [{ label: 'Save the answers on that checkup', primary: true, onClick: () => { choice = one; } }] : []),
+      ], { onClose: () => answer(choice) });
+    });
 
     const checkDupes = async () => {
       const mine = ++dupSeq;
@@ -203,11 +269,14 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
           : [],
       ]);
       if (mine !== dupSeq || done) return;
+      sameDayNow = sameDay;
       const phoneDigits = digitsOf(phone.value);
       const sorted = [...rows].sort((a, b) => Number(digitsOf(b.phone) === phoneDigits && phoneDigits.length >= 7) - Number(digitsOf(a.phone) === phoneDigits && phoneDigits.length >= 7)).slice(0, 3);
       mount(warn,
         sameDay.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sameDay.slice(0, 3).map((c) => h('div', { class: 'dup-line' },
-          h('span', {}, h('strong', {}, `Already on the list for ${shortDate(day)}: `), `${c.patient_name} (${c.phone}). Press Cancel unless this is a different person.`)))) : null,
+          h('span', {}, h('strong', {}, `Already on the list for ${shortDate(day)}: `), `${c.patient_name} (${c.phone}). `,
+            formComplete(c) ? 'Its checkup form is already filled in. ' : '', 'Same person? Save the answers on this checkup, so they are not on the list twice.'),
+          h('button', { type: 'button', class: 'btn btn-small', 'aria-label': `Save the answers on this checkup: ${c.patient_name}`, onclick: busy(() => saveAnswersOn(c)) }, 'Save the answers on this checkup')))) : null,
         sorted.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sorted.map((p) => {
           const samePhone = phoneDigits.length >= 7 && digitsOf(p.phone) === phoneDigits;
           return h('div', { class: 'dup-line' },
@@ -224,7 +293,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     dateIn?.addEventListener('change', checkDupes);
     branch.addEventListener('change', checkDupes);
 
-    const body = h('div', {},
+    body = h('div', {},
       h('p', { class: 'muted' }, 'Ask the patient these questions after the checkup. ', fixedDay
         ? `Goes on the list for ${branchName(branchId)} on ${shortDate(date)} and on the Checkups page. A checkup patient has no Mr#; they get one when they start treatment.`
         : "Goes on the Checkups page, and on that branch's Aaj ki List for today (another day can be chosen under More). A checkup patient has no Mr#; they get one when they start treatment."),
@@ -232,6 +301,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       q.el,
       more);
 
+    const snapshot = () => JSON.stringify([q.values(), dateIn?.value, followUp?.value, details.value, notes.value]);
     dialog = modal('Add a checkup patient', body, [
       { label: 'Cancel' },
       { label: 'Add checkup patient', primary: true, onClick: async () => {
@@ -244,12 +314,17 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
         }
         clearFieldErrors(body);
         const day = fixedDay ? date : dateIn.value;
+        if (sameDayNow.length) {
+          const choice = await sameDayChoice(sameDayNow, day);
+          if (choice === 'back') { warn.querySelector('button')?.focus(); return false; }
+          if (choice !== 'add') return (await saveAnswersOn(choice)) ? undefined : false;
+        }
         const answers = q.values();
         const b = state.ref.branches.find((x) => x.id === answers.branch_id);
         try {
           const row = await state.data.addCheckup({
             ...answers, checkup_date: day, city: (b && cityName(b.city_id)) || null,
-            details: details.value.trim() || null, day_status: day === today ? 'waiting' : 'completed',
+            details: details.value.trim() || null, day_status: 'completed',
             follow_up: fixedDay ? 'Not Contacted' : followUp.value, notes: notes.value.trim() || null,
           });
           done = true;
@@ -257,7 +332,33 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
           resolve(row);
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ], { onClose: () => { done = true; resolve(null); } });
+    ], { onClose: () => { done = true; resolve(null); }, confirmDismiss: discardGuard(snapshot) });
+  });
+}
+
+/**
+ * "Fill in the checkup form" for a checkup already on the Aaj ki List (typed into the Google Sheet on arrival, or added before the form):
+ * the nine questions, filled in with what the checkup has, every one required. The answers go on that checkup, which becomes Completed.
+ * Resolves the saved row, false when the checkup is gone, or null when it was cancelled.
+ */
+export function checkupAnswersModal(row) {
+  return new Promise((resolve) => {
+    const q = checkupQuestions({ row, fill: true, branchId: row.branch_id, branchFixed: true });
+    const body = h('div', {}, h('p', { class: 'muted' }, 'Ask the patient these questions after the checkup. The answers go on this checkup, also on the Checkups page.'), q.el);
+    modal(`Checkup form: ${row.patient_name}`, body, [
+      { label: 'Cancel' },
+      { label: 'Save the answers', primary: true, onClick: async () => {
+        const errors = q.errors();
+        if (errors.length) return showFormErrors(body, errors);
+        clearFieldErrors(body);
+        const changes = Object.fromEntries(Object.entries({ ...q.values(), day_status: 'completed' }).filter(([k, v]) => k !== 'branch_id' && (v ?? null) !== (row[k] ?? null)));
+        try {
+          const saved = Object.keys(changes).length ? await state.data.updateCheckup(row.id, changes) : row;
+          if (!saved) toast(`${row.patient_name} is no longer on the list.`, 'error');
+          resolve(saved || false);
+        } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } },
+    ], { onClose: () => resolve(null), confirmDismiss: discardGuard(() => JSON.stringify(q.values())) });
   });
 }
 
