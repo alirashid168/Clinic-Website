@@ -2577,14 +2577,7 @@ await step('Edit on an old-list row tells Dr. Ali (and only Dr. Ali) that import
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
 await step('Front desk (North Nazimabad) on the Checkups page sees the imported North Nazimabad row and the no-branch row, never the RJ Mall or Lahore rows, and cannot remove an old-list row', async () => {
-<<<<<<< sheet-view
-  await pk.getByRole('button', { name: 'Try another role' }).click();
-  await pk.waitForSelector('.topbar', { state: 'detached' });
-  // The logout ends on the home page; a login page opened before that would be replaced by it.
-  await pk.waitForSelector('.door');
-=======
   await tryAnotherRole(pk);
->>>>>>> golive
   await pk.goto(BASE + '#/login/staff');
   await pk.getByRole('button', { name: /Front desk \(North Nazimabad\)/ }).click();
   await pk.waitForSelector('.topbar');
@@ -2782,21 +2775,10 @@ await step('phone: the Checkups page has a row on the first screen (More filters
 // ------------------------------------------------------------- Register needs both "Register new patients" and list editing
 await step('Register needs both "Register new patients" and list editing: with list editing off for a person the button is not offered, and the data layer says no', async () => {
   // (the accountant's page: its own in-memory demo data, not used again after this)
-<<<<<<< sheet-view
-  await pa.getByRole('button', { name: 'Try another role' }).click();
-  await pa.waitForSelector('.topbar', { state: 'detached' });
-  await pa.waitForSelector('.door'); // (the logout ends on the home page; see the step above)
-  await loginAs(pa, 'Dr. Ali Rashid');
-  await pa.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-nn', 'sheet.edit', false); });
-  await pa.getByRole('button', { name: 'Try another role' }).click();
-  await pa.waitForSelector('.topbar', { state: 'detached' });
-  await pa.waitForSelector('.door');
-=======
   await tryAnotherRole(pa);
   await loginAs(pa, 'Dr. Ali Rashid');
   await pa.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-nn', 'sheet.edit', false); });
   await tryAnotherRole(pa);
->>>>>>> golive
   await loginAs(pa, 'Front desk.*North Nazimabad');
   const rights = await pa.evaluate(async () => { const { can } = await import('/js/state.js'); return [can('patients.create'), can('sheet.edit'), can('sheet.view')]; });
   assert.deepEqual(rights, [true, false, true], 'may register patients and see the list, but not edit it');
