@@ -10,6 +10,7 @@ import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, fla
 import { newInvoiceModal, paymentModal } from './invoice.js';
 import { dayListCheckups } from '../../lib/checkups.js';
 import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
+import { dayEndControls } from './day-end.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = {
@@ -284,6 +285,7 @@ export async function renderSheet(root, params, signal) {
   }
 
   async function load() {
+    dayEnd.refresh(); // "End the day" for this branch and day, and the note when it was ended (day-end.js)
     try {
       const [visitRows, checkupRows] = await Promise.all([d.listVisits({ branchId: branchId || null, date }), loadCheckups()]);
       rows = visitRows;
@@ -780,6 +782,13 @@ export async function renderSheet(root, params, signal) {
 
   const statusHint = srOnly('Choose a status with the arrow keys, then press Enter or move to the next cell to save it. Escape undoes a status that is not saved yet.');
   statusHint.id = 'sheet-status-hint';
+  // "End the day" (owner, 12 Oct 2026): a copy of the whole day's list (whatever the filters show) goes to the History of
+  // Aaj ki List, then the next day's list opens. Nothing on this day's list is changed or locked.
+  const dayEnd = dayEndControls({
+    getList: () => ({ branchId, date, pending: q.pendingCount || 0, failed: failedEdits().length,
+      rows: [...rows.map((r) => ({ kind: 'patient', status: r.status })), ...dayListCheckups(checkups, rows).map((c) => ({ kind: 'checkup', status: c.day_status || null }))] }),
+    onEnded: async (next) => { date = next; dateInput.value = date; setURL(); await load(); dateInput.focus(); },
+  });
   mount(root,
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Aaj ki List'), h('p', {}, counts)),
@@ -787,11 +796,13 @@ export async function renderSheet(root, params, signal) {
     failBox,
     undoBox,
     warnBox,
+    dayEnd.note,
     statusHint,
     h('div', { class: 'sheet-toolbar' }, branchSel, dateInput, filterSel, doctorSel, groupSel, findBox,
       h('label', { class: 'inline', style: { gap: '4px' } }, duesBox, 'With dues'), h('label', { class: 'inline', style: { gap: '4px' } }, bracesBox, 'Braces only'),
       h('button', { class: 'btn', onclick: () => { date = localISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
       h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
+      dayEnd.historyLink, dayEnd.button,
       can('export.data') || can('finance.view') ? h('button', { class: 'btn', onclick: download }, 'Download') : null),
     addPanel,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),

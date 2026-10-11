@@ -45,6 +45,8 @@ Steps marked **(Dr. Ali)** need you: a sign-in, a payment or an approval. Everyt
 ## 6. Parallel run
 Keep Healthwire and the Google Sheets running until the numbers match for a few weeks. Then switch Healthwire off.
 
+**End the day and the History of Aaj ki List** (owner's request, 12 Oct 2026): paste `supabase/migrations/20261012000100_day_list_history.sql` into the Supabase SQL Editor and run it once (it can run again safely). It adds the "End the day on the Aaj ki List" box to the access list, ticked for every role that may edit the list (front desk, assistant, doctor and coordinator unless you changed that) and for you. Until it is run the website shows no "End the day" button and the History page says it is not switched on yet. Ending a day saves a copy of that branch's list (built by the database, with the dues at that moment) and opens the next day's list; it changes nothing on the list, and the Google Sheet sync is not affected. Ending the same day again replaces the copy; the copy it replaced stays in the audit log.
+
 ## Costs (approximate, confirm before buying)
 | Item | Cost |
 |---|---|

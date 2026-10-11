@@ -79,7 +79,7 @@ await step('visitor page lists benefits, braces options and WhatsApp button', as
 await step('front desk sees only their branch and the Aaj ki List', async () => {
   await loginAs(page, 'Front desk \\(North Nazimabad\\)');
   await page.locator('.topnav .menu:has-text("Aaj ki List") > button').click();
-  await page.locator('.topnav .menu-list a:has-text("Aaj ki List")').click();
+  await page.locator('.topnav .menu-list a:text-is("Aaj ki List")').click(); // (not "History of Aaj ki List" next to it)
   await page.waitForSelector('table.sheet tbody tr');
   const options = await page.locator('.sheet-toolbar select').first().locator('option').allTextContents();
   assert.deepEqual(options, ['North Nazimabad']);
@@ -2191,6 +2191,187 @@ await step('Register needs both "Register new patients" and list editing: with l
     try { await state.data.registerCheckupAsPatient(rows[0].id); return 'registered'; } catch (e) { return e.message; }
   });
   assert.match(answer, /NOT_ALLOWED: registering a patient needs "Register new patients" and "Add and edit Aaj ki List entries"/);
+});
+
+// ------------------------------------------------------------- "End the day" and the History of Aaj ki List (owner, 12 Oct 2026)
+// (The demo has one day ended already: North Nazimabad five days ago, at 21:05, by its front desk. Made-up names only.)
+const pd = await newPage();
+const dayInfo = (pg, n) => pg.evaluate(async (k) => {
+  const { addDaysISO, localISO } = await import('/js/ui/dom.js');
+  const { dayLabel } = await import('/js/lib/day-list.js');
+  const iso = addDaysISO(localISO(), k);
+  return { iso, label: dayLabel(iso) };
+}, n);
+const sheetStatuses = (pg) => pg.locator('table.sheet tbody tr[data-id] select[aria-label^="Status for"]').evaluateAll((els) => els.map((e) => e.value));
+const historyLines = async (pg) => (await pg.locator('.day-history-list a').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+await step('End the day: the front desk ends today\'s list; the dialog gives the counts, the toast says the copy is saved, and the next day\'s list opens', async () => {
+  await loginAs(pd, 'Front desk \\(North Nazimabad\\)');
+  await pd.goto(BASE + '#/staff/sheet');
+  await pd.waitForSelector('table.sheet tbody tr.is-checkup');
+  const today = await dayInfo(pd, 0);
+  const tomorrow = await dayInfo(pd, 1);
+  // The dialog counts the whole day's list (no filter is on here): every row, the completed ones, those still waiting or in treatment.
+  const statuses = await sheetStatuses(pd);
+  const checkups = await pd.locator('table.sheet tbody tr.is-checkup').count();
+  const done = statuses.filter((s) => s === 'completed').length;
+  const busy = statuses.filter((s) => s === 'waiting' || s === 'in_treatment').length;
+  assert.ok(busy > 0 && done > 0 && checkups > 0, 'the demo list has finished, waiting and checkup patients');
+  await pd.getByRole('button', { name: 'End the day' }).click();
+  const m = pd.locator('.modal');
+  await m.waitFor();
+  assert.equal(await m.locator('h2').innerText(), `End the day for North Nazimabad, ${today.label}?`);
+  assert.equal(await m.locator('p').first().innerText(),
+    `${statuses.length} patients (${checkups} of them checkup patients): ${done} completed, ${busy} still waiting or in treatment. A copy of the list is saved in History.`);
+  assert.match(await m.innerText(), new RegExp(`The ${busy} patients still waiting or in treatment stay as they are`));
+  assert.match(await m.innerText(), new RegExp(`After that the list for ${tomorrow.label} opens`));
+  await shot(pd, '20-end-the-day-dialog');
+  await m.getByRole('button', { name: 'End the day' }).click();
+  await pd.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
+  await pd.waitForFunction((d) => location.hash.includes(`date=${d}`), tomorrow.iso);
+  assert.equal(await pd.locator('input[aria-label="Date"]').inputValue(), tomorrow.iso, 'the next day\'s list is open (the "reset")');
+  assert.equal((await pd.locator('.day-end-note').innerText()).trim(),
+    `${today.label} was ended and its list saved in History. This is the list for ${tomorrow.label}. See the saved copy`);
+  assert.equal(await pd.getByRole('button', { name: 'End the day' }).count(), 0, 'a day still to come cannot be ended');
+  await shot(pd, '21-next-day-after-end');
+  // Nothing on the ended day's list was changed.
+  await pd.getByRole('button', { name: 'Today', exact: true }).click();
+  await pd.waitForSelector('table.sheet tbody tr.is-checkup');
+  assert.deepEqual(await sheetStatuses(pd), statuses, 'every row is as it was');
+});
+await step('End the day: an ended day says when and by whom (with a link to its copy), the rows stay editable, and ending it again updates the copy', async () => {
+  const note = pd.locator('.day-end-note');
+  await note.locator('text=This day was ended').waitFor();
+  assert.match((await note.innerText()).trim(), /^This day was ended at \d{2}:\d{2} by Front desk \(North Nazimabad\)\. Ending it again updates the copy\. See the saved copy$/);
+  assert.equal(await pd.locator('table.sheet tbody tr input[aria-label^="Treatment details"]').first().isDisabled(), false, 'the rows can still be edited');
+  await shot(pd, '22-sheet-ended-day-banner');
+  // A checkup patient finishes after the day was ended; the day is ended again.
+  const checkup = pd.locator('table.sheet tbody tr.is-checkup', { has: pd.locator('select[aria-label^="Status for"] option:checked[value="waiting"]') }).first();
+  await checkup.locator('select[aria-label^="Status for"]').selectOption('completed');
+  await pd.waitForTimeout(300);
+  await pd.getByRole('button', { name: 'End the day' }).click();
+  await pd.locator('.modal p:has-text("This day was already ended at")').waitFor();
+  await pd.locator('.modal').getByRole('button', { name: 'End the day' }).click();
+  await pd.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
+  await pd.waitForFunction(() => !document.querySelector('.modal'));
+  await pd.getByRole('button', { name: 'Today', exact: true }).click();
+  await note.locator('a:has-text("See the saved copy")').click();
+  await pd.waitForSelector('.day-copy table.sheet tbody tr');
+  assert.match((await pd.locator('.alert-info').innerText()).trim(),
+    /^Saved copy from \d{2}:\d{2}, when Front desk \(North Nazimabad\) ended the day\. The day was ended 2 times; this is the latest copy\.$/);
+  assert.equal(await pd.locator('.day-copy tbody tr.is-checkup select, .day-copy tbody tr.is-checkup input').count(), 0);
+  assert.ok(await pd.locator('.day-copy tbody tr.is-checkup .status-chip:has-text("Completed")').count() >= 2, 'the copy has the change made before it was ended again');
+});
+await step('History of Aaj ki List: next to the Aaj ki List in the menu; one line per day ("Ended 21:05 by ..." or "Not ended"); the front desk sees its own branch only', async () => {
+  const ended = await dayInfo(pd, -5);
+  const today = await dayInfo(pd, 0);
+  await pd.locator('.topnav .menu:has-text("Aaj ki List") > button').click();
+  const items = (await pd.locator('.topnav .menu:has(> button:has-text("Aaj ki List")) .menu-list a').allInnerTexts()).map((t) => t.trim());
+  assert.deepEqual(items.slice(0, 2), ['Aaj ki List', 'History of Aaj ki List'], 'right under the Aaj ki List');
+  await pd.locator('.topnav .menu-list a:has-text("History of Aaj ki List")').click();
+  await pd.waitForSelector('.day-history-list a');
+  assert.match(await pd.locator('.topnav .menu:has(> button:has-text("Aaj ki List")) > button').getAttribute('class'), /current/, 'the Aaj ki List menu stays highlighted');
+  const lines = await historyLines(pd);
+  assert.match(lines[0], new RegExp(`^${today.label} – North Nazimabad – \\d+ patients \\(\\d+ completed\\) Ended \\d{2}:\\d{2} by Front desk \\(North Nazimabad\\)$`), lines[0]);
+  assert.ok(lines.includes(`${ended.label} – North Nazimabad – 3 patients (3 completed) Ended 21:05 by Front desk (North Nazimabad)`), 'the day ended five days ago');
+  assert.ok(lines.some((t) => / Not ended$/.test(t)), 'days that were not ended say so');
+  assert.ok(lines.every((t) => t.includes(' – North Nazimabad – ')), 'a desk limited to North Nazimabad sees only its branch');
+  assert.deepEqual(await pd.locator('select[aria-label="Branch"] option').allInnerTexts(), ['North Nazimabad']);
+  await shot(pd, '23-history-front-desk');
+});
+await step('History of Aaj ki List: a saved day opens read only, in the Aaj ki List\'s columns and order; a day that was not ended says it is the list as stored now', async () => {
+  const ended = await dayInfo(pd, -5);
+  await pd.locator('.day-history-list a', { hasText: `${ended.label} – North Nazimabad` }).click();
+  await pd.waitForSelector('.day-copy table.sheet tbody tr');
+  assert.equal(await pd.locator('h1').innerText(), `${ended.label} – North Nazimabad`);
+  assert.equal((await pd.locator('.alert-info').innerText()).trim(), 'Saved copy from 21:05, when Front desk (North Nazimabad) ended the day.');
+  assert.equal(await pd.locator('.day-copy input, .day-copy select, .day-copy textarea, .day-copy button').count(), 0, 'read only');
+  assert.deepEqual((await pd.locator('.day-copy thead th').allInnerTexts()).map((t) => t.trim()),
+    ['# · Patient', 'Flags', 'Month', 'Treatment', 'Token', 'Status', "Doctor's name", 'Treatment details', 'Dues', 'Notes', 'Contact'], 'the Aaj ki List\'s columns');
+  const serials = await pd.locator('.day-copy tbody .serial').evaluateAll((els) => els.map((e) => e.textContent.replace(/\D/g, '')));
+  assert.deepEqual(serials, serials.map((_, i) => String(i + 1)), 'numbered 1..n');
+  assert.equal(await pd.getByRole('button', { name: 'Download (CSV)' }).count(), 0, 'no download for the front desk (no export rights)');
+  assert.equal(await pd.getByRole('link', { name: 'Open this day on the Aaj ki List' }).getAttribute('href'), `#/staff/sheet?branch=2&date=${ended.iso}`);
+  await shot(pd, '24-history-saved-day');
+  await pd.locator('.back-line a').click();
+  await pd.waitForSelector('.day-history-list a');
+  await pd.locator('.day-history-list a', { hasText: 'Not ended' }).first().click();
+  await pd.waitForSelector('.day-copy');
+  assert.equal((await pd.locator('.alert-warning').innerText()).trim(), 'Not ended; this is the list as stored now.');
+  // The Aaj ki List of the ended day itself links back to its copy.
+  await pd.goto(BASE + `#/staff/sheet?branch=2&date=${ended.iso}`);
+  await pd.locator('.day-end-note:has-text("This day was ended at 21:05 by Front desk (North Nazimabad).")').waitFor();
+  assert.equal(await pd.locator('.day-end-note a').getAttribute('href'), `#/staff/day-history?branch=2&date=${ended.iso}`);
+});
+const ph = await newPage();
+await step('History of Aaj ki List for Dr. Ali: every branch, newest first; the branch and month filters, paging, and Download (CSV) of a day', async () => {
+  await loginAs(ph, 'Dr. Ali Rashid');
+  const ended = await dayInfo(ph, -5);
+  await ph.goto(BASE + '#/staff/day-history');
+  await ph.waitForSelector('.day-history-list a');
+  const total = Number((await ph.locator('.pager-info').innerText()).match(/of ([\d,]+)/)[1].replace(/,/g, ''));
+  let lines = await historyLines(ph);
+  assert.ok(total >= lines.length && lines.length > 5, `${total} lines`);
+  assert.ok(new Set(lines.map((t) => t.split(' – ')[1])).size > 1, 'more than one branch');
+  if (total > 60) {
+    await ph.getByRole('button', { name: 'Next' }).click();
+    await ph.waitForFunction(() => document.querySelector('.pager-info')?.textContent.includes('Showing 61-'));
+    await ph.getByRole('button', { name: 'Previous' }).click();
+    await ph.waitForFunction(() => document.querySelector('.pager-info')?.textContent.includes('Showing 1-'));
+  }
+  // Branch, then month.
+  await ph.locator('select[aria-label="Branch"]').selectOption({ label: 'Gulshan (RJ Mall)' });
+  await ph.waitForFunction(() => [...document.querySelectorAll('.day-history-list a')].every((a) => a.textContent.includes('Gulshan (RJ Mall)')));
+  const month = ended.iso.slice(0, 7);
+  await ph.locator('input[aria-label="Month"]').fill(month);
+  const [, mon, year] = ended.label.match(/ (\w{3}) (\d{4})$/);
+  await ph.waitForFunction(([mo, y]) => { const a = [...document.querySelectorAll('.day-history-list a')]; return a.length > 0 && a.every((x) => x.textContent.includes(` ${mo} ${y} – Gulshan (RJ Mall)`)); }, [mon, year]);
+  assert.match(await ph.evaluate(() => location.hash), new RegExp(`branch=1&month=${month}`));
+  await shot(ph, '25-history-filters');
+  await ph.getByRole('button', { name: 'Clear filters' }).click();
+  await ph.waitForFunction(() => new Set([...document.querySelectorAll('.day-history-list a')].map((a) => a.textContent.split(' – ')[1])).size > 1);
+  // The saved day, with Download for a role with export rights.
+  await ph.goto(BASE + `#/staff/day-history?branch=2&date=${ended.iso}`);
+  await ph.waitForSelector('.day-copy table.sheet tbody tr');
+  const [download] = await Promise.all([ph.waitForEvent('download'), ph.getByRole('button', { name: 'Download (CSV)' }).click()]);
+  assert.equal(download.suggestedFilename(), `aaj-ki-list_North-Nazimabad_${ended.iso}_saved.csv`);
+  const csv = fs.readFileSync(await download.path(), 'utf8').replace(/^﻿/, '').split('\n');
+  assert.equal(csv[0], 'serial,token,patient,mr_number,type,braces_month,treatment,status,group,doctors,details,dues,invoice,notes,phone');
+  assert.equal(csv.length, 1 + await ph.locator('.day-copy tbody tr').count(), 'one line per row of the copy');
+});
+await step('A role without "End the day" sees no button (the accountant; a front desk whose box is unticked), and still has the History', async () => {
+  await tryAnotherRole(ph);
+  await loginAs(ph, 'Accountant');
+  await ph.goto(BASE + '#/staff/sheet?branch=2');
+  await ph.waitForSelector('table.sheet tbody tr');
+  assert.equal(await ph.getByRole('button', { name: 'End the day' }).count(), 0, 'accountant: no "End the day"');
+  assert.equal(await ph.getByRole('link', { name: 'History of Aaj ki List' }).count(), 1, 'accountant: the History is there');
+  await tryAnotherRole(ph);
+  await loginAs(ph, 'Dr. Ali Rashid');
+  await ph.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-gul', 'sheet.end_day', false); });
+  await tryAnotherRole(ph);
+  await loginAs(ph, 'Front desk \\(Gulshan\\)');
+  await ph.goto(BASE + '#/staff/sheet');
+  await ph.waitForSelector('table.sheet tbody tr');
+  assert.equal(await ph.getByRole('button', { name: 'End the day' }).count(), 0, 'front desk with the box unticked: no "End the day"');
+  const refused = await ph.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    try { await state.data.endDay({ branchId: 1, date: localISO() }); return 'ended'; } catch (e) { return e.message; }
+  });
+  assert.match(refused, /^NOT_ALLOWED: ending the day needs "End the day on the Aaj ki List"/, 'and the data layer says no');
+});
+const phd = await newPage({ width: 390, height: 844 });
+await step('phone: the History of Aaj ki List and a saved day fit the screen', async () => {
+  await loginAs(phd, 'Front desk \\(North Nazimabad\\)');
+  const ended = await dayInfo(phd, -5);
+  await phd.goto(BASE + '#/staff/day-history');
+  await phd.waitForSelector('.day-history-list a');
+  assert.ok(await phd.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'no sideways scroll of the page');
+  await shot(phd, '26-history-phone');
+  await phd.goto(BASE + `#/staff/day-history?branch=2&date=${ended.iso}`);
+  await phd.waitForSelector('.day-copy table.sheet tbody tr');
+  assert.ok(await phd.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'the table scrolls inside its box, not the page');
+  await shot(phd, '27-history-saved-day-phone');
 });
 
 await browser.close();
