@@ -593,6 +593,54 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .public-fallback .inline { gap: var(--space-3); }
 .public-main.public-fallback { margin: clamp(var(--space-6), 8vh, var(--space-8)) auto; width: calc(100% - 2 * var(--space-4)); padding: var(--space-6); }
 
+/* The two homepage buttons ("Join our team", "Complaints & suggestions") and their forms (views/forms.js). Phone first: one
+   column, full-width controls and send button, 44px targets; two columns of buttons from 600px. */
+.forms-band-wrap { padding-top: 0; }
+.forms-band { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: clamp(var(--space-5), 4vw, var(--space-7)); }
+.forms-band h2 { font-size: var(--fs-section); letter-spacing: -.02em; margin-bottom: var(--space-4); }
+.forms-cards { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); margin-bottom: var(--space-4); }
+.forms-card {
+  --ring: var(--focus-ring); display: grid; gap: var(--space-1); align-content: start; padding: var(--space-5); border-radius: var(--radius-m);
+  background: var(--aubergine); color: var(--on-dark-strong); text-decoration: none; transition: background-color .15s;
+}
+.forms-card + .forms-card { background: var(--aubergine-deep); }
+.forms-card:hover { background: var(--aubergine-light); }
+.forms-card:focus-visible { outline-offset: 3px; }
+.forms-card strong { font-size: var(--fs-xl); letter-spacing: -.01em; }
+.forms-card span { font-size: var(--fs-sm); color: var(--on-dark-soft); }
+.forms-card .forms-card-go { margin-top: var(--space-2); font-size: var(--fs-ui); font-weight: 700; color: var(--gold-300); }
+.forms-band-note { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); }
+
+.form-page { padding-top: var(--space-5); }
+.form-wrap { max-width: 40rem; margin: 0 auto; }
+.form-back { margin: 0 0 var(--space-2); }
+.form-back a { display: inline-flex; align-items: center; min-height: var(--target); font-weight: 600; }
+.form-intro { font-size: var(--fs-md); }
+.form-privacy { font-size: var(--fs-sm); background: var(--gold-soft); border-left: 3px solid var(--champagne); padding: var(--space-3); border-radius: 0 var(--radius-s) var(--radius-s) 0; margin-bottom: var(--space-5); }
+.public-form { display: grid; gap: var(--space-4); }
+fieldset.form-group { margin: 0; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); min-width: 0; }
+fieldset.form-group > legend { padding: 0 var(--space-2); font-size: var(--fs-md); font-weight: 700; color: var(--text); }
+.public-form .field-label { color: var(--text); }
+.form-group-note { font-size: var(--fs-sm); margin-bottom: var(--space-3); }
+.check-line { display: flex; gap: var(--space-3); align-items: flex-start; min-height: var(--target); padding: var(--space-2) 0; cursor: pointer; }
+.check-line input { flex: none; margin-top: .125rem; }
+fieldset.choice-group { margin: 0; padding: 0; border: 0; min-width: 0; display: grid; gap: var(--space-2); }
+fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
+.choice { display: flex; gap: var(--space-3); align-items: center; min-height: var(--target); padding: var(--space-3); border: 1px solid var(--control-border); border-radius: var(--radius-m); background: var(--surface); cursor: pointer; }
+.choice:has(input:checked) { border-color: var(--aubergine); box-shadow: inset 0 0 0 1px var(--aubergine); background: var(--aubergine-soft); }
+.choice input { flex: none; }
+.choice > span { display: grid; }
+.choice small { font-size: var(--fs-sm); color: var(--text-muted); }
+.form-actions .form-send { width: 100%; }
+@media (min-width: 600px) { .form-actions .form-send { width: auto; min-width: 16rem; } }
+.form-alert { margin: 0; }
+/* The box only bots fill in: off screen, out of the tab order (tabindex -1) and hidden from screen readers (aria-hidden). */
+.hp-field { position: absolute !important; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+.form-thanks { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: var(--space-7) var(--space-5); }
+.form-thanks-mark { display: inline-grid; place-items: center; width: 56px; height: 56px; margin-bottom: var(--space-3); border-radius: 50%; background: var(--ok-soft); color: var(--ok); font-size: var(--fs-2xl); font-weight: 800; }
+.form-thanks-actions { display: flex; gap: var(--space-2); justify-content: center; flex-wrap: wrap; margin: var(--space-5) 0 0; }
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* ============================================================ LOGIN */
 .login-wrap { min-height: 100svh; display: grid; place-items: center; padding: var(--space-6) var(--space-4); background: linear-gradient(180deg, var(--aubergine-deep), var(--aubergine)); }
 .login-card { background: var(--surface); border-radius: var(--radius-l); padding: var(--space-6); width: min(440px, 100%); box-shadow: 0 30px 80px rgba(var(--shadow-base), .35); }
@@ -1205,6 +1253,19 @@ table.invoice-lines input { min-width: 0; }
 .phone-link a { display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; text-decoration: none; font-size: var(--fs-ui); opacity: .8; }
 .phone-link a:hover { opacity: 1; }
 
+/* Job applications (views/staff/jobs.js) */
+.jobs-filters select, .complaints-from select { width: auto; max-width: 220px; }
+.jobs-cleanup .btn { margin-left: var(--space-2); }
+.job-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-4); margin: 0 0 var(--space-3); }
+.job-detail { display: contents; }
+.job-details dt { font-size: var(--fs-sm); color: var(--text-muted); }
+.job-details dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .job-details { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .job-details dd { margin-bottom: var(--space-2); }
+}
+.job-history { margin: 0; padding-left: var(--space-5); display: grid; gap: var(--space-2); font-size: var(--fs-ui); }
+
 /* ============================================================ TOUCH
    Phones and tablets: 44px targets and 16px form text (no iOS focus zoom). */
 @media (pointer: coarse), (hover: none) {
@@ -1250,7 +1311,8 @@ table.invoice-lines input { min-width: 0; }
   .cx-cal-day.is-visit { forced-color-adjust: none; background: Highlight; color: HighlightText; }
   .cx-cal-day.is-visit.is-past { background: Canvas; color: CanvasText; border: 2px dashed Highlight; }
   .badge, .status-chip, .person, .cx-status, .sx-chip, .sx-today { border: 1px solid CanvasText; }
-  .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn { border: 1px solid ButtonText; }
+  .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn, .forms-card { border: 1px solid ButtonText; }
+  .choice:has(input:checked) { outline: 2px solid Highlight; outline-offset: -2px; }
   .modal, .menu-list, .search-results, .suggestions, .combobox [role="listbox"], .toast { border: 1px solid CanvasText; }
   .sidebar.open, body.drawer-open .sidebar { border-right: 1px solid CanvasText; }
   .stars [aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; }

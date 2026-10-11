@@ -16,6 +16,7 @@ import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
+import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS } from '../lib/public-forms.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -26,6 +27,8 @@ const daysAgo = (n) => {
   return d.toISOString().slice(0, 10);
 };
 const fail = (msg) => { throw new Error(msg); };
+/** A refused homepage form, the way the database says it: "FORM_INVALID: ..." (or FORM_CV) with the field it is about. */
+const formError = (field, message, code = 'FORM_INVALID') => Object.assign(new Error(`${code}: ${message}`), { code, field });
 // Same wording as the admin-users Edge Function: a staff login name never has the shape of a patient username.
 const PATIENT_SHAPE_ERROR = 'That login name has the shape of a patient login (a name, a dash and a number). Choose a staff name such as reception@' + CONFIG.STAFF_EMAIL_DOMAIN + '.';
 // A labelled placeholder "progress photo" (a drawn smile, not a real picture) for the sample patient.
@@ -236,6 +239,33 @@ function seed() {
   db.complaints.push(sampleComplaint);
   db.complaint_messages = [{ id: uid(), complaint_id: sampleComplaint.id, author: 'Dr. Ali Rashid', body: 'Sorry about that. Come in any day this week and the assistant will trim the wire; no token needed.', internal_note: false, created_at: daysAgo(11) + 'T10:30:00' }];
   db.documents = [];
+  // The homepage forms (20261011000200_public_forms.sql): two made-up job applications and two website forms in the Complaints inbox.
+  // job_cvs stands in for the private bucket job-cvs: { path, type, size, file, created_at } (file is the browser File of an upload made on this page).
+  db.job_cvs = [
+    { path: 'incoming/00000000-0000-4000-8000-000000000001.pdf', type: 'application/pdf', size: 84000, file: null, created_at: daysAgo(2) + 'T11:00:00.000Z' },
+    { path: 'incoming/00000000-0000-4000-8000-000000000002.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 42000, file: null, created_at: daysAgo(5) + 'T09:30:00.000Z' },
+    { path: 'incoming/00000000-0000-4000-8000-000000000003.pdf', type: 'application/pdf', size: 51000, file: null, created_at: daysAgo(4) + 'T16:00:00.000Z' }, // never sent with a form
+  ];
+  db.job_applications = [
+    { id: uid(), full_name: 'Sana Example', phone: '03005550411', email: 'sana.example@example.com', position: 'dental_assistant', qualification: 'Diploma',
+      graduation_year: 2022, experience: 'One year at a dental clinic (sample)', branch_id: 2, cnic: '12345-0000001-1', cv_path: db.job_cvs[0].path,
+      cv_type: db.job_cvs[0].type, cv_size: db.job_cvs[0].size, message: 'I can work evenings. (Made-up sample.)', consent_at: daysAgo(2) + 'T11:01:00.000Z',
+      status: 'new', updated_by: null, updated_at: null, created_at: daysAgo(2) + 'T11:01:00.000Z' },
+    { id: uid(), full_name: 'Omar Sample', phone: '03005550412', email: null, position: 'dentist', qualification: 'BDS', graduation_year: 2019,
+      experience: 'Four years (sample)', branch_id: null, cnic: '12345-0000002-2', cv_path: db.job_cvs[1].path, cv_type: db.job_cvs[1].type,
+      cv_size: db.job_cvs[1].size, message: null, consent_at: daysAgo(5) + 'T09:31:00.000Z', status: 'contacted', updated_by: 's-admin',
+      updated_at: daysAgo(4) + 'T10:00:00.000Z', created_at: daysAgo(5) + 'T09:31:00.000Z' },
+  ];
+  db.job_events = [
+    { id: uid(), application_id: db.job_applications[1].id, kind: 'status', status: 'contacted', body: null, by_staff: 's-admin', by_name: 'Dr. Ali Rashid', created_at: daysAgo(4) + 'T10:00:00.000Z' },
+    { id: uid(), application_id: db.job_applications[1].id, kind: 'note', status: null, body: 'Called, will come on Saturday. (Sample note.)', by_staff: 's-admin', by_name: 'Dr. Ali Rashid', created_at: daysAgo(4) + 'T10:01:00.000Z' },
+  ];
+  const website = (over) => ({ id: uid(), patient_id: null, clinician_id: null, status: 'new', source: 'website', contact_name: null, contact_phone: null,
+    contact_mr: null, contact_me: false, ...over, subject: feedbackSubject(over.kind, over.topic) });
+  db.complaints.push(
+    website({ kind: 'suggestion', topic: 'cleanliness', branch_id: 1, body: 'The washroom could be cleaned more often in the evening. (Made-up sample.)', created_at: daysAgo(1) + 'T18:40:00' }),
+    website({ kind: 'complaint', topic: 'front_desk', branch_id: 2, body: 'Nobody answered the phone on Sunday. (Made-up sample.)', contact_name: 'Hira Sample',
+      contact_phone: '03005550433', contact_mr: '9815', contact_me: true, created_at: daysAgo(3) + 'T12:05:00' }));
   db.schedule = [
     { id: uid(), branch_id: 1, weekday: 1, start_time: '12:00', end_time: '16:00' },
     { id: uid(), branch_id: 2, weekday: 1, start_time: '16:00', end_time: '21:00' },
@@ -959,8 +989,98 @@ export function createDemoAdapter() {
       return { treated: treatedVisits.length, checked: vs.filter((x) => x.role === 'checker').length, assisted: vs.filter((x) => x.role === 'assistant').length,
         days: new Set(vs.map((x) => x.visit.visit_date)).size, billed, branches: [...new Set(vs.map((x) => x.visit.branch_id))],
         referred_patients: own.length, referred_paid: paid,
-        complaints: db.complaints.filter((c) => c.clinician_id === clinicianId && inRange(c.created_at.slice(0, 10))).map((c) => ({ id: c.id, subject: c.subject, status: c.status, created_at: c.created_at, branch_id: c.branch_id, patient_name: patient(c.patient_id)?.full_name, mr_number: patient(c.patient_id)?.mr_number })),
+        complaints: db.complaints.filter((c) => c.clinician_id === clinicianId && inRange(c.created_at.slice(0, 10))).map((c) => ({ id: c.id, subject: c.subject, status: c.status, created_at: c.created_at, branch_id: c.branch_id, patient_name: patient(c.patient_id)?.full_name, mr_number: patient(c.patient_id)?.mr_number, source: c.source || 'portal' })),
         rule: rule ? { percent: rule.percent, basis: rule.basis, notes: rule.notes } : null, share: rule ? Math.round(base * rule.percent) / 100 : null };
+    },
+
+    // ------------------------------------------------------------ the homepage forms (visitors, no login)
+    // The same rules as the database functions (submit_job_application, submit_feedback): every field checked again, the honeypot
+    // and the per-phone / per-CNIC limits answer { ok: true } without storing, the whole-website limits ask to try again later.
+    async uploadJobCv(file) {
+      const info = cvFileInfo(file);
+      if (info.error) throw formError('cv', info.error, 'FORM_CV');
+      if (db.job_cvs.filter((x) => Date.parse(x.created_at) > Date.now() - 60000).length >= 5) fail('new row violates row-level security policy for table "objects"');
+      const path = `incoming/${crypto.randomUUID ? crypto.randomUUID() : uid()}.${info.ext}`;
+      db.job_cvs.push({ path, type: info.type, size: file.size, file, created_at: new Date().toISOString() });
+      return path;
+    },
+    async submitJobApplication(form) {
+      const ok = { ok: true };
+      if (cleanLine(form?.website)) return ok;
+      const { errors, data } = checkJobApplication(form);
+      if (errors.length) throw formError(errors[0].field, errors[0].message);
+      if (data.branch !== 'any' && !db.branches.some((b) => b.active && b.id === data.branch)) throw formError('branch', 'Please choose a branch, or "Any branch".');
+      if (!/^incoming\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|doc|docx|jpg|png)$/.test(String(data.cv_path || ''))) throw formError('cv', 'Please attach your CV again.', 'FORM_CV');
+      const since = (ms) => db.job_applications.filter((a) => Date.parse(a.created_at) > Date.now() - ms);
+      if (since(60000).length >= 5 || since(86400000).length >= 50) fail('FORM_BUSY: many job applications are arriving right now. Please try again later.');
+      const cv = db.job_cvs.find((x) => x.path === data.cv_path);
+      if (!cv) throw formError('cv', 'Your CV did not finish uploading. Please choose it again.', 'FORM_CV');
+      if (db.job_applications.some((a) => a.cv_path === cv.path) || Date.parse(cv.created_at) < Date.now() - 86400000) throw formError('cv', 'Please choose your CV again.', 'FORM_CV');
+      // after every other check, like the database: no answer depends on whether the phone or CNIC was used before
+      if (since(86400000).filter((a) => a.phone === data.phone).length >= 2 || since(86400000).filter((a) => a.cnic === data.cnic).length >= 2) return ok;
+      const now = new Date().toISOString();
+      db.job_applications.unshift({ id: uid(), full_name: data.full_name, phone: data.phone, email: data.email, position: data.position, qualification: data.qualification,
+        graduation_year: data.graduation_year, experience: data.experience, branch_id: data.branch === 'any' ? null : data.branch, cnic: data.cnic, cv_path: cv.path,
+        cv_type: cv.type, cv_size: cv.size, message: data.message, consent_at: now, status: 'new', updated_by: null, updated_at: null, created_at: now });
+      return ok;
+    },
+    async submitFeedback(form) {
+      const ok = { ok: true };
+      if (cleanLine(form?.website)) return ok;
+      const { errors, data } = checkFeedback(form);
+      if (errors.length) throw formError(errors[0].field, errors[0].message);
+      if (data.branch !== 'none' && !db.branches.some((b) => b.active && b.id === data.branch)) throw formError('branch', 'Please choose a branch, or "Not about one branch".');
+      const web = (ms) => db.complaints.filter((c) => c.source === 'website' && Date.parse(c.created_at) > Date.now() - ms);
+      if (web(60000).length >= 10 || web(86400000).length >= 200) fail('FORM_BUSY: many forms are arriving right now. Please try again later.');
+      if (data.phone && web(86400000).filter((c) => c.contact_phone === data.phone).length >= 5) return ok;
+      db.complaints.push({ id: uid(), patient_id: null, branch_id: data.branch === 'none' ? null : data.branch, clinician_id: null, subject: feedbackSubject(data.kind, data.topic),
+        body: data.message, status: 'new', created_at: new Date().toISOString(), source: 'website', kind: data.kind, topic: data.topic,
+        contact_name: data.name, contact_phone: data.phone, contact_mr: data.mr, contact_me: data.contact_me });
+      return ok;
+    },
+
+    // ------------------------------------------------------------ job applications (staff with jobs.view)
+    async jobApplications({ status = '', position = '', branch = '' } = {}) {
+      need('jobs.view');
+      return db.job_applications
+        .filter((a) => (!status || a.status === status) && (!position || a.position === position)
+          && (!branch || (branch === 'any' ? a.branch_id === null : a.branch_id === Number(branch))))
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+        .map((a) => ({ ...clone(a), events: clone(db.job_events.filter((e) => e.application_id === a.id).sort((x, y) => (x.created_at < y.created_at ? -1 : 1))) }));
+    },
+    async updateJobApplication(id, { status = null, note = null } = {}) {
+      need('jobs.view');
+      const a = db.job_applications.find((x) => x.id === id);
+      if (!a) fail('NOT_FOUND: this application does not exist.');
+      if (status && !JOB_STATUS_LABELS[status]) fail('INVALID: unknown status ' + status);
+      const text = cleanBlock(note);
+      if (text.length > LIMITS.note) fail('INVALID: a note can have at most 2,000 characters.');
+      const by = { by_staff: me().id, by_name: me().full_name, created_at: new Date().toISOString() };
+      const changed = !!status && status !== a.status;
+      if (changed) { a.status = status; db.job_events.push({ id: uid(), application_id: id, kind: 'status', status, body: null, ...by }); }
+      if (text) db.job_events.push({ id: uid(), application_id: id, kind: 'note', status: null, body: text, ...by });
+      if (changed || text) { a.updated_by = me().id; a.updated_at = by.created_at; }
+      return clone(a);
+    },
+    /** A short-lived link to open the CV: here a link to the file in this browser (a made-up sample has a short text instead); it stops working after a minute. */
+    async jobCvUrl(path) {
+      need('jobs.view');
+      const cv = db.job_cvs.find((x) => x.path === path);
+      if (!cv) fail('The CV file was not found.');
+      const url = URL.createObjectURL(cv.file || new Blob(['A made-up CV for the demo. Nothing here is real.'], { type: 'text/plain' }));
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return url;
+    },
+    async jobCvOrphans() {
+      need('jobs.view');
+      return db.job_cvs.filter((x) => Date.parse(x.created_at) < Date.now() - 86400000 && !db.job_applications.some((a) => a.cv_path === x.path))
+        .map((x) => ({ path: x.path, uploaded_at: x.created_at, size_bytes: x.size }));
+    },
+    async removeJobCvOrphans(paths) {
+      need('jobs.view');
+      const gone = new Set((await this.jobCvOrphans()).map((x) => x.path).filter((p) => (paths || []).includes(p)));
+      db.job_cvs = db.job_cvs.filter((x) => !gone.has(x.path));
+      return gone.size;
     },
 
     // ------------------------------------------------------------ coordinator

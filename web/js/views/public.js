@@ -1,5 +1,5 @@
 // Public website: home (hero smile card + three doors + Meet Dr. Ali + his week
-// and the clinics) and the visitor page. The parts that need no data render at
+// and the clinics + the two form buttons) and the visitor page. The parts that need no data render at
 // once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce } from '../ui/dom.js';
 import { state } from '../state.js';
@@ -46,7 +46,8 @@ export function smile3d() {
 }
 
 // ---------------------------------------------------------------- pieces
-function header(sub) {
+/** The top bar of the public pages (also used by the two forms, views/forms.js). */
+export function header(sub) {
   return h('header', { class: ['site-header', sub && 'subpage-header'] },
     h('a', { href: '#/', class: 'wordmark' }, "Dr. Ali Rashid's", h('small', {}, 'Dental Clinic')),
     h('nav', { class: 'inline', 'aria-label': 'Main' },
@@ -70,9 +71,11 @@ function waFloat() {
     h('span', { 'aria-hidden': 'true' }, '💬'), 'WhatsApp');
 }
 
-function footer() {
+export function footer() {
   return h('footer', { class: 'site-footer' },
     h('div', { class: 'footer-links' },
+      h('a', { href: '#/join' }, 'Join our team'),
+      h('a', { href: '#/feedback' }, 'Complaints & suggestions'),
       HOME.social.map((s) => extLink(s.url, s.name)),
       extLink(HOME.reviewsUrl, 'Google reviews'),
       h('a', { href: `tel:${CONTACT.tel}` }, `Call ${CONTACT.phone}`)),
@@ -136,6 +139,22 @@ function resultsSection(cases, { limit, reviews } = {}) {
     // url is a resized rendition when the data layer can make one; srcset/sizes let phones pick a smaller file.
     h('div', { class: 'cases' }, shown.map((c, i) => h('img', { src: c.url, srcset: c.srcset || null, sizes: c.srcset ? '(max-width: 560px) 100vw, 360px' : null, alt: caseAlt(c, i), loading: 'lazy', decoding: 'async' }))),
     cases.length > shown.length ? h('p', {}, h('a', { href: '#/visitor' }, `See all ${cases.length} results`)) : null);
+}
+
+/**
+ * The two buttons the owner asked for (11 Oct 2026): "Join our team" and "Complaints & suggestions", each opening its own
+ * page (#/join, #/feedback), with one line on who sees what is sent.
+ */
+function formsSection() {
+  const card = (href, title, text, action) => h('a', { class: 'forms-card', href },
+    h('strong', {}, title), h('span', {}, text), h('span', { class: 'forms-card-go', 'aria-hidden': 'true' }, action, ' →'));
+  return h('div', { class: 'public-main forms-band-wrap' },
+    h('section', { class: 'forms-band', id: 'work-with-us', 'aria-labelledby': 'forms-band-title' },
+      h('h2', { id: 'forms-band-title' }, 'Work with us, or help us improve'),
+      h('div', { class: 'forms-cards' },
+        card('#/join', 'Join our team', 'Dentists, assistants, front desk and more: send your details and CV.', 'Apply'),
+        card('#/feedback', 'Complaints & suggestions', 'Tell us what went wrong or what we could do better. You can stay anonymous.', 'Write to us')),
+      h('p', { class: 'forms-band-note' }, "What you send goes only to Dr. Ali Rashid and the clinic's management. It is never shared.")));
 }
 
 // ---------------------------------------------------------------- data
@@ -229,7 +248,8 @@ export async function renderHome(root) {
     h('main', { id: 'main' },
       meet.el,
       results.node,
-      dataSlot),
+      dataSlot,
+      formsSection()),
     footer(),
     waFloat());
 

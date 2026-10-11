@@ -34,6 +34,7 @@ const PAGES = {
   coordinator: { render: lazy(() => import('./coordinator.js'), 'renderCoordinator'), show: () => can('reminders.manage') || can('lab.manage') || can('retainers.manage') },
   stock: { render: lazy(() => import('./inventory.js'), 'renderInventory'), show: () => can('inventory.manage') },
   complaints: { render: lazy(pagesModule, 'renderComplaints'), show: () => can('complaints.view') },
+  jobs: { render: lazy(() => import('./jobs.js'), 'renderJobs'), show: () => can('jobs.view') },
   review: { render: lazy(pagesModule, 'renderReview'), show: () => isAdmin() || can('complaints.view') || can('flags.clear') },
   log: { render: lazy(pagesModule, 'renderDoctorLog'), show: () => state.session.staff.role === 'doctor' || can('doctor_log.view_all') },
   admin: { render: lazy(() => import('./admin.js'), 'renderAdmin'), show: () => can('users.manage') || can('export.data') || can('audit.view') || can('schedule.manage') || isAdmin() },
@@ -68,7 +69,7 @@ function menu() {
       { ...link('Low ratings', 'coordinator?tab=ratings'), show: () => can('reminders.manage') },
     ] },
     { label: 'More', key: 'more', show: () => true, items: [
-      link('Stock', 'stock'), link('Complaints', 'complaints'), link("Dr. Ali's list", 'review'), link('Doctor log', 'log'),
+      link('Stock', 'stock'), link('Complaints', 'complaints'), link('Job applications', 'jobs'), link("Dr. Ali's list", 'review'), link('Doctor log', 'log'),
       { divider: true, show: () => show('admin') },
       { ...link('Access list', 'admin?tab=access'), show: () => can('users.manage') },
       { ...link('Staff accounts', 'admin?tab=staff'), show: () => can('users.manage') },

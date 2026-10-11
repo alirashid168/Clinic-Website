@@ -13,6 +13,7 @@ import { PERMISSIONS } from '../lib/permissions.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { isPatientLoginName } from '../lib/portal-login.js';
 import { checkupPhone } from '../lib/checkups.js';
+import { cvFileInfo } from '../lib/public-forms.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
 // is allowed by the site's Content-Security-Policy (script-src and connect-src), so there is no
@@ -124,6 +125,32 @@ async function checkupListRow(sb, row) {
     mr = res.error ? null : res.data?.mr_number ?? null;
   }
   return { ...row, phone_key: checkupPhone(row.phone), mr_number: mr };
+}
+
+// ------------------------------------------------------------ the homepage forms and job applications (20261011000200_public_forms.sql)
+const JOBS_CAP = 500;
+const CV_LINK_SECONDS = 60; // a CV opens through a link that works for one minute
+/** A database answer to a homepage form as an Error the form understands: the code in the message, the field from DETAIL. */
+function formAnswerError(error) {
+  const e = new Error(error.message || String(error));
+  if (error.code) e.code = error.code;
+  if (error.details) e.field = error.details;
+  return e;
+}
+/** Storage refused a CV: too big or the wrong type (Storage checks the bucket's limits), or the upload limit (the storage policy). */
+function cvUploadError(error) {
+  const text = String(error?.message || error || '');
+  const status = Number(error?.statusCode || error?.status);
+  if (status === 413 || /exceed|too large|maximum allowed size|payload/i.test(text)) return Object.assign(new Error('FORM_CV: Your CV is larger than 5 MB. Please choose a smaller file, or a PDF.'), { field: 'cv' });
+  if (/mime|content type|not supported/i.test(text)) return Object.assign(new Error('FORM_CV: Your CV must be a PDF, Word (.doc or .docx), JPG or PNG file.'), { field: 'cv' });
+  if (/row-level security|unauthorized|forbidden/i.test(text) || status === 403) return new Error('FORM_BUSY: many CVs are arriving right now. Please try again later.');
+  return error instanceof Error ? error : new Error(text);
+}
+// Before the migration is applied: "not switched on yet" on the staff page (PGRST205 / PGRST202, or 42P01 / 42883, or a 404).
+const JOBS_MISSING_TEXT = 'JOBS_MISSING: job applications are not switched on yet. They appear once the database update has been run.';
+const jobsMissing = (e) => !!e && (CHECKUPS_MISSING_CODES.has(e.code) || e.status === 404);
+async function jobsCall(run) {
+  try { return await run(); } catch (e) { throw jobsMissing(e) ? plainError(JOBS_MISSING_TEXT, 'JOBS_MISSING') : e; }
 }
 
 // ------------------------------------------------------------ loading the SDK
@@ -1484,6 +1511,64 @@ export async function createSupabaseAdapter() {
       check(await sb.from('complaints').update(patch).eq('id', id));
     },
     async linkComplaintDoctor(id, clinicianId) { check(await sb.from('complaints').update({ clinician_id: clinicianId || null }).eq('id', id)); },
+
+    // ------------------------------------------------------------ the homepage forms (visitors, no login: role anon)
+    /** Uploads the CV as a new file incoming/<random uuid>.<ext> of the private bucket job-cvs; resolves its path. Never overwrites. */
+    async uploadJobCv(file) {
+      const info = cvFileInfo(file);
+      if (info.error) throw Object.assign(new Error('FORM_CV: ' + info.error), { field: 'cv' });
+      const path = `incoming/${crypto.randomUUID()}.${info.ext}`;
+      const { error } = await sb.storage.from('job-cvs').upload(path, file, { contentType: info.type, upsert: false });
+      if (error) throw cvUploadError(error);
+      return path;
+    },
+    /** The checked form (lib/public-forms.js) to public.submit_job_application. Resolves { ok: true }; a refusal says which field. */
+    async submitJobApplication(form) {
+      const { data, error } = await sb.rpc('submit_job_application', { p_form: form });
+      if (error) throw formAnswerError(error);
+      return data;
+    },
+    async submitFeedback(form) {
+      const { data, error } = await sb.rpc('submit_feedback', { p_form: form });
+      if (error) throw formAnswerError(error);
+      return data;
+    },
+
+    // ------------------------------------------------------------ job applications (staff with jobs.view; the database shows nothing to anyone else)
+    /** Newest first, each with its history (events, oldest first). Filters: status, position, branch (an id, or 'any' for "Any branch"). */
+    async jobApplications({ status = '', position = '', branch = '' } = {}) {
+      return jobsCall(async () => {
+        let q = sb.from('job_applications').select('*, events:job_application_events(*)')
+          .order('created_at', { ascending: false }).order('id', { ascending: true }).limit(JOBS_CAP + 1);
+        if (status) q = q.eq('status', status);
+        if (position) q = q.eq('position', position);
+        if (branch === 'any') q = q.is('branch_id', null);
+        else if (branch) q = q.eq('branch_id', Number(branch));
+        const rows = capped(check(await q), JOBS_CAP);
+        for (const r of rows) r.events = (r.events || []).sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
+        return rows;
+      });
+    },
+    /** A new status and/or an internal note; the database stamps who and when. */
+    async updateJobApplication(id, { status = null, note = null } = {}) {
+      return check(await sb.rpc('update_job_application', { p_id: id, p_status: status || null, p_note: note || null }));
+    },
+    /** A link to the CV that works for one minute. */
+    async jobCvUrl(path) {
+      const { data, error } = await sb.storage.from('job-cvs').createSignedUrl(path, CV_LINK_SECONDS);
+      if (error) throw error;
+      return data.signedUrl;
+    },
+    /** CVs uploaded more than a day ago that no application uses: [{ path, uploaded_at, size_bytes }]. */
+    async jobCvOrphans() {
+      return jobsCall(async () => check(await sb.rpc('job_cv_orphans')) || []);
+    },
+    /** Removes such CVs (the storage policy refuses any other file); resolves how many were removed. */
+    async removeJobCvOrphans(paths) {
+      const list = [...new Set((paths || []).filter(Boolean))];
+      if (!list.length) return 0;
+      return (check(await sb.storage.from('job-cvs').remove(list)) || []).length;
+    },
 
     // ------------------------------------------------------------ coordinator (capped lists: .truncated / .cap)
     // The three lists below leave out what is finished (old ones), so the cap is rarely reached.
