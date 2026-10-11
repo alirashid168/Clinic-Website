@@ -27,6 +27,22 @@
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
 --   It is safe to run more than once. With the Supabase CLI, keep the file name as it is: 20261011000100
 --   sorts after the last migration (20261009000400_mr_50000_front_desk_portal.sql).
+--
+-- AFTER RUNNING IT: WARNINGS ALREADY IN THE SHEET STAY UNTIL TONIGHT
+--   Running this file does not clear a token warning that a row of today's list already shows ("Token 41 is
+--   already used by ..." or "That token was just taken on the website ..."), and the tab heading keeps counting
+--   those rows in "N need attention". The sheet sends a row again only when one of its cells changes, and in those
+--   rows nothing changed (the old version had already kept the typed token, own = true), so no new answer comes
+--   for them. The website cannot reach a row the sheet does not send, and the sheet's script does not change.
+--   Nothing is wrong with those rows. They go away:
+--     * by themselves at the nightly clear (from 00:05), which empties the tabs;
+--     * or as soon as staff change anything else in the row (its Status, Treatment, ...): the row is sent again
+--       and its new answer replaces the warning (a plain tick when nothing else is wrong);
+--     * or at once by hand: in today's tabs, select the Website cells that still show a token warning and press
+--       Delete. The heading stops counting them within about five minutes, and each shows "On website" with a
+--       tick the next time anything changes on that branch's list on the website.
+--   (Typing the same token again does not help: the cell does not change, so the row is not sent.)
+--   tests/aaj-sync-script.test.mjs pins this ("a token warning written before 20261011000100 was run ...").
 -- =============================================================================
 
 create or replace function private.aaj_sync_row(
