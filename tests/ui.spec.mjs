@@ -1582,9 +1582,17 @@ await step('status, group, month and doctor chips carry the sheet\'s colours; In
   assert.ok(seen.length && seen.every((x) => x.pending && x.shown === 'Pending' && /^Invoice pending for /.test(x.label)), 'seen and no invoice: Pending');
   await shot(pb, '22-sheet-chips');
 });
-await step('busy day: an exact Mr# and Enter adds that patient at once (no extra click) and puts the cursor in the Treatment cell; Enter there saves and moves down', async () => {
+await step('busy day: an exact Mr# and Enter adds that patient at once (no extra click) and puts the cursor in the Treatment cell; Enter there saves and goes to the add box for the next Mr# (never into the checkup row below)', async () => {
   const before = await pb.locator('table.sheet tbody tr').count();
   const box = pb.locator('.add-panel input[type=search]');
+  // (the checkup rows as the data has them: their cells save as they are typed, so the next Mr# must not land in one)
+  const checkupsNow = () => pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    return (await state.data.listDayCheckups({ branchId: 1, date: localISO() })).map((c) => [c.patient_name, c.checkup_for, c.token, c.phone]);
+  });
+  const checkupsBefore = await checkupsNow();
+  assert.ok(checkupsBefore.length, 'the busy day has a checkup row');
   await box.fill('9816');
   await box.press('Enter');
   const row = pb.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: 'Mr# 9816' });
@@ -1593,13 +1601,29 @@ await step('busy day: an exact Mr# and Enter adds that patient at once (no extra
   assert.equal(await pb.locator('.modal').count(), 0, 'no dialog in the way');
   assert.equal(await box.inputValue(), '', 'the add box is empty for the next one');
   assert.equal(await pb.locator('table.sheet tbody tr').count(), before + 1);
+  assert.equal(await row.evaluate((tr) => tr.nextElementSibling?.dataset.kind), 'checkup', 'the new patient is the last patient row, above the checkup rows');
   await pb.keyboard.type('Monthly PC');
   await pb.keyboard.press('Enter');
-  assert.equal(await pb.evaluate(() => document.activeElement?.closest('tr')?.previousElementSibling?.textContent.includes('Mr# 9816')), true, 'Enter moved down a row');
-  await pb.keyboard.press('ArrowUp');
-  assert.equal(await pb.evaluate(() => document.activeElement?.getAttribute('aria-label')), await row.locator('input[aria-label^="Treatment for"]').getAttribute('aria-label'), 'ArrowUp comes back to the same column');
+  assert.ok(await box.evaluate((el) => el === document.activeElement), 'Enter after the last patient goes to the add box, the sheet\'s next empty row');
+  // the rhythm goes on: the next Mr# and Enter adds the next patient
+  await pb.keyboard.type('9821');
+  await pb.keyboard.press('Enter');
+  const row2 = pb.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: 'Mr# 9821' });
+  await row2.waitFor();
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label^="Treatment for"]') && document.activeElement.closest('tr')?.textContent.includes('Mr# 9821'));
   await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
   assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Monthly PC');
+  assert.deepEqual(await checkupsNow(), checkupsBefore, 'the checkup rows are unchanged');
+  // Arrow Down still goes into the checkup rows and ArrowUp comes back to the same column; Enter with a patient below moves down
+  const label = () => pb.evaluate(() => document.activeElement?.getAttribute('aria-label'));
+  await pb.keyboard.press('ArrowDown');
+  assert.ok(await pb.evaluate(() => document.activeElement?.closest('tr')?.dataset.kind === 'checkup' && document.activeElement.matches('input[aria-label^="Treatment for"]')), 'Arrow Down into the checkup row: ' + await label());
+  await pb.keyboard.press('ArrowUp');
+  await pb.keyboard.press('ArrowUp');
+  assert.equal(await label(), await row.locator('input[aria-label^="Treatment for"]').getAttribute('aria-label'), 'ArrowUp comes back to the same column');
+  await pb.keyboard.press('Enter');
+  assert.equal(await label(), await row2.locator('input[aria-label^="Treatment for"]').getAttribute('aria-label'), 'Enter moved down to the patient below');
+  await pb.evaluate(() => document.activeElement?.blur());
   // a name (not an exact Mr#) still shows the matches to choose from
   await box.fill('Sample Patient 11');
   await box.press('Enter');
@@ -2111,6 +2135,75 @@ await step('busy day: with the cursor waiting in the Treatment cell of a patient
   await pb.keyboard.press('Tab');
   await shows('Sample Patient 094', 'in_treatment', 12000);
   assert.equal(await pb.locator('table.sheet tbody tr', { hasText: 'Mr# 9820' }).locator('input[aria-label^="Treatment for"]').inputValue(), 'Bonding');
+});
+await step('busy day: Treatment cells typed in and left with the text they had (nothing to save) do not hold up what the other computers change', async () => {
+  const cellOf = (name) => pb.locator('table.sheet tbody tr', { hasText: name }).locator(`input[aria-label="Treatment for ${name}"]`);
+  const was = {};
+  // the same treatment typed over itself, and Enter (twice), then a letter typed and taken back
+  for (const name of ['Sample Patient 088', 'Sample Patient 089']) {
+    was[name] = await cellOf(name).inputValue();
+    await cellOf(name).click();
+    await pb.keyboard.press('Control+A');
+    await pb.keyboard.type(was[name]);
+    await pb.keyboard.press('Enter');
+  }
+  was['Sample Patient 087'] = await cellOf('Sample Patient 087').inputValue();
+  await cellOf('Sample Patient 087').click();
+  await pb.keyboard.press('End');
+  await pb.keyboard.type('x');
+  await pb.keyboard.press('Backspace');
+  await pb.locator('h1').click(); // (the cursor leaves the list)
+  // another reception computer changes a row, as a live update tells the list
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const v = (await state.data.listVisits({ branchId: 1, date: localISO() })).find((x) => x.patient.full_name === 'Sample Patient 097');
+    await state.data.updateVisit(v.id, { status: 'in_treatment' });
+    document.dispatchEvent(new CustomEvent('sheet-reload'));
+  });
+  await pb.waitForFunction(() => [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes('Sample Patient 097'))?.querySelector('select[aria-label^="Status for"]').value === 'in_treatment', null, { timeout: 12000 });
+  for (const [name, value] of Object.entries(was)) assert.equal(await cellOf(name).inputValue(), value, `${name} keeps its treatment`);
+});
+await step('busy day: after a row\'s dialog adds the Dr. Ali flag, an invoice from the Pending chip, or a note and a payment, focus goes back to that patient\'s row, not to the page heading', async () => {
+  const rowOf = (name) => pb.locator('table.sheet tbody tr', { hasText: name });
+  const focused = () => pb.evaluate(() => { const el = document.activeElement; return [el?.closest('tr')?.querySelector('.name-text')?.textContent || el?.localName, el?.dataset.focus || '']; });
+  const dialogs = pb.locator('.modal');
+  // the flag (it adds "See Dr. Ali" to the name's words), from the keyboard: Enter on the name or the month chip, the flag, Escape
+  for (const [name, key] of [['Sample Patient 088', 'patient'], ['Sample Patient 089', 'month']]) {
+    await rowOf(name).locator(`[data-focus="${key}"]`).focus();
+    await pb.keyboard.press('Enter');
+    await dialogs.getByRole('button', { name: 'Next appointment with Dr. Ali' }).click();
+    await dialogs.getByLabel('Reason').fill('Sample: check the wire');
+    await dialogs.getByRole('button', { name: 'Flag for Dr. Ali' }).click();
+    await rowOf(name).locator('.badge-ali').waitFor();
+    await pb.waitForFunction(() => document.querySelectorAll('.modal').length === 1);
+    await pb.keyboard.press('Escape');
+    await pb.waitForSelector('.modal', { state: 'detached' });
+    assert.deepEqual(await focused(), [name, key], `${name}: back on the control that opened the dialog`);
+  }
+  // a new invoice from the Pending chip, which turns Done (no button): back on the patient's name
+  const r18 = rowOf('Sample Patient 018');
+  await r18.locator('button.invoice-pending').focus();
+  await pb.keyboard.press('Enter');
+  await dialogs.getByLabel('Treatment, line 1').fill('Checkup');
+  await dialogs.getByLabel('Price (Rs), line 1').fill('1500');
+  await dialogs.getByRole('button', { name: 'Save invoice' }).click();
+  await pb.waitForSelector('.modal', { state: 'detached' });
+  await r18.locator('span.chip:text-is("Done")').waitFor();
+  await pb.waitForFunction(() => document.activeElement?.matches('.name-btn') && document.activeElement.closest('tr').textContent.includes('Sample Patient 018'));
+  // a note typed in the row's dialog (it adds the note mark), then a payment taken there, then Escape
+  await rowOf('Sample Patient 014').locator('.name-btn').focus();
+  await pb.keyboard.press('Enter');
+  await dialogs.getByLabel('Notes').fill('Sample: pays on Friday');
+  await dialogs.getByRole('button', { name: 'Take payment' }).click();
+  await pb.locator('.modal:has(h2:has-text("Take payment · Sample Patient 014"))').getByRole('button', { name: 'Save payment' }).click();
+  await pb.waitForFunction(() => /^0/.test([...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes('Sample Patient 014'))?.querySelector('td.pp').innerText));
+  await pb.waitForFunction(() => document.querySelectorAll('.modal').length === 1);
+  await pb.keyboard.press('Escape');
+  await pb.waitForSelector('.modal', { state: 'detached' });
+  assert.deepEqual(await focused(), ['Sample Patient 014', 'patient']);
+  await rowOf('Sample Patient 014').locator('.name-btn .note-mark[title="Note: Sample: pays on Friday"]').waitFor();
+  await pb.evaluate(() => document.activeElement?.blur());
 });
 await step('busy day on a phone (390px, touch, 44px rows): every chip\'s × is in sight and takes the tap, and a name cut short is whole in the tooltip', async () => {
   const pt = await newPage({ width: 390, height: 844 }, { isMobile: true, hasTouch: true });

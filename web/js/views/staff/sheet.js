@@ -186,7 +186,8 @@ export async function renderSheet(root, params, signal) {
   const tableBody = h('tbody', {});
   // Typed text that is not saved yet: Treatment, and a checkup patient's name, token and phone, save when the cell is left
   // (the other typed cells save as they are typed). A redraw of the row keeps it (restoreFocus), and a reload in the
-  // background waits for it, and for a few seconds after the last key or tap in the list (userIsBusy).
+  // background waits for it while that cell has the cursor, and for a few seconds after the last key or tap in the list
+  // (userIsBusy). A cell left with the text it had fires no change, so unsavedCell can stay set after it is left.
   const SAVED_ON_LEAVE = new Set(['treatment_label', 'patient_name', 'token', 'phone']);
   let unsavedCell = null;
   let lastTouch = 0;
@@ -583,6 +584,16 @@ export async function renderSheet(root, params, signal) {
     return h('div', { class: 'people' }, h('div', { class: 'people-chips' }, chips), hint, add);
   }
 
+  // After a dialog opened from a row, modal() puts focus back on the button that opened it, or on its twin (the same name)
+  // when the list was drawn again meanwhile. There is no twin when the row's flags, note or invoice changed with that
+  // redraw, and focus would go to the page heading: it goes back to that control of the row (key), or to the name.
+  function backToRow(id, key) {
+    const el = document.activeElement;
+    if (document.querySelector('.modal') || (el && el !== document.body && !el.matches('h1'))) return;
+    const els = [...tableBody.querySelectorAll(`tr[data-id="${id}"] [data-focus]`)];
+    (els.find((x) => x.dataset.focus === key) || els.find((x) => x.dataset.focus === 'patient'))?.focus();
+  }
+
   // The "+" of the Doctor Name cell: who is on the visit, each with Remove (and Undo; a chip out of sight is listed here
   // too), and the people to add.
   function pickPeople(row) {
@@ -636,8 +647,7 @@ export async function renderSheet(root, params, signal) {
         // An Undo made here stays on the bar above the list for its 10 seconds.
         if (undoFn) { clearTimeout(undoTimer); undoTimer = setTimeout(hideUndo, 10000); }
         // The "+" that opened this was redrawn with the row: continue from the new one.
-        const again = tableBody.querySelector(`tr[data-id="${row.id}"] [data-focus="add-person"]`);
-        if (again?.isConnected && !document.querySelector('.modal') && (!document.activeElement || document.activeElement === document.body || document.activeElement.matches('h1'))) again.focus();
+        backToRow(row.id, 'add-person');
       },
     });
   }
@@ -669,6 +679,7 @@ export async function renderSheet(root, params, signal) {
     // the row shows a "Note" flag once there is one.
     const notesBefore = row.notes || '';
     const notes = h('input', { value: notesBefore, disabled: !canEdit, autocomplete: 'off', oninput: (e) => save(row, 'notes', e.target.value) });
+    const from = tableBody.contains(document.activeElement) ? document.activeElement.dataset.focus : null; // (the name or the month chip)
     dialog = modal(`${row.patient.full_name} · Mr# ${row.patient.mr_number}`, h('div', {},
       medical ? h('div', { class: 'alert alert-warning' }, h('strong', {}, 'Medical history: '), medical) : null,
       row.dues > 0 && can('dues.view') ? h('div', { class: 'alert alert-stop' }, `Pending dues ${rupees(row.dues)}. Clear dues before treatment.`) : null,
@@ -678,12 +689,11 @@ export async function renderSheet(root, params, signal) {
       h('div', { style: { marginTop: '14px' } }, field('Notes', notes, 'Saved by itself, like the cells of the list.'))), [], {
       // The buttons above reload the list when they are done (a payment, an invoice, Dr. Ali, photos), which puts new rows
       // in it: the row is redrawn from the one in the list now, with the note typed here, not from this dialog's old copy.
+      // Focus then goes back to the control of the row that opened this (a flag or note just added changes the name's words).
       onClose: () => {
-        if ((row.notes || '') === notesBefore) return;
-        const now = rows.find((r) => r.id === row.id);
-        if (!now) return;
-        now.notes = row.notes;
-        redrawRow(now);
+        const now = (row.notes || '') !== notesBefore && rows.find((r) => r.id === row.id);
+        if (now) { now.notes = row.notes; redrawRow(now); }
+        backToRow(row.id, from);
       },
     });
     // Start on the heading, as before the notes were here (the first field would otherwise take focus).
@@ -701,10 +711,13 @@ export async function renderSheet(root, params, signal) {
     const due = row.status === 'in_treatment' || row.status === 'completed';
     const cls = ['chip', 'chip-fill', due ? 'gs-darkred invoice-pending' : 'gs-grey invoice-none'];
     const words = due ? 'Pending' : srOnly('No invoice yet');
+    // Saved: the list is drawn again with this chip as Done, which is no button, so focus goes back to the row's name
+    // (backToRow). The dialog closes once onDone is over: the next task finds it closed.
+    const onDone = async () => { await load(); setTimeout(() => backToRow(row.id, 'invoice')); };
     return can('billing.create')
       ? h('button', {
         type: 'button', class: cls, 'aria-haspopup': 'dialog', 'aria-label': `${due ? 'Invoice pending' : 'No invoice yet'} for ${who}: make a new invoice`,
-        title: 'New invoice', dataset: { focus: 'invoice' }, onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone: load }),
+        title: 'New invoice', dataset: { focus: 'invoice' }, onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone }),
       }, words)
       : h('span', { class: cls }, words);
   }
@@ -959,12 +972,20 @@ export async function renderSheet(root, params, signal) {
   }
 
   // Arrow keys / Enter move between cells like a spreadsheet (Enter keeps what was typed: leaving the cell saves it).
+  // After the last patient row, Enter goes to the add box, the sheet's next empty row, so the next Mr# is typed there and
+  // not over the first checkup row below (its cells save as they are typed); Arrow Down still goes into the checkup rows.
   function onKey(e) {
     if (!['ArrowUp', 'ArrowDown', 'Enter'].includes(e.key) || !e.target.classList.contains('cell-input')) return;
     const td = e.target.closest('td, th'); // (the name of a checkup patient sits in the row header)
     const tr = td.parentElement;
     const col = [...tr.children].indexOf(td);
     const target = e.key === 'ArrowUp' ? tr.previousElementSibling : tr.nextElementSibling;
+    if (e.key === 'Enter' && (!target || (target.dataset.kind === 'checkup' && tr.dataset.kind !== 'checkup'))) {
+      const box = search?.querySelector('input');
+      // (leaving the cell saves it, as a click elsewhere would; without the add line, all branches, the cursor stays)
+      if (box && !addPanel.hidden) { e.preventDefault(); box.focus(); }
+      return;
+    }
     const next = target?.children[col]?.querySelector('.cell-input');
     if (next) { e.preventDefault(); next.focus(); next.select?.(); }
   }
@@ -1092,10 +1113,13 @@ export async function renderSheet(root, params, signal) {
     h('div', { class: 'add-panel-text' }, addHint)) : h('div', { hidden: true });
   const warnBox = h('div', { class: 'alert alert-warning', role: 'status', hidden: true });
   // (Only typing holds it up, not the cursor sitting in a cell: after an Mr# and Enter the cursor waits in the new row's
-  //  Treatment cell, often with nothing to type, and the list must keep showing what the other computers do.)
-  const userIsBusy = () => q.pendingCount || unsavedCell?.isConnected || Date.now() - lastTouch < 5000 || document.querySelector('.modal');
+  //  Treatment cell, often with nothing to type, and the list must keep showing what the other computers do. A cell typed
+  //  in counts only while it has the cursor: one left with the text it had saves nothing and must not stop the reloads for
+  //  good. Another window taking the focus leaves the cursor in the cell, so its unsaved text still holds them up.)
+  const userIsBusy = () => q.pendingCount || (unsavedCell?.isConnected && unsavedCell === document.activeElement)
+    || Date.now() - lastTouch < 5000 || document.querySelector('.modal');
   // A reload in the background (live updates, the 20-second check, a save the server refused) waits while this person is
-  // typing (text in a cell that is not saved yet, or a key or tap in the list in the last 5 seconds) or has a dialog open,
+  // typing (unsaved text in the cell with the cursor, or a key or tap in the list in the last 5 seconds) or has a dialog open,
   // and tries again every few seconds until they are done; a hidden tab reloads when it comes back. The cell with the
   // cursor is drawn again with the rest, and the cursor stays in it.
   let retryTimer = null;
