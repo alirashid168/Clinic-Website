@@ -16,6 +16,7 @@ import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
+import { MAX_KEYS, KEY_PATTERN } from '../lib/menu-arrange.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -103,6 +104,7 @@ function seed() {
   db.discount_caps = { front_desk: { maxPercent: 5, maxAmount: 1000 }, accountant: { maxPercent: null, maxAmount: null } };
   db.grid = defaultGrid();
   db.overrides = {};
+  db.menu_prefs = {}; // staff id -> the menu arrangement they saved (Arrange my menu), like public.staff_menu_prefs
 
   // One demo login per role. Placeholder @example.com addresses, never real staff logins.
   db.staff = [
@@ -445,6 +447,23 @@ export function createDemoAdapter() {
       return { kind: 'staff', staff: clone(s), perms: permsFor(s) };
     },
     async resetDemo() { db = seed(); session = null; ownPasswords.clear(); },
+
+    // ------------------------------------------------------------ the person's own menu (Arrange my menu)
+    // Like public.staff_menu_prefs: each staff member reads and saves only their own row, and the database's check (an array of
+    // at most 60 strings of menu keys) refuses anything else.
+    async myMenuArrangement() {
+      const s = me();
+      if (!s?.active) fail('Please log in again.');
+      return db.menu_prefs[s.id] ? clone(db.menu_prefs[s.id]) : null;
+    },
+    async saveMyMenuArrangement(list) {
+      const s = me();
+      if (!s?.active) fail('NOT_STAFF: only a staff login has a menu to arrange');
+      if (!Array.isArray(list) || list.length > MAX_KEYS || !list.every((k) => typeof k === 'string' && KEY_PATTERN.test(k))) {
+        fail('new row for relation "staff_menu_prefs" violates check constraint "staff_menu_prefs_arrangement_check"');
+      }
+      db.menu_prefs[s.id] = clone(list);
+    },
 
     // ------------------------------------------------------------ reference
     async branches() { return clone(db.branches.filter((b) => b.active)); },

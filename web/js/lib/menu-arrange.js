@@ -1,0 +1,163 @@
+// Arrange my menu: each staff member chooses what is on the top menu bar and in what order (the owner's request, 12 Oct 2026:
+// "employees should habe option to rearrange the tabs on the top in any order they want, so they can keep most used things in
+// the one click access"). Pure functions, no DOM, no storage, so every rule can be tested in Node (tests/menu-arrange.test.ts).
+// The browser side (the saved copy, the dialog, a top bar that must fit on one line) is web/js/views/staff/nav-arrange.js.
+//
+// The menu is what shell.js's menu() returns, already cut down to what the person's permissions allow: links
+// ({ label, href, key }) and drop-downs ({ label, key, items }, the items being links and { divider: true }). Arranging only
+// ever reorders and moves those entries, so it never shows a page the person may not open. Every page is known by its address
+// without '#/staff/' ('patients', 'reports?group=financial') and every drop-down other than More by 'menu:' and its key
+// ('menu:reports'), so a page added to menu() later needs no key of its own.
+//
+// What is saved (public.staff_menu_prefs.arrangement, at most 60 short strings):
+//   'key'   on the top bar, in this order;
+//   '-key'  taken off the top bar (only said of what the clinic's menu has on the top bar).
+// [] is the clinic's own menu. Whatever the list does not mention is in its default place: something the clinic's menu has on
+// the top bar (added since the person saved, or one they may open only now) is put back next to the entry before it, and every
+// other page stays in its drop-down. Keys the menu does not have (a page that was removed, or one the person may not open)
+// are skipped.
+//
+// On an arranged top bar the pages that are not on it are under More: first the pages of the clinic's top bar that were taken
+// off it, then each drop-down that is not on the top bar under its own name (Aaj ki List, Reports, Coordinator), then More's
+// own pages.
+
+export const MAX_KEYS = 60;
+// The same rule as the database's check constraint (supabase/migrations/20261012000300_staff_menu_prefs.sql).
+export const KEY_PATTERN = /^-?[A-Za-z0-9:_?=&./-]{1,80}$/;
+
+const MORE = 'more';
+/** '#/staff/reports?group=financial' -> 'reports?group=financial' ('' for anything that is not a staff page). */
+export const pageKey = (href) => (/^#\/staff\/./.test(String(href || '')) ? String(href).slice('#/staff/'.length) : '');
+const groupKey = (key) => `menu:${key}`;
+const isLink = (m) => !m.items && !!pageKey(m.href);
+
+/** A saved arrangement as read from storage or the database: only well-formed keys, each once, at most MAX_KEYS. */
+export function cleanArrangement(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const k of value) if (typeof k === 'string' && KEY_PATTERN.test(k) && !out.includes(k)) out.push(k);
+  return out.slice(0, MAX_KEYS);
+}
+
+/**
+ * Every entry the person can place: { key, label, kind: 'page' | 'group', top (on the clinic's top bar), group (the key of the
+ * drop-down a page is in, null for a top-bar page), groupLabel (its name; null in More), item (the menu's own link) or menu
+ * (the drop-down) }, in the menu's order. More itself is not an entry: it always comes last and holds the rest.
+ */
+export function menuEntries(menu) {
+  const entries = [];
+  const seen = new Set();
+  for (const m of menu || []) {
+    if (m.items) {
+      const inMore = m.key === MORE;
+      if (!inMore) entries.push({ key: groupKey(m.key), label: m.label, kind: 'group', top: true, menu: m });
+      for (const i of m.items) {
+        const key = pageKey(i.href);
+        if (i.divider || i.heading || !key || seen.has(key)) continue;
+        seen.add(key);
+        entries.push({ key, label: i.label, kind: 'page', top: false, group: m.key, groupLabel: inMore ? null : m.label, item: i });
+      }
+    } else if (isLink(m)) {
+      const key = pageKey(m.href);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ key, label: m.label, kind: 'page', top: true, group: null, groupLabel: null, item: m });
+    }
+  }
+  return entries;
+}
+
+const defaultTop = (entries) => entries.filter((e) => e.top).map((e) => e.key);
+const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** The keys on the person's top bar, in order (see the top of this file for what the saved list means). */
+export function topKeys(entries, saved) {
+  const known = new Set(entries.map((e) => e.key));
+  const list = cleanArrangement(saved);
+  const removed = new Set(list.filter((k) => k.startsWith('-')).map((k) => k.slice(1)));
+  const top = [];
+  for (const k of list) if (!k.startsWith('-') && known.has(k) && !top.includes(k)) top.push(k);
+  const defaults = defaultTop(entries);
+  defaults.forEach((k, i) => {
+    if (top.includes(k) || removed.has(k)) return;
+    // Not mentioned: next to the nearest entry before it on the clinic's top bar that is on this top bar too (else first).
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const p = top.indexOf(defaults[j]);
+      if (p >= 0) { at = p + 1; break; }
+    }
+    top.splice(at, 0, k);
+  });
+  return top;
+}
+
+/** What to save for a top bar of these keys: [] for the clinic's own menu. */
+export function arrangementFor(entries, top) {
+  const known = new Set(entries.map((e) => e.key));
+  const keys = top.filter((k, i) => known.has(k) && top.indexOf(k) === i);
+  const defaults = defaultTop(entries);
+  if (sameList(keys, defaults)) return [];
+  return [...keys, ...defaults.filter((k) => !keys.includes(k)).map((k) => `-${k}`)].slice(0, MAX_KEYS);
+}
+
+// Drop dividers at the edges and doubled ones (the pages between them may have moved to the top bar).
+function trim(items) {
+  const out = [];
+  for (const i of items) if (!(i.divider && (!out.length || out[out.length - 1].divider))) out.push(i);
+  while (out[out.length - 1]?.divider) out.pop();
+  return out;
+}
+const parse = (key) => { const [path, query = ''] = String(key).replace(/^#\/staff\//, '').split('?'); return { path, params: new URLSearchParams(query) }; };
+
+/**
+ * The menu in the same shape as menu(), arranged by `saved`. The clinic's own menu comes back unchanged (the same array) when
+ * nothing differs from it. { spill: n } moves the last n entries of the top bar into More (a top bar too long for the screen).
+ * { here } is the address on screen ('#/staff/coordinator?tab=lab'): a page with a tab on the top bar is marked as the
+ * current one (key = its section, as shell.js's current() expects) only on that very tab.
+ */
+export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
+  const entries = menuEntries(menu);
+  const byKey = new Map(entries.map((e) => [e.key, e]));
+  const all = topKeys(entries, saved);
+  const top = spill > 0 ? all.slice(0, Math.max(0, all.length - spill)) : all;
+  if (sameList(top, defaultTop(entries))) return menu;
+  const onTop = new Set(top);
+  const open = (i) => i.divider || !onTop.has(pageKey(i.href)); // still in its drop-down (anything that is not a page stays too)
+  // A page on the top bar with a label another page also has says which drop-down it comes from: "Patients (Reports)".
+  const labels = entries.filter((e) => e.kind === 'page').map((e) => e.label);
+  const now = parse(here);
+  const pinned = (e) => {
+    const { path, params } = parse(e.key);
+    const tab = [...params.keys()].length > 0;
+    const current = !tab || (now.path === path && [...params].every(([k, v]) => now.params.get(k) === v));
+    const label = e.groupLabel && labels.filter((l) => l === e.label).length > 1 ? `${e.label} (${e.groupLabel})` : e.label;
+    return { ...e.item, label, key: current ? (e.item.key || path) : `page:${e.key}` };
+  };
+  const out = [];
+  for (const k of top) {
+    const e = byKey.get(k);
+    if (e.kind === 'page') out.push(pinned(e));
+    else {
+      const items = trim(e.menu.items.filter(open));
+      if (items.length) out.push({ ...e.menu, items });
+    }
+  }
+  // Anything at the top level that is neither a link nor a drop-down (none today) keeps its place on the bar.
+  for (const m of menu) if (!m.items && !isLink(m)) out.push(m);
+  // More: the clinic's top-bar pages taken off it, each drop-down that is not on the top bar under its own name, then More's own pages.
+  const sections = [];
+  const loose = entries.filter((e) => e.kind === 'page' && e.top && !onTop.has(e.key)).map((e) => e.item);
+  if (loose.length) sections.push({ items: loose });
+  const groups = menu.filter((m) => m.items && m.key !== MORE && !onTop.has(groupKey(m.key)));
+  for (const m of groups) sections.push({ heading: m.label, items: trim(m.items.filter(open)) });
+  const more = menu.find((m) => m.items && m.key === MORE);
+  if (more) sections.push({ items: trim(more.items.filter(open)) });
+  const items = [];
+  for (const s of sections.filter((x) => x.items.length)) {
+    if (items.length) items.push({ divider: true });
+    if (s.heading) items.push({ heading: s.heading });
+    items.push(...s.items);
+  }
+  if (items.length) out.push({ ...(more || { label: 'More', key: MORE }), items });
+  return out;
+}

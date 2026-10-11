@@ -1454,7 +1454,7 @@ await step('staff: "Change password" is in the account menu above "Log out" and 
   await loginAs(pw, 'Front desk \\(Gulshan\\)');
   await pw.locator('.user-menu > button').click();
   const items = (await pw.locator('.user-menu .menu-list button').allTextContents()).map((t) => t.trim());
-  assert.deepEqual(items, ['Change password', 'Log out']);
+  assert.deepEqual(items, ['Arrange my menu', 'Change password', 'Log out']);
   await pw.locator('.user-menu .menu-list button:has-text("Change password")').click();
   await pw.waitForSelector('.modal h2:has-text("Change password")');
   assert.equal(await pw.locator('.user-menu.open').count(), 0, 'the menu closed behind the dialog');
@@ -1518,7 +1518,7 @@ await step('at phone width the drawer shows "Change password" next to "Log out",
   await pwPhone.locator('.menu-toggle').click();
   await pwPhone.waitForSelector('#staff-drawer.open');
   const items = (await pwPhone.locator('.sidebar-foot button').allTextContents()).map((t) => t.trim());
-  assert.deepEqual(items, ['Change password', 'Log out']);
+  assert.deepEqual(items, ['Arrange my menu', 'Change password', 'Log out']);
   await shot(pwPhone, '16-drawer-change-password');
   await pwPhone.locator('.sidebar-foot button:has-text("Change password")').click();
   await pwPhone.waitForSelector('.modal h2:has-text("Change password")');
@@ -1611,6 +1611,197 @@ await step('on a phone the drawer keeps "Change password" and "Log out" on scree
   assert.ok(row.height >= 44, `the "Show the new password" row is ${Math.round(row.height)}px tall`);
   await pwTouch.keyboard.press('Escape');
   await pwTouch.waitForSelector('.modal', { state: 'detached' });
+});
+
+// ------------------------------------------------------------- Arrange my menu (owner's request, 12 Oct 2026)
+// One page for the whole story: its localStorage is "this computer" (the copy that draws the menu at once), and the demo data in
+// it plays the database (reset by a reload, like a new computer that has the copy but not the row).
+const pn = await newPage();
+const barLabels = (pg) => pg.locator('.topnav > a, .topnav > .menu > button').evaluateAll((els) => els.map((el) => {
+  const c = el.cloneNode(true);
+  c.querySelectorAll('.sr-only, .caret').forEach((x) => x.remove());
+  return c.textContent.trim();
+}));
+const arrangeDialog = (pg) => pg.locator('.modal:has(h2:text-is("Arrange my menu"))');
+const topRows = (pg) => arrangeDialog(pg).locator('ol.arrange-list > li .arrange-name').evaluateAll((els) => els.map((el) => el.firstChild.textContent.trim()));
+const focusedName = (pg) => pg.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent.trim());
+const openArrange = async (pg) => {
+  await pg.locator('.user-menu > button').click();
+  await pg.locator('.user-menu .menu-list button:has-text("Arrange my menu")').click();
+  await arrangeDialog(pg).waitFor();
+};
+const saveArrange = async (pg, expectBar) => {
+  await arrangeDialog(pg).getByRole('button', { name: 'Save', exact: true }).click();
+  await arrangeDialog(pg).waitFor({ state: 'detached' });
+  await pg.waitForSelector('.toast:has-text("Menu saved")');
+  if (expectBar) await pg.waitForFunction((want) => [...document.querySelectorAll('.topnav > a, .topnav > .menu > button')].map((el) => {
+    const c = el.cloneNode(true); c.querySelectorAll('.sr-only, .caret').forEach((x) => x.remove()); return c.textContent.trim();
+  }).join('|') === want, expectBar.join('|'));
+};
+const ADMIN_BAR = ['Today', 'Aaj ki List', 'Patients', 'Billing', 'Reports', 'Coordinator', 'More'];
+const ADMIN_TOP_ROWS = ['Today', 'Aaj ki List drop-down', 'Patients', 'Billing', 'Reports drop-down', 'Coordinator drop-down'];
+let fdDefault = [];
+await step('Arrange my menu: the front desk\'s menu before anyone arranges anything (its own default)', async () => {
+  await loginAs(pn, 'Front desk \\(Gulshan\\)');
+  fdDefault = await barLabels(pn);
+  assert.deepEqual(fdDefault, ['Today', 'Aaj ki List', 'Patients', 'Billing', 'Reports', 'Coordinator']);
+  await tryAnotherRole(pn);
+});
+await step('Arrange my menu: in the name menu above "Change password"; the dialog shows the top bar in order and every other page Dr. Ali may open', async () => {
+  await loginAs(pn, 'Dr. Ali Rashid');
+  assert.deepEqual(await barLabels(pn), ADMIN_BAR);
+  await shot(pn, '18-top-bar-before');
+  await pn.locator('.user-menu > button').click();
+  assert.deepEqual((await pn.locator('.user-menu .menu-list button').allTextContents()).map((t) => t.trim()), ['Arrange my menu', 'Change password', 'Log out']);
+  await pn.locator('.user-menu .menu-list button:has-text("Arrange my menu")').click();
+  await arrangeDialog(pn).waitFor();
+  assert.equal(await pn.locator('.user-menu.open').count(), 0, 'the menu closed behind the dialog');
+  assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
+  const rest = arrangeDialog(pn).locator('.arrange-rest');
+  for (const name of ['Queue board (Aaj ki List)', 'Financial (Reports)', 'Reminders (Coordinator)', 'Stock', 'Audit log', 'Import (Healthwire, Aaj ki List, checkups)']) {
+    assert.equal(await rest.getByRole('button', { name: `Put on the top bar: ${name}`, exact: true }).count(), 1, name);
+  }
+  assert.match(await arrangeDialog(pn).innerText(), /A long top bar may not fit on a small laptop screen/);
+  assert.equal(await focusedName(pn), 'On the top bar', 'focus starts at the top-bar list');
+  await shot(pn, '19-arrange-dialog');
+});
+await step('Arrange my menu: "Move up" moves a page up and focus stays on it, also with the keyboard; the first row cannot move up', async () => {
+  const d = arrangeDialog(pn);
+  await d.getByRole('button', { name: 'Move up: Patients', exact: true }).click();
+  assert.deepEqual((await topRows(pn)).slice(0, 3), ['Today', 'Patients', 'Aaj ki List drop-down']);
+  assert.equal(await focusedName(pn), 'Move up: Patients');
+  await pn.keyboard.press('Enter');
+  assert.deepEqual((await topRows(pn)).slice(0, 3), ['Patients', 'Today', 'Aaj ki List drop-down']);
+  assert.ok(await d.getByRole('button', { name: 'Move up: Patients', exact: true }).isDisabled(), 'the first row cannot move up');
+  assert.equal(await focusedName(pn), 'Move down: Patients', 'focus went to the button of that row that still works');
+});
+await step('Arrange my menu: a page from More goes on the top bar (last), a whole drop-down goes under More', async () => {
+  const d = arrangeDialog(pn);
+  await d.getByRole('button', { name: 'Put on the top bar: Stock', exact: true }).click();
+  assert.equal((await topRows(pn)).at(-1), 'Stock');
+  assert.equal(await focusedName(pn), 'Move up: Stock', 'focus follows the page to the top-bar list');
+  await d.getByRole('button', { name: 'Put in More: Coordinator drop-down', exact: true }).click();
+  assert.deepEqual(await topRows(pn), ['Patients', 'Today', 'Aaj ki List drop-down', 'Billing', 'Reports drop-down', 'Stock']);
+  assert.equal(await focusedName(pn), 'Put on the top bar: Coordinator drop-down');
+  assert.match(await d.locator('.arrange-rest').innerText(), /Coordinator · under More/);
+});
+const ARRANGED = ['Patients', 'Today', 'Aaj ki List', 'Billing', 'Reports', 'Stock', 'More'];
+await step('Arrange my menu: Save changes the top bar at once, More keeps the Coordinator pages under their name, and a reload keeps it', async () => {
+  await saveArrange(pn, ARRANGED);
+  await pn.locator('.topnav .menu:has(> button:has-text("More")) > button').click();
+  const list = pn.locator('.topnav .menu.open .menu-list');
+  assert.equal((await list.locator('.menu-heading').allTextContents()).join('|'), 'Coordinator');
+  assert.equal(await list.locator('a:text-is("Reminders")').count(), 1);
+  assert.equal(await list.locator('a:text-is("Stock")').count(), 0, 'Stock is on the top bar now, not under More');
+  await shot(pn, '20-top-bar-after');
+  await pn.keyboard.press('Escape');
+  // A reload starts the demo afresh (logged out, nothing saved in its data): the copy on this computer draws the arranged menu.
+  await pn.reload();
+  await loginAs(pn, 'Dr. Ali Rashid');
+  assert.deepEqual(await barLabels(pn), ARRANGED);
+  await pn.locator('.topnav > a:text-is("Stock")').click();
+  await pn.waitForSelector('h1:has-text("Stock")');
+  assert.equal(await pn.locator('.topnav > a:text-is("Stock")').getAttribute('aria-current'), 'page', 'the pinned link shows the page on screen');
+});
+await step('Arrange my menu: "Reset to default" brings back the clinic\'s menu, in the database too', async () => {
+  await openArrange(pn);
+  await arrangeDialog(pn).getByRole('button', { name: 'Reset to default' }).click();
+  assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
+  assert.equal(await focusedName(pn), 'On the top bar');
+  await saveArrange(pn, ADMIN_BAR);
+  assert.equal(await pn.evaluate(() => localStorage.getItem('staff-menu:s-admin')), '[]');
+  assert.deepEqual(await pn.evaluate(async () => (await import('/js/state.js')).state.data.myMenuArrangement()), []);
+});
+await step('Arrange my menu: another role sees its own default, not Dr. Ali\'s arrangement', async () => {
+  await openArrange(pn);
+  await arrangeDialog(pn).getByRole('button', { name: 'Put on the top bar: Audit log', exact: true }).click();
+  await saveArrange(pn, [...ADMIN_BAR.slice(0, -1), 'Audit log', 'More']);
+  await tryAnotherRole(pn);
+  await loginAs(pn, 'Front desk \\(Gulshan\\)');
+  assert.deepEqual(await barLabels(pn), fdDefault);
+  await openArrange(pn);
+  const text = await arrangeDialog(pn).innerText();
+  for (const word of ['Audit log', 'Stock', 'Staff accounts', 'Financial']) assert.ok(!text.includes(word), `the front desk's dialog has no ${word}`);
+  await pn.keyboard.press('Escape');
+  await arrangeDialog(pn).waitFor({ state: 'detached' });
+});
+await step('Arrange my menu: a page the person may not open never appears, even when their saved list names it', async () => {
+  // A copy on this computer naming pages the front desk may not open (as if written by hand, or saved before access was taken away).
+  await pn.evaluate(() => localStorage.setItem('staff-menu:s-fd-gul', JSON.stringify(['admin?tab=staff', 'complaints', 'patients', 'stock', 'today', 'menu:sheet', 'billing', 'menu:reports', 'menu:coordinator', 'admin?tab=audit'])));
+  await pn.goto(BASE + '#/staff/patients');
+  await pn.waitForSelector('h1:has-text("Patients")');
+  assert.deepEqual(await barLabels(pn), ['Patients', ...fdDefault.filter((l) => l !== 'Patients')], 'only the page it may open moved');
+  const menus = (await pn.locator('.topnav, #staff-drawer').allTextContents()).join(' ');
+  for (const word of ['Staff accounts', 'Complaints', 'Stock', 'Audit log']) assert.ok(!menus.includes(word), `${word} is not in the menu`);
+  assert.equal(await pn.evaluate(() => [...document.querySelectorAll('a[href]')].filter((a) => /#\/staff\/(admin|stock|complaints)/.test(a.getAttribute('href'))).length), 0);
+});
+await step('Arrange my menu: when Dr. Ali takes a page away from someone, it leaves their arranged top bar too', async () => {
+  await openArrange(pn);
+  await arrangeDialog(pn).getByRole('button', { name: 'Put on the top bar: Reminders (Coordinator)', exact: true }).click();
+  await saveArrange(pn, ['Patients', ...fdDefault.filter((l) => l !== 'Patients'), 'Reminders']);
+  await tryAnotherRole(pn);
+  await loginAs(pn, 'Dr. Ali Rashid');
+  await pn.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-gul', 'reminders.manage', false); });
+  await tryAnotherRole(pn);
+  await loginAs(pn, 'Front desk \\(Gulshan\\)');
+  // Without "Follow-up reminders" the front desk has no Coordinator pages at all, so that drop-down goes too.
+  assert.deepEqual(await barLabels(pn), ['Patients', ...fdDefault.filter((l) => l !== 'Patients' && l !== 'Coordinator')]);
+  const menus = (await pn.locator('.topnav, #staff-drawer').allTextContents()).join(' ');
+  assert.ok(!menus.includes('Reminders') && !menus.includes('Drop-offs'), 'Reminders is gone from every menu');
+  await openArrange(pn);
+  assert.ok(!(await arrangeDialog(pn).innerText()).includes('Reminders'), 'and from the dialog');
+  await pn.keyboard.press('Escape');
+});
+// A 1366 x 768 laptop: Dr. Ali pins far more than fits.
+const pnLaptop = await newPage({ width: 1366, height: 768 });
+const MANY = ['today', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator', 'stock', 'complaints', 'review', 'log',
+  'admin?tab=staff', 'admin?tab=audit', 'coordinator?tab=reminders', 'reports?group=financial'];
+await step('Arrange my menu: a top bar too long for a 1366px laptop moves its last pages into More by themselves, and takes them back on a wider screen', async () => {
+  await pnLaptop.goto(BASE + '#/login/staff');
+  await pnLaptop.evaluate((list) => localStorage.setItem('staff-menu:s-admin', JSON.stringify(list)), MANY);
+  await loginAs(pnLaptop, 'Dr. Ali Rashid');
+  const fits = () => pnLaptop.evaluate(() => { const b = document.querySelector('.topbar'); return b.scrollWidth <= b.clientWidth + 1; });
+  assert.ok(await fits(), 'the top bar fits on one line');
+  const shown = await barLabels(pnLaptop);
+  assert.equal(shown.at(-1), 'More');
+  assert.ok(shown.length < 15 && shown.length > 7, `some of the 14 pinned are on the bar (${shown.length - 1})`);
+  // Every pinned page is still one or two clicks away: on the bar, or in a drop-down of it.
+  const inMenus = await pnLaptop.locator('.topnav .menu-list a').allTextContents();
+  for (const label of ['Stock', 'Complaints', "Dr. Ali's list", 'Doctor log', 'Staff accounts', 'Audit log', 'Reminders', 'Financial']) {
+    assert.ok(shown.includes(label) || inMenus.includes(label), `${label} can be reached`);
+  }
+  await shot(pnLaptop, '21-top-bar-too-long');
+  await pnLaptop.setViewportSize({ width: 1920, height: 900 });
+  await pnLaptop.waitForFunction((n) => document.querySelectorAll('.topnav > a, .topnav > .menu > button').length > n, shown.length);
+  assert.ok(await fits());
+  await pnLaptop.setViewportSize({ width: 1366, height: 768 });
+  await pnLaptop.waitForFunction((n) => document.querySelectorAll('.topnav > a, .topnav > .menu > button').length === n, shown.length);
+  assert.ok(await fits());
+});
+// A phone: the drawer shows the same order, and the dialog fits.
+const pnPhone = await newPage({ width: 390, height: 844 });
+await step('Arrange my menu on a phone: the drawer follows the arrangement and has "Arrange my menu"; the dialog fits the screen', async () => {
+  await pnPhone.goto(BASE + '#/login/staff');
+  await pnPhone.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['patients', 'stock', 'today', 'menu:sheet', 'billing', 'menu:reports', '-menu:coordinator'])));
+  await loginAs(pnPhone, 'Dr. Ali Rashid');
+  await pnPhone.locator('.menu-toggle').click();
+  await pnPhone.waitForSelector('#staff-drawer.open');
+  const first = (await pnPhone.locator('#staff-drawer > a.nav-link').allTextContents()).map((t) => t.trim());
+  assert.deepEqual(first, ['Patients', 'Stock', 'Today', 'Billing']);
+  const groups = (await pnPhone.locator('#staff-drawer .drawer-group > .nav-group:not(.nav-subgroup)').allTextContents()).map((t) => t.trim());
+  assert.deepEqual(groups, ['Aaj ki List', 'Reports', 'More']);
+  assert.equal(await pnPhone.locator('#staff-drawer .nav-subgroup:text-is("Coordinator")').count(), 1, 'More names the Coordinator pages');
+  await shot(pnPhone, '22-drawer-arranged');
+  await pnPhone.locator('.sidebar-foot button:has-text("Arrange my menu")').click();
+  await arrangeDialog(pnPhone).waitFor();
+  assert.equal(await pnPhone.locator('#staff-drawer.open').count(), 0, 'the drawer closed behind the dialog');
+  const box = await arrangeDialog(pnPhone).boundingBox();
+  assert.ok(box.x >= 0 && box.x + box.width <= 390, 'the dialog fits the screen');
+  assert.ok(await arrangeDialog(pnPhone).locator('.modal-body').evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'no sideways scrolling inside it');
+  await shot(pnPhone, '23-arrange-dialog-phone');
+  await pnPhone.keyboard.press('Escape');
+  await arrangeDialog(pnPhone).waitFor({ state: 'detached' });
+  assert.ok(await pnPhone.evaluate(() => document.activeElement?.classList.contains('menu-toggle')), 'focus is back on the menu button');
 });
 
 // ------------------------------------------------------------- the Checkups page (admin), Download Excel, the checkup list import

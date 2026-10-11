@@ -126,6 +126,9 @@ async function checkupListRow(sb, row) {
   return { ...row, phone_key: checkupPhone(row.phone), mr_number: mr };
 }
 
+// The table of "Arrange my menu" is not there yet (20261012000300 not run): the codes PostgREST and Postgres answer with.
+const MENU_PREFS_MISSING_CODES = new Set(['PGRST205', '42P01']);
+
 // ------------------------------------------------------------ loading the SDK
 function withTimeout(promise, ms) {
   let timer;
@@ -995,6 +998,22 @@ export async function createSupabaseAdapter() {
       };
       window.addEventListener('storage', onStorage);
       return () => { data.subscription.unsubscribe(); window.removeEventListener('storage', onStorage); };
+    },
+
+    // ------------------------------------------------------------ the person's own menu (Arrange my menu)
+    // One row per staff member in public.staff_menu_prefs (20261012000300_staff_menu_prefs.sql); row-level security lets each
+    // person read and save only their own. While that file is not run, the table and save_my_menu are missing (PGRST205 / 42P01,
+    // PGRST202 / 404): reading answers null (the default menu) and saving fails with the code MENU_PREFS_MISSING, so the
+    // website keeps the arrangement on that computer only.
+    /** The arrangement this staff member saved (an array of menu keys), or null when there is none. */
+    async myMenuArrangement() {
+      const res = await sb.from('staff_menu_prefs').select('arrangement').maybeSingle();
+      if (res.error && (MENU_PREFS_MISSING_CODES.has(res.error.code) || res.status === 404)) return null;
+      return check(res)?.arrangement ?? null;
+    },
+    async saveMyMenuArrangement(list) {
+      const r = await rpc('save_my_menu', { p_arrangement: list });
+      if (r.missing) throw plainError('MENU_PREFS_MISSING: the menu cannot be saved in the database until its update is run.', 'MENU_PREFS_MISSING');
     },
 
     // ------------------------------------------------------------ reference

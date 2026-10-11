@@ -697,6 +697,19 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .topnav-layout { grid-template-columns: 1fr; }
 .topnav-layout > .sidebar { display: none; }
 .drawer-group .nav-link { padding-left: var(--space-5); }
+/* Arrange my menu (nav-arrange.js): the drop-down names inside an arranged More, and its dialog. */
+.menu-heading { padding: var(--space-2) var(--space-3) var(--space-1); font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+.nav-subgroup { padding-left: var(--space-4); }
+.sidebar-foot .drawer-arrange { display: block; margin-top: var(--space-2); }
+.arrange h3 { margin: var(--space-4) 0 var(--space-2); }
+.arrange h4 { margin: var(--space-3) 0 var(--space-1); font-size: var(--fs-sm); }
+.arrange-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-1); }
+.arrange-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); }
+.arrange-num { flex: none; min-width: 1.75em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.arrange-name { flex: 1 1 12rem; min-width: 0; font-weight: 600; }
+.arrange-name small { display: block; font-weight: 400; color: var(--text-muted); }
+.arrange-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.arrange-count { margin: 0 0 var(--space-2); }
 .drawer-close { align-self: flex-end; color: inherit; flex: none; }
 /* Tap-to-close layer behind the phone drawer (a real element, so taps never reach the page). */
 .drawer-scrim {

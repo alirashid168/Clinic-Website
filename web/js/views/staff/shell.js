@@ -8,6 +8,7 @@ import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from 
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
+import { arrangedMenu, loadArrangement, fitTopBar, openArrangeMenu } from './nav-arrange.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
 const passwordDialogModule = () => import('../../ui/password-dialog.js');
@@ -128,13 +129,14 @@ export async function renderStaff(root, path, params, signOut) {
   // Reload these lists for every new login (and token refresh), so a settings change reaches a
   // shared computer that is never reloaded; page changes within one session reuse them.
   const session = state.session;
-  if (refSession !== session) { await loadStaffRef(); refSession = session; }
+  if (refSession !== session) { await Promise.all([loadStaffRef(), loadArrangement()]); refSession = session; }
   if (signal.aborted) return;
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
   const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet');
-  const items = menu();
+  // The menu as this person arranged it ("Arrange my menu", nav-arrange.js): only reorders what menu() allows them.
+  const items = arrangedMenu(menu());
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
   // Click or Enter opens them (touch and keyboard); desktop CSS also opens them on hover.
@@ -165,7 +167,7 @@ export async function renderStaff(root, path, params, signOut) {
     const listId = `menu-list-${m.key}`;
     const btn = h('button', { type: 'button', class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-expanded': 'false', 'aria-controls': listId },
       m.label, current(m.key) ? srOnly(' (current section)') : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
-    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: () => {
+    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : i.heading ? h('div', { class: 'menu-heading' }, i.heading) : h('a', { href: i.href, onclick: () => {
       // Choosing the page already on screen fires no hashchange, so give focus back to the menu button.
       const same = i.href === location.hash;
       closeAll();
@@ -174,8 +176,9 @@ export async function renderStaff(root, path, params, signOut) {
     markCurrent(list);
     return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
   };
-  const navLinks = items.map((m) => (m.items ? dropdown(m)
-    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label)));
+  const navEntry = (m) => (m.items ? dropdown(m)
+    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label));
+  const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }, items.map(navEntry));
 
   // ---- patient search from any screen: name, Mr# or phone (an ARIA combobox).
   const searchBox = can('patients.view') ? (() => {
@@ -206,6 +209,7 @@ export async function renderStaff(root, path, params, signOut) {
     h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
     h('hr', {}),
     // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
+    h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
     h('button', { type: 'button', class: 'menu-btn', onclick: signOut }, 'Log out'));
   const userMenu = disclosure(h('div', { class: 'menu user-menu' }, userBtn, userList), userBtn, userList);
@@ -221,10 +225,11 @@ export async function renderStaff(root, path, params, signOut) {
     h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' }, onclick: () => closeDrawer(location.hash === '#/staff/today') }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
     items.map((m) => (m.items
-      ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => drawerLink(i)))
+      ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => (i.heading ? h('div', { class: 'nav-group nav-subgroup' }, i.heading) : drawerLink(i))))
       : drawerLink(m, current(m.key)))),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
+      h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); } }, 'Log out'))));
@@ -235,7 +240,7 @@ export async function renderStaff(root, path, params, signOut) {
   const topbar = h('header', { class: 'topbar' },
     toggle,
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' } }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
-    h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }, navLinks),
+    topnav,
     searchBox,
     userMenu);
 
@@ -283,6 +288,7 @@ export async function renderStaff(root, path, params, signOut) {
     topbar,
     h('div', { class: 'app topnav-layout' }, drawer, content),
     scrim);
+  fitTopBar(topnav, (spill) => arrangedMenu(menu(), { spill }).map(navEntry), signal);
 
   try {
     if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);
