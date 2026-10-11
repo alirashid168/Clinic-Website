@@ -980,7 +980,8 @@ select.chip-select option { background: var(--enamel); color: var(--sheet-text);
   .sheet-page { --w-doctor: clamp(200px, 16.5vw, 380px); }
   table.sheet col.c-doctor { width: var(--w-doctor); }
   /* All branches: every column but Treatment Details has a set width, so the list is at least those plus 140px for it
-     (806px = Branch, Month, Token, Status, Group, P.P, Invoice, Contact No and those 140px). */
+     (806px = Branch, Month, Token, Status, Group, P.P, Invoice, Contact No and those 140px; for someone who does not see
+     invoices there is no Invoice column, and Treatment Details has its 74px too). */
   table.sheet:has(> colgroup > .c-branch) { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 806px); }
   .people-chips { flex-wrap: wrap; align-content: flex-start; height: 20px; }
   .person, .person.checker { position: relative; min-width: 0; padding-right: var(--space-2); }
@@ -1461,11 +1462,17 @@ table.invoice-lines input { min-width: 0; }
   .topsearch input { min-height: var(--target); }
   .status-chip { min-height: 36px; }
   .sheet-page { --sheet-row: 44px; }
-  /* (the list scrolls sideways here anyway: wider, so the bigger chips of three people and their × fit the Doctor Name cell) */
-  table.sheet { min-width: 1440px; }
-  table.sheet:has(> colgroup > .c-branch) { min-width: 1560px; } /* (All branches: its Branch column on top) */
+  /* (the list scrolls sideways here anyway: wider, so the bigger chips of three people and their × fit the Doctor Name cell,
+     and Status and Group are wide enough for "In treatment" and "No group" in 16px, see below) */
+  table.sheet { min-width: 1490px; }
+  table.sheet:has(> colgroup > .c-branch) { min-width: 1610px; } /* (All branches: its Branch column on top) */
+  table.sheet col.c-status { width: 128px; }
+  table.sheet col.c-group { width: 108px; }
   .sheet-toolbar select, .sheet-toolbar input:not([type=checkbox]), .add-panel input[type=search] { min-height: var(--target); font-size: var(--fs-control); }
   .chip, select.chip-select, .person { height: 32px; border-radius: 16px; font-size: var(--fs-ui); }
+  /* The list's typed cells and its Status and Group chips are form fields: 16px here too (the sheet's 13px and 12px would
+     make iOS zoom on every tap). */
+  table.sheet .cell-input, select.chip-select { font-size: var(--fs-control); }
   .add-person, .chip-add { width: 36px; height: 32px; border-radius: 16px; }
   .people { --x-w: 32px; }
   .person button, .chip-remove { min-height: 32px; margin-block: -6px; }

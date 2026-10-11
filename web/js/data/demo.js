@@ -78,15 +78,18 @@ function seed() {
     { id: 4, code: 'LHR', name: 'Gulberg Lahore', city_id: 2, address: 'Al Hafeez Business Avenue, Gulberg 3, Lahore', active: true, opened_on: '2021-11-03' },
     { id: 5, code: 'ISB', name: 'Islamabad', city_id: 3, address: 'Giga Downtown, DHA Phase II, Islamabad', active: true, opened_on: '2025-11-25' },
   ];
-  const doc = (name, group, region, is_doctor = true) => ({ id: uid(), display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
+  // Fixed ids, not uid(): the Aaj ki List colours a person's chip from their id (sheet.js doctorTone), so each sample
+  // clinician keeps one colour on every load, and the people who share a cell on the busy day get different ones
+  // (Amna green, Bushra blue, Hina orange, Iqra purple, Nida red, Rabia teal, Saba yellow; Uzma blue, Zara red).
+  const doc = (n, name, group, region, is_doctor = true) => ({ id: `00000000-0000-4000-8000-0000000c${n}`, display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
   // Fictional clinicians: one or two per braces group and region, enough to try every rule.
   db.clinicians = [
-    doc('Dr. Ali Rashid', null, null),
-    doc('Dr. Amna (sample)', 1, 'KHI'), doc('Dr. Bushra (sample)', 1, 'KHI'),
-    doc('Dr. Hina (sample)', 2, 'KHI'), doc('Dr. Iqra (sample)', 2, null),
-    doc('Dr. Nida (sample)', 3, 'KHI'), doc('Dr. Rabia (sample)', 3, 'KHI'), doc('Dr. Saba (sample)', 3, 'LHR'),
-    doc('Dr. Tania (sample)', null, 'ISB'),
-    doc('Assistant Uzma (sample)', null, 'KHI', false), doc('Assistant Zara (sample)', null, 'KHI', false),
+    doc('0104', 'Dr. Ali Rashid', null, null),
+    doc('0205', 'Dr. Amna (sample)', 1, 'KHI'), doc('0306', 'Dr. Bushra (sample)', 1, 'KHI'),
+    doc('0403', 'Dr. Hina (sample)', 2, 'KHI'), doc('0503', 'Dr. Iqra (sample)', 2, null),
+    doc('0605', 'Dr. Nida (sample)', 3, 'KHI'), doc('0700', 'Dr. Rabia (sample)', 3, 'KHI'), doc('0806', 'Dr. Saba (sample)', 3, 'LHR'),
+    doc('0905', 'Dr. Tania (sample)', null, 'ISB'),
+    doc('1006', 'Assistant Uzma (sample)', null, 'KHI', false), doc('1102', 'Assistant Zara (sample)', null, 'KHI', false),
   ];
   const cl = (name) => db.clinicians.find((c) => c.display_name === name).id;
 

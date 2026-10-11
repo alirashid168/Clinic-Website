@@ -184,6 +184,15 @@ export async function renderSheet(root, params, signal) {
   let checkupsOnly = false; // the "Checkups" count was clicked
 
   const tableBody = h('tbody', {});
+  // Typed text that is not saved yet: Treatment, and a checkup patient's name, token and phone, save when the cell is left
+  // (the other typed cells save as they are typed). A redraw of the row keeps it (restoreFocus), and a reload in the
+  // background waits for it, and for a few seconds after the last key or tap in the list (userIsBusy).
+  const SAVED_ON_LEAVE = new Set(['treatment_label', 'patient_name', 'token', 'phone']);
+  let unsavedCell = null;
+  let lastTouch = 0;
+  tableBody.addEventListener('input', (e) => { if (SAVED_ON_LEAVE.has(e.target.dataset.field)) unsavedCell = e.target; });
+  tableBody.addEventListener('change', (e) => { if (e.target === unsavedCell) unsavedCell = null; });
+  for (const ev of ['keydown', 'pointerdown', 'input']) tableBody.addEventListener(ev, () => { lastTouch = Date.now(); });
 
   // ---- save status, the list of changes that could not be saved, and undo for removals.
   const saveStatus = h('span', { class: 'save-status save-state', tabindex: '-1', dataset: { state: 'saved' } }, 'All changes saved');
@@ -395,6 +404,8 @@ export async function renderSheet(root, params, signal) {
   // ---------------------------------------------------------------- cells
   const canEdit = can('sheet.edit');
   const canTreatment = can('treatment.enter') || canEdit;
+  // The Invoice column is for the people who see invoices; without them (doctors, assistants) Treatment Details gets its room.
+  const canBill = can('billing.view');
 
   function save(row, fieldName, value) {
     row[fieldName] = value;
@@ -665,7 +676,15 @@ export async function renderSheet(root, params, signal) {
       g ? guidancePanel(g) : null,
       h('div', { class: 'inline', style: { marginTop: '10px' } }, actions),
       h('div', { style: { marginTop: '14px' } }, field('Notes', notes, 'Saved by itself, like the cells of the list.'))), [], {
-      onClose: () => { if ((row.notes || '') !== notesBefore) redrawRow(row); },
+      // The buttons above reload the list when they are done (a payment, an invoice, Dr. Ali, photos), which puts new rows
+      // in it: the row is redrawn from the one in the list now, with the note typed here, not from this dialog's old copy.
+      onClose: () => {
+        if ((row.notes || '') === notesBefore) return;
+        const now = rows.find((r) => r.id === row.id);
+        if (!now) return;
+        now.notes = row.notes;
+        redrawRow(now);
+      },
     });
     // Start on the heading, as before the notes were here (the first field would otherwise take focus).
     dialog.dialog.querySelector('h2')?.focus();
@@ -676,7 +695,6 @@ export async function renderSheet(root, params, signal) {
   // booked) has an empty grey chip, like a row of the sheet that is not done yet: no invoice is due, so it says nothing
   // (screen readers hear "No invoice yet"). Pending and the empty chip open a new invoice.
   function invoiceCell(row) {
-    if (!can('billing.view')) return null;
     const who = row.patient.full_name;
     if (row.has_invoice) return h('span', { class: 'chip chip-fill gs-green', title: 'This visit has an invoice' }, 'Done');
     if (row.status === 'cancelled' || row.status === 'no_show') return h('span', { class: 'chip chip-fill gs-grey' }, srOnly('No invoice'));
@@ -774,7 +792,7 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, peopleCell(row)),
       h('td', {}, h('div', { class: 'details-cell' }, details, quickTap)),
       h('td', { class: 'pp' }, pp),
-      h('td', {}, invoiceCell(row)),
+      canBill ? h('td', {}, invoiceCell(row)) : null,
       h('td', { class: 'contact' }, cellText(row.patient.phone || '')));
   }
 
@@ -830,18 +848,19 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, typedCell(text('doctors', "Doctor's name", { list: 'sheet-doctors' }))),
       h('td', {}, typedCell(text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
       h('td', { class: 'pp' }),
-      h('td', {}),
+      canBill ? h('td', {}) : null,
       h('td', {}, typedCell(text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null }))));
   }
 
-  // Redraws replace rows, so remember the focused control (row id + data-focus key + caret) and
-  // put focus back on the same control in the new row, or on "+" when a removed chip had it.
+  // Redraws replace rows, so remember the focused control (row id + data-focus key + caret, and typed text the cell has not
+  // saved yet) and put focus back on the same control in the new row, or on "+" when a removed chip had it. The new cell is
+  // drawn from the row's data, which does not have that typed text yet: it is put back in, and the cell saves it.
   function rememberFocus() {
     const el = document.activeElement;
     if (!el || !tableBody.contains(el)) return null;
     let caret = null;
     try { if (typeof el.selectionStart === 'number') caret = [el.selectionStart, el.selectionEnd]; } catch { /* not a text field */ }
-    return { rowId: el.closest('tr')?.dataset.id, key: el.dataset.focus, caret };
+    return { rowId: el.closest('tr')?.dataset.id, key: el.dataset.focus, caret, typed: el === unsavedCell ? el.value : null };
   }
   function restoreFocus(saved) {
     const tr = saved && [...tableBody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === saved.rowId);
@@ -849,6 +868,13 @@ export async function renderSheet(root, params, signal) {
     const target = (saved.key && [...tr.querySelectorAll('[data-focus]')].find((el) => el.dataset.focus === saved.key))
       || tr.querySelector('[data-focus="add-person"]') || tr.querySelector('[data-focus="patient"]') || tr.querySelector('[data-focus="name"]');
     target?.focus({ preventScroll: true });
+    if (saved.typed !== null) {
+      unsavedCell = null; // (the cell that had it is gone)
+      if (target?.dataset.focus === saved.key && target.value !== saved.typed) {
+        target.value = saved.typed;
+        target.dispatchEvent(new Event('change', { bubbles: true })); // (saved through the cell's own handler, as on leaving it)
+      }
+    }
     if (saved.caret && target?.setSelectionRange) { try { target.setSelectionRange(saved.caret[0], saved.caret[1]); } catch { /* not a text field */ } }
   }
 
@@ -906,7 +932,7 @@ export async function renderSheet(root, params, signal) {
   // The sheet's columns in the sheet's order. "Reminder Status", the sheet's last column, is left out while it is empty on
   // every tab; when the clinic starts using it, it goes after Contact No (a <col>, a heading and a cell in both row kinds).
   const colgroup = h('colgroup', {});
-  const columns = () => [!branchId && 'branch', 'num', 'mr', 'name', 'month', 'treatment', 'token', 'status', 'group', 'doctor', 'details', 'pp', 'invoice', 'contact']
+  const columns = () => [!branchId && 'branch', 'num', 'mr', 'name', 'month', 'treatment', 'token', 'status', 'group', 'doctor', 'details', 'pp', canBill && 'invoice', 'contact']
     .filter(Boolean).map((k) => h('col', { class: `c-${k}` }));
 
   function draw() {
@@ -1065,10 +1091,13 @@ export async function renderSheet(root, params, signal) {
     checkupBtn,
     h('div', { class: 'add-panel-text' }, addHint)) : h('div', { hidden: true });
   const warnBox = h('div', { class: 'alert alert-warning', role: 'status', hidden: true });
-  const userIsBusy = () => q.pendingCount || tableBody.contains(document.activeElement) || document.querySelector('.modal');
+  // (Only typing holds it up, not the cursor sitting in a cell: after an Mr# and Enter the cursor waits in the new row's
+  //  Treatment cell, often with nothing to type, and the list must keep showing what the other computers do.)
+  const userIsBusy = () => q.pendingCount || unsavedCell?.isConnected || Date.now() - lastTouch < 5000 || document.querySelector('.modal');
   // A reload in the background (live updates, the 20-second check, a save the server refused) waits while this person is
-  // typing or has a dialog open, and tries again every few seconds until they are done; a hidden tab reloads when it
-  // comes back.
+  // typing (text in a cell that is not saved yet, or a key or tap in the list in the last 5 seconds) or has a dialog open,
+  // and tries again every few seconds until they are done; a hidden tab reloads when it comes back. The cell with the
+  // cursor is drawn again with the rest, and the cursor stays in it.
   let retryTimer = null;
   function reloadQuietly() {
     clearTimeout(retryTimer);
@@ -1149,7 +1178,7 @@ export async function renderSheet(root, params, signal) {
           filterHeading('Doctor Name', doctorSel, 'Filter by doctor'),
           heading('Treatment Details'),
           can('dues.view') ? filterHeading('P.P', duesBox, 'Show only patients with dues', { class: 'pp pp-head', title: 'Pending dues' }) : heading('P.P', { class: 'pp pp-head', title: 'Pending dues' }),
-          heading('Invoice'),
+          canBill ? heading('Invoice') : null,
           heading('Contact No'))),
         tableBody)));
   // On a laptop or bigger screen the list fills the window to its bottom edge, so the header row stays at the top and the
