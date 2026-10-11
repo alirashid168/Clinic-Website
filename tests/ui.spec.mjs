@@ -1303,6 +1303,22 @@ await step('stock: receive and use items, low-stock warning', async () => {
   await shot(p7, '16-stock');
 });
 
+await step('stock: one tab per branch in the clinic\'s order, then a Total tab that adds up all branches', async () => {
+  const tabNames = await p7.locator('[role="tablist"][aria-label="Branch"] [role="tab"]').allInnerTexts();
+  assert.equal(tabNames[tabNames.length - 1], 'Total', `the last tab is Total: ${tabNames.join(', ')}`);
+  assert.ok(tabNames.length >= 3, 'the branches, then Total');
+  await p7.getByRole('tab', { name: 'Total' }).click();
+  await p7.waitForSelector('h2:has-text("Total stock · all branches")');
+  const row = p7.locator('tr', { hasText: '014 NiTi wire' });
+  const cells = await row.locator('td.right').allInnerTexts();
+  const nums = cells.map((c) => Number.parseInt(c, 10));
+  assert.equal(nums[nums.length - 1], nums.slice(0, -1).reduce((a, b) => a + b, 0), `the Total column is the sum of the branches: ${cells.join(' | ')}`);
+  assert.equal(await p7.getByRole('button', { name: '+ Received' }).count(), 0, 'the Total tab is read only');
+  assert.match(p7.url(), /branch=all/);
+  await p7.getByRole('tab', { name: tabNames[0] }).click();
+  await p7.waitForSelector(`h2:has-text("Stock · ${tabNames[0]}")`);
+});
+
 await step('edited photo upload is marked for the patient and the website', async () => {
   await p7.goto(BASE + '#/staff/patients');
   await p7.waitForSelector('table.list tbody tr');

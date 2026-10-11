@@ -1,6 +1,6 @@
 // Stock: brackets, wires, elastics and consumables per branch. Every change
 // is a "move" (received, used, adjustment) so the quantity is always explained.
-import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf, downloadCSV, todayISO, localISO, srOnly, showFormErrors, clearFieldErrors, capFirst } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf, downloadCSV, todayISO, localISO, srOnly, showFormErrors, clearFieldErrors, capFirst, tabs } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 
 const CATEGORIES = ['brackets', 'wires', 'elastics', 'bonding', 'consumables', 'instruments', 'other'];
@@ -8,9 +8,18 @@ const REASONS = { received: 'Received (stock in)', used: 'Used in treatment', ad
 
 export async function renderInventory(root, params) {
   const d = state.data;
-  let branchId = Number(params.get('branch')) || defaultBranchId();
-  const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId, { 'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); load(); } });
+  // One tab per branch in the clinic's order (Gulshan RJ Mall, North Nazimabad, DHA, Gulberg Lahore, Islamabad), then a
+  // "Total" tab that adds up every branch's stock (owner, 11 Oct 2026). Total is there only for staff who see every branch.
+  const branches = myBranches();
+  const withTotal = branches.length > 1;
+  let branchId = params.get('branch') === 'all' && withTotal ? 'all' : Number(params.get('branch')) || defaultBranchId();
+  if (branchId !== 'all' && !branches.some((b) => b.id === branchId)) branchId = branches[0]?.id; // the tab shown is the list shown
   const out = h('div', {});
+  const strip = tabs({
+    label: 'Branch', current: branchId, panel: out,
+    items: [...branches.map((b) => ({ id: b.id, label: b.name })), ...(withTotal ? [{ id: 'all', label: 'Total' }] : [])],
+    onChange: (id) => { branchId = id === 'all' ? 'all' : Number(id); history.replaceState(null, '', `#/staff/stock?branch=${id}`); load(); },
+  });
 
   const newItem = () => {
     const name = h('input', { placeholder: 'e.g. 022 MBT brackets, upper' });
@@ -55,7 +64,31 @@ export async function renderInventory(root, params) {
     ]);
   };
 
+  // The Total tab: every item with its stock at each branch and all branches together (read only; moves are made per branch).
+  async function loadTotal() {
+    const per = await Promise.all(branches.map((b) => d.inventory(b.id).then((x) => ({ b, x }), () => ({ b, x: null }))));
+    const ok = per.filter((p) => p.x);
+    if (!ok.length) { mount(out, empty('Stock could not be loaded for any branch.')); return; }
+    const items = ok[0].x.items;
+    const qty = (p, id) => Number(p.x?.stock.find((s) => s.item_id === id)?.quantity || 0);
+    const failed = per.filter((p) => !p.x).map((p) => p.b.name);
+    mount(out,
+      failed.length ? h('div', { class: 'alert alert-warning' }, `Not counted (could not be loaded): ${failed.join(', ')}.`) : null,
+      h('section', { class: 'panel' },
+        h('div', { class: 'panel-head' }, h('h2', {}, 'Total stock · all branches')),
+        items.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+          h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Item'), h('th', { scope: 'col' }, 'Category'),
+            per.map((p) => h('th', { scope: 'col', class: 'right' }, p.b.name)), h('th', { scope: 'col', class: 'right' }, 'Total'))),
+          h('tbody', {}, items.map((it) => h('tr', { class: it.active ? null : 'is-inactive' },
+            h('td', {}, h('strong', {}, it.name), it.active ? null : [' ', h('span', { class: 'badge badge-inactive' }, 'Inactive')]),
+            h('td', {}, capFirst(it.category)),
+            per.map((p) => h('td', { class: 'right' }, p.x ? `${qty(p, it.id)} ${it.unit}` : '–')),
+            h('td', { class: 'right' }, h('strong', {}, `${ok.reduce((n, p) => n + qty(p, it.id), 0)} ${it.unit}`)))))))
+          : empty('No stock items yet. Add them in a branch tab with "New item".')));
+  }
+
   async function load() {
+    if (branchId === 'all') { await loadTotal(); return; }
     let data;
     try { data = await d.inventory(branchId); } catch (e) { mount(out, empty(friendlyError(e))); return; }
     const { items, stock, moves } = data;
@@ -109,7 +142,7 @@ export async function renderInventory(root, params) {
   }
 
   mount(root,
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Stock'), h('p', {}, 'Per branch. Record what comes in and what is used; the list warns when something runs low.')), branchSel),
-    out);
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Stock'), h('p', {}, 'Per branch. Record what comes in and what is used; the list warns when something runs low. Total adds up all branches.'))),
+    strip.el, out);
   await load();
 }
