@@ -561,3 +561,55 @@ test('demo: the import follows the database - same key, fill versus overwrite, c
   r = await d.importCheckups([rows4[0]]);
   assert.equal(r.inserted, 1);
 });
+
+test('demo: Admin -> Import of the Aaj ki List history never files a row whose name fits its Mr# only with doubt (it comes back with why), and never files a row without an Mr# on a brother of the same first name (abuse-privacy M1, M2; 11 Oct 2026)', async () => {
+  const d = await demoAs('s-admin');
+  const pa = await d.createPatient({ mr_number: '77131', full_name: 'Ayesha Khan', phone: '03160000131', first_branch_id: 2 });
+  const pb = await d.createPatient({ mr_number: '77133', full_name: 'Ali Hamza', phone: '03160000102', first_branch_id: 2 });
+  const day = (n: number) => { const t = new Date(TODAY + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() - n); return t.toISOString().slice(0, 10); };
+  const row = (date: string, mr: string | null, name: string, phone: string | null, month: number | null, treatment: string) =>
+    [date, 2, mr, name, null, phone, month, treatment, null, 'completed', null, [], [], [], null, null, 'North Nazimabad', false, null];
+  const out = await d.importAajSheet([
+    row(day(20), '77131', 'Ayesha Rajpoot', null, 5, 'Monthly'),
+    row(day(19), '77131', 'Zoya Rajpoot', '03160000131', 4, 'Monthly'),
+    row(day(20), null, 'Ali Raza', '03160000102', 6, 'Monthly'),
+    row(day(18), null, 'Ali', '0316 0000102', 4, 'Monthly'),
+  ], true);
+  assert.equal(out.cases_created, 0, 'no braces case from a row whose name fits only with doubt, nor from a first name only on a phone');
+  const a = await d.getPatient(pa.id), b = await d.getPatient(pb.id);
+  assert.equal(a.braces_case, null);
+  assert.equal(a.visits.filter((v: any) => v.visit_date === day(20) || v.visit_date === day(19)).length, 0, 'nothing filed on Ayesha Khan: not another surname, not another name on her phone');
+  assert.equal(out.unmatched.find((x: any) => x.name === 'Ayesha Rajpoot').why,
+    'the name only partly matches Mr# 77131 (Ayesha Khan): another surname, another first name or only the phone. Check the Mr# or the name');
+  assert.match(out.unmatched.find((x: any) => x.name === 'Zoya Rajpoot').why, /^the name only partly matches Mr# 77131 \(Ayesha Khan\)/);
+  assert.equal(b.braces_case, null);
+  assert.equal(b.visits.filter((v: any) => v.visit_date === day(20)).length, 0, '"Ali Raza" is not filed on his brother "Ali Hamza"');
+  const vb = b.visits.find((v: any) => v.visit_date === day(18));
+  assert.ok(vb && vb.braces_month == null && /Month 4/.test(vb.notes) && /Sheet name: Ali \(check the Mr#\)/.test(vb.notes), 'the first name alone on that phone is filed with the note');
+  assert.equal(out.unmatched.find((x: any) => x.name === 'Ali Raza').why, 'add the Mr# (another person with this first name is on this phone)');
+});
+
+test('demo: Admin -> Import counts Muhammad, Syed, Hafiz ... as part of the name, like the sync (abuse-privacy L2-residual, 11 Oct 2026): "Muhammad Usman" is not filed on Usman Tariq; "M Usman" is filed on Muhammad Usman Tariq', async () => {
+  const d = await demoAs('s-admin');
+  const pt = await d.createPatient({ mr_number: '77141', full_name: 'Usman Tariq', phone: '03160000141', first_branch_id: 2 });
+  const pm = await d.createPatient({ mr_number: '77142', full_name: 'Muhammad Usman Tariq', phone: '03160000142', first_branch_id: 2 });
+  const day = (n: number) => { const t = new Date(TODAY + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() - n); return t.toISOString().slice(0, 10); };
+  const row = (date: string, mr: string, name: string) => [date, 2, mr, name, null, null, null, 'Scaling', null, 'completed', null, [], [], [], null, null, 'North Nazimabad', false, null];
+  const out = await d.importAajSheet([row(day(30), '77141', 'Muhammad Usman'), row(day(30), '77142', 'M Usman')], true);
+  const t = await d.getPatient(pt.id), m = await d.getPatient(pm.id);
+  assert.equal(t.visits.filter((v: any) => v.visit_date === day(30)).length, 0, 'nothing filed on Usman Tariq');
+  assert.match(out.unmatched.find((x: any) => x.name === 'Muhammad Usman').why, /^the name only partly matches Mr# 77141 \(Usman Tariq\)/);
+  assert.equal(m.visits.filter((v: any) => v.visit_date === day(30)).length, 1, '"M Usman" is Muhammad Usman Tariq');
+});
+
+test('demo: Admin -> Import makes a Healthwire Mr# only up to the highest Healthwire number the website has plus 100 (abuse-privacy M-HW-SQUAT, 11 Oct 2026); above it the row comes back with why', async () => {
+  const d = await demoAs('s-admin');
+  await d.createPatient({ mr_number: '19000', full_name: 'Sample Hw Top', phone: '03160019000', first_branch_id: 2 });
+  const day = (n: number) => { const t = new Date(TODAY + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() - n); return t.toISOString().slice(0, 10); };
+  const row = (mr: string, name: string) => [day(25), 2, mr, name, null, null, null, 'Scaling', null, 'completed', null, [], [], [], null, null, 'North Nazimabad', false, null];
+  const out = await d.importAajSheet([row('19100', 'Sample Hw Edge'), row('19101', 'Sample Hw Ahead')], true);
+  assert.equal(out.patients_created, 1, 'only 19100 (19000 + 100) is made');
+  assert.equal(out.unmatched.find((x: any) => x.mr === '19101').why,
+    'an Mr# above the newest Healthwire number the website takes (19100): probably a typo. Check the Mr#, or import the Healthwire patients first');
+  assert.equal((await d.patientsByMr(['19100', '19101'])).map((p: any) => p.mr_number).join(','), '19100');
+});

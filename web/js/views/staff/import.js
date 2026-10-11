@@ -213,7 +213,7 @@ export async function renderImport(root) {
   const aajInput = filePicker('.xlsx,.xls,.csv', async (file) => {
     mount(aajOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
     try {
-      const [{ BRANCH_ID, chunk }, { readTab, buildImport, tabBranch, FIELD_LABELS }] = await Promise.all([healthwire(), aaj()]);
+      const [{ BRANCH_ID, chunk }, { readTab, buildImport, splitCheckupRows, tabBranch, FIELD_LABELS }] = await Promise.all([healthwire(), aaj()]);
       const sheets = await fileToTabs(file);
       const tabs = sheets.map((t) => ({ name: t.name, rows: t.rows, branchId: BRANCH_ID[tabBranch(t.name)] || null, fixedDate: null, columns: null, read: readTab(t.rows) }))
         .filter((t) => t.read.headerAt >= 0 || t.rows.length > 3);
@@ -229,21 +229,27 @@ export async function renderImport(root) {
       const rebuild = () => {
         for (const t of tabs) t.read = readTab(t.rows, { fixedDate: t.fixedDate, columns: t.columns });
         built = buildImport(tabs, state.ref.clinicians, state.ref.treatments, todayISO());
+        // a row without an Mr# whose Treatment says checkup is a checkup patient: never a visit (owner, 9 Oct 2026). It is not sent at all.
+        const split = splitCheckupRows(built.rows);
+        built.visitRows = split.visits; built.checkupRows = split.checkups;
         const s = built.summary;
+        const nVisits = built.visitRows.length;
         const people = Object.entries(s.unmatchedPeople).sort((a, b) => b[1] - a[1]);
-        btn.textContent = `Import ${s.rows} visits`;
-        btn.disabled = !s.rows;
+        btn.textContent = `Import ${nVisits} visit${nVisits === 1 ? '' : 's'}`;
+        btn.disabled = !nVisits;
         mount(summaryBox,
           h('div', { class: 'stat-row', style: { margin: '12px 0' } },
-            stat(s.rows, s.from ? `Visits ${shortDate(s.from)} → ${shortDate(s.to)}` : 'Visits'), stat(s.days, 'Days'), stat(tabs.filter((t) => t.branchId).length, 'Branch tabs'),
+            stat(nVisits, s.from ? `Visits ${shortDate(s.from)} → ${shortDate(s.to)}` : 'Visits'), stat(s.days, 'Days'), stat(tabs.filter((t) => t.branchId).length, 'Branch tabs'),
             stat(s.withMr, 'Rows with an Mr#'), stat(s.noId, 'Rows with no Mr# and no phone')),
+          built.checkupRows.length ? h('div', { class: 'alert alert-info' },
+            `${built.checkupRows.length} row${built.checkupRows.length === 1 ? ' has' : 's have'} no Mr# and a Treatment that says checkup: checkup patients, not visits. They are not imported here. To put them on the website's checkup list, use "5. Checkup list" below with the "Checkup karwaliya" file.`) : null,
           s.future ? h('p', { class: 'muted' }, `${s.future} rows are dated today or later: they belong to the live Aaj ki List and are not imported.`) : null,
           s.undated ? h('p', { class: 'muted' }, `${s.undated} rows have no date and are skipped.`) : null,
           people.length ? h('div', { class: 'alert alert-warning' },
             h('div', {}, h('strong', {}, `${people.length} names in the Doctor's Name column are not on the doctor list: `),
               people.slice(0, 30).map(([n, c]) => `${n} (${c})`).join(', '), people.length > 30 ? ', …' : ''),
             h('div', { class: 'muted', style: { marginTop: '4px' } }, 'They are kept in the visit notes. To link them properly, add the spelling as an alias on ', h('a', { href: '#/staff/admin?tab=setup' }, 'Clinic setup → Doctors and assistants'), ' and drop the file again.')) : null,
-          h('p', { class: 'muted' }, 'Rows are matched to patients by Mr#, then phone, then a name only one patient has. A visit already on the website for that day (from Healthwire) is completed with the sheet\'s doctors, details, token and braces month; otherwise the visit is added. Patients with braces months but no braces case get one from the history. Dropping the file again adds nothing.'));
+          h('p', { class: 'muted' }, 'Rows are matched to patients by Mr#, when the name in the row fits that patient without doubt (the same first name, or an everyday spelling of it, and no other surname; Muhammad, Syed or Hafiz count as part of the name). A row whose name only partly matches the patient of its Mr# (another surname, another first name, or only the phone) is never filed on that patient: it is listed afterwards with the reason. A row without an Mr# is matched only by its phone and first name, never by a name alone; a row whose Mr# the website does not have, or whose Mr# belongs to somebody else, is never put on another patient\'s file: those rows are listed afterwards. A visit already on the website for that day (from Healthwire) is completed with the sheet\'s doctors, details, token and braces month; otherwise the visit is added. Patients with braces months but no braces case get one from the history. Dropping the file again adds nothing.'));
       };
 
       const tabCard = (t) => {
@@ -281,17 +287,18 @@ export async function renderImport(root) {
       btn.onclick = async () => {
         btn.disabled = true;
         try {
-          const parts = chunk(built.rows, 200);
-          const total = { future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, cases: {}, unmatched: {} };
+          const parts = chunk(built.visitRows, 200);
+          const total = { future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, checkups_skipped: built.checkupRows.length, cases: {}, unmatched: {} };
           const add = (r) => {
-            for (const k of ['future', 'patients_created', 'visits_inserted', 'visits_updated', 'staff_added', 'cases_created', 'tokens', 'rows_unmatched']) total[k] += Number(r?.[k] || 0);
+            for (const k of ['future', 'patients_created', 'visits_inserted', 'visits_updated', 'staff_added', 'cases_created', 'tokens', 'rows_unmatched', 'checkups_skipped']) total[k] += Number(r?.[k] || 0);
             for (const [k, v] of Object.entries(r?.cases || {})) total.cases[k] = (total.cases[k] || 0) + Number(v);
             for (const u of r?.unmatched || []) { const k = `${u.name}|${u.mr || ''}|${u.phone || ''}`; const cur = total.unmatched[k] || { ...u, rows: 0 }; cur.rows += Number(u.rows || 0); cur.last = u.last > (cur.last || '') ? u.last : cur.last; total.unmatched[k] = cur; }
           };
           for (let i = 0; i < parts.length; i++) {
-            progress.textContent = `Importing: ${Math.min((i + 1) * 200, built.rows.length)} of ${built.rows.length} visits…`;
+            progress.textContent = `Importing: ${Math.min((i + 1) * 200, built.visitRows.length)} of ${built.visitRows.length} visits…`;
             document.dispatchEvent(new Event('app:activity'));
-            // A row without an Mr# is a checkup patient: it is matched to a patient file that already exists, but never gets a new one.
+            // A row without an Mr# (an existing patient whose Mr# was forgotten) is matched by its phone and first name to a patient file that
+            // already exists, but never gets a new one.
             const withMr = parts[i].filter((row) => row[2]);
             const withoutMr = parts[i].filter((row) => !row[2]);
             if (withMr.length) add(await d.importAajSheet(withMr, createBox.checked));
@@ -303,19 +310,20 @@ export async function renderImport(root) {
           mount(result, h('div', { class: 'alert alert-info' },
             h('div', {}, `Visits: ${total.visits_inserted} added, ${total.visits_updated} already there and completed from the sheet. Doctors and assistants added to ${total.staff_added} visit slots; ${total.tokens} token numbers.`),
             h('div', {}, `Patients: ${total.patients_created} added from the sheet. Braces cases created from the history: ${total.cases_created}${caseNote ? ` (${caseNote})` : ''}.`),
+            total.checkups_skipped ? h('div', {}, `Checkup patients not imported as visits: ${total.checkups_skipped} (use "5. Checkup list" for them).`) : null,
             un.length ? h('div', { style: { marginTop: '6px' } }, h('strong', {}, `${un.length} names could not be matched to a patient (${total.rows_unmatched} rows). `),
               'Add them from the Patients page or put the Mr# or phone on the sheet, then drop the file again. ',
-              h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`aaj-ki-list-unmatched-${todayISO()}.csv`, un.map((u) => ({ name: u.name, mr: u.mr || '', phone: u.phone || '', rows: u.rows, first: u.first, last: u.last, tab: u.tab }))) }, 'Download the list')) : null,
+              h('button', { class: 'btn btn-small', onclick: () => downloadCSV(`aaj-ki-list-unmatched-${todayISO()}.csv`, un.map((u) => ({ name: u.name, mr: u.mr || '', phone: u.phone || '', rows: u.rows, first: u.first, last: u.last, tab: u.tab, why: u.why || '' }))) }, 'Download the list')) : null,
             h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/patients' }, 'Open Patients →'), ' · ', h('a', { href: '#/staff/reports?group=financial' }, 'Reports →'))),
             un.length ? h('div', { class: 'table-scroll', style: { marginTop: '8px' } }, h('table', { class: 'list' },
-              h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Name on the sheet'), h('th', { scope: 'col' }, 'Mr#'), h('th', { scope: 'col' }, 'Phone'), h('th', { scope: 'col', class: 'right' }, 'Rows'), h('th', { scope: 'col' }, 'First'), h('th', { scope: 'col' }, 'Last'), h('th', { scope: 'col' }, 'Tab'))),
-              h('tbody', {}, un.slice(0, 50).map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.mr || ''), h('td', {}, u.phone || ''), h('td', { class: 'right' }, u.rows), h('td', { class: 'nowrap' }, shortDate(u.first)), h('td', { class: 'nowrap' }, shortDate(u.last)), h('td', {}, u.tab || '')))))) : null);
+              h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Name on the sheet'), h('th', { scope: 'col' }, 'Mr#'), h('th', { scope: 'col' }, 'Phone'), h('th', { scope: 'col', class: 'right' }, 'Rows'), h('th', { scope: 'col' }, 'First'), h('th', { scope: 'col' }, 'Last'), h('th', { scope: 'col' }, 'Tab'), h('th', { scope: 'col' }, 'Why'))),
+              h('tbody', {}, un.slice(0, 50).map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.mr || ''), h('td', {}, u.phone || ''), h('td', { class: 'right' }, u.rows), h('td', { class: 'nowrap' }, shortDate(u.first)), h('td', { class: 'nowrap' }, shortDate(u.last)), h('td', {}, u.tab || ''), h('td', {}, u.why || '')))))) : null);
           toast('Aaj ki List imported.', 'ok');
         } catch (e) { btn.disabled = false; progress.textContent = ''; toast(friendlyError(e), 'error', 8000); }
       };
 
       mount(aajOut, cards, summaryBox,
-        h('label', { class: 'inline', style: { margin: '8px 0' } }, createBox, ' Add patient records for rows with an Mr# that is not on the website yet. Rows without an Mr# are checkup patients and never get a patient file.'),
+        h('label', { class: 'inline', style: { margin: '8px 0' } }, createBox, ' Add patient records for rows with a Healthwire Mr# (below 50000) that is not on the website yet, up to 100 above the highest Healthwire Mr# the website has (a higher number is not given by Healthwire yet: probably a typo; import the Healthwire patients first). An Mr# of 50000 or more that the website does not have is a typing mistake and is never added. Rows without an Mr# never get a patient file, and a patient the website already has (the same name and phone under another Mr#, or an old Mr# of that patient) never gets a second one: those rows are listed with the reason.'),
         h('div', { style: { marginTop: '8px' } }, btn), progress, result);
       draw(); rebuild();
     } catch (e) { mount(aajOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }

@@ -1961,7 +1961,8 @@ await step('Front desk (North Nazimabad) on the Checkups page sees the imported 
 });
 
 
-// Rows of the Aaj ki List history that have no Mr# are checkup patients: the import must never create a patient file for them.
+// Rows of the Aaj ki List history that have no Mr# never get a patient file; those whose Treatment says checkup are checkup patients and are
+// not sent as visits at all (they belong on the checkup list).
 const pi = await newPage();
 await pi.route('**/js/data/index.js', (r) => r.fulfill({
   contentType: 'text/javascript',
@@ -1977,25 +1978,28 @@ export function getData() {
 }
 `,
 }));
-await step('Import "4. Aaj ki List history": rows without an Mr# never get a new patient file, rows with an Mr# keep the "Add patient records" choice', async () => {
+await step('Import "4. Aaj ki List history": rows without an Mr# never get a new patient file (a checkup row is not even sent), rows with an Mr# keep the "Add patient records" choice', async () => {
   await loginAs(pi, 'Dr. Ali Rashid');
   await pi.goto(BASE + '#/staff/admin?tab=import');
   await pi.waitForSelector('h2:text("4. Aaj ki List history")');
   const csv = [
     "Tt Mr #,Tt Patient Name,Monthly,Tt Treatment,Token No,Waiting,Group,Doctor's Name,Tt Treatment Details,P.P,Healthwire,Tt Contact No,Reminder Status",
     '9811,Areeba Siddiqui,4,Monthly,3,Completed,,"Dr. Hina (sample)",U L 016 Pc refresh,,Done,,',
-    ',Brand New Nobody,,Checkup,6,Completed,,Dr Nida,,,,0300 5559999,', ''].join('\n');
+    ',Brand New Nobody,,Checkup,6,Completed,,Dr Nida,,,,0300 5559999,',
+    ',Forgot Mr Person,,Filling,7,Completed,,Dr Nida,,,,0300 5558888,', ''].join('\n');
   const aaj = pi.locator('section.panel:has(h2:text("4. Aaj ki List history")) input[type=file]');
   await aaj.setInputFiles({ name: 'aaj-ki-list-sample.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
   await pi.waitForSelector('section[data-tab]');
   await pi.locator('section[data-tab] select[aria-label^="Branch for"]').selectOption('2');
   await pi.locator('section[data-tab] input[type=date]').fill('2026-08-20');
   await pi.locator('section[data-tab] input[type=date]').dispatchEvent('change');
-  const box = pi.locator('label:has-text("Rows without an Mr# are checkup patients") input[type=checkbox]');
+  const box = pi.locator('label:has-text("Rows without an Mr# never get a patient file") input[type=checkbox]');
   assert.ok(await box.isChecked(), 'the box stays ticked by default');
+  await pi.locator('.alert:has-text("1 row has no Mr# and a Treatment that says checkup")').waitFor();
   await pi.getByRole('button', { name: 'Import 2 visits' }).click();
   await pi.waitForSelector('.alert:has-text("Visits:")');
-  assert.deepEqual(await pi.evaluate(() => window.__aajCalls), [{ create: true, mr: [true] }, { create: false, mr: [false] }]);
+  assert.deepEqual(await pi.evaluate(() => window.__aajCalls), [{ create: true, mr: [true] }, { create: false, mr: [false] }], 'the checkup row is not sent; the row whose Mr# was forgotten is sent without "Add patient records"');
+  await pi.locator('.alert:has-text("Checkup patients not imported as visits: 1")').waitFor();
   await pi.locator('.topsearch input').fill('Brand New Nobody');
   await pi.locator('.search-results:has-text("No patient matches")').waitFor();
 });

@@ -1,6 +1,7 @@
 // Aaj ki List (Google Sheet) reader: node tests/aaj.test.mjs
 import assert from 'node:assert/strict';
-import { detectColumns, isHeaderRow, cellDate, tabBranch, readTab, buildImport } from '../web/js/lib/aaj.js';
+import fs from 'node:fs';
+import { detectColumns, isHeaderRow, cellDate, tabBranch, readTab, buildImport, tokenOf, groupOf, firstPhone, liveStatus, mrOf, givenName, isCheckupText, splitCheckupRows } from '../web/js/lib/aaj.js';
 
 let passed = 0;
 const test = (name, fn) => { try { fn(); passed++; console.log('ok -', name); } catch (e) { console.log('FAIL -', name, '\n   ', e.message.split('\n')[0]); process.exitCode = 1; } };
@@ -121,6 +122,59 @@ test('rows for import: people matched through aliases, tokens not repeated, toda
   assert.deepEqual(twos.map((r) => r[0]), ['2025-10-06', '2025-10-07'], 'one patient\'s rows sit together, in date order');
 });
 
+// ---- the strict readers the live sync shares with this import (apps-script/AajSync.js has a copy; tests/aaj-sync-script.test.mjs compares the two)
+test('the "Months" header (Gulshan) is the month column', () => {
+  const m = detectColumns(['MR #', 'Patients Name', 'Months', 'Treatment', 'Token', 'Waiting', 'Group', 'Doctor Name']);
+  assert.equal(m.month, 2);
+  assert.equal(readTab([['MR #', 'Patients Name', 'Months', 'Treatment', 'Doctor Name'], ['9701', 'Sample Person', '5', 'Monthly', 'Dr Haniya']]).rows[0].month, 5);
+});
+
+test('token: only a whole number 1..999 is a token; kit text is not read as one', () => {
+  for (const [text, want] of [['121', 121], [' 12 ', 12], ['1.0', 1], ['999', 999], ['Kit 80k', null], ['Kit 55k', null], ['1 pfm', null], ['4 Zirconia', null], ['Dr Verda', null], ['0', null], ['1000', null], ['12.5', null], ['', null]]) {
+    assert.equal(tokenOf(text), want, `tokenOf(${JSON.stringify(text)})`);
+  }
+  const row = readTab([HEADER, ['', 'Kit Person', '', 'Zirconia', 'Kit 80k', 'Completed', '', '', '', '', '', '', '']]).rows;
+  assert.equal(row[0].token, null);
+});
+
+test('group: Group 1-3 give the digit, Group 4 and "Group" nothing, several groups the first', () => {
+  for (const [text, want] of [['Group 1', '1'], ['Group 3', '3'], ['Group 4', null], ['Group', null], ['Group 1, Group 2', '1'], ['Group 2, Group 1', '2'], ['12', null], ['2', '2'], ['', null]]) {
+    assert.equal(groupOf(text), want, `groupOf(${JSON.stringify(text)})`);
+  }
+});
+
+test('phone: a cell with two numbers gives the first one, not one 22-digit number', () => {
+  assert.equal(firstPhone('03001110003 / 03211110003'), '03001110003');
+  assert.equal(firstPhone('0300 1111111 or 0321 2222222'), '03001111111');
+  assert.equal(firstPhone('3001234567'), '03001234567');
+  assert.equal(firstPhone('call mother'), null);
+  assert.equal(readTab([HEADER, ['9701', 'Two Numbers', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03001110003 / 03211110003', '']]).rows[0].phone, '03001110003');
+});
+
+test('live status: Waiting, Treatment, Scheduled are never Completed; an empty or unknown word is null; the history reading is unchanged', () => {
+  for (const [text, want] of [['Waiting', 'waiting'], ['Treatment', 'in_treatment'], ['In treatment', 'in_treatment'], ['Scheduled', 'scheduled'], ['Completed', 'completed'], ['Cancelled', 'cancelled'], ['No show', 'no_show'], ['', null], ['Banana', null]]) {
+    assert.equal(liveStatus(text), want, `liveStatus(${JSON.stringify(text)})`);
+  }
+  const r = readTab([HEADER, ['9701', 'Some One', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '', '']]).rows[0];
+  assert.equal(r.status, 'completed', 'Admin -> Import still reads a history row as completed');
+  assert.equal(r.liveStatus, 'waiting');
+});
+
+test('Mr# cell: a number, NEW, or nothing; "98 51" is not an Mr#; the given name skips titles', () => {
+  assert.deepEqual(mrOf('146.0'), { mr: '146', isNew: false });
+  assert.deepEqual(mrOf('8602.'), { mr: '8602', isNew: false }, 'a stray dot after the Mr# is ignored (seen in the real sheet)');
+  assert.deepEqual(mrOf(' 8602. '), { mr: '8602', isNew: false });
+  assert.deepEqual(mrOf('8602..'), { mr: '8602', isNew: false });
+  assert.deepEqual(mrOf('.'), { mr: null, isNew: false });
+  assert.deepEqual(mrOf('NEW'), { mr: null, isNew: true });
+  assert.deepEqual(mrOf('98 51'), { mr: null, isNew: false });
+  assert.deepEqual(mrOf(''), { mr: null, isNew: false });
+  assert.equal(givenName('M Umer'), 'umer');
+  assert.equal(givenName('Muhammad Umer'), 'umer');
+  assert.equal(givenName('Dr. Sara Khan'), 'sara');
+  assert.equal(givenName(''), '');
+});
+
 // The website's own Mr# start at 50000, which is also an Excel date serial (24 Nov 2036). A Mr# typed on a row whose name is not filled
 // in yet must not turn that row into a day row, or every row after it would be dated 2036 and skipped as "future".
 const MINI = ['Mr #', 'Patient Name', 'Treatment', "Doctor's Name", 'Token No'];
@@ -150,6 +204,40 @@ test('a day row with a date serial in the Mr# column and a word in another colum
   const t = readTab(rows);
   assert.deepEqual(t.rows.map((r) => [r.mr, r.date]), [['9846', '2026-10-06'], ['9850', '2026-10-07'], ['9851', '2026-10-08'], ['9852', '2026-10-09']]);
   assert.deepEqual(t.days, ['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09']);
+});
+
+// Loop 4: Admin -> Import never sends a checkup row (no Mr#, Treatment says checkup) as a visit; the pattern is the sync's and the database's
+test('a row without an Mr# whose Treatment says checkup is a checkup patient: kept apart from the visits to import (the same pattern as the sync and the database)', () => {
+  for (const t of ['Checkup', 'checkup / pain', 'Xray checkup', 'Check up', 'CHECK-UP', 'chek up', 'Checkups', 'checup']) assert.ok(isCheckupText(t), t);
+  for (const t of ['Wire check', 'Braces check', 'RCT check', 'Check wire', 'Cheek filler', 'Filling and crown prep', 'Monthly', '', null]) assert.ok(!isCheckupText(t), String(t));
+  const src = fs.readFileSync(new URL('../web/js/lib/aaj.js', import.meta.url), 'utf8');
+  const pattern = String.raw`/\bch[ea]{1,2}c?k?[- ]?ups?\b/i`;
+  assert.ok(src.includes(pattern), 'aaj.js uses the pattern');
+  assert.ok(fs.readFileSync(new URL('../apps-script/AajSync.js', import.meta.url), 'utf8').includes(pattern), 'the same as the sync script');
+  assert.ok(fs.readFileSync(new URL('../supabase/migrations/20261009000300_aaj_two_way_sync.sql', import.meta.url), 'utf8').includes(String.raw`'\mch[ea]{1,2}c?k?[- ]?ups?\M'`), 'and the database');
+  const rows = [MINI, ['08/10/2026'], ['', 'Ck Person', 'Checkup', '', 1], ['9846', 'Hw Patient', 'Checkup', '', 2], ['', 'Forgot Mr', 'Filling and crown prep', '', 3], ['', 'Wire Person', 'Wire check', '', 4]];
+  const { rows: imp } = buildImport([{ name: 'Gulshan', branchId: 1, read: readTab(rows) }], [], [], '2026-10-09');
+  const { visits, checkups } = splitCheckupRows(imp);
+  assert.deepEqual(checkups.map((r) => r[3]), ['Ck Person'], 'only the row without an Mr# whose Treatment says checkup');
+  assert.deepEqual(visits.map((r) => r[3]).sort(), ['Forgot Mr', 'Hw Patient', 'Wire Person'], 'a row with an Mr# is a visit whatever its Treatment; a row without one and another Treatment is sent (matched by phone and first name only)');
+});
+
+// Loop 8 (sheet-behaviour RS8-C1): the archive the sync writes marks a row whose visit or checkup front desk deleted on the website, and a
+// checkup patient's row, in its "Website visit id" column: Admin -> Import reads past both (never a Completed visit for a wrong entry or a checkup)
+test('an archive row marked "deleted on the website" or "checkup <id>" in the Website visit id column is not imported; the others are', () => {
+  const head = ['Date', 'MR #', 'Patients Name', 'Months', 'Treatment', 'Token', 'Waiting', 'Group', 'Doctor Name', 'Treatment Details', 'P.P', 'Healthwire', 'Contact No', 'Reminder Status', 'Website visit id', 'Archived at'];
+  const row = (mr, name, treatment, webId) => ['2026-10-09', mr, name, '', treatment, '', 'Waiting', '', '', '', '', '', '', '', webId, '2026-10-10 00:05'];
+  const t = readTab([head,
+    row('9811', 'Kept Visit', 'Scaling', '00000000-0000-4000-8000-000000000001'),
+    row('9812', 'Gone Visit', 'Scaling', 'deleted on the website'),
+    row('9813', 'Registered Checkup', 'Checkup', 'checkup 00000000-0000-4000-8000-000000000002'),
+    row('9814', 'Never Synced', 'RCT', '')]);
+  assert.deepEqual(t.rows.map((r) => r.name), ['Kept Visit', 'Never Synced']);
+  assert.equal(t.deletedOnWebsite, 1);
+  assert.equal(t.archivedCheckups, 1);
+  assert.ok(t.issues.some((i) => /1 row is marked "deleted on the website"/.test(i)) && t.issues.some((i) => /1 row is a checkup patient/.test(i)), 'the import page says so');
+  // a tab without that column (the live sheet, an old download) is read as before
+  assert.equal(readTab([head.slice(0, 14), row('9812', 'Gone Visit', 'Scaling', 'deleted on the website').slice(0, 14)]).rows.length, 1);
 });
 
 console.log(`${passed} passed`);

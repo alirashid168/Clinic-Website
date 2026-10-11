@@ -1745,7 +1745,8 @@ export async function createSupabaseAdapter() {
     async auditLog() {
       const [rows, names] = await Promise.all([sb.from('audit_log').select('*').order('at', { ascending: false }).limit(201).then(check), staffNames()]);
       const list = capped(rows, 200);
-      return keepFlags(list, list.map((r) => ({ ...r, actor_name: names[r.actor] || null })));
+      // 00000000-...-0000000aa500 is the Google Sheet sync (private.aaj_sync_actor() in 20261009000300_aaj_two_way_sync.sql)
+      return keepFlags(list, list.map((r) => ({ ...r, actor_name: names[r.actor] || (r.actor === '00000000-0000-0000-0000-0000000aa500' ? 'Google Sheet sync' : null) })));
     },
     async dashboard(date) {
       const day = date || todayISO();
