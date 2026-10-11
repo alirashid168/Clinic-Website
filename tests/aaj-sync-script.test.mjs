@@ -1815,7 +1815,7 @@ test('Open the archive and Help show something useful', () => {
   assert.match(env.dialogs[env.dialogs.length - 1].text, /^The archive is here:\nhttps:\/\/docs\.google\.com\/spreadsheets\/d\/book-\d+\/edit$/);
   env.ctx.aajHelp();
   const help = env.dialogs[env.dialogs.length - 1].text;
-  for (const bit of ['checkup', 'Deleting a row', 'Completed', 'hidden columns', '10 minutes', 'archive']) assert.ok(help.includes(bit), bit);
+  for (const bit of ['checkup', 'Deleting a row', 'Completed', 'hidden columns', 'filter buttons in row 1', '10 minutes', 'archive']) assert.ok(help.includes(bit), bit);
   const w = world({ install: false, helpers: false });
   w.env.responder = () => 'OK';
   w.env.ctx.aajShowArchive();
@@ -5051,6 +5051,487 @@ test('a checkup patient added on the website and typed again in the sheet (the t
   env.at(TODAY, '23:58'); env.ticks(1);
   env.at(NEXT, '00:05'); env.ticks(2);
   assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]), ['Nadia Twice'], 'one line for one person (before: the refused second row was listed too)');
+});
+
+// ------------------------------------------------------------------------------------------------ fix loop 1 of round 10 (2026-10-11): SB10-1 (phone-less checkups doubled by a sort), SB10-2 (a left-over row in a sort), the header filter
+/** a sort of the visible columns only (the hidden helper columns stay where they are): rows from..to (default every row below the header) by one column; a stable sort, as in Sheets */
+function sortVisibleTab(env, tab, label, dir = 1, from = 2, to = null) {
+  const sh = env.tab(tab), last = colOf(env, tab, 'website') - 1, c = colOf(env, tab, label);
+  const end = to || sh.used().rows, data = [];
+  for (let r = from; r <= end; r++) { const row = []; for (let j = 1; j <= last; j++) row.push(sh._get(r, j)); data.push(row); }
+  const val = (x) => (x[c - 1] ? String(x[c - 1].v) : '￿');
+  data.sort((a, b) => dir * val(a).localeCompare(val(b)));
+  data.forEach((row, i) => row.forEach((cell, j) => sh._set(from + i, j + 1, cell)));
+  env.touch();
+}
+const SB_PATIENTS = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot'].map((n, i) => ({ mr: String(9721 + i), name: 'Sb ' + n, phone: '0300555000' + (i + 1) }));
+const sbVisit = (i, treatment = 'Scaling') => [SB_PATIENTS[i].mr, SB_PATIENTS[i].name, '', treatment, '', 'Waiting', '', '', 'd' + i, '', '', SB_PATIENTS[i].phone, ''];
+const nightLines = (env) => { env.at(TODAY, '23:58'); env.ticks(1); env.at(NEXT, '00:05'); env.ticks(2); return ckSheet(env).values().slice(1).map((r) => r[1]); };
+/** every row that shows `name` (copies aside) is linked to a checkup whose details are that row's details: nobody's notes went to the other one */
+function ckRowsMatch(env, server, name) {
+  for (const r of rowsNamed(env, GUL, name)) {
+    if (/^✗ Duplicate of row/.test(statusOf(env, GUL, r))) continue;
+    const key = cellOf(env, GUL, r, 'sync key');
+    const c = server.state.checkups.find((x) => (x.sheet_key || 'W-' + x.id) === key);
+    assert.ok(c, `row ${r} (${name}) is linked to a checkup: ${statusOf(env, GUL, r)}`);
+    assert.equal(c.details, cellOf(env, GUL, r, 'treatment details'), `row ${r}: the checkup behind it is the one with this row's details`);
+  }
+}
+
+test('SB10-1: two walk-ins of one name with no phone (two checkups), Completed, sorted four times with only the visible columns: still two checkups, two rows, two nightly lines', () => {
+  const rows = [sbVisit(0), sbVisit(1), ['', 'Sana Walkin', '', 'Checkup', '', 'Completed', '', 'Dr Haniya', 'first sana', '', '', '', ''],
+    sbVisit(2), sbVisit(3), ['', 'Sana Walkin', '', 'Checkup', '', 'Completed', '', 'Dr Haniya', 'second sana', '', '', '', ''], sbVisit(4), sbVisit(5)];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: SB_PATIENTS });
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 2, 'two walk-ins of one name are two checkups (by design)');
+  assert.equal(server.state.visits.length, 6);
+  const used = env.tab(GUL).used().rows;
+  for (const [label, dir] of [['patient', 1], ['mr', -1], ['patient', 1], ['treatment', -1]]) {
+    sortVisibleTab(env, GUL, label, dir);
+    env.advance(61000);
+    env.ticks(4);
+    assert.equal(server.state.checkups.length, 2, `sort by ${label}: no checkup made`);
+    assert.equal(server.state.visits.length, 6, `sort by ${label}: no visit made or lost`);
+    assert.equal(rowsNamed(env, GUL, 'Sana Walkin').length, 2, `sort by ${label}: two Sana rows (none came back as "Not removed")`);
+    assert.equal(env.tab(GUL).used().rows, used, `sort by ${label}: the tab did not grow`);
+    assert.equal(server.state.removedLog.length, 0, `sort by ${label}: nothing removed`);
+    ckRowsMatch(env, server, 'Sana Walkin');
+    for (const r of rowsNamed(env, GUL, 'Sana Walkin')) assert.ok(statusOf(env, GUL, r).startsWith('✓'), `row ${r}: ${statusOf(env, GUL, r)}`);
+  }
+  quiet(env, server);
+  assert.equal(nightLines(env).filter((n) => n === 'Sana Walkin').length, 2, 'two lines for two people');
+});
+
+test('SB10-1: the guide\'s path (four rows deleted at once, put back, Ctrl+Z) with a checkup that has no phone, then three sorts: one checkup, the copy still says "Duplicate of row N", one nightly line', () => {
+  const rows = [sbVisit(0), sbVisit(1, 'RCT'), ['', 'Ck Nophone', '', 'Checkup', '', 'Treatment', '', 'Dr Haniya', 'pain upper left', '', '', '', ''],
+    sbVisit(2, 'Filling'), sbVisit(3, 'Polish'), sbVisit(4), sbVisit(5)];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: SB_PATIENTS });
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 1);
+  const sh = env.tab(GUL);
+  const saved = saveRows(sh, 3, 4);
+  env.deleteRows(GUL, 3, 4);
+  env.ticks(2);                                               // held: the four rows come back at the bottom
+  undoDelete(env, GUL, 3, saved);                             // Ctrl+Z: the originals at their place, the copies say "Duplicate of row N"
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(rowsNamed(env, GUL, 'Ck Nophone').length, 2);
+  const used = sh.used().rows;
+  for (const [label, dir] of [['patient', 1], ['mr', -1], ['patient', -1]]) {
+    sortVisibleTab(env, GUL, label, dir);
+    env.advance(61000);
+    env.ticks(4);
+    assert.equal(server.state.checkups.length, 1, `sort by ${label}: one checkup patient stays one checkup`);
+    assert.equal(server.state.visits.length, 6, `sort by ${label}: one visit per patient`);
+    assert.equal(sh.used().rows, used, `sort by ${label}: the tab did not grow`);
+    assert.equal(server.state.removedLog.length, 0, `sort by ${label}: nothing removed`);
+    for (const name of ['Sb Bravo', 'Ck Nophone', 'Sb Charlie', 'Sb Delta']) {
+      const at = rowsNamed(env, GUL, name);
+      assert.equal(at.length, 2, `sort by ${label}: ${name} twice`);
+      assert.ok(statusOf(env, GUL, at[0]).startsWith('✓'), `sort by ${label}: ${name} row ${at[0]}: ${statusOf(env, GUL, at[0])}`);
+      assert.equal(statusOf(env, GUL, at[1]), `✗ Duplicate of row ${at[0]}: delete this row.`, `sort by ${label}: ${name}`);
+      assert.equal(cellOf(env, GUL, at[1], 'sync key'), cellOf(env, GUL, at[0], 'sync key'), `sort by ${label}: ${name}: the copy keeps the one key`);
+    }
+  }
+  quiet(env, server);
+  assert.deepEqual(nightLines(env).filter((n) => n === 'Ck Nophone'), ['Ck Nophone'], 'one line for one person');
+});
+
+test('SB10-1: two same-name checkups with no phone whose rows lost the hidden key (helper cells cleared) each adopt their own checkup: nothing made twice, nothing comes back', () => {
+  const rows = [sbVisit(0), ['', 'Sana Walkin', '', 'Checkup', '', 'Completed', '', '', 'first sana', '', '', '', ''], sbVisit(1),
+    ['', 'Sana Walkin', '', 'Checkup', '', 'Treatment', '', '', 'second sana', '', '', '', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: SB_PATIENTS });
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 2);
+  const ids = server.state.checkups.map((c) => c.id);
+  const sh = env.tab(GUL);
+  for (const r of rowsNamed(env, GUL, 'Sana Walkin')) for (const h of ['sync key', 'sync base', 'sync edited']) sh._set(r, colOf(env, GUL, h), null);
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.deepEqual(server.state.checkups.map((c) => c.id), ids, 'the same two checkups, none made');
+  assert.equal(rowsNamed(env, GUL, 'Sana Walkin').length, 2, 'no row came back');
+  assert.equal(server.state.removedLog.length, 0);
+  for (const r of rowsNamed(env, GUL, 'Sana Walkin')) assert.ok(statusOf(env, GUL, r).startsWith('✓'), `row ${r}: ${statusOf(env, GUL, r)}`);
+  // a third walk-in of that name typed now is a new person: her own checkup
+  env.typeRow(GUL, 6, ['', 'Sana Walkin', '', 'Checkup', '', 'Waiting', '', '', 'third sana', '', '', '', '']);
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 3, 'a third Sana gets her own checkup');
+});
+
+test('SB10-2: a "Left over from <day>" row in a sort of the visible columns: no visit removed, no visit made for the left-over patient, each row keeps its own message', () => {
+  const P = [...SB_PATIENTS, { mr: '9739', name: 'Zed Yesterday', phone: '03005550009' }];
+  const { env, server } = world({ rows: { [GUL]: [['9739', 'Zed Yesterday', '7', 'Braces', '', 'Completed', '', '', 'wire', '', '', '03005550009', '']] }, patients: P });
+  settle(env, 3);
+  const sh = env.tab(GUL);
+  const zed = saveRows(sh, 2, 1);
+  rv9Night(env);
+  assert.deepEqual(dataCells(env), []);
+  env.at(NEXT, '08:00');
+  // the new day: yesterday's row is back at the top with its hidden cells (a clear that missed it), and today's patients are typed below it
+  zed[0].forEach((cell, j) => { if (cell) sh._set(2, j + 1, cell); });
+  env.touch();
+  env.typeRow(GUL, 3, sbVisit(1, 'RCT'));
+  env.typeRow(GUL, 4, sbVisit(2, 'Filling'));
+  env.typeRow(GUL, 5, sbVisit(0));
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.visitsOf('GUL', NEXT).length, 3);
+  assert.equal(statusOf(env, GUL, 2), `✗ Left over from ${TODAY} (archived that night): delete this row.`);
+  const from = server.calls.length;
+  sortVisibleTab(env, GUL, 'patient');                        // Sb Alpha, Sb Bravo, Sb Charlie, Zed Yesterday
+  assert.equal(cellOf(env, GUL, 5, 'patient'), 'Zed Yesterday');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.state.removedLog.length, 0, 'no visit removed');
+  assert.deepEqual(server.visitsOf('GUL', NEXT).map((v) => server.patientByMr(v.mr).name).sort(), ['Sb Alpha', 'Sb Bravo', 'Sb Charlie'], 'no visit for yesterday\'s patient, today\'s three kept');
+  assert.equal(sentRowsSince(server, from).filter((r) => r.set && r.set.name === 'Zed Yesterday').length, 0, 'yesterday\'s row is never sent');
+  assert.equal(statusOf(env, GUL, 5), `✗ Left over from ${TODAY} (archived that night): delete this row.`, 'the message went with yesterday\'s patient');
+  for (const r of [2, 3, 4]) assert.ok(statusOf(env, GUL, r).startsWith('✓'), `row ${r}: ${statusOf(env, GUL, r)}`);
+  quiet(env, server);
+  env.deleteRows(GUL, 5);                                     // staff follow the message
+  env.ticks(3);
+  assert.equal(server.visitsOf('GUL', NEXT).length, 3, 'deleting the left-over row removes nobody');
+  assert.equal(server.state.removedLog.length, 0);
+});
+
+test('SB10-2: the same sort with today\'s patient also edited in that minute (so the rows did not only swap): the "Left over" memory still goes with yesterday\'s patient; today\'s patient keeps her visit and her edit', () => {
+  const P = [...SB_PATIENTS, { mr: '9739', name: 'Zed Yesterday', phone: '03005550009' }];
+  const { env, server } = world({ rows: { [GUL]: [['9739', 'Zed Yesterday', '7', 'Braces', '', 'Completed', '', '', 'wire', '', '', '03005550009', '']] }, patients: P });
+  settle(env, 3);
+  const sh = env.tab(GUL);
+  const zed = saveRows(sh, 2, 1);
+  rv9Night(env);
+  env.at(NEXT, '08:00');
+  zed[0].forEach((cell, j) => { if (cell) sh._set(2, j + 1, cell); });
+  env.touch();
+  env.typeRow(GUL, 3, sbVisit(1, 'RCT'));
+  env.typeRow(GUL, 4, sbVisit(0));
+  env.advance(61000);
+  env.ticks(3);
+  const alpha = server.visitsOf('GUL', NEXT).find((v) => v.mr === '9721');
+  assert.ok(alpha);
+  sortVisibleTab(env, GUL, 'patient');                        // Sb Alpha, Sb Bravo, Zed Yesterday
+  assert.equal(cellOf(env, GUL, 4, 'patient'), 'Zed Yesterday');
+  setCell(env, GUL, 2, 'waiting', 'Treatment');               // and Sb Alpha goes in to the doctor before the next minute
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.state.removedLog.length, 0, 'no visit removed');
+  assert.deepEqual(server.visitsOf('GUL', NEXT).map((v) => v.mr).sort(), ['9721', '9722'], 'the same two visits: none made for yesterday\'s patient');
+  assert.ok(server.visitById(alpha.id), 'Sb Alpha\'s own visit, not a new one');
+  assert.equal(server.visitById(alpha.id).status, 'in_treatment', 'Sb Alpha\'s edit reached her own visit');
+  assert.equal(statusOf(env, GUL, 4), `✗ Left over from ${TODAY} (archived that night): delete this row.`);
+  for (const r of [2, 3]) assert.ok(statusOf(env, GUL, r).startsWith('✓'), `row ${r}: ${statusOf(env, GUL, r)}`);
+  quiet(env, server);
+});
+// ------------------------------------------------------------------------------------------------ fix loop 2 of round 11 (2026-10-11): B1 (a copied phone-less checkup in a move that is not a closed exchange), B2 (a key left on a row the move made blank)
+/** "Delete cells, shift up" over the visible columns of row `from`: the visible cells below move up one row, the hidden helper columns stay */
+function shiftUpVisible(env, tab, from) {
+  const sh = env.tab(tab), last = colOf(env, tab, 'website') - 1, end = sh.used().rows;
+  for (let r = from; r <= end; r++) for (let c = 1; c <= last; c++) sh._set(r, c, sh._get(r + 1, c));
+  env.touch();
+}
+const b1Rows = () => [sbVisit(0), ['', 'Ck Nophone', '', 'Checkup', '', 'Treatment', '', 'Dr Haniya', 'pain upper left', '', '', '', ''], sbVisit(1, 'RCT'), sbVisit(2, 'Filling')];
+
+test('R11-B1: a phone-less checkup and its "Duplicate of row N" copy, then a move of the visible cells that is not a closed exchange (a row cleared and a sort; "Delete cells, shift up"; a sort with a Status typed in the same minute): one checkup, the copy still says so, one nightly line', () => {
+  for (const variant of ['cleared + sort', 'shift up', 'sort + status']) {
+    const { env, server } = world({ rows: { [GUL]: b1Rows() }, patients: SB_PATIENTS });
+    settle(env, 3);
+    const sh = env.tab(GUL);
+    saveRows(sh, 3, 1)[0].forEach((cell, j) => { if (cell) sh._set(6, j + 1, cell); });     // the whole row copied below, hidden key too
+    env.touch();
+    env.advance(61000);
+    env.ticks(2);
+    assert.equal(statusOf(env, GUL, 6), '✗ Duplicate of row 3: delete this row.', variant + ': setup');
+    assert.equal(server.state.checkups.length, 1, variant + ': setup');
+    const ck = server.state.checkups[0].id;
+    if (variant === 'cleared + sort') {                 // Sb Alpha's cells cleared (a wrong entry), then a sort by name: Ck, Ck, Sb Bravo, Sb Charlie, blank
+      env.clearRow(GUL, 2, 1, colOf(env, GUL, 'website') - 1);
+      sortVisibleTab(env, GUL, 'patient');
+    } else if (variant === 'shift up') {                // Ck, Sb Bravo, Sb Charlie, Ck, blank: each key is one row off, the last one on a blank row
+      shiftUpVisible(env, GUL, 2);
+    } else {                                            // Ck, Ck, Sb Alpha, Sb Bravo, Sb Charlie, and the first Ck goes Completed in that minute
+      sortVisibleTab(env, GUL, 'patient');
+      setCell(env, GUL, 2, 'waiting', 'Completed');
+    }
+    env.advance(61000);
+    env.ticks(4);
+    assert.deepEqual(server.state.checkups.map((c) => c.id), [ck], variant + ': the one checkup, none made (before: a second checkup, in Treatment, that came back when deleted)');
+    const at = rowsNamed(env, GUL, 'Ck Nophone');
+    assert.equal(at.length, 2, variant + ': both rows are still there');
+    assert.ok(statusOf(env, GUL, at[0]).startsWith('✓'), `${variant}: row ${at[0]}: ${statusOf(env, GUL, at[0])}`);
+    assert.equal(statusOf(env, GUL, at[1]), `✗ Duplicate of row ${at[0]}: delete this row.`, variant + ': the copy still says so');
+    assert.equal(cellOf(env, GUL, at[1], 'sync key'), cellOf(env, GUL, at[0], 'sync key'), variant + ': one key on both rows');
+    assert.equal(cellOf(env, GUL, at[0], 'sync key'), server.checkupById(ck).sheet_key || 'W-' + ck, variant + ': the checkup\'s own key');
+    if (variant === 'sort + status') assert.equal(server.checkupById(ck).day_status, 'completed', 'the Status typed after the sort reached the one checkup');
+    for (const name of ['Sb Bravo', 'Sb Charlie']) {
+      const r = rowOf(env, GUL, name);
+      assert.ok(statusOf(env, GUL, r).startsWith('✓'), `${variant}: ${name}: ${statusOf(env, GUL, r)}`);
+      assert.equal(cellOf(env, GUL, r, 'sync key'), webVisit(server, name).sheet_key, `${variant}: ${name} carries its own visit's key`);
+    }
+    assert.equal(server.state.visits.length, variant === 'sort + status' ? 3 : 2, variant + ': only the cleared wrong entry\'s visit is gone');
+    assert.deepEqual(nightLines(env).filter((n) => n === 'Ck Nophone'), ['Ck Nophone'], variant + ': one nightly line for one person');
+  }
+});
+
+test('R11-B1: the copy row deleted with "Delete cells, shift up" or cleared, and the original deleted with "Delete cells, shift up": one row and one checkup are left, nothing comes back', () => {
+  for (const variant of ['copy shifted up', 'copy cleared', 'original shifted up']) {
+    const { env, server } = world({ rows: { [GUL]: b1Rows() }, patients: SB_PATIENTS });
+    settle(env, 3);
+    const sh = env.tab(GUL);
+    saveRows(sh, 3, 1)[0].forEach((cell, j) => { if (cell) sh._set(6, j + 1, cell); });
+    env.touch();
+    env.advance(61000);
+    env.ticks(2);
+    const ck = server.state.checkups[0].id;
+    if (variant === 'copy shifted up') shiftUpVisible(env, GUL, 6);
+    else if (variant === 'copy cleared') env.clearRow(GUL, 6, 1, colOf(env, GUL, 'website') - 1);
+    else shiftUpVisible(env, GUL, 3);
+    env.advance(61000);
+    env.ticks(4);
+    assert.deepEqual(server.state.checkups.map((c) => c.id), [ck], variant + ': the one checkup');
+    const at = rowsNamed(env, GUL, 'Ck Nophone');
+    assert.equal(at.length, 1, variant + ': one row (nothing came back as "Not removed")');
+    assert.ok(statusOf(env, GUL, at[0]).startsWith('✓'), `${variant}: ${statusOf(env, GUL, at[0])}`);
+    assert.equal(server.state.visits.length, 3, variant + ': every visit kept');
+    assert.equal(server.state.removedLog.length, 0, variant + ': nothing removed');
+    quiet(env, server);
+  }
+});
+
+test('R11-B1: two walk-ins of one name with no phone (two checkups), one of them copied, then "Delete cells, shift up": the copied key is not handed to the other walk-in (her checkup is never deleted, her row is never called a duplicate)', () => {
+  const rows = [sbVisit(0), ['', 'Sana Walkin', '', 'Checkup', '', 'Treatment', '', '', 'first sana', '', '', '', ''], sbVisit(1),
+    ['', 'Sana Walkin', '', 'Checkup', '', 'Treatment', '', '', 'second sana', '', '', '', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: SB_PATIENTS });
+  settle(env, 3);
+  const sh = env.tab(GUL);
+  saveRows(sh, 3, 1)[0].forEach((cell, j) => { if (cell) sh._set(6, j + 1, cell); });     // the first Sana's whole row copied below
+  env.touch();
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(statusOf(env, GUL, 6), '✗ Duplicate of row 3: delete this row.');
+  const ids = server.state.checkups.map((c) => c.id);
+  assert.equal(ids.length, 2);
+  shiftUpVisible(env, GUL, 2);                                // Sb Alpha (a wrong entry) removed: Sana, Sb Bravo, Sana, Sana, blank
+  env.advance(61000);
+  env.ticks(4);
+  for (const id of ids) assert.ok(server.checkupById(id), 'both walk-ins keep their own checkup');
+  assert.equal(server.state.removedLog.filter((x) => /Sana/.test(JSON.stringify(x))).length, 0, 'no Sana checkup removed');
+  const second = rowsNamed(env, GUL, 'Sana Walkin').filter((r) => cellOf(env, GUL, r, 'treatment details') === 'second sana');
+  assert.equal(second.length, 1);
+  assert.ok(!/^✗ Duplicate of row/.test(statusOf(env, GUL, second[0])), 'the second walk-in\'s own row is not called a copy of the first: ' + statusOf(env, GUL, second[0]));
+});
+
+/** yesterday's rows put back at the top of the new day's tab with their hidden cells (a clear that missed them, a Version history restore) */
+function leftOverWorld(leftRows, todayRows = [], P = []) {
+  const { env, server } = world({ rows: { [GUL]: leftRows }, patients: [...SB_PATIENTS, ...P] });
+  settle(env, 3);
+  const sh = env.tab(GUL);
+  const saved = saveRows(sh, 2, leftRows.length);
+  rv9Night(env);
+  assert.deepEqual(dataCells(env), []);
+  env.at(NEXT, '08:00');
+  todayRows.forEach((row, i) => env.typeRow(GUL, 2 + i, row));
+  saved.forEach((row, i) => row.forEach((cell, j) => { if (cell) sh._set(2 + todayRows.length + i, j + 1, cell); }));
+  env.touch();
+  env.advance(61000);
+  env.ticks(3);
+  return { env, server, sh };
+}
+const LEFT = `✗ Left over from ${TODAY} (archived that night): delete this row.`;
+const B2_P = [{ mr: '9738', name: 'Yara Leftover', phone: '03005550008' }, { mr: '9739', name: 'Zed Leftover', phone: '03005550009' }];
+const yaraRow = () => ['9738', 'Yara Leftover', '5', 'Braces', '', 'Completed', '', '', 'wire', '', '', '03005550008', ''];
+const zedRow = () => ['9739', 'Zed Leftover', '7', 'Braces', '', 'Completed', '', '', 'wire', '', '', '03005550009', ''];
+
+test('R11-B2: early morning, only two "Left over" rows; the first removed with "Delete cells, shift up": the second stays "Left over", no visit of today is made for it', () => {
+  const { env, server } = leftOverWorld([yaraRow(), zedRow()], [], B2_P);
+  assert.equal(statusOf(env, GUL, 2), LEFT);
+  assert.equal(statusOf(env, GUL, 3), LEFT);
+  const from = server.calls.length;
+  shiftUpVisible(env, GUL, 2);
+  assert.equal(cellOf(env, GUL, 2, 'patient'), 'Zed Leftover');
+  env.advance(61000);
+  env.ticks(3);
+  assert.deepEqual(server.visitsOf('GUL', NEXT), [], 'no visit of today for yesterday\'s patient (before: a Completed braces visit, month 7, photo step skipped)');
+  assert.equal(sentRowsSince(server, from).filter((r) => r.set && r.set.name === 'Zed Leftover').length, 0, 'yesterday\'s row is never sent');
+  assert.equal(statusOf(env, GUL, 2), LEFT, 'the message went with yesterday\'s patient');
+  assert.equal(cellOf(env, GUL, 3, 'sync key'), '', 'the blank row lets its key go');
+  quiet(env, server);
+});
+
+test('R11-B2: a "Left over" row as the last row, then the visible cells move up one row ("Delete cells, shift up" on a wrong entry; a row cleared and a sort; its cells cut and pasted lower): no visit of today for it, it still says "Left over"', () => {
+  for (const variant of ['shift up', 'cleared + sort', 'cut + paste']) {
+    const { env, server, sh } = leftOverWorld([zedRow()], [sbVisit(1, 'RCT'), sbVisit(2, 'Filling'), sbVisit(0)], B2_P);
+    assert.equal(statusOf(env, GUL, 5), LEFT, variant + ': setup');
+    assert.equal(server.visitsOf('GUL', NEXT).length, 3, variant + ': setup');
+    const from = server.calls.length, W = colOf(env, GUL, 'website') - 1;
+    if (variant === 'shift up') shiftUpVisible(env, GUL, 2);                    // Sb Bravo (a wrong entry) removed: Sb Charlie, Sb Alpha, Zed, blank
+    else if (variant === 'cleared + sort') { env.clearRow(GUL, 3, 1, W); sortVisibleTab(env, GUL, 'patient'); }     // Sb Alpha, Sb Bravo, Zed, blank
+    else {                                                                      // Zed's visible cells cut and pasted two rows lower
+      const cells = Array.from({ length: W }, (_, j) => sh._get(5, j + 1));
+      for (let c = 1; c <= W; c++) sh._set(5, c, null);
+      cells.forEach((cell, j) => sh._set(7, j + 1, cell));
+      env.ctx.aajOnEdit({ range: sh.getRange(7, 1, 1, W), source: env.book });
+    }
+    const zr = rowOf(env, GUL, 'Zed Leftover');
+    env.advance(61000);
+    env.ticks(4);
+    assert.equal(server.visitsOf('GUL', NEXT).filter((v) => v.mr === '9739').length, 0, variant + ': no visit of today for yesterday\'s patient');
+    assert.equal(sentRowsSince(server, from).filter((r) => r.set && r.set.name === 'Zed Leftover').length, 0, variant + ': yesterday\'s row is never sent');
+    assert.equal(statusOf(env, GUL, zr), LEFT, variant + ': the message went with yesterday\'s patient');
+    for (const name of ['Sb Alpha', 'Sb Bravo', 'Sb Charlie']) {
+      const r = rowOf(env, GUL, name);
+      if (!r) continue;
+      assert.ok(statusOf(env, GUL, r).startsWith('✓'), `${variant}: ${name}: ${statusOf(env, GUL, r)}`);
+    }
+  }
+});
+
+test('R11-B2: a "deleted on the website" row as the last row, then "Delete cells, shift up" on a wrong entry above it: the visit front desk deleted is not made again and the row still says so', () => {
+  const { env, server } = synced();
+  const r7 = rowOf(env, GUL, 'Sample Person Six');
+  assert.equal(r7, 7, 'the last row');
+  server.removeVisit(webVisit(server, 'Sample Person Six').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, 7), GONE);
+  const from = server.calls.length;
+  shiftUpVisible(env, GUL, 2);                                // Sample Person One (a wrong entry) removed: every person one row up, row 7 blank
+  assert.equal(cellOf(env, GUL, 6, 'patient'), 'Sample Person Six');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(visitOfMr(server, '9703').length, 0, 'the visit front desk deleted is not made again (owner decision 2)');
+  assert.equal(sentRowsSince(server, from).filter((r) => r.set && r.set.name === 'Sample Person Six').length, 0, 'its row is not sent');
+  assert.equal(statusOf(env, GUL, 6), GONE, 'the row still says so');
+  for (const name of ['Sample Person Two', 'Sample Person Three', 'Sample Person Four', 'Sample Person Five']) {
+    const r = rowOf(env, GUL, name);
+    assert.ok(/^[✓⚠]/.test(statusOf(env, GUL, r)), name + ': ' + statusOf(env, GUL, r));
+    assert.equal(cellOf(env, GUL, r, 'sync key'), webVisit(server, name).sheet_key, name + ' carries its own visit\'s key');
+  }
+});
+
+test('R11-B2: a "deleted on the website" row whose "Duplicate of row N" copy was just cleared, then "Delete cells, shift up" on a wrong entry: the deleted visit is not made again', () => {
+  const { env, server } = synced();
+  server.removeVisit(webVisit(server, 'Sample Person Five').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, 6), GONE);
+  const sh = env.tab(GUL);
+  saveRows(sh, 6, 1)[0].forEach((cell, j) => { if (cell) sh._set(9, j + 1, cell); });     // its whole row copied below
+  env.touch();
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(statusOf(env, GUL, 9), '✗ Duplicate of row 6: delete this row.');
+  env.clearRow(GUL, 9, 1, colOf(env, GUL, 'website') - 1);     // the copy cleared (its hidden key stays a moment)
+  shiftUpVisible(env, GUL, 2);                                // and in the same minute Sample Person One removed with "Delete cells, shift up"
+  assert.equal(cellOf(env, GUL, 5, 'patient'), 'Sample Person Five');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(visitOfMr(server, '9705').length, 0, 'the visit front desk deleted is not made again');
+  assert.equal(statusOf(env, GUL, 5), GONE, 'the row still says so');
+});
+
+test('R11-B2: a "deleted on the website" row above a "Left over" row, then a sort that puts the deleted person on the left-over row\'s place, with a Status typed in that minute: each memory goes with its own person', () => {
+  const { env, server } = leftOverWorld([zedRow()], [sbVisit(2, 'Filling')], B2_P);    // Sb Charlie (row 2), Zed left over (row 3)
+  env.typeRow(GUL, 4, sbVisit(0));                            // Sb Alpha
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(statusOf(env, GUL, 3), LEFT);
+  const alpha = server.visitsOf('GUL', NEXT).find((v) => v.mr === '9721');
+  server.removeVisit(server.visitsOf('GUL', NEXT).find((v) => v.mr === '9723').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, 2), GONE);
+  const from = server.calls.length;
+  sortVisibleTab(env, GUL, 'patient');                        // Sb Alpha, Sb Charlie (on Zed's key), Zed (on Sb Alpha's key)
+  setCell(env, GUL, 2, 'waiting', 'Treatment');               // and Sb Alpha goes in, so the rows did not only swap
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.visitsOf('GUL', NEXT).filter((v) => v.mr === '9739').length, 0, 'no visit of today for yesterday\'s patient');
+  assert.equal(sentRowsSince(server, from).filter((r) => r.set && r.set.name === 'Zed Leftover').length, 0, 'yesterday\'s row is never sent');
+  assert.equal(statusOf(env, GUL, 4), LEFT, 'the "Left over" message went with Zed');
+  assert.equal(visitOfMr(server, '9723').length, 0, 'the visit front desk deleted is not made again');
+  assert.equal(statusOf(env, GUL, 3), GONE, 'the "deleted" message went with Sb Charlie');
+  assert.equal(server.visitById(alpha.id).status, 'in_treatment', 'Sb Alpha\'s edit reached her own visit');
+});
+
+test('R11-B2: the archive clears a row as "left over" only while it shows that earlier day\'s person (the rule of aajScanTab): a patient a sort put on an old key is copied', () => {
+  const { env } = world({ rows: { [GUL]: [zedRow(), sbVisit(0)] }, patients: [...SB_PATIENTS, ...B2_P] });
+  const sh = env.tab(GUL), y = '2026-10-08';
+  const put = (r, key, s, n) => {
+    sh._set(r, colOf(env, GUL, 'sync key'), { kind: 's', v: key });
+    sh._set(r, colOf(env, GUL, 'sync base'), { kind: 's', v: JSON.stringify({ v: '00000000-0000-0000-0000-00000000000' + n, d: y, b: 'GUL', s, w: { mr: s.mr, name: s.name } }) });
+    sh._set(r, colOf(env, GUL, 'sync edited'), { kind: 's', v: String(Date.parse(y + 'T15:00:00+05:00')) });
+  };
+  put(2, 'S-0123456789ab', { mr: '9739', name: 'Zed Leftover', phone: '03005550009' }, 1);     // still that day's person
+  put(3, 'S-0123456789ac', { mr: '9738', name: 'Yara Leftover', phone: '03005550008' }, 2);    // Sb Alpha sorted onto Yara's old key
+  const e = { cfg: { tab: GUL, branch: 'GUL' }, sheet: sh };
+  env.ctx.aajReadTab_(e);
+  const rows = env.ctx.aajArchiveRows_(e, 0, TODAY);
+  assert.deepEqual(Array.from(rows, (x) => [x.r, x.stale]), [[2, true], [3, false]], 'Zed is left over (cleared, not copied again); Sb Alpha is a row of the day being archived (before: cleared without a copy)');
+});
+
+/** the tab's basic filter as [first row, first column, rows, columns], or null */
+const filterBox = (sh) => (sh.filter ? [sh.filter.range.r, sh.filter.range.c, sh.filter.range.nr, sh.filter.range.nc] : null);
+
+test('Set up gives every tab a header filter over all used columns, the hidden helper columns too (its sort buttons then move whole rows); a narrower filter is widened keeping its criteria; a filter that covers them is left alone', () => {
+  const { env, server } = world({ tabs: TABS, patients: ALL_PATIENTS, install: false, helpers: false });
+  const gul = env.tab(GUL), nn = env.tab('North Nazimabad'), dha = env.tab('DHA KHI');
+  // Gulshan: a filter made before Set up on the visible columns only, showing Waiting rows; NN: one that already reaches over where the helper
+  // columns go (17..20); DHA: one that starts at the second column
+  const gulCrit = { visibleValues: ['Waiting'] }, nnCrit = { hiddenValues: ['Cancelled'] };
+  gul.getRange(1, 1, 50, 13).createFilter().setColumnFilterCriteria(6, gulCrit);
+  const nnFilter = nn.getRange(1, 1, 200, 20).createFilter();
+  nnFilter.setColumnFilterCriteria(3, nnCrit);
+  dha.getRange(1, 2, 80, 12).createFilter();
+  const removed0 = env.stats.filtersRemoved || 0;
+  scripted(env);
+  env.ctx.aajSetup();
+  const helperEnd = (t) => { const sh = env.tab(t); let c = 0; for (let j = 1; j <= sh.used().cols; j++) if (/^(Website|Sync key|Sync base|Sync edited)/.test(sh.text(1, j))) c = j; return c; };
+  assert.deepEqual(filterBox(gul), [1, 1, 50, helperEnd(GUL)], 'Gulshan: widened over the same rows to every used column');
+  assert.equal(gul.filter.criteria.get(6), gulCrit, 'Gulshan: the Waiting criteria is kept on its column');
+  assert.equal(gul.filter.criteria.size, 1);
+  assert.equal(nn.filter, nnFilter, 'North Nazimabad: the filter that already covers the helper columns is the same filter');
+  assert.deepEqual(filterBox(nn), [1, 1, 200, 20], 'North Nazimabad: not changed');
+  assert.equal(nn.filter.criteria.get(3), nnCrit);
+  assert.deepEqual(filterBox(dha), [1, 1, 80, helperEnd('DHA KHI')], 'DHA: a filter that starts at the second column now starts at the first');
+  for (const t of ['Gulberg Lhr', 'Islamabad']) assert.deepEqual(filterBox(env.tab(t)), [1, 1, env.tab(t).getMaxRows(), helperEnd(t)], t + ': a new filter over every row and used column');
+  assert.equal((env.stats.filtersRemoved || 0) - removed0, 2, 'only the two narrow filters were taken off (to be widened)');
+  assert.match(logText(env), /Gulshan KHI.*The filter in row 1 now covers the hidden columns too/);
+  assert.match(logText(env), /Islamabad.*A filter was added to row 1/);
+  assert.ok(!/North Nazimabad.*filter/.test(logText(env)), 'nothing said about the filter that was left alone');
+  // a second Set up (repair) changes nothing
+  const boxes = TABS.map((t) => filterBox(env.tab(t)));
+  const created = env.stats.filtersCreated;
+  scripted(env);
+  env.ctx.aajSetup();
+  assert.deepEqual(TABS.map((t) => filterBox(env.tab(t))), boxes);
+  assert.equal(env.stats.filtersCreated, created, 'no filter made again');
+  assert.ok(server.calls.length > 0);
+});
+
+test('the minute tick puts the header filter back when staff removed it (at most every ten minutes, only when it reads the tabs anyway); a filter Google refuses is logged once a day and the sync goes on', () => {
+  const { env, server } = synced();
+  const sh = env.tab(GUL);
+  assert.deepEqual(filterBox(sh), [1, 1, sh.getMaxRows(), colOf(env, GUL, 'sync edited')], 'the first full read made it');
+  sh.filter = null;                                           // staff: Data > Remove filter
+  env.touch();
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(sh.filter, null, 'not looked at again within ten minutes');
+  env.advance(10 * 60000);
+  env.touch();
+  env.ticks(1);
+  assert.deepEqual(filterBox(sh), [1, 1, sh.getMaxRows(), colOf(env, GUL, 'sync edited')], 'put back');
+  // Google refuses (merged cells in row 1, say): one line in the log that day, and the rows still sync
+  sh.filter = null;
+  const real = env.Range.prototype.createFilter;
+  env.Range.prototype.createFilter = function () { throw new Error('You can\'t create a filter on a range with merged cells.'); };
+  try {
+    for (let k = 0; k < 3; k++) { env.advance(11 * 60000); env.touch(); env.ticks(1); }
+    assert.equal((logText(env).match(/The filter in row 1 could not be set/g) || []).length, 1, 'logged once');
+    env.typeRow(GUL, 9, ['9799', 'Filter Walker', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110099', '']);
+    server.addPatient({ mr: '9799', name: 'Filter Walker', phone: '03001110099' });
+    settle(env, 3);
+    assert.ok(server.state.visits.some((v) => v.mr === '9799'), 'the sync works without the filter');
+  } finally { env.Range.prototype.createFilter = real; }
 });
 
 console.log(`${passed} passed, ${failed} failed`);

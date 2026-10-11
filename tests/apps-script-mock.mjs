@@ -1,4 +1,4 @@
-// A fake Google for apps-script/AajSync.js: SpreadsheetApp (tabs, ranges, hidden columns, creating a second
+// A fake Google for apps-script/AajSync.js: SpreadsheetApp (tabs, ranges, hidden columns, a tab's basic filter, creating a second
 // spreadsheet), PropertiesService, LockService, ScriptApp triggers, Utilities, UrlFetchApp, SpreadsheetApp.getUi()
 // with scripted answers, and a clock. The script file is loaded into a separate JavaScript context with
 // node:vm, exactly as Google would run it (plain script, its top-level names become globals).
@@ -120,6 +120,24 @@ function makeEnv(options = {}) {
     }
     setNumberFormat(fmt) { charge('write', env.cost.write); this.sheet.formats = this.sheet.formats || new Map(); this.sheet.formats.set(this.c, fmt); return this; }
     getFontColors() { charge('read', env.cost.read); return this._each((cell, r, c) => this.sheet.fonts.get(r + ',' + c) || '#000000'); }
+    // Data > Create a filter: one basic filter per sheet (Google throws when the sheet has one already)
+    createFilter() {
+      charge('structure', env.cost.structure);
+      if (this.sheet.filter) throw new Error('You can\'t create a filter in a sheet that already has a filter.');
+      this.sheet.filter = new Filter(this.sheet, this);
+      env.stats.filtersCreated = (env.stats.filtersCreated || 0) + 1;
+      return this.sheet.filter;
+    }
+  }
+
+  // a basic filter: its range (header row first) and the criteria of its columns (column numbers of the sheet)
+  class Filter {
+    constructor(sheet, range) { this.sheet = sheet; this.range = range; this.criteria = new Map(); }
+    getRange() { charge('small', env.cost.small); return new Range(this.sheet, this.range.r, this.range.c, this.range.nr, this.range.nc); }
+    getColumnFilterCriteria(c) { charge('small', env.cost.small); this._inside(c); return this.criteria.get(c) || null; }
+    setColumnFilterCriteria(c, crit) { charge('small', env.cost.small); this._inside(c); if (crit) this.criteria.set(c, crit); else this.criteria.delete(c); return this; }
+    remove() { charge('structure', env.cost.structure); if (this.sheet.filter === this) this.sheet.filter = null; env.stats.filtersRemoved = (env.stats.filtersRemoved || 0) + 1; }
+    _inside(c) { if (c < this.range.c || c > this.range.c + this.range.nc - 1) throw new Error('The column position is outside the filter range.'); }
   }
 
   class Sheet {
@@ -148,6 +166,7 @@ function makeEnv(options = {}) {
       if (!(r >= 1 && c >= 1 && nr >= 1 && nc >= 1) || r + nr - 1 > this.maxRows || c + nc - 1 > this.maxCols) throw new Error(`The coordinates of the range are outside the dimensions of the sheet. (${A1(r, c)}, ${nr}x${nc}, sheet ${this.maxRows}x${this.maxCols})`);
       return new Range(this, r, c, nr, nc);
     }
+    getFilter() { charge('small', env.cost.small); return this.filter || null; }
     insertColumnsAfter(c, n) { charge('structure', env.cost.structure); this.maxCols += n; }
     insertRowsAfter(r, n) { charge('structure', env.cost.structure); this.maxRows += n; }
     hideColumns(c, n = 1) { charge('structure', env.cost.structure); for (let i = 0; i < n; i++) this.hidden.add(c + i); }
@@ -315,7 +334,7 @@ function makeEnv(options = {}) {
   }
 
   env.sandbox = { SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date: MockDate, console, Logger: { log() {} } };
-  env.Sheet = Sheet; env.Book = Book; env.Range = Range;
+  env.Sheet = Sheet; env.Book = Book; env.Range = Range; env.Filter = Filter;
   return env;
 }
 

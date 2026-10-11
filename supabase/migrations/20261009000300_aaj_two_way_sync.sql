@@ -1275,31 +1275,25 @@ end $$;
 -- ---------------------------------------------------------------------
 -- The checkup of today at this branch that a new row of the sheet is: its row lost the hidden key (cut and pasted, the helper columns deleted,
 -- a sort of the visible columns), or the same person was typed again. The same name and the same phone, compared as numbers (the website's
--- Checkups page keeps a phone as typed: "0300-1117777"); with no phone in the row, the one checkup of that full name today when it has no
--- phone either (two of that name are never guessed between). Never a checkup whose row is on the sheet now. Null when there is none.
+-- Checkups page keeps a phone as typed: "0300-1117777"); with no phone in the row, the oldest checkup of that full name today that has no
+-- phone either. Never a checkup whose row is on the sheet now (its key in p_present), so two walk-ins of one name with no phone whose rows
+-- were given new keys by a sort each find their own checkup again, and a third one typed while the other two rows are on the sheet gets her
+-- own. Before, two of that name were never adopted at all: every sort made each of them a new checkup, the old ones (Completed, Treatment)
+-- came back as rows, and the next sort doubled them again (sheet-behaviour SB10-1, 11 Oct 2026). Null when there is none.
 create or replace function private.aaj_checkup_twin(p_branch smallint, p_date date, p_key text, p_name text, p_phone text, p_present text[])
 returns uuid
 language plpgsql stable set search_path = public, extensions
 as $$
-declare v_ph text := private.aaj_norm_phone(p_phone); v_nn text := private.aaj_norm_name(p_name); v_id uuid; v_n int;
+declare v_ph text := private.aaj_norm_phone(p_phone); v_nn text := private.aaj_norm_name(p_name); v_id uuid;
 begin
   if length(v_nn) < 2 then return null; end if;
-  if v_ph is not null then
-    select x.id into v_id from public.checkups x
-     where x.branch_id = p_branch and x.checkup_date = p_date and x.source <> 'archive' and not x.date_is_month
-       and private.aaj_norm_phone(x.phone) = v_ph and private.aaj_norm_name(x.patient_name) = v_nn
-       and coalesce(x.sheet_key, 'W-' || x.id::text) <> p_key and not (coalesce(x.sheet_key, 'W-' || x.id::text) = any (coalesce(p_present, '{}')))
-     order by x.created_at, x.id limit 1;
-    return v_id;
-  end if;
-  select count(*), min(x.id::text)::uuid into v_n, v_id from public.checkups x
+  select x.id into v_id from public.checkups x
    where x.branch_id = p_branch and x.checkup_date = p_date and x.source <> 'archive' and not x.date_is_month
-     and private.aaj_norm_name(x.patient_name) = v_nn and private.aaj_norm_phone(x.phone) is null;
-  if v_n = 1 and not exists (select 1 from public.checkups x where x.id = v_id
-                                and (coalesce(x.sheet_key, 'W-' || x.id::text) = p_key or coalesce(x.sheet_key, 'W-' || x.id::text) = any (coalesce(p_present, '{}')))) then
-    return v_id;
-  end if;
-  return null;
+     and private.aaj_norm_name(x.patient_name) = v_nn
+     and (case when v_ph is null then private.aaj_norm_phone(x.phone) is null else private.aaj_norm_phone(x.phone) = v_ph end)
+     and coalesce(x.sheet_key, 'W-' || x.id::text) <> p_key and not (coalesce(x.sheet_key, 'W-' || x.id::text) = any (coalesce(p_present, '{}')))
+   order by x.created_at, x.id limit 1;
+  return v_id;
 end $$;
 
 -- The other side of aaj_checkup_twin: the checkup of today at this branch that a new row with no Mr# repeats while ITS row is on the sheet now

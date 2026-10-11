@@ -477,15 +477,16 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
   }
 
   // private.aaj_checkup_twin: the checkup of today that a new row is (its row lost the hidden key, or the person was typed again): the same
-  // name and phone (compared as numbers), or with no phone the only checkup of that full name today when it has none either
+  // name and phone (compared as numbers), or with no phone the oldest checkup of that full name today that has none either and whose row is
+  // not on the sheet now (SB10-1: two walk-ins of one name whose rows lost their keys in a sort each find their own checkup again)
   function checkupTwin(tab, date, key, name, phoneIn, present) {
     const nn = normName(name), ph = normPhone(phoneIn);
     if (nn.length < 2) return null;
     const free = (c) => checkupKey(c) !== key && !present.includes(checkupKey(c));
-    const today = S.checkups.filter((c) => c.branch === tab.branch && c.date === date && c.source !== 'archive' && normName(c.name) === nn);
+    const today = S.checkups.filter((c) => c.branch === tab.branch && c.date === date && c.source !== 'archive' && normName(c.name) === nn)
+      .sort((a, b) => a.seq - b.seq);
     if (ph) return today.find((c) => normPhone(c.phone) === ph && free(c)) || null;
-    const none = today.filter((c) => !normPhone(c.phone));
-    return none.length === 1 && free(none[0]) ? none[0] : null;
+    return today.find((c) => !normPhone(c.phone) && free(c)) || null;
   }
   // private.aaj_checkup_dup: a checkup of the same name and phone whose row IS on the sheet now (its key in present): the key of that row.
   // Never by a name alone (two walk-ins with no phone can share a name)

@@ -1625,16 +1625,32 @@ select pg_temp.check((select details = 'sheet notes' from public.checkups where 
   'RS5-A1: an adopted checkup takes what the row typed after the website''s last change (the newer edit wins, like a linked row)');
 select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'ad1'), 1) = 'created' and (select count(*) = 2 from public.checkups where patient_name = 'Zara Other'),
   'another phone is never guessed to be the same person');
--- loop 5 (RS5-2): with no phone on either side, the only checkup of that full name today (its row not on the sheet) is the row's: a moved
--- no-phone checkup row is not deleted and made again. Two of that name are never guessed between.
+-- loop 5 (RS5-2): with no phone on either side, a checkup of that full name today whose row is not on the sheet is the row's: a moved
+-- no-phone checkup row is not deleted and made again.
 select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'ad1'), 2) = 'linked' and (select count(*) = 1 from public.checkups where patient_name = 'Zara NoPhone')
                      and (select sheet_key = pg_temp.s25_k(1502) and source = 'website' from public.checkups where patient_name = 'Zara NoPhone'),
   'no phone on either side: the only checkup of that full name today is adopted, not made twice');
-insert into public.checkups (checkup_date, branch_id, patient_name, phone, checkup_for, source, day_status) values
-  (pg_temp.s25_today(), 3, 'Zara Twice', null, 'Checkup', 'website', 'waiting'), (pg_temp.s25_today(), 3, 'Zara Twice', null, 'Checkup', 'website', 'waiting');
+-- SB10-1 (11 Oct 2026): two walk-ins of one name with no phone whose rows were given new keys (a sort of the visible columns) each find their
+-- own checkup again: the oldest one whose row is not on the sheet. Before, two of that name were never adopted: every sort made both again,
+-- the old ones (Completed, Treatment) came back as rows, and the next sort doubled them again. A third one typed while both rows are on the
+-- sheet (their keys present) is a new person.
+insert into public.checkups (checkup_date, branch_id, patient_name, phone, checkup_for, source, day_status, details) values
+  (pg_temp.s25_today(), 3, 'Zara Twice', null, 'Checkup', 'website', 'completed', 'first'), (pg_temp.s25_today(), 3, 'Zara Twice', null, 'Checkup', 'website', 'in_treatment', 'second');
+create temp table s25_twice as select id, row_number() over (order by created_at, id) as n from public.checkups where patient_name = 'Zara Twice';
 insert into s25_resp select 'ad1b', pg_temp.s25_sync(pg_temp.s25_one('DHA', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(1504), '{"name":"Zara Twice","treatment":"Checkup"}'))));
-select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'ad1b')) = 'created' and (select count(*) = 3 from public.checkups where patient_name = 'Zara Twice'),
-  'two checkups of that name without a phone: the row is not guessed to be either of them');
+select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'ad1b')) = 'linked' and (select count(*) = 2 from public.checkups where patient_name = 'Zara Twice')
+                     and (select sheet_key = pg_temp.s25_k(1504) from public.checkups where id = (select id from s25_twice where n = 1)),
+  'SB10-1: two checkups of that name without a phone and neither row on the sheet: the row adopts the oldest, nothing is made');
+insert into s25_resp select 'ad1c', pg_temp.s25_sync(pg_temp.s25_one('DHA', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(1505), '{"name":"Zara Twice","treatment":"Checkup"}')),
+  array[pg_temp.s25_k(1504), pg_temp.s25_k(1505)]));
+select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'ad1c')) = 'linked' and (select count(*) = 2 from public.checkups where patient_name = 'Zara Twice')
+                     and (select sheet_key = pg_temp.s25_k(1505) from public.checkups where id = (select id from s25_twice where n = 2))
+                     and (select sheet_key = pg_temp.s25_k(1504) from public.checkups where id = (select id from s25_twice where n = 1)),
+  'SB10-1: the second row of that name adopts the other checkup (the first one''s row is on the sheet), never the one already taken');
+insert into s25_resp select 'ad1d', pg_temp.s25_sync(pg_temp.s25_one('DHA', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(1506), '{"name":"Zara Twice","treatment":"Checkup"}')),
+  array[pg_temp.s25_k(1504), pg_temp.s25_k(1505), pg_temp.s25_k(1506)]));
+select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'ad1d')) = 'created' and (select count(*) = 3 from public.checkups where patient_name = 'Zara Twice'),
+  'SB10-1: a third walk-in of that name typed while both other rows are on the sheet gets her own checkup');
 insert into s25_resp select 'ad2', pg_temp.s25_sync(pg_temp.s25_pl(jsonb_build_array(pg_temp.s25_tab('DHA',
   jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(1503), '{"name":"Zara Other","phone":"03130000051","treatment":"Checkup"}')),
   array[pg_temp.s25_k(1503), (select wk from s25_zara where n = 'Zara Other')]))));
