@@ -1,6 +1,6 @@
 // Stock: brackets, wires, elastics and consumables per branch. Every change
 // is a "move" (received, used, adjustment) so the quantity is always explained.
-import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf, downloadCSV, todayISO, localISO, srOnly, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf, downloadCSV, todayISO, localISO, srOnly, showFormErrors, clearFieldErrors, capFirst } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 
 const CATEGORIES = ['brackets', 'wires', 'elastics', 'bonding', 'consumables', 'instruments', 'other'];
@@ -86,7 +86,7 @@ export async function renderInventory(root, params) {
             // Inactive and low items say so in words; inactive rows are not dimmed, so they stay readable.
             return h('tr', { class: it.active ? null : 'is-inactive' },
               h('td', {}, h('strong', {}, it.name), it.active ? null : [' ', h('span', { class: 'badge badge-inactive' }, 'Inactive')], it.supplier ? h('div', { class: 'muted' }, it.supplier) : null),
-              h('td', {}, it.category),
+              h('td', {}, capFirst(it.category)),
               h('td', { class: ['right', isLow && 'status-bad'] }, isLow ? h('strong', {}, `${Number(s?.quantity || 0)} ${it.unit}`) : `${Number(s?.quantity || 0)} ${it.unit}`, isLow ? [' ', h('span', { class: 'badge badge-warn' }, 'Low')] : null),
               h('td', { class: 'right' }, can('inventory.manage') ? h('input', { type: 'number', min: 0, value: s?.reorder_level ?? 0, style: { width: '80px' }, 'aria-label': `Reorder level for ${it.name}`,
                 onchange: async (e) => { try { await d.setReorderLevel({ branch_id: branchId, item_id: it.id, reorder_level: Number(e.target.value) || 0 }); toast('Reorder level saved.', 'ok', 1500); } catch (err) { toast(friendlyError(err), 'error'); } } }) : (s?.reorder_level ?? 0)),

@@ -2,7 +2,7 @@
 // details, notes) save by themselves; if the internet drops, those typed
 // changes wait on this device and are sent when it comes back. Status, doctor
 // and new-patient changes need the connection, and say so when they fail.
-import { h, mount, toast, friendlyError, isLostAnswer, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, isLostAnswer, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy, capFirst } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
@@ -34,12 +34,25 @@ const notSaved = (e, still) => {
   return friendlyError(e);
 };
 
-// Checkup rows go after the visit rows: by branch (all-branches view), then by the token written on the sheet when it is
+// Checkup rows among themselves: by branch (all-branches view), then by the token written on the sheet when it is
 // a number, then by when they were added.
 const tokenNo = (c) => (/^\d+$/.test(String(c.token ?? '').trim()) ? Number(c.token) : Infinity);
+const byNumber = (x, y) => (x === y ? 0 : x < y ? -1 : 1);
 const byToken = (a, b) => (a.branch_id ?? 0) - (b.branch_id ?? 0)
-  || (tokenNo(a) === tokenNo(b) ? 0 : tokenNo(a) < tokenNo(b) ? -1 : 1)
+  || byNumber(tokenNo(a), tokenNo(b))
   || String(a.created_at || '').localeCompare(String(b.created_at || ''));
+
+// The order of the list, as the clinic's Google Sheet is sorted (owner, 11 Oct 2026): Waiting at the top, then In treatment,
+// then Scheduled and checkups with no status yet, then Completed, then Cancelled and No show. Inside one status the patients
+// come first by token, then the checkup patients by their token. (All branches view: by branch first.)
+const STATUS_RANK = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
+const rankOf = (item) => STATUS_RANK[(item.checkup ? item.row.day_status : item.row.status) || ''] ?? 3;
+const tokenOf = (item) => (item.checkup ? tokenNo(item.row) : item.row.token_no ?? Infinity);
+const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
+  || rankOf(a) - rankOf(b)
+  || Number(a.checkup) - Number(b.checkup)
+  || byNumber(tokenOf(a), tokenOf(b))
+  || String(a.row.created_at || '').localeCompare(String(b.row.created_at || ''));
 
 // ---------------------------------------------------------------- offline queue
 // One queue per signed-in staff member: autosave.js stores their typed edits under a key that
@@ -134,6 +147,7 @@ export async function renderSheet(root, params, signal) {
   let date = params.get('date') || localISO();
   let rows = [];
   let checkups = []; // the day's checkup patients (no Mr#); see lib/checkups.js dayListCheckups for which of them are shown
+  let serials = new Map(); // row id -> its serial number in the list as last drawn (draw)
   let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Checkup patient"
   let checkupsWarn = ''; // why the checkups could not be loaded (the visits still show)
   let checkupsKey = ''; // branch and day the `checkups` above belong to
@@ -501,7 +515,7 @@ export async function renderSheet(root, params, signal) {
     const ctl = commitOnFinish(status, (value) => changeStatus(row, value, ctl), (value) => { status.className = `status-chip status-${value}`; });
 
     const treatment = h('input', {
-      class: 'cell-input', value: row.treatment_label || '', list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
+      class: 'cell-input', value: capFirst(row.treatment_label), list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
       dataset: { focus: 'treatment', field: 'treatment_label' }, onchange: (e) => save(row, 'treatment_label', e.target.value),
     });
     const details = h('input', {
@@ -535,20 +549,28 @@ export async function renderSheet(root, params, signal) {
 
     return h('tr', { dataset: { id: row.id } },
       !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(row.branch_id))) : null,
-      // The patient cell is the row's header (th scope=row); app.css styles .row-head.
+      // The patient cell is the row's header (th scope=row); app.css styles .row-head. It starts with the row's serial number.
       h('th', { scope: 'row', class: 'frozen row-head' }, h('div', { class: 'cell' },
-        h('span', { class: 'token', title: arrived ? `Arrived ${arrived}` : null }, srOnly('Token '), row.token_no ?? '–', arrived ? srOnly(`, arrived ${arrived}`) : null),
+        serialEl(row),
         h('button', { type: 'button', class: 'link-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, style: { textDecoration: 'none', textAlign: 'left' }, onclick: () => openRow(row) },
           h('div', {}, who), h('div', { class: 'muted field-hint', style: { fontWeight: 500 } }, `Mr# ${row.patient.mr_number}`)))),
       h('td', {}, h('div', { class: 'cell row-flags' }, duesBadge(row.dues), aliBadge(row.see_dr_ali))),
       h('td', {}, h('div', { class: 'cell' }, month)),
       h('td', { style: { minWidth: '150px' } }, treatment),
+      h('td', {}, h('div', { class: 'cell token-cell' },
+        h('span', { class: 'token', title: arrived ? `Arrived ${arrived}` : null }, srOnly('Token '), row.token_no ?? '–', arrived ? srOnly(`, arrived ${arrived}`) : null))),
       h('td', {}, h('div', { class: 'cell' }, status)),
       h('td', { style: { minWidth: '250px' } }, peopleCell(row)),
       h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, details, quickTap)),
       h('td', { class: 'right' }, h('div', { class: ['cell', row.dues > 0 ? 'status-bad' : 'muted'], style: { justifyContent: 'flex-end', fontWeight: 700 } }, can('dues.view') ? (row.dues > 0 ? rupees(row.dues) : '0') : '')),
       h('td', { style: { minWidth: '160px' } }, notes),
       h('td', {}, h('div', { class: 'cell muted nowrap' }, row.patient.phone)));
+  }
+
+  // The row's serial number (1..n down the list as last drawn), at the left of the row header like the sheet's row numbers.
+  function serialEl(row) {
+    const n = serials.get(row.id);
+    return h('span', { class: 'serial' }, n ? [srOnly('Row '), String(n)] : '');
   }
 
   // A checkup patient: the same columns as a visit row (so the arrow keys keep working), but no Mr#, no braces month,
@@ -584,19 +606,20 @@ export async function renderSheet(root, params, signal) {
     }, (c.day_status ? DAY_STATUSES : ['', ...DAY_STATUSES]).map((value) => h('option', { value, selected: value === (c.day_status || '') }, value ? STATUS_LABELS[value] : 'Not set')));
     const ctl = commitOnFinish(status, (value) => changeCheckupStatus(c, value, ctl), (value) => { status.className = `status-chip status-${value || 'unset'}`; });
     const text = (fieldName, label, props = {}) => h('input', {
-      class: 'cell-input', value: c[fieldName] || '', disabled: !canEdit, 'aria-label': `${label} for ${who}`, autocomplete: 'off',
+      class: 'cell-input', value: fieldName === 'checkup_for' ? capFirst(c[fieldName]) : c[fieldName] || '', disabled: !canEdit, 'aria-label': `${label} for ${who}`, autocomplete: 'off',
       dataset: { focus: fieldName, field: fieldName }, oninput: (e) => saveCheckup(c, fieldName, e.target.value), ...props,
     });
     return h('tr', { class: 'is-checkup', dataset: { id: c.id, kind: 'checkup' } },
       !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(c.branch_id))) : null,
       h('th', { scope: 'row', class: 'frozen row-head' }, h('div', { class: 'cell' },
-        tokenIn,
+        serialEl(c),
         h('div', { class: 'checkup-name' }, nameIn, h('div', { class: 'muted field-hint' }, hint)))),
       h('td', {}, h('div', { class: 'cell row-flags' },
         h('span', { class: 'badge badge-checkup' }, 'Checkup'),
         h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, dataset: { focus: 'options' }, onclick: () => checkupOptions(c) }, 'Options'))),
       h('td', {}, h('div', { class: 'cell' }, h('span', { class: 'muted' }, h('span', { 'aria-hidden': 'true' }, '–'), srOnly('Not braces')))),
       h('td', { style: { minWidth: '150px' } }, text('checkup_for', 'Treatment', { list: 'sheet-treatments' })),
+      h('td', {}, h('div', { class: 'cell token-cell' }, tokenIn)),
       h('td', {}, h('div', { class: 'cell' }, status)),
       h('td', { style: { minWidth: '250px' } }, text('doctors', "Doctor's name", { list: 'sheet-doctors' })),
       h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
@@ -652,8 +675,13 @@ export async function renderSheet(root, params, signal) {
     warnBox.hidden = !checkupsWarn;
     warnBox.textContent = checkupsWarn ? `Checkup patients could not be loaded: ${checkupsWarn}` : '';
     const saved = rememberFocus();
-    mount(tableBody, shown.length || shownChecks.length ? [...shown.map(rowEl), ...shownChecks.map(checkupRowEl)]
-      : h('tr', {}, h('td', { colspan: 11 }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients or checkups on any list for this day.'))));
+    // Sorted only here, never when one row is saved (redrawRow): a row whose status was just changed keeps its place and its
+    // number until the list is drawn again (the live reload waits while someone is in the table), so it never jumps away
+    // under the cursor. Every row gets a serial number 1..n in the order shown, whatever its status (owner, 11 Oct 2026).
+    const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].sort(listOrder);
+    serials = new Map(items.map((item, i) => [item.row.id, i + 1]));
+    mount(tableBody, items.length ? items.map((item) => (item.checkup ? checkupRowEl(item.row) : rowEl(item.row)))
+      : h('tr', {}, h('td', { colspan: 12 }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients or checkups on any list for this day.'))));
     restoreFocus(saved);
     drawCounts();
     markInvalid();
@@ -665,7 +693,11 @@ export async function renderSheet(root, params, signal) {
     const td = e.target.closest('td, th'); // (the name of a checkup patient sits in the row header)
     const tr = td.parentElement;
     const col = [...tr.children].indexOf(td);
-    const target = e.key === 'ArrowUp' ? tr.previousElementSibling : tr.nextElementSibling;
+    // The nearest row above or below with a typing cell in this column: rows are sorted by status, so a checkup patient's
+    // name (a typing cell) can have a patient row (a name button) next to it; that row is passed over.
+    const step = (t) => (e.key === 'ArrowUp' ? t.previousElementSibling : t.nextElementSibling);
+    let target = step(tr);
+    while (target && !target.children[col]?.querySelector('.cell-input')) target = step(target);
     const next = target?.children[col]?.querySelector('.cell-input');
     if (next) { e.preventDefault(); next.focus(); next.select?.(); }
   }
@@ -768,8 +800,8 @@ export async function renderSheet(root, params, signal) {
       h('table', { class: 'sheet' },
         h('thead', {}, h('tr', {},
           branchHead,
-          h('th', { scope: 'col', class: 'frozen', style: { minWidth: '210px' } }, 'Token · Patient'), h('th', { scope: 'col' }, 'Flags'), h('th', { scope: 'col' }, 'Month'), h('th', { scope: 'col' }, 'Treatment'),
-          h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, "Doctor's name"), h('th', { scope: 'col' }, 'Treatment details'), h('th', { scope: 'col', class: 'right' }, 'Dues'),
+          h('th', { scope: 'col', class: 'frozen', style: { minWidth: '210px' } }, '# · Patient'), h('th', { scope: 'col' }, 'Flags'), h('th', { scope: 'col' }, 'Month'), h('th', { scope: 'col' }, 'Treatment'),
+          h('th', { scope: 'col', class: 'center' }, 'Token'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, "Doctor's name"), h('th', { scope: 'col' }, 'Treatment details'), h('th', { scope: 'col', class: 'right' }, 'Dues'),
           h('th', { scope: 'col' }, 'Notes'), h('th', { scope: 'col' }, 'Contact'))),
         tableBody)));
 

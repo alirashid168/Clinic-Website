@@ -1,6 +1,6 @@
 // Admin → Clinic setup: branches, doctors and assistants, doctor groups,
 // treatment list and expense categories, editable without touching the database.
-import { h, mount, toast, friendlyError, modal, field, select, empty, rupees, srOnly, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, modal, field, select, empty, rupees, srOnly, showFormErrors, clearFieldErrors, capFirst } from '../../ui/dom.js';
 import { state, loadPublicRef, loadStaffRef } from '../../state.js';
 
 const REGIONS = [{ value: '', label: 'Any city' }, { value: 'KHI', label: 'Karachi' }, { value: 'LHR', label: 'Lahore' }, { value: 'ISB', label: 'Islamabad' }];
@@ -46,16 +46,24 @@ function editor({ title, help, rows, columns, onSave, addLabel = 'Add', fixedId 
       } },
     ]);
   };
-  const cell = (c, r) => (c.show ? c.show(r) : c.type === 'check' ? (r[c.key] ? 'Yes' : 'No') : c.type === 'list' ? (r[c.key] || []).join(', ') : (r[c.key] ?? ''));
+  // A drop-down column shows the drop-down's own wording ("Braces", not the stored "braces"); other text starts with a capital.
+  const optionLabel = (c, v) => c.options().find((o) => String(o.value) === String(v ?? ''))?.label;
+  const cell = (c, r) => (c.show ? c.show(r) : c.type === 'check' ? (r[c.key] ? 'Yes' : 'No') : c.type === 'list' ? (r[c.key] || []).join(', ')
+    : c.type === 'select' ? (optionLabel(c, r[c.key]) ?? capFirst(r[c.key])) : typeof r[c.key] === 'string' ? capFirst(r[c.key]) : (r[c.key] ?? ''));
   const text = (v) => (v instanceof Node ? v.textContent : String(v ?? ''));
+  // The table's columns: a column marked tableFirst (an order number) comes first in the table only; the form keeps the
+  // fields' own order, and the Edit button is named after the first other column (the name).
+  const shown = columns.filter((c) => !c.hideInTable);
+  const tableCols = [...shown.filter((c) => c.tableFirst), ...shown.filter((c) => !c.tableFirst)];
+  const nameCol = shown.find((c) => !c.tableFirst) || shown[0];
   return h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, title), h('button', { class: 'btn btn-primary btn-small', onclick: () => form(null) }, addLabel)),
     help ? h('p', { class: 'muted' }, help) : null,
     rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, columns.filter((c) => !c.hideInTable).map((c) => h('th', { scope: 'col', class: c.type === 'number' ? 'right' : '' }, c.label)), h('th', { scope: 'col' }, srOnly('Actions')))),
+      h('thead', {}, h('tr', {}, tableCols.map((c) => h('th', { scope: 'col', class: c.type === 'number' ? 'right' : '' }, c.label)), h('th', { scope: 'col' }, srOnly('Actions')))),
       h('tbody', {}, rows.map((r) => h('tr', { class: r.active === false ? 'is-inactive' : null },
-        columns.filter((c) => !c.hideInTable).map((c) => h('td', { class: c.type === 'number' ? 'right' : '' }, cell(c, r))),
-        h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Edit ${text(cell(columns.find((c) => !c.hideInTable), r))}`, onclick: () => form(r) }, 'Edit'))))))) : empty(`Nothing here yet. Use "${addLabel}".`));
+        tableCols.map((c) => h('td', { class: c.type === 'number' ? 'right' : '' }, cell(c, r))),
+        h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Edit ${text(cell(nameCol, r))}`, onclick: () => form(r) }, 'Edit'))))))) : empty(`Nothing here yet. Use "${addLabel}".`));
 }
 
 export async function renderSetup(root) {
@@ -141,7 +149,8 @@ export async function renderSetup(root) {
       onSave: save('expense_categories'),
       columns: [
         { key: 'name', label: 'Name', required: true },
-        { key: 'sort_order', label: 'Order', type: 'number', default: 50 },
+        // a new category is numbered after the last one, so the Order column keeps counting 1, 2, 3 ... (owner, 11 Oct 2026)
+        { key: 'sort_order', label: 'Order', type: 'number', default: Math.max(0, ...lists.categories.map((c) => Number(c.sort_order) || 0)) + 1, tableFirst: true },
         { key: 'active', label: 'In the dropdown', type: 'check', show: (r) => (r.active ? 'Yes' : off('Hidden')) },
       ],
     }));

@@ -76,6 +76,12 @@ export function extLink(href, text, props = {}) {
 }
 
 // ---------------------------------------------------------------- formatting
+/** Shown with a capital first letter: "monthly" -> "Monthly", "braces" -> "Braces" (owner, 11 Oct 2026). Only the first
+ *  letter changes, so "RCT", "Upper Bonding" and "Dr. Ali" keep their own capitals; text without letter case stays as it is. */
+export function capFirst(text) {
+  return String(text ?? '').replace(/^(\s*)(\p{Ll})/u, (_, space, letter) => space + letter.toUpperCase());
+}
+
 export function rupees(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return '';
   const v = Number(n);

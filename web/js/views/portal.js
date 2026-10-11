@@ -1,6 +1,6 @@
 // Patient portal: invoices, dues, X-rays and photos, visit history, the
 // "see Dr. Ali" message, ratings and the complaint button.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors, announce } from '../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors, announce, capFirst } from '../ui/dom.js';
 import { state, branchName } from '../state.js';
 import { signThumbs } from '../ui/photos.js';
 import { checkPortalPassword, PASSWORD_MIN } from '../lib/portal-login.js';
@@ -328,7 +328,7 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
           h('h2', {}, 'Your visits'),
           completed.length ? h('ul', { class: 'timeline' }, completed.map((v) => h('li', {},
             h('strong', {}, shortDate(v.visit_date)), branchLabel(v.branch_id) ? ` · ${branchLabel(v.branch_id)}` : null,
-            h('div', {}, [v.treatment_label, v.braces_month ? `braces month ${v.braces_month}` : null].filter(Boolean).join(', ')),
+            h('div', {}, [capFirst(v.treatment_label), v.braces_month ? `braces month ${v.braces_month}` : null].filter(Boolean).join(', ')),
             h('div', { class: 'muted' }, v.staff.filter((s) => s.role === 'doctor').map((s) => s.name).join(', ')),
             rated.has(v.id) ? h('span', { class: 'badge badge-ok' }, 'Rated')
               : h('button', { class: 'btn btn-small', onclick: (e) => rate(v, e.currentTarget), ...off }, 'Rate this visit', srOnly(` on ${shortDate(v.visit_date)}`))))) : empty('Your visits will appear here.')),

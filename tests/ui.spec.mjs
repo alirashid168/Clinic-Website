@@ -153,7 +153,7 @@ await step('flag patient for Dr. Ali from the sheet', async () => {
 // ------------------------------------------------------------- checkup patients on the Aaj ki List (front desk, North Nazimabad)
 // (Checkup patients have no Mr#. Made-up names only; the demo keeps its data in memory, so the browser is never reloaded here.)
 const checkupRow = (pg, name) => pg.locator(`table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient ${name}"])`);
-await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, after the patients', async () => {
+await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, sorted like the sheet with a serial number on every row', async () => {
   await page.goto(BASE + '#/staff/sheet');
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
   const seeded = page.locator('table.sheet tbody tr.is-checkup');
@@ -161,8 +161,18 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   assert.ok(await seeded.first().locator('.badge-checkup:has-text("Checkup")').count(), 'badge');
   assert.match(await seeded.first().locator('th').innerText(), /no Mr#/);
   assert.equal(await seeded.first().locator('.quick-tap').count(), 0, 'no quick-tap button on a checkup row');
-  const kinds = await page.locator('table.sheet tbody tr').evaluateAll((trs) => trs.map((t) => t.classList.contains('is-checkup')));
-  assert.ok(kinds.indexOf(false) >= 0 && kinds.lastIndexOf(false) < kinds.indexOf(true), 'visit rows first, then the checkup rows');
+  // Owner, 11 Oct 2026: Waiting first, then In treatment, then Scheduled / no status, then Completed, then Cancelled and
+  // No show; inside one status the patients before the checkup patients. Every row is numbered 1..n in that order.
+  const order = await page.locator('table.sheet tbody tr[data-id]').evaluateAll((trs) => trs.map((t) => ({
+    checkup: t.classList.contains('is-checkup'),
+    status: t.querySelector('select[aria-label^="Status for"]')?.value ?? '',
+    serial: t.querySelector('.serial')?.textContent.replace(/\D/g, '') ?? '',
+  })));
+  const rank = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
+  const keys = order.map((r) => rank[r.status] * 2 + (r.checkup ? 1 : 0));
+  assert.ok(keys.every((k, i) => i === 0 || keys[i - 1] <= k), `rows are sorted by status, patients before checkups: ${order.map((r) => r.status + (r.checkup ? '/c' : '')).join(', ')}`);
+  assert.deepEqual(order.map((r) => r.serial), order.map((_, i) => String(i + 1)), 'every row has its serial number 1..n');
+  assert.ok(await page.locator('table.sheet thead th:has-text("Token")').count(), 'the token has its own column');
   assert.match(await page.locator('.page-head p').innerText(), /\d+ checkups/);
   await shot(page, '14-sheet-checkups');
 });

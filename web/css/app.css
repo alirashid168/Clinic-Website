@@ -787,6 +787,10 @@ select.cell-input { cursor: pointer; }
 .add-person, .chip-add { min-height: 28px; padding: 2px var(--space-3); border: 1px dashed var(--control-border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text-muted); font-size: var(--fs-xs); cursor: pointer; }
 .add-person:hover, .chip-add:hover { border-color: var(--aubergine); color: var(--text-accent); }
 .token { font-weight: 800; color: var(--text-accent); }
+/* The Aaj ki List's serial number (1..n down the list), grey like a spreadsheet's row numbers; the token has its own column. */
+.serial { flex: 0 0 auto; min-width: 1.75rem; text-align: right; color: var(--text-muted); font-size: var(--fs-sm); font-weight: 700; font-variant-numeric: tabular-nums; }
+.token-cell { justify-content: center; }
+table.sheet th.center { text-align: center; }
 .month-pill { font-weight: 700; }
 .row-flags { display: flex; gap: var(--space-1); flex-wrap: wrap; }
 .add-panel { display: flex; align-items: center; gap: var(--space-3) var(--space-4); flex-wrap: wrap; margin: 0 0 var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-left: 4px solid var(--aubergine); border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow); }

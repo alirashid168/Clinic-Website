@@ -3,7 +3,7 @@
 // Staff set the follow-up status and write notes here, and register someone as a patient (with an Mr#) when they
 // start treatment. Notes save by themselves and wait on this device if the internet drops; the follow-up status and
 // everything else needs the connection and says so when it fails.
-import { h, mount, toast, friendlyError, isLostAnswer, empty, modal, field, select, localISO, announce, shortDate, phoneLink, showFormErrors, clearFieldErrors, busy, srOnly } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, isLostAnswer, empty, modal, field, select, localISO, announce, shortDate, phoneLink, showFormErrors, clearFieldErrors, busy, srOnly, capFirst } from '../../ui/dom.js';
 import { state, can, isAdmin, myBranches, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { FOLLOW_UP_STATUSES, SOURCE_LABELS, monthLabel, checkupsToSheet } from '../../lib/checkups.js';
@@ -215,7 +215,7 @@ export async function renderCheckups(root, params, signal) {
         c.phone ? h('div', { class: 'field-hint' }, phoneLink(c.phone)) : null,
         c.patient_id ? (mr ? h('a', { class: 'mr', href: `#/staff/patient/${c.patient_id}` }, `Mr# ${mr}`) : h('span', { class: 'badge badge-ok' }, 'Has a patient file')) : null),
       h('td', {}, c.branch_id ? branchName(c.branch_id) : h('span', { class: 'muted' }, 'No branch')),
-      h('td', {}, c.checkup_for || h('span', { class: 'muted' }, '–'), c.doctors ? h('div', { class: 'muted field-hint' }, c.doctors) : null),
+      h('td', {}, capFirst(c.checkup_for) || h('span', { class: 'muted' }, '–'), c.doctors ? h('div', { class: 'muted field-hint' }, c.doctors) : null),
       h('td', {}, h('div', { class: 'cell' }, follow, savedMark)),
       h('td', { class: 'cell-td' }, notes),
       h('td', { class: 'muted' }, sourceText(c)),
