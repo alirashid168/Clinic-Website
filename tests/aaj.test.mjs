@@ -1,6 +1,7 @@
 // Aaj ki List (Google Sheet) reader: node tests/aaj.test.mjs
 import assert from 'node:assert/strict';
-import { detectColumns, isHeaderRow, cellDate, tabBranch, readTab, buildImport, tokenOf, groupOf, firstPhone, liveStatus, mrOf, givenName } from '../web/js/lib/aaj.js';
+import fs from 'node:fs';
+import { detectColumns, isHeaderRow, cellDate, tabBranch, readTab, buildImport, tokenOf, groupOf, firstPhone, liveStatus, mrOf, givenName, isCheckupText, splitCheckupRows } from '../web/js/lib/aaj.js';
 
 let passed = 0;
 const test = (name, fn) => { try { fn(); passed++; console.log('ok -', name); } catch (e) { console.log('FAIL -', name, '\n   ', e.message.split('\n')[0]); process.exitCode = 1; } };
@@ -203,6 +204,40 @@ test('a day row with a date serial in the Mr# column and a word in another colum
   const t = readTab(rows);
   assert.deepEqual(t.rows.map((r) => [r.mr, r.date]), [['9846', '2026-10-06'], ['9850', '2026-10-07'], ['9851', '2026-10-08'], ['9852', '2026-10-09']]);
   assert.deepEqual(t.days, ['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09']);
+});
+
+// Loop 4: Admin -> Import never sends a checkup row (no Mr#, Treatment says checkup) as a visit; the pattern is the sync's and the database's
+test('a row without an Mr# whose Treatment says checkup is a checkup patient: kept apart from the visits to import (the same pattern as the sync and the database)', () => {
+  for (const t of ['Checkup', 'checkup / pain', 'Xray checkup', 'Check up', 'CHECK-UP', 'chek up', 'Checkups', 'checup']) assert.ok(isCheckupText(t), t);
+  for (const t of ['Wire check', 'Braces check', 'RCT check', 'Check wire', 'Cheek filler', 'Filling and crown prep', 'Monthly', '', null]) assert.ok(!isCheckupText(t), String(t));
+  const src = fs.readFileSync(new URL('../web/js/lib/aaj.js', import.meta.url), 'utf8');
+  const pattern = String.raw`/\bch[ea]{1,2}c?k?[- ]?ups?\b/i`;
+  assert.ok(src.includes(pattern), 'aaj.js uses the pattern');
+  assert.ok(fs.readFileSync(new URL('../apps-script/AajSync.js', import.meta.url), 'utf8').includes(pattern), 'the same as the sync script');
+  assert.ok(fs.readFileSync(new URL('../supabase/migrations/20261009000300_aaj_two_way_sync.sql', import.meta.url), 'utf8').includes(String.raw`'\mch[ea]{1,2}c?k?[- ]?ups?\M'`), 'and the database');
+  const rows = [MINI, ['08/10/2026'], ['', 'Ck Person', 'Checkup', '', 1], ['9846', 'Hw Patient', 'Checkup', '', 2], ['', 'Forgot Mr', 'Filling and crown prep', '', 3], ['', 'Wire Person', 'Wire check', '', 4]];
+  const { rows: imp } = buildImport([{ name: 'Gulshan', branchId: 1, read: readTab(rows) }], [], [], '2026-10-09');
+  const { visits, checkups } = splitCheckupRows(imp);
+  assert.deepEqual(checkups.map((r) => r[3]), ['Ck Person'], 'only the row without an Mr# whose Treatment says checkup');
+  assert.deepEqual(visits.map((r) => r[3]).sort(), ['Forgot Mr', 'Hw Patient', 'Wire Person'], 'a row with an Mr# is a visit whatever its Treatment; a row without one and another Treatment is sent (matched by phone and first name only)');
+});
+
+// Loop 8 (sheet-behaviour RS8-C1): the archive the sync writes marks a row whose visit or checkup front desk deleted on the website, and a
+// checkup patient's row, in its "Website visit id" column: Admin -> Import reads past both (never a Completed visit for a wrong entry or a checkup)
+test('an archive row marked "deleted on the website" or "checkup <id>" in the Website visit id column is not imported; the others are', () => {
+  const head = ['Date', 'MR #', 'Patients Name', 'Months', 'Treatment', 'Token', 'Waiting', 'Group', 'Doctor Name', 'Treatment Details', 'P.P', 'Healthwire', 'Contact No', 'Reminder Status', 'Website visit id', 'Archived at'];
+  const row = (mr, name, treatment, webId) => ['2026-10-09', mr, name, '', treatment, '', 'Waiting', '', '', '', '', '', '', '', webId, '2026-10-10 00:05'];
+  const t = readTab([head,
+    row('9811', 'Kept Visit', 'Scaling', '00000000-0000-4000-8000-000000000001'),
+    row('9812', 'Gone Visit', 'Scaling', 'deleted on the website'),
+    row('9813', 'Registered Checkup', 'Checkup', 'checkup 00000000-0000-4000-8000-000000000002'),
+    row('9814', 'Never Synced', 'RCT', '')]);
+  assert.deepEqual(t.rows.map((r) => r.name), ['Kept Visit', 'Never Synced']);
+  assert.equal(t.deletedOnWebsite, 1);
+  assert.equal(t.archivedCheckups, 1);
+  assert.ok(t.issues.some((i) => /1 row is marked "deleted on the website"/.test(i)) && t.issues.some((i) => /1 row is a checkup patient/.test(i)), 'the import page says so');
+  // a tab without that column (the live sheet, an old download) is read as before
+  assert.equal(readTab([head.slice(0, 14), row('9812', 'Gone Visit', 'Scaling', 'deleted on the website').slice(0, 14)]).rows.length, 1);
 });
 
 console.log(`${passed} passed`);

@@ -31,10 +31,10 @@ const TX_CSV = `Dr. Ali Rashid's Dental Clinic,,,,,,,,,,,,,,,
 ,,,,,,,,,,,,,,,
 Financial Transaction Report,,,,,,,,,,,,,,,
 Invoice#,MR#,Patient Name,Patient Phone#,Location,Description,Total,Cash,Discount,Dues,Advance,Mode Of Payment,Created By,Updated By,Discounted By,Payment Date
-134006,9556,Test Patient One,3355107605,-,Braces First Payment,150000,40000,110000,0,0,Cash ,RJ Mall Clinic,RJ Mall Clinic,,01/08/2026 - 12:36AM
-134006,9556,Test Patient One,3355107605,-,Braces First Payment,150000,0,110000,0,0,Cash ,RJ Mall Clinic,Sadia Azam,,02/08/2026 - 03:10PM
+900006,7991,Test Patient One,3009990001,-,Braces First Payment,150000,40000,110000,0,0,Cash ,RJ Mall Clinic,RJ Mall Clinic,,01/08/2026 - 12:36AM
+900006,7991,Test Patient One,3009990001,-,Braces First Payment,150000,0,110000,0,0,Cash ,RJ Mall Clinic,Test Accounts,,02/08/2026 - 03:10PM
 134007,9557,Test Patient Two lhr,3001112223,-,"Braces Monthly Payment,brackets",8000,4000,0,4000,0,Debit/Credit Card ,Lahore Gulberg Clinic,Lahore Gulberg Clinic,,05/08/2026 - 06:00PM
-134008,9558,TEST PATIENT THREE,3009998887,-,Scaling & Polishing,5000,5000,0,0,0,Online Payment ,Sadia Azam,Sadia Azam,,06/08/2026 - 01:00PM
+134008,9558,TEST PATIENT THREE,3009998887,-,Scaling & Polishing,5000,5000,0,0,0,Online Payment ,Test Accounts,Test Accounts,,06/08/2026 - 01:00PM
 134009,9557,Test Patient Two lhr,3001112223,-,Braces Monthly Payment,4000,4000,0,0,0,Cash ,Lahore Gulberg Clinic,Lahore Gulberg Clinic,,05/08/2026 - 06:05PM
 134010,9559,Test Patient Four,3005556667,-,Braces First Payment,70000,20000,0,30000,0,Cash ,North Nazimabad Clinic,North Nazimabad Clinic,,04/08/2026 - 05:00PM
 134011,9558,TEST PATIENT THREE,3009998887,-,ORTHO RETAINER,10000,2000,0,3000,0,Cash ,DHA Clinic,DHA Clinic,,20/08/2026 - 07:30PM
@@ -46,7 +46,7 @@ test('transactions report: header row found, totals row ignored, modes trimmed',
   assert.equal(tx.length, 7);
   assert.ok(columns.includes('paid') && columns.includes('createdBy'));
   assert.equal(tx[0].mode, 'Cash');
-  assert.equal(tx[0].phone, '03355107605');
+  assert.equal(tx[0].phone, '03009990001');
   assert.equal(tx[0].at, '2026-08-01 00:36');
 });
 
@@ -58,19 +58,19 @@ test('transactions -> invoices, payments, visits and patients with branches from
   assert.equal(out.summary.paid, 75000);
   assert.deepEqual(out.summary.perBranch, { 1: 60000, 4: 8000, 3: 7000 }); // 134010: NN login on a Tuesday = Gulshan; 134008 follows the patient's other invoice (DHA)
   const inv = Object.fromEntries(out.invoices.map((r) => [r[0], r]));
-  assert.equal(inv['134006'][2], 1); // RJ Mall login -> Gulshan
+  assert.equal(inv['900006'][2], 1); // RJ Mall login -> Gulshan
   assert.equal(inv['134007'][2], 4); // Lahore
   assert.equal(inv['134008'][2], 3); // entered by accounts: the patient's other invoice says DHA, note 3
   assert.equal(inv['134008'][6], 3);
   assert.equal(out.summary.unknownBranch.length, 0);
   assert.equal(inv['134007'][7][0][1], 'Braces Monthly Payment, brackets');
   assert.equal(inv['134007'][7][0][3], 8000);
-  assert.deepEqual(inv['134006'][7], [[4, 'Braces First Payment', 1, 150000]]);
-  assert.equal(inv['134006'][5], 110000); // discount
+  assert.deepEqual(inv['900006'][7], [[4, 'Braces First Payment', 1, 150000]]);
+  assert.equal(inv['900006'][5], 110000); // discount
   assert.equal(inv['134011'][6], 5); // 10000 - 0 - 3000 dues - 2000 paid here = 5000 paid outside the file
   assert.equal(inv['134011'][2], 3); // DHA
   assert.equal(out.summary.otherPeriods.length, 2); // 134010 too (its note stays 1: the NN-login swap matters more)
-  assert.deepEqual(out.payments.find((p) => p[0] === '134006'), ['134006', '9556', 1, 40000, 'Cash', '2026-08-01 00:36']);
+  assert.deepEqual(out.payments.find((p) => p[0] === '900006'), ['900006', '7991', 1, 40000, 'Cash', '2026-08-01 00:36']);
   assert.equal(out.visits.length, 6); // patient two paid two invoices on the same day: one visit
   const v2 = out.visits.find((v) => v[0] === '9557');
   assert.deepEqual(v2.slice(0, 3), ['9557', '2026-08-05', 4]);
@@ -91,10 +91,10 @@ test('invoice 134010: North Nazimabad login on a Tuesday counts as Gulshan', () 
 });
 
 test('patients list: columns matched by name, gender and dates normalised', () => {
-  const csv = `MR#,Patient Name,Phone,Gender,Date of Birth,Address,Email,Registration Date\n9556,Test Patient One,3355107605,Female,12-05-1998,"House 1, Karachi",,01-02-2024\n9560,Someone Isb,3331234567,M,,,x@y.z,03/08/2026\n`;
+  const csv = `MR#,Patient Name,Phone,Gender,Date of Birth,Address,Email,Registration Date\n7991,Test Patient One,3009990001,Female,12-05-1998,"House 1, Karachi",,01-02-2024\n9560,Someone Isb,3331234567,M,,,x@y.z,03/08/2026\n`;
   const { patients } = readPatients(parseCSV(csv));
   assert.equal(patients.length, 2);
-  assert.deepEqual(patients[0], ['9556', 'Test Patient One', null, '03355107605', null, null, 'female', '1998-05-12', 'House 1, Karachi', null, '2024-02-01']);
+  assert.deepEqual(patients[0], ['7991', 'Test Patient One', null, '03009990001', null, null, 'female', '1998-05-12', 'House 1, Karachi', null, '2024-02-01']);
   assert.deepEqual(patients[1].slice(0, 2), ['9560', 'Someone']);
   assert.equal(patients[1][6], 'male');
   assert.equal(patients[1][9], 5);
@@ -108,7 +108,7 @@ const page = (rows, withTotal) => {
     items.push({ s: String(i + 1), x: 33, y }, { s: r.voucher, x: 88, y });
     r.desc.split(' ').forEach((w, k) => items.push({ s: w, x: 144 + (k % 2) * 20, y: y - Math.floor(k / 2) * 12 }));
     items.push({ s: r.date.slice(0, 2), x: 202, y }, { s: '/', x: 210, y }, { s: r.date.slice(3, 5), x: 212, y }, { s: '/', x: 219, y }, { s: r.date.slice(6), x: 222, y });
-    items.push({ s: r.cat, x: 257, y }, { s: r.amount, x: 348, y }, { s: r.mode, x: 404, y }, { s: '08', x: 459, y }, { s: '/', x: 467, y }, { s: r.date.slice(0, 2), x: 469, y }, { s: '/', x: 477, y }, { s: '2026', x: 479, y }, { s: '-', x: 496, y }, { s: '10:52', x: 459, y: y - 12 }, { s: 'PM', x: 476, y: y - 12 }, { s: 'Sadia', x: 515, y }, { s: 'Azam', x: 535, y });
+    items.push({ s: r.cat, x: 257, y }, { s: r.amount, x: 348, y }, { s: r.mode, x: 404, y }, { s: '08', x: 459, y }, { s: '/', x: 467, y }, { s: r.date.slice(0, 2), x: 469, y }, { s: '/', x: 477, y }, { s: '2026', x: 479, y }, { s: '-', x: 496, y }, { s: '10:52', x: 459, y: y - 12 }, { s: 'PM', x: 476, y: y - 12 }, { s: 'Test', x: 515, y }, { s: 'Accounts', x: 535, y });
     y -= 60;
   });
   if (withTotal) items.push({ s: 'Total', x: 33, y: y + 10 }, { s: 'Expense', x: 60, y: y + 10 }, { s: ':', x: 90, y: y + 10 }, { s: '7,600.0', x: 120, y: y + 10 });
@@ -138,7 +138,7 @@ test('expenses PDF: rows per Sr#, wrapped descriptions joined, footer and total 
   assert.equal(read.rows[0].date, '2026-08-31');
   assert.equal(read.rows[0].createdAt, '2026-08-31 22:52');
   assert.equal(read.rows[1].desc, 'Sugar pot & Spoon');
-  assert.equal(read.rows[3].createdBy, 'Sadia Azam');
+  assert.equal(read.rows[3].createdBy, 'Test Accounts');
   const built = buildExpenses(read.rows);
   assert.deepEqual(built.categories, ['Home rent (Dr. Ali)', 'Maintenance and repairs', 'Office supplies', 'Personal (Dr. Ali)']);
   assert.equal(built.expenses.find((e) => e[7] === 108588)[1], null); // personal spending: no branch
@@ -158,14 +158,14 @@ test('expenses PDF: columns are read from the header row, so a file with wider c
   const y = 652, hy = 674;
   const H = (s, x) => ({ s, x, y: hy });
   const items = [H('Sr#', 33), H('Voucher#', 86), H('Description', 140), H('Date', 214), H('Category', 268), H('Amount', 356), { s: 'Payment', x: 409, y: hy + 12 }, H('Mode', 409), H('Created', 463), H('At', 493), H('Created', 517), H('By', 547),
-    { s: '1', x: 33, y }, { s: '109130', x: 86, y }, { s: 'DHA', x: 139.9, y }, { s: 'travelling', x: 156, y }, { s: 'expense', x: 140, y: y - 11 },
+    { s: '1', x: 33, y }, { s: '900130', x: 86, y }, { s: 'DHA', x: 139.9, y }, { s: 'travelling', x: 156, y }, { s: 'expense', x: 140, y: y - 11 },
     { s: '06', x: 214, y }, { s: '/', x: 221, y }, { s: '10', x: 223, y }, { s: '/', x: 231, y }, { s: '2026', x: 233, y },
     { s: 'Traveling', x: 268, y }, { s: 'Staff', x: 298, y }, { s: '9,930.0', x: 356, y }, { s: 'Cash', x: 409, y },
     { s: '10', x: 463, y }, { s: '/', x: 470, y }, { s: '06', x: 472, y }, { s: '/', x: 480, y }, { s: '2026', x: 482, y }, { s: '-', x: 498, y }, { s: '10:28', x: 463, y: y - 11 }, { s: 'PM', x: 479, y: y - 11 },
-    { s: 'Sadia', x: 517, y }, { s: 'Azam', x: 536, y }];
+    { s: 'Test', x: 517, y }, { s: 'Accounts', x: 536, y }];
   const read = readExpensesPdf([{ items }]);
   assert.equal(read.rows.length, 1);
-  assert.deepEqual(read.rows[0], { voucher: '109130', desc: 'DHA travelling expense', date: '2026-10-06', category: 'Traveling Staff', amount: 9930, mode: 'Cash', createdAt: '2026-10-06 22:28', createdBy: 'Sadia Azam' });
+  assert.deepEqual(read.rows[0], { voucher: '900130', desc: 'DHA travelling expense', date: '2026-10-06', category: 'Traveling Staff', amount: 9930, mode: 'Cash', createdAt: '2026-10-06 22:28', createdBy: 'Test Accounts' });
   assert.equal(buildExpenses(read.rows).expenses[0][1], 3); // DHA
 });
 

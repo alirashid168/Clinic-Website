@@ -166,6 +166,24 @@ export function givenName(t) {
   return list.length ? list[list.length - 1] : '';
 }
 
+/**
+ * Does a Treatment say "checkup"? ("Checkup", "checkup / pain", "Xray checkup", "Check up", "chek up"; not "Wire check", "RCT check", "Cheek filler".)
+ * The same pattern as the live sync (aajIsCheckupText in apps-script/AajSync.js) and the database (private.aaj_is_checkup_text).
+ */
+export function isCheckupText(t) {
+  return /\bch[ea]{1,2}c?k?[- ]?ups?\b/i.test(String(t ?? ''));
+}
+
+/**
+ * Rows for import_aaj_sheet() -> { visits, checkups }. A row without an Mr# whose Treatment says checkup is a checkup patient (owner,
+ * 9 Oct 2026): not a visit, never a patient file. Those rows belong on the checkup list (Admin -> Import -> 5. Checkup list).
+ */
+export function splitCheckupRows(rows) {
+  const visits = [], checkups = [];
+  for (const r of rows) (!r[2] && isCheckupText(r[7]) ? checkups : visits).push(r);
+  return { visits, checkups };
+}
+
 /** One row of cells + the detected columns -> what the row says. The live sync (apps-script/AajSync.js) has a copy of this function. */
 export function readRow(r, cols) {
   const get = (f) => (cols[f] === undefined ? '' : text(r[cols[f]]));
@@ -188,9 +206,13 @@ const nonEmpty = (row) => (row || []).filter((c) => text(c) !== '' || c instance
  * opts.columns overrides the detected mapping; opts.fixedDate is used when the tab carries no dates.
  */
 export function readTab(rows, opts = {}) {
-  const out = { columns: opts.columns || null, headerAt: -1, rows: [], dateMode: 'none', days: new Set(), issues: [], headers: [] };
+  const out = { columns: opts.columns || null, headerAt: -1, rows: [], dateMode: 'none', days: new Set(), issues: [], headers: [], deletedOnWebsite: 0, archivedCheckups: 0 };
   let cols = opts.columns || null;
   let currentDate = null;
+  // The archive the Google Sheet sync writes ("Aj ki List - Archive") has a "Website visit id" column. A row it marked "deleted on the
+  // website" (front desk deleted or moved its visit or checkup there before the night) is never imported: it would bring a wrong entry back
+  // as a Completed visit (sheet-behaviour RS8-C1). A row marked "checkup <id>" is a checkup patient (owner rule 6): never a visit either.
+  let webCol = -1;
   const seenDates = new Set();
   rows.forEach((raw, idx) => {
     const r = raw || [];
@@ -198,6 +220,7 @@ export function readTab(rows, opts = {}) {
     if (!cells.length) return;
     if (isHeaderRow(r)) {
       if (!opts.columns) cols = detectColumns(r);
+      webCol = r.findIndex((c) => norm(c) === 'website visit id');
       if (out.headerAt < 0) { out.headerAt = idx; out.headers = r.map((c) => text(c)); out.columns = cols; }
       return;
     }
@@ -215,6 +238,9 @@ export function readTab(rows, opts = {}) {
     const get = (f) => (cols[f] === undefined ? '' : text(r[cols[f]]));
     const rawName = get('name');
     if (!rawName || /^(total|count|patients?)\b/i.test(rawName) || cellDate(r[cols.name]) || isHeaderRow(r)) return;
+    const mark = webCol >= 0 ? text(r[webCol]).toLowerCase() : '';
+    if (mark === 'deleted on the website') { out.deletedOnWebsite++; return; }
+    if (/^checkup\s/.test(mark)) { out.archivedCheckups++; return; }
     let date = currentDate;
     if (cols.date !== undefined) { const d = cellDate(r[cols.date]); if (d) { date = d; out.dateMode = 'column'; } }
     if (!date && opts.fixedDate) { date = opts.fixedDate; if (out.dateMode === 'none') out.dateMode = 'fixed'; }
@@ -225,6 +251,8 @@ export function readTab(rows, opts = {}) {
   else if (out.rows.length && out.dateMode === 'none') out.issues.push('No dates found on this tab: the rows will be imported for the date you choose below.');
   const undated = out.rows.filter((r) => !r.date).length;
   if (undated && out.dateMode !== 'none') out.issues.push(`${undated} rows come before the first date on the tab and will be skipped.`);
+  if (out.deletedOnWebsite) out.issues.push(`${out.deletedOnWebsite} row${out.deletedOnWebsite === 1 ? ' is' : 's are'} marked "deleted on the website" (front desk deleted ${out.deletedOnWebsite === 1 ? 'it' : 'them'} there before the archive) and will be skipped.`);
+  if (out.archivedCheckups) out.issues.push(`${out.archivedCheckups} row${out.archivedCheckups === 1 ? ' is a checkup patient' : 's are checkup patients'} (marked "checkup" in the archive) and will be skipped: checkups are not visits. They are on the website's Checkups page already.`);
   out.days = [...out.days].sort();
   return out;
 }

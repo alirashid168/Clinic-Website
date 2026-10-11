@@ -80,7 +80,9 @@ function validateRequest(req) {
   for (const t of p.tabs) {
     // a quiet minute asks only "anything new?": no rows and no list of present rows (so the website claims and removes nothing)
     const quick = !('present' in t);
-    if (JSON.stringify(Object.keys(t).sort()) !== (quick ? '["branch","hash","rows","tab"]' : '["branch","hash","present","rows","tab"]')) fail('tab keys ' + Object.keys(t));
+    if (JSON.stringify(Object.keys(t).filter((k) => k !== 'doubled').sort()) !== (quick ? '["branch","hash","rows","tab"]' : '["branch","hash","present","rows","tab"]')) fail('tab keys ' + Object.keys(t));
+    // keys on two rows that show the same person (RV-1 / RV-3): only with the list of present rows, each one of them, never empty
+    if ('doubled' in t && (quick || !Array.isArray(t.doubled) || !t.doubled.length || t.doubled.some((k) => !t.present.includes(k)) || new Set(t.doubled).size !== t.doubled.length)) fail('doubled');
     if (quick && (t.rows.length || p.check_removed || t.hash === null)) fail('a call without "present" carries no rows, no removal pass and a hash');
     if (BRANCH[t.tab] !== t.branch || seen.has(t.branch)) fail('tab ' + t.tab);
     seen.add(t.branch);
@@ -349,6 +351,8 @@ test('first sync writes back what the website knows: a checkup has no Mr# (the c
   assert.equal(env.tab('Gulshan KHI').font(r2, colOf(env, 'Gulshan KHI', 'website')), '#b45309', 'warning: amber');
   const r4 = rowOf(env, 'Gulshan KHI', 'sample person four');
   assert.match(statusOf(env, 'Gulshan KHI', r4), /^\u26a0 A checkup cannot be Scheduled\. Saved as Waiting\./);
+  // the Status column is headed "Waiting" here: the kept field is called Status, never "Waiting" (sheet-behaviour minor, loop 6)
+  assert.match(statusOf(env, 'Gulshan KHI', r4), / \u00b7 Website change kept for: Status$/);
   assert.equal(cellOf(env, 'Gulshan KHI', r4, 'waiting'), 'Waiting', 'a checkup cannot be Scheduled: the sheet is told what the website kept');
   assert.equal(cellOf(env, 'Gulshan KHI', r4, 'patient'), 'sample person four lhr', 'the typed name is never changed');
   assert.match(headerOf(env, 'Gulshan KHI'), /^Website \u00b7 \d\d:\d\d \u00b7 \d need attention$/);
@@ -946,7 +950,7 @@ test('deleting more than three rows at once, or a quarter of a small tab, or a t
   assert.equal(w4.server.state.visits.length, 2, 'and when it is sent, two visits vanishing at once are put back');
 });
 
-test('a copied row gets a new key; the website says the patient is already on the list and names the row', () => {
+test('a whole row copied (hidden key too) is a pure copy: it says "Duplicate of row N", is never sent, and keeps the key; typed over with somebody else it gets a new key', () => {
   const { env, server } = synced();
   const r = rowOf(env, GUL, 'Sample Person One');
   const sh = env.tab(GUL);
@@ -954,11 +958,23 @@ test('a copied row gets a new key; the website says the patient is already on th
   copy.forEach((v, i) => { if (v !== '') sh._set(9, i + 1, { kind: 's', v }); });
   env.touch();
   env.advance(61000);
+  const from = server.calls.length;
   env.ticks(2);
   assert.equal(server.state.visits.filter((v) => server.patientByMr(v.mr).name === 'Sample Person One').length, 1);
-  assert.match(statusOf(env, GUL, 9), /^✗ Already on this list in row 2 \(Mr# 9701\)\. Put both treatments in one row and delete this one\.$/);
-  assert.notEqual(sh.text(9, colOf(env, GUL, 'sync key')), sh.text(2, colOf(env, GUL, 'sync key')), 'the copy was re-keyed');
+  assert.equal(statusOf(env, GUL, 9), '✗ Duplicate of row 2: delete this row.', 'sheet-behaviour RV-1 (before: re-keyed, sent and refused as "Already on this list")');
+  assert.equal(sentRowsSince(server, from).length, 0, 'nothing sent for it');
+  assert.equal(sh.text(9, colOf(env, GUL, 'sync key')), sh.text(2, colOf(env, GUL, 'sync key')), 'the copy keeps the key');
   assert.equal(statusOf(env, GUL, 2), '✓ On website', 'the original is not disturbed');
+  // the copy typed over with another patient is that patient's new row
+  server.addPatient({ mr: '9790', name: 'Sample Person Ninety', phone: '03001110090' });
+  setCell(env, GUL, 9, 'mr', '9790');
+  setCell(env, GUL, 9, 'patients name', 'Sample Person Ninety');
+  setCell(env, GUL, 9, 'contact', '03001110090');
+  settle(env, 3);
+  assert.equal(visitsOfPatient(server, 'Sample Person Ninety').length, 1);
+  assert.notEqual(sh.text(9, colOf(env, GUL, 'sync key')), sh.text(2, colOf(env, GUL, 'sync key')), 'a new key');
+  assert.equal(server.state.visits.filter((v) => server.patientByMr(v.mr).name === 'Sample Person One').length, 1);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
 });
 
 test('two different people typed with the same Mr# (a real case in the DHA tab): the second row is refused, nothing is merged', () => {
@@ -966,7 +982,8 @@ test('two different people typed with the same Mr# (a real case in the DHA tab):
   settle(env, 3);
   assert.equal(server.state.visits.length, 1);
   assert.equal(statusOf(env, 'DHA KHI', 2), '✓ On website');
-  assert.match(statusOf(env, 'DHA KHI', 3), /^✗ Already on this list in row 2 \(Mr# 8641\)/);
+  // (11 Oct 2026) the second name only fits the Mr# with doubt (another last word): refused before anything is looked up on the list
+  assert.equal(statusOf(env, 'DHA KHI', 3), '✗ Needs attention: the name in this row does not match Mr# 8641 on the website. Check the Mr#, or type the name as the website has it.');
   assert.equal(cellOf(env, 'DHA KHI', 3, 'patient'), 'Sample Person Ten');
   assert.equal(cellOf(env, 'DHA KHI', 3, 'treatment details'), 'U018 Upper Pc', 'the second row\'s text is untouched');
 });
@@ -1338,7 +1355,8 @@ test('Set up (Dr. Ali): the secret, a question for each tab, the old timer, the 
   for (const v of server.state.visits) { const k = v.branch + v.mr; perPatient.set(k, (perPatient.get(k) || 0) + 1); }
   assert.ok([...perPatient.values()].every((n) => n === 1), 'one visit per patient and branch: ' + JSON.stringify([...perPatient]));
   assert.equal(webVisit(server, 'Sample Person One').sheet_key, env.tab(GUL).text(2, 15), 'linked to the website visit that was already there');
-  assert.equal(webVisit(server, 'Sample Person One').status, 'waiting', 'a different status on the sheet is a normal two-way merge, not a doubling');
+  // the sheet's Completed (a row Set up stamped, no edit time) completes the website's Waiting visit: the status only moves forward (SB7-2)
+  assert.equal(webVisit(server, 'Sample Person One').status, 'completed', 'a different status on the sheet is a normal two-way merge, not a doubling');
   assert.match(statusOf(env, GUL, 2), /^[✓⚠]/);
 });
 
@@ -1620,10 +1638,13 @@ test('a tab that is renamed or missing is skipped and logged once a day; the oth
   assert.equal(server.visitsOf('ISB', TODAY).length, 2, 'Islamabad kept syncing');
 });
 
-test('runtime guard: past 70 minutes of run time today the script works only every 5th minute; past 85 it stops for the day and says so; tomorrow it starts again', () => {
+test('runtime guard: past 50 minutes of run time today the script works only every 5th minute; past 65 it stops for the day and says so; tomorrow it starts again', () => {
   const { env, server } = world({ patients: BASE_PATIENTS });
   settle(env, 2);
-  env.props.document.set('rt:' + TODAY, String(4300000));
+  // L8 (loop 3): Google counts more than the script sees (each run's start-up too), so the script stops well before the 90 minutes
+  assert.equal(env.global('AAJ').RUNTIME_SLOW_MS, 50 * 60000);
+  assert.equal(env.global('AAJ').RUNTIME_STOP_MS, 65 * 60000);
+  env.props.document.set('rt:' + TODAY, String(3100000));
   const fetched = [];
   for (const m of ['08:11', '08:12', '08:13', '08:14', '08:15', '08:16', '08:20']) {
     env.at(TODAY, m);
@@ -1634,7 +1655,7 @@ test('runtime guard: past 70 minutes of run time today the script works only eve
   assert.deepEqual(fetched.filter(([, n]) => n > 0).map(([m]) => m), ['08:15', '08:20'], 'slow mode: every 5th minute only');
   env.at(TODAY, '08:21');
   setCell(env, GUL, 2, 'treatment details', 'x');
-  env.props.document.set('rt:' + TODAY, String(5200000));
+  env.props.document.set('rt:' + TODAY, String(4000000));
   const f1 = env.stats.fetches;
   env.tick();
   assert.equal(env.stats.fetches, f1, 'stopped');
@@ -2084,11 +2105,14 @@ test('a checkup row can be renamed or edited in the sheet: it stays the same che
   const { env, server } = ckWorld();
   const c = server.state.checkups.find((x) => x.name === 'Check One');
   const key = c.sheet_key;
-  setCell(env, GUL, 2, 'patient', 'Zainab Uno');       // another first name: a patient row would become a new row, a checkup row is only corrected
+  setCell(env, GUL, 2, 'patient', 'Check Onay');       // the surname corrected, the same phone: the same checkup
   setCell(env, GUL, 2, 'treatment', 'Scaling');
   env.tickAfter(5000);
+  assert.equal(c.name, 'Check One', 'a name being typed (edited a moment ago) is not sent yet');
+  env.advance(61000);
+  env.ticks(2);
   assert.equal(server.state.checkups.length, 2, 'no second checkup');
-  assert.equal(c.name, 'Zainab Uno');
+  assert.equal(c.name, 'Check Onay');
   assert.equal(c.checkup_for, 'Scaling');
   assert.equal(c.sheet_key, key);
   assert.equal(statusOf(env, GUL, 2), '\u2713 On website');
@@ -2117,16 +2141,54 @@ test('a checkup edited on the website shows in its row; an Mr# the website gives
   assert.equal(c.details, 'sheet again', 'and the row still follows the checkup');
 });
 
-test('an Mr# typed into a checkup row makes it another row (a patient row): the checkup is removed, the patient gets the visit', () => {
+test('RS5-E1 (was B4): an Mr# typed later into a checkup row (an existing patient on recall, the Mr# looked up in Healthwire) makes the patient\'s visit: the row lets go of the checkup, the untouched checkup is removed like a deleted row, and the patient is no lead at night', () => {
   const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
   server.addPatient({ mr: '9810', name: 'Check One', phone: '03001110301' });
   setCell(env, GUL, 2, 'mr', '9810');
   env.advance(61000);
   env.ticks(3);
+  assert.equal(server.state.visits.length, 1, 'a row with an Mr# is a patient\'s visit (owner rule)');
+  const v = server.state.visits[0];
+  assert.equal(v.mr, '9810');
+  assert.equal(server.checkupById(c.id), undefined, 'the untouched checkup went like a deleted row (nothing hung on it)');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), v.sheet_key, "the row is the patient's visit now");
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  assert.equal(env.tab(GUL).used().rows, 3, 'no row was added');
+  quiet(env, server);
+  env.at(TODAY, '23:58'); env.ticks(1);
+  env.at(NEXT, '00:05'); env.ticks(1);
+  assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]), ['Check Two'], 'only the real checkup patient is on the nightly list');
+});
+
+test('RS5-E1: an Mr# typed into a checkup row that has follow-up notes: the visit is made, the checkup is kept and comes back as its own row', () => {
+  const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  server.editCheckup(c.id, { follow_up: 'Interested' });
+  env.ticks(1);
+  server.addPatient({ mr: '9810', name: 'Check One', phone: '03001110301' });
+  setCell(env, GUL, 2, 'mr', '9810');
+  env.advance(61000);
+  env.ticks(4);
+  assert.deepEqual(server.state.visits.map((v) => v.mr), ['9810']);
+  assert.equal(server.checkupById(c.id), c, 'the checkup with follow-up notes stays');
+  const back = [...Array(6).keys()].map((i) => i + 3).find((r) => cellOf(env, GUL, r, 'sync key') === c.sheet_key);
+  assert.ok(back, "the checkup's row came back below");
+  assert.match(statusOf(env, GUL, back), /^⚠ Not removed: this checkup is already a patient, or has follow-up notes/);
+});
+
+test('another person typed over a checkup row together with their own Mr# (another name and phone) is a patient row: the patient gets the visit, the checkup goes with its old key', () => {
+  const { env, server } = ckWorld();
+  server.addPatient({ mr: '9810', name: 'Rehan Typed', phone: '03001119810' });
+  setCell(env, GUL, 2, 'mr', '9810');
+  setCell(env, GUL, 2, 'patient', 'Rehan Typed');
+  setCell(env, GUL, 2, 'contact', '03001119810');
+  env.advance(61000);
+  env.ticks(3);
   assert.equal(server.state.visits.length, 1);
   assert.equal(server.state.visits[0].mr, '9810');
-  assert.equal(server.state.checkups.filter((x) => x.name === 'Check One').length, 0, 'the checkup of the same row went with the old key');
-  assert.equal(statusOf(env, GUL, 2), '\u2713 On website');
+  assert.equal(server.state.checkups.filter((x) => x.name === 'Check One').length, 0, 'the checkup of the old person went with the old key (nothing hangs on it)');
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
 });
 
 test('a checkup made on the website is added to the sheet as a row without an Mr#, claimed once, and follows later edits', () => {
@@ -2149,9 +2211,9 @@ test('a checkup made on the website is added to the sheet as a row without an Mr
   setCell(env, GUL, r, 'treatment details', 'from the sheet');
   env.tickAfter(5000);
   assert.equal(c.details, 'from the sheet');
-  setCell(env, GUL, r, 'patient', 'Zainab Web');       // renamed in the sheet: the same checkup, not a new row
-  env.tickAfter(5000);
-  assert.equal(c.name, 'Zainab Web');
+  setCell(env, GUL, r, 'patient', 'Web Checkups');       // renamed in the sheet (the same first name): the same checkup, not a new row
+  settle(env, 2);
+  assert.equal(c.name, 'Web Checkups');
   assert.equal(server.state.checkups.length, 3, 'no fourth checkup');
   assert.equal(c.sheet_key, 'W-' + c.id);
   quiet(env, server);
@@ -2163,9 +2225,9 @@ test('a checkup row that has just come from the website is renamed in the sheet 
   env.ticks(1);
   const r = rowOf(env, GUL, 'Web Two');
   assert.equal(statusOf(env, GUL, r), '✓ Added from the website');
-  setCell(env, GUL, r, 'patient', 'Zainab Two');
-  env.tickAfter(5000);
-  assert.equal(c.name, 'Zainab Two');
+  setCell(env, GUL, r, 'patient', 'Web Too');
+  settle(env, 2);
+  assert.equal(c.name, 'Web Too');
   assert.equal(server.state.checkups.length, 3, 'no new checkup was made for the renamed row');
   assert.equal(c.sheet_key, 'W-' + c.id);
 });
@@ -2220,6 +2282,174 @@ test('a deleted row of a visit that has an invoice: the website keeps it marked 
   assert.equal(server.state.visits.filter((x) => x.mr === '9702').length, 1, 'once');
 });
 
+// ------------------------------------------------------------------------------------------------ Ctrl+Z after the sync put rows back (RV-1, RV-3); kept checkups (RV-2)
+/** the cells of rows r .. r+n-1 as they are now (the hidden columns too), for a Ctrl+Z later */
+function saveRows(sh, r, n = 1) {
+  const width = sh.used().cols, out = [];
+  for (let i = 0; i < n; i++) { const row = []; for (let c = 1; c <= width; c++) row.push(sh._get(r + i, c)); out.push(row); }
+  return out;
+}
+/** Ctrl+Z of a row deletion: the saved rows are back at row `at` with their hidden cells; everything from there down moves down */
+function undoDelete(env, tab, at, saved) {
+  const sh = env.tab(tab), n = saved.length, width = Math.max(sh.used().cols, saved[0].length);
+  sh.insertRowsAfter(sh.getMaxRows(), n);
+  for (let rr = sh.used().rows; rr >= at; rr--) for (let c = 1; c <= width; c++) { sh._set(rr + n, c, sh._get(rr, c)); sh._set(rr, c, null); }
+  saved.forEach((row, i) => row.forEach((cell, j) => { if (cell) sh._set(at + i, j + 1, cell); }));
+  env.ctx.aajOnChange({ changeType: 'INSERT_ROW', source: env.book });
+}
+/** the rows whose patient name is exactly this, top to bottom */
+function rowsNamed(env, tab, name) {
+  const sh = env.tab(tab), nc = colOf(env, tab, 'patient'), out = [];
+  for (let r = 2; r <= sh.used().rows; r++) if (sh.text(r, nc) === name) out.push(r);
+  return out;
+}
+/** the rows the script sent to the website since call number `from` */
+function sentRowsSince(server, from) { return server.calls.slice(from).flatMap((c) => (c.payload.tabs || []).flatMap((t) => t.rows || [])); }
+
+test('RV-1: Ctrl+Z after the sync has put back a held deletion: the copies it appended say "Duplicate of row N", are not sent, and no checkup is made twice', () => {
+  const ph = (i) => '0302100000' + i;
+  const rows = [
+    ['9861', 'Rv Alpha', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(1), ''],
+    ['9862', 'Rv Bravo', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(2), ''],
+    ['', 'Ck Echo', '', 'Checkup', '', 'Waiting', '', '', '', '', '', ph(5), ''],
+    ['', 'Ck Foxtrot', '', 'Checkup', '', 'Waiting', '', '', '', '', '', ph(6), ''],
+    ['9863', 'Rv Charlie', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(3), ''],
+    ['9864', 'Rv Delta', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(4), ''],
+  ];
+  const patients = [1, 2, 3, 4].map((i) => ({ mr: String(9860 + i), name: 'Rv ' + ['Alpha', 'Bravo', 'Charlie', 'Delta'][i - 1], phone: ph(i) }));
+  const { env, server } = world({ rows: { [GUL]: rows }, patients });
+  settle(env, 3);
+  assert.equal(server.state.visits.length, 4);
+  assert.equal(server.state.checkups.length, 2);
+  const sh = env.tab(GUL);
+  const saved = saveRows(sh, 3, 4);                           // Rv Bravo, Ck Echo, Ck Foxtrot, Rv Charlie
+  env.deleteRows(GUL, 3, 4);
+  env.ticks(2);
+  assert.equal(server.state.visits.length, 4, 'held: nothing removed');
+  assert.equal(server.state.checkups.length, 2);
+  assert.match(statusOf(env, GUL, exactRow(env, GUL, 'Ck Echo')), /^⚠ Needs attention: 4 rows disappeared at once/);
+  // Ctrl+Z: the four rows are back at their place with their hidden keys; the rows the sync put back stay at the bottom
+  undoDelete(env, GUL, 3, saved);
+  const from = server.calls.length;
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.state.checkups.length, 2, 'no checkup made twice');
+  assert.equal(server.state.visits.length, 4);
+  assert.equal(sentRowsSince(server, from).length, 0, 'nothing is sent for the copies');
+  for (const name of ['Rv Bravo', 'Ck Echo', 'Ck Foxtrot', 'Rv Charlie']) {
+    const at = rowsNamed(env, GUL, name);
+    assert.equal(at.length, 2, name + ' is on the sheet twice');
+    assert.equal(statusOf(env, GUL, at[1]), `✗ Duplicate of row ${at[0]}: delete this row.`, name);
+    assert.ok(statusOf(env, GUL, at[0]).startsWith('✓'), name + ': ' + statusOf(env, GUL, at[0]));
+    assert.equal(sh.text(at[1], colOf(env, GUL, 'sync key')), sh.text(at[0], colOf(env, GUL, 'sync key')), 'the copy keeps the key (never a new row)');
+  }
+  assert.match(headerOf(env, GUL), /4 need attention/);
+  // staff delete the four copies together: nothing is removed from the website, nothing comes back
+  env.deleteRows(GUL, rowsNamed(env, GUL, 'Rv Bravo')[1], 4);
+  env.ticks(3);
+  assert.equal(server.state.visits.length, 4);
+  assert.equal(server.state.checkups.length, 2);
+  for (const name of ['Rv Alpha', 'Rv Bravo', 'Ck Echo', 'Ck Foxtrot', 'Rv Charlie', 'Rv Delta']) assert.equal(rowsNamed(env, GUL, name).length, 1, name + ' once');
+  assert.ok(server.state.visits.every((v) => v.status === 'waiting'));
+  quiet(env, server);
+});
+
+test('RV-1: a pure copy of a checkup row deleted later, or the original deleted instead, keeps the one checkup', () => {
+  const rows = [];
+  for (let i = 0; i < 6; i++) rows.push(['', 'Ck Copy ' + (i + 1), '', 'Checkup', '', 'Waiting', '', '', '', '', '', '0302200000' + i, '']);
+  const { env, server } = world({ rows: { [GUL]: rows } });
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 6);
+  const sh = env.tab(GUL);
+  const copy = saveRows(sh, 2, 1)[0];
+  copy.forEach((cell, j) => { if (cell) sh._set(9, j + 1, cell); });       // a whole row copied (hidden cells too) below the list
+  env.touch();
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(server.state.checkups.length, 6, 'no second checkup');
+  assert.equal(statusOf(env, GUL, 9), '✗ Duplicate of row 2: delete this row.');
+  env.deleteRows(GUL, 2);                                     // the ORIGINAL is deleted: the copy is the row now
+  env.ticks(3);
+  assert.equal(server.state.checkups.length, 6, 'the checkup stays');
+  const r = exactRow(env, GUL, 'Ck Copy 1');
+  assert.equal(server.state.checkups.find((c) => c.name === 'Ck Copy 1').sheet_key, sh.text(r, colOf(env, GUL, 'sync key')));
+});
+
+test('RV-2: deleting the row of a Completed or Treatment checkup keeps the checkup (doctor, details), and its row comes back with the reason', () => {
+  const rows = [['', 'Ck Done', '', 'Checkup', '', 'Completed', '', 'Dr Ali Rashid', 'needs braces, quoted 80k', '', '', '03023000001', ''],
+    ['', 'Ck Treat', '', 'Checkup', '', 'Treatment', '', '', '', '', '', '03023000002', '']];
+  for (let i = 0; i < 6; i++) rows.push(['', 'Ck Plain ' + (i + 1), '', 'Checkup', '', 'Waiting', '', '', '', '', '', '0302300010' + i, '']);
+  const { env, server } = world({ rows: { [GUL]: rows } });
+  settle(env, 3);
+  const done = server.state.checkups.find((c) => c.name === 'Ck Done');
+  assert.equal(done.day_status, 'completed');
+  const sh = env.tab(GUL);
+  const savedDone = saveRows(sh, rowOf(env, GUL, 'Ck Done'), 1);
+  env.deleteRows(GUL, rowOf(env, GUL, 'Ck Done'));
+  env.ticks(2);
+  assert.ok(server.checkupById(done.id), 'kept on the website');
+  assert.equal(done.doctors, 'Dr Ali Rashid');
+  assert.equal(done.details, 'needs braces, quoted 80k');
+  const back = exactRow(env, GUL, 'Ck Done');
+  assert.ok(back > 8, 'its row is back at the bottom');
+  assert.equal(statusOf(env, GUL, back), '⚠ Not removed: this checkup is Completed on the website. To take a patient off, set Status to Cancelled.');
+  // Ctrl+Z after the row came back (loop-1 deferred N4): the checkup is not made twice; the row put back says it is a duplicate
+  undoDelete(env, GUL, 2, savedDone);
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(server.state.checkups.filter((c) => c.name === 'Ck Done').length, 1, 'one checkup');
+  assert.deepEqual(rowsNamed(env, GUL, 'Ck Done').map((r) => statusOf(env, GUL, r).charAt(0)), ['✓', '✗']);
+  env.deleteRows(GUL, rowsNamed(env, GUL, 'Ck Done')[1]);
+  env.ticks(2);
+  assert.equal(server.state.checkups.filter((c) => c.name === 'Ck Done').length, 1);
+  env.deleteRows(GUL, rowOf(env, GUL, 'Ck Treat'));
+  env.ticks(2);
+  assert.ok(server.state.checkups.find((c) => c.name === 'Ck Treat'), 'a checkup in Treatment is kept too');
+  assert.equal(statusOf(env, GUL, exactRow(env, GUL, 'Ck Treat')), '⚠ Not removed: this checkup is Treatment on the website. To take a patient off, set Status to Cancelled.');
+  env.deleteRows(GUL, rowOf(env, GUL, 'Ck Plain 1'));
+  env.ticks(2);
+  assert.equal(server.state.checkups.find((c) => c.name === 'Ck Plain 1'), undefined, 'a Waiting checkup with nothing on it still goes with its row');
+});
+
+test('RV-3: Ctrl+Z after the row of a kept-and-Cancelled visit came back: the visit is Waiting again and the copy says "Duplicate of row N"', () => {
+  const { env, server } = synced();
+  const v = webVisit(server, 'Sample Person Three');
+  v.attached = true;
+  const sh = env.tab(GUL);
+  const r3 = rowOf(env, GUL, 'Sample Person Three');
+  const saved = saveRows(sh, r3, 1);
+  env.deleteRows(GUL, r3);
+  env.ticks(2);
+  assert.equal(v.status, 'cancelled');
+  assert.equal(statusOf(env, GUL, exactRow(env, GUL, 'Sample Person Three')), '⚠ Kept on the website and marked Cancelled: it has an attached record (invoices).');
+  undoDelete(env, GUL, r3, saved);
+  env.ticks(2);
+  assert.equal(v.status, 'waiting', 'the visit has its status back');
+  assert.equal(server.state.visits.filter((x) => x.mr === '9702').length, 1);
+  const at = rowsNamed(env, GUL, 'Sample Person Three');
+  assert.deepEqual([at.length, at[0]], [2, r3]);
+  assert.equal(cellOf(env, GUL, r3, 'waiting'), 'Waiting');
+  assert.equal(statusOf(env, GUL, r3), '✓ On website');
+  assert.equal(statusOf(env, GUL, at[1]), `✗ Duplicate of row ${r3}: delete this row.`);
+  env.deleteRows(GUL, at[1]);                                 // staff delete the copy
+  env.ticks(2);
+  assert.equal(v.status, 'waiting');
+  assert.equal(server.visitById(v.id), v, 'nothing removed');
+  assert.equal(rowsNamed(env, GUL, 'Sample Person Three').length, 1);
+  quiet(env, server);
+});
+
+test('RV-3: the row the sync put back itself (no Ctrl+Z) leaves the kept visit Cancelled', () => {
+  const { env, server } = synced();
+  const v = webVisit(server, 'Sample Person Three');
+  v.attached = true;
+  env.deleteRows(GUL, rowOf(env, GUL, 'Sample Person Three'));
+  env.ticks(4);
+  assert.equal(v.status, 'cancelled');
+  assert.equal(rowsNamed(env, GUL, 'Sample Person Three').length, 1);
+  quiet(env, server);
+});
+
 test('a row deleted by a person while the sheet is being archived at night is never a removal: the nightly clear removes nothing from the website', () => {
   const { env, server } = dayEnd();
   const before = server.state.visits.length;
@@ -2251,11 +2481,35 @@ test('an Mr# the website does not know: below 50000 it is a Healthwire number (t
   assert.match(headerOf(env, GUL), /3 need attention/, 'two new patients to check, one typo');
 });
 
-test('another patient\'s name is not given away when an Mr# does not fit: the row only says the Mr# belongs to somebody else', () => {
+test('M2 (loop 6): a retired Mr# (the website\'s 10003, now 50003) typed with that patient\'s name says to use 50003 and makes nothing; with another name it is Healthwire\'s new patient', () => {
+  const rows = [
+    ['10903', 'Renum Sample', '', 'Monthly', '4', 'Waiting', '', '', '', '', '', '', ''],
+    ['10904', 'Kashif Newcomer', '', 'RCT', '', 'Waiting', '', '', '', '', '', '', ''],
+  ];
+  const patients = [
+    { mr: '50903', name: 'Renum Sample', notes: 'Mr# was 10903 until 09 Oct 2026 (the website now numbers from 50000)' },
+    { mr: '50904', name: 'Renum Other', notes: 'Mr# was 10904 until 09 Oct 2026 (the website now numbers from 50000)' },
+  ];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients });
+  settle(env, 3);
+  assert.equal(statusOf(env, GUL, 2), "✗ Mr# 10903 is no longer used. This patient's Mr# is now 50903. Use 50903.");
+  assert.equal(statusOf(env, GUL, 3), '⚠ New patient added with Healthwire Mr# 10904. Check the name and phone on the website.');
+  assert.deepEqual(server.state.patients.map((p) => p.mr), ['50903', '50904', '10904'], 'no second file under the old number; Healthwire\'s own 10904 is made');
+  assert.equal(server.state.visits.length, 1, 'only the Healthwire patient has a visit');
+  setCell(env, GUL, 2, 'mr', '50903');       // staff follow the message
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  assert.equal(server.state.visits.length, 2);
+  assert.equal(server.state.visits[1].mr, '50903', 'the visit is on the patient\'s file');
+});
+
+test('another patient\'s name is not given away when an Mr# does not fit: the row only says the name does not match that Mr#', () => {
   const rows = [['9701', 'Totally Different', '', 'RCT', '', 'Waiting', '', '', '', '', '', '', '']];
   const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9701', name: 'Sample Person One', phone: '03001110001', first_branch: 'DHA' }] });
   settle(env, 3);
-  assert.equal(statusOf(env, GUL, 2), '\u2717 Mr# 9701 belongs to another patient. Check the Mr#.');
+  assert.equal(statusOf(env, GUL, 2), "\u2717 Needs attention: the name in this row does not match Mr# 9701 on the website. Check the Mr#, or type the name as the website has it.");
+  assert.ok(!/Sample|Person One/.test(statusOf(env, GUL, 2)));
   assert.equal(server.state.visits.length, 0);
 });
 
@@ -2326,12 +2580,12 @@ test('a new row that is still settling keeps the following minutes in full until
   assert.equal(webVisit(server, 'Sample Person One').details, 'while the website is down', 'the next minute tried again at once');
 });
 
-test('the run time of the edit runs counts too: "rte:" grows with every edit and the stop at 85 minutes counts both', () => {
+test('the run time of the edit runs counts too: "rte:" grows with every edit and the stop at 65 minutes counts both', () => {
   const { env } = synced();
   env.ticks(1);
   setCell(env, GUL, 2, 'treatment details', 'x');
   assert.ok(Number(env.props.document.get('rte:' + TODAY)) >= 0 && env.props.document.has('rte:' + TODAY), 'the edit run was counted');
-  env.props.document.set('rte:' + TODAY, String(5200000));
+  env.props.document.set('rte:' + TODAY, String(4000000));
   const f = env.stats.fetches;
   env.at(TODAY, '08:21');
   env.tick();
@@ -2757,15 +3011,16 @@ test('K8: the nightly checkup list follows the row\'s own checkup flag: a checku
   const row = (mr, name, treatment, status, extra = {}) => ({ key: '', fp: '', cells: [mr, name, '', treatment, '', status, '', '', '', '', '', '03001110500', ''], visit: '', checkup: false, ...extra });
   const lines = (rows) => env0.call('aajCheckupLines', s, rows, TODAY).map((l) => l.name);
   assert.deepEqual(lines([
-    row('50001', 'Registered Checkup', 'Checkup', 'Completed', { checkup: true, visit: 'v1' }),
-    row('50002', 'Registered Cancelled', 'Checkup', 'Cancelled', { checkup: true, visit: 'v2' }),
+    row('50001', 'Registered Checkup', 'Checkup', 'Completed', { checkup: true, visit: 'v1', ckMr: '50001' }),
+    row('50002', 'Registered Cancelled', 'Checkup', 'Cancelled', { checkup: true, visit: 'v2', ckMr: '50002' }),
     row('', 'Did Not Come', 'Checkup', 'No show', { checkup: true, visit: 'v3' }),
+    row('9702', 'Mr Typed Into Checkup', 'Checkup', 'Waiting', { checkup: true, visit: 'v6' }),      // RW8-1: still a checkup on the website (a refused Mr#; a matching one would have made the row a visit, no checkup memory)
     row('9701', 'A Patient', 'Checkup', 'Completed', { visit: 'v4' }),
     row('', 'Needs Mr', 'Filling', 'Waiting', { visit: 'v5' }),
     row('', 'Never Seen Filling', 'Filling', 'Waiting'),
     row('', 'Never Seen Checkup', 'Xray checkup', 'Waiting'),
     row('NEW', 'Never Seen New', 'chek up', ''),
-  ]), ['Registered Checkup', 'Never Seen Checkup', 'Never Seen New']);
+  ]), ['Registered Checkup', 'Mr Typed Into Checkup', 'Never Seen Checkup', 'Never Seen New']);
   // end to end: Check One is registered as a patient during the day, Check Two is cancelled on the website
   const w = ckWorld({ patients: BASE_PATIENTS });
   const c1 = w.server.state.checkups.find((x) => x.name === 'Check One'), c2 = w.server.state.checkups.find((x) => x.name === 'Check Two');
@@ -2837,6 +3092,20 @@ test('K13: rows that never reached the website are counted in the log when the a
   env.ticks(1);
   assert.equal(env.props.document.get('listDate:' + GUL), NEXT, 'the archive went ahead');
   assert.match(env.tab('Aaj Sync log').values().map((r) => r[3]).join('\n'), /2 of the 9 rows of 2026-10-09 never reached the website \(the last sync did not go through\)\. They are in the archive: Admin > Import can bring them back\./);
+});
+
+test('loop 6 (minor): rows that still needed attention at midnight (a typo Mr#, "add the Mr#") are named in the log when they are archived, even though the last sync went through', () => {
+  const { env, server } = dayEnd();
+  env.typeRow(GUL, 9, ['60001', 'Typo Midnight', '', 'RCT', '', 'Waiting', '', '', '', '', '', '03001110979', '']);
+  env.typeRow(GUL, 10, ['', 'Forgot Mr Midnight', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110980', '']);
+  env.at(NEXT, '00:05');       // the final flush sends them (the website refuses both), then the day is archived
+  env.ticks(1);
+  assert.equal(env.props.document.get('listDate:' + GUL), NEXT, 'the archive went ahead');
+  const log = env.tab('Aaj Sync log').values().map((r) => r.join(' | ')).join('\n');
+  assert.match(log, /Typo Midnight \| Archived without reaching the website \(the row still needed attention\)\. It is in the archive under 2026-10-09/);
+  assert.match(log, /Forgot Mr Midnight \| Archived without reaching the website/);
+  assert.doesNotMatch(log, /Website Walker \| Archived without/, 'a row that is on the website is not listed');
+  assert.ok(server.state.visits.length > 0);
 });
 
 test('K11: Lahore and Islamabad keep kit and material text in the Token column: the website never fills a blank Token cell there, not even on a row it adds; Gulshan still gets its number', () => {
@@ -2933,7 +3202,7 @@ test('R2: the website\'s list is data, not instructions: a visit with a key the 
   assert.equal(sh.text(rd, colOf(env, GUL, 'website')), '=3+3');
 });
 
-test('K7: the same checkup patient in two rows (same name and phone, no Mr# to tell them by) is flagged on both rows; two people with no phone are not guessed; deleting one row clears the warning on the other', () => {
+test('K7: the same checkup patient typed in two rows (same name and phone, no Mr# to tell them by): the second row is refused as a duplicate (RV-1), and deleting the first lets it take over the checkup; two people with no phone are not guessed', () => {
   const rows = [
     ['', 'Twin Checkup', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03001110555', ''],
     ['', 'Twin Checkup', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '0300 1110555', ''],
@@ -2943,24 +3212,1845 @@ test('K7: the same checkup patient in two rows (same name and phone, no Mr# to t
   ];
   const { env, server } = world({ rows: { [GUL]: rows } });
   settle(env, 3);
-  assert.equal(server.state.checkups.length, 5, 'five checkups: the sheet cannot tell whether two rows are one person, so it says so');
-  const WARN = '\u26a0 Same checkup patient twice on today\'s list (same name and phone). Delete one of the rows.';
-  assert.equal(statusOf(env, GUL, 2), WARN);
-  assert.equal(statusOf(env, GUL, 3), WARN);
+  assert.equal(server.state.checkups.length, 4, 'one checkup for the two Twin rows (sheet-behaviour RV-1: before, two)');
+  assert.equal(statusOf(env, GUL, 2), '\u2713 Checkup patient: no Mr#, no patient file.');
+  assert.equal(statusOf(env, GUL, 3), '\u2717 Already on this list in row 2 (the same checkup patient). Delete this row. If this is another person, correct the name or the phone.');
   assert.equal(statusOf(env, GUL, 4), '\u2713 Checkup patient: no Mr#, no patient file.');
-  assert.equal(statusOf(env, GUL, 5), '\u2713 Checkup patient: no Mr#, no patient file.', 'no phone: never guessed to be the same person');
-  assert.match(headerOf(env, GUL), /2 need attention/);
-  env.ticks(3);                                                // quiet minutes (the website sends no list)
-  assert.equal(statusOf(env, GUL, 2), WARN, 'the warning stays through quiet minutes');
-  server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Unrelated Walk', phone: '03001110999', checkup_for: 'Checkup' });
-  env.ticks(3);                                                // a new list arrives
-  assert.equal(statusOf(env, GUL, 2), WARN, 'and through the next lists');
-  assert.equal(statusOf(env, GUL, 3), WARN);
-  env.deleteRows(GUL, 3);
+  assert.equal(statusOf(env, GUL, 5), '\u2713 Checkup patient: no Mr#, no patient file.');
+  assert.equal(statusOf(env, GUL, 6), '\u2713 Checkup patient: no Mr#, no patient file.', 'no phone: never guessed to be the same person');
+  assert.equal(server.state.checkups.filter((c) => c.name === 'No Phone').length, 2);
+  assert.match(headerOf(env, GUL), /1 need attention/);
+  const twin = server.state.checkups.find((c) => c.name === 'Twin Checkup');
+  env.deleteRows(GUL, 2);                                       // staff delete the first row: the refused one takes over its checkup
   env.ticks(2);
-  assert.equal(server.state.checkups.length, 5, 'the deleted row\'s checkup is gone from the website (four rows and the unrelated walk-in remain)');
-  assert.equal(statusOf(env, GUL, 2), '\u2713 On website', 'and the other row is no longer flagged');
+  assert.equal(server.state.checkups.length, 4, 'nothing removed, nothing made');
+  assert.equal(server.checkupById(twin.id), twin);
+  assert.equal(twin.sheet_key, env.tab(GUL).text(2, colOf(env, GUL, 'sync key')));
+  assert.equal(statusOf(env, GUL, 2), '\u2713 On website');
   assert.match(headerOf(env, GUL), /^Website \u00b7 \d\d:\d\d \u2713$/);
 });
 
-// @@MORE@@
+test('K7: two checkups of the same name and phone made on the website are flagged on both rows; the warning stays through quiet minutes; deleting one row clears it on the other', () => {
+  const rows = [['', 'Other Person', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03001110556', '']];
+  for (let i = 0; i < 4; i++) rows.push(['', 'Filler ' + (i + 1), '', 'Checkup', '', 'Waiting', '', '', '', '', '', '0300111060' + i, '']);
+  const { env, server } = world({ rows: { [GUL]: rows } });
+  settle(env, 3);
+  server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Twin Checkup', phone: '03001110555', checkup_for: 'Checkup' });
+  server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Twin Checkup', phone: '0300-1110555', checkup_for: 'Checkup' });
+  env.ticks(3);
+  const WARN = '\u26a0 Same checkup patient twice on today\'s list (same name and phone). Delete one of the rows.';
+  const at = rowsNamed(env, GUL, 'Twin Checkup');
+  assert.equal(at.length, 2);
+  assert.equal(statusOf(env, GUL, at[0]), WARN);
+  assert.equal(statusOf(env, GUL, at[1]), WARN);
+  assert.match(headerOf(env, GUL), /2 need attention/);
+  env.ticks(3);                                                // quiet minutes (the website sends no list)
+  assert.equal(statusOf(env, GUL, at[0]), WARN, 'the warning stays through quiet minutes');
+  server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Unrelated Walk', phone: '03001110999', checkup_for: 'Checkup' });
+  env.ticks(3);                                                // a new list arrives
+  assert.equal(statusOf(env, GUL, at[0]), WARN, 'and through the next lists');
+  assert.equal(statusOf(env, GUL, at[1]), WARN);
+  env.deleteRows(GUL, at[1]);
+  env.ticks(2);
+  assert.equal(server.state.checkups.filter((c) => c.name === 'Twin Checkup').length, 1, 'the deleted row\'s checkup is gone from the website');
+  assert.equal(statusOf(env, GUL, at[0]), '\u2713 On website', 'and the other row is no longer flagged');
+  assert.match(headerOf(env, GUL), /^Website \u00b7 \d\d:\d\d \u2713$/);
+});
+
+// ------------------------------------------------------------------------------------------------ loop 3 (2026-10-10): the skeptic's L1, L5, L6, L7
+/** writes visible cells the way a person's sort of the visible columns leaves them (a leading-0 phone stays text) */
+function putVisible(sh, r, cells) {
+  cells.forEach((v, c) => { sh._set(r, c + 1, v === '' ? null : { kind: /^[1-9]\d*$/.test(v) ? 'n' : 's', v: /^[1-9]\d*$/.test(v) ? Number(v) : v }); });
+}
+
+test('L1: checkup rows sorted with only the visible columns (hidden keys left behind) are not renamed into each other: every checkup keeps its own person and notes', () => {
+  const people = [['Amna Ck', '03001110401'], ['Bushra Ck', '03001110402'], ['Fiza Ck', '03001110403'], ['Hira Ck', '03001110404']];
+  const rows = people.map(([n, p]) => ['', n, '', 'Checkup', '', 'Waiting', '', '', '', '', '', p, '']);
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 4);
+  for (const c of server.state.checkups) server.editCheckup(c.id, { follow_up: 'Called: ' + c.name });      // the front desk's follow-up on the website
+  env.ticks(1);
+  const idOf = Object.fromEntries(server.state.checkups.map((c) => [c.name, c.id]));
+  const sh = env.tab(GUL);
+  const kc = colOf(env, GUL, 'website');
+  const vis = [2, 3, 4, 5].map((r) => sh.row(r).slice(0, kc - 1)).reverse();
+  [2, 3, 4, 5].forEach((r, i) => putVisible(sh, r, vis[i]));
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.state.checkups.length, 4, 'no checkup made, none lost');
+  for (const c of server.state.checkups) assert.equal(c.follow_up, 'Called: ' + c.name, `${c.name}: the follow-up notes stay with the person they were written for`);
+  for (const [n, p] of people) {
+    const c = server.checkupById(idOf[n]);
+    assert.equal(c.name, n, 'the checkup was not renamed to the person now in its old row');
+    assert.equal(c.phone, p);
+    assert.equal(cellOf(env, GUL, rowOf(env, GUL, n), 'sync key'), c.sheet_key, `${n}'s row is linked to ${n}'s own checkup`);
+  }
+  quiet(env, server);
+});
+
+test('L1: a checkup row typed over with another person (another name and phone) is a new row: the first checkup keeps its person', () => {
+  const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  server.editCheckup(c.id, { follow_up: 'Called once' });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'patient', 'Zara Newcomer');
+  setCell(env, GUL, 2, 'contact', '03009998888');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(c.name, 'Check One', 'the first checkup was not renamed');
+  assert.equal(c.phone, '03001110301');
+  const z = server.state.checkups.find((x) => x.name === 'Zara Newcomer');
+  assert.ok(z, 'the new person has a checkup of their own');
+  assert.equal(z.phone, '03009998888');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), z.sheet_key);
+  assert.equal(z.follow_up, 'Not Contacted', "and none of the first person's follow-up");
+  assert.ok(rowOf(env, GUL, 'Check One'), "the first person's checkup has follow-up notes, so the website keeps it and its row comes back");
+});
+
+test('L5: a column the staff added to the right of the helper columns ("Staff notes") is copied to the archive before the midnight clear', () => {
+  const { env } = dayEnd();
+  const sh = env.tab(GUL);
+  const last = sh.used().cols;
+  sh.maxCols = Math.max(sh.maxCols, last + 3);
+  sh._set(1, last + 1, { kind: 's', v: 'Staff notes' });
+  sh._set(2, last + 1, { kind: 's', v: 'called twice' });
+  sh._set(5, last + 1, { kind: 's', v: 'bring the x-ray' });
+  env.at(NEXT, '00:05');
+  env.ticks(1);
+  const arch = archiveSheet(env);
+  const hcol = arch.row(1).indexOf('Staff notes');
+  assert.ok(hcol >= 0, 'the archive has the staff column: ' + arch.row(1).join(' | '));
+  const notes = [];
+  for (let r = 2; r <= arch.used().rows; r++) if (arch.text(r, hcol + 1)) notes.push(arch.text(r, hcol + 1));
+  assert.deepEqual(notes.sort(), ['bring the x-ray', 'called twice'], 'both notes are in the archive');
+  for (let r = 2; r <= 12; r++) assert.equal(sh.text(r, last + 1), '', 'and the tab is cleared');
+  assert.equal(sh.text(1, last + 1), 'Staff notes', 'the header stays');
+  assert.ok(!arch.row(1).some((h) => /^Sync |^Website ·/.test(h)), 'the helper columns are not archived');
+});
+
+test('L6: "checkup" is the word checkup only (the same pattern as the database); a row with a Month is never put on the nightly checkup list', () => {
+  const env = createEnv();
+  const yes = ['Checkup', 'checkup / pain', 'Xray checkup', 'Check up', 'CHECK-UP', 'chek up', 'Checkups', 'checup', 'Consultation checkup'];
+  const no = ['Wire check', 'Braces check', 'Retainer check', 'RCT check', 'Post op check', 'Check wire', 'Cheek filler', 'Check upper wire', 'Filling & Crown prep', 'Monthly', '', null];
+  for (const t of yes) assert.equal(env.call('aajIsCheckupText', t), true, t);
+  for (const t of no) assert.equal(env.call('aajIsCheckupText', t), false, String(t));
+  const sql = fs.readFileSync(new URL('../supabase/migrations/20261009000300_aaj_two_way_sync.sql', import.meta.url), 'utf8');
+  assert.ok(sql.includes(String.raw`~* '\mch[ea]{1,2}c?k?[- ]?ups?\M'`), 'the database has the same pattern (its word edges are written \\m and \\M)');
+  assert.ok(fs.readFileSync(SCRIPT_PATH, 'utf8').includes(String.raw`/\bch[ea]{1,2}c?k?[- ]?ups?\b/i`), 'and the script uses it');
+  const header = fixture.headers[GUL];
+  const s = { cfg: { tab: GUL, branch: 'GUL' }, cols: env.call('aajDetectColumns', header) };
+  const row = (name, month, treatment) => {
+    const cells = header.map(() => '');
+    cells[s.cols.name] = name; cells[s.cols.month] = month; cells[s.cols.treatment] = treatment; cells[s.cols.status] = 'Completed';
+    return { cells, key: '', visit: '', checkup: false };
+  };
+  const lines = env.call('aajCheckupLines', s, [row('Plain Checkup', '', 'Checkup'), row('Wire Forgot', '6', 'Wire check'), row('Month Checkup', '04 Photo', 'Checkup'), row('Cheek Person', '', 'Cheek filler')], TODAY);
+  assert.deepEqual(lines.map((l) => l.name), ['Plain Checkup'], 'only the real checkup goes to the nightly list');
+});
+
+test('L7: a website visit that was cancelled on the website and whose row staff then deleted is not added back when the website list changes', () => {
+  const { env, server } = synced();
+  server.addPatient({ mr: '9796', name: 'Cancel Later', phone: '03001110096' });
+  const v = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9796', status: 'waiting' });
+  env.ticks(2);
+  const r = rowOf(env, GUL, 'Cancel Later');
+  assert.ok(r, 'added from the website');
+  assert.equal(v.sheet_key, 'W-' + v.id, 'claimed');
+  server.editVisit(v.id, { status: 'cancelled' });
+  env.ticks(1);
+  assert.equal(cellOf(env, GUL, r, 'waiting'), 'Cancelled');
+  env.deleteRows(GUL, r);
+  env.ticks(2);
+  assert.equal(rowOf(env, GUL, 'Cancel Later'), null, 'gone from the sheet');
+  server.addPatient({ mr: '9795', name: 'Next Walker', phone: '03001110095' });
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: '9795', status: 'waiting' });      // the website's list changes
+  env.ticks(2);
+  assert.ok(rowOf(env, GUL, 'Next Walker'), 'the new website visit is added');
+  assert.equal(rowOf(env, GUL, 'Cancel Later'), null, 'the cancelled one whose row was deleted is not added back');
+  assert.equal(server.visitById(v.id).status, 'cancelled', 'and it stays on the website, cancelled');
+  quiet(env, server);
+});
+
+// ------------------------------------------------------------------------------------------------ loop 4 (2026-10-10): row identity (sheet-behaviour B1, B2, B4)
+test('B1: two checkups with the SAME first name sorted with only the visible columns are not swapped: each keeps its own person, phone and notes', () => {
+  const people = [['Ali Raza', '03001110502'], ['Ali Khan', '03001110501'], ['Sana Butt', '03001110503']];
+  const rows = people.map(([n, p]) => ['', n, '', 'Checkup', '', 'Waiting', '', '', 'det ' + n, '', '', p, '']);
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  assert.equal(server.state.checkups.length, 3);
+  for (const c of server.state.checkups) server.editCheckup(c.id, { follow_up: 'Called: ' + c.name });
+  env.ticks(1);
+  const idOf = Object.fromEntries(server.state.checkups.map((c) => [c.name, c.id]));
+  const sh = env.tab(GUL);
+  const kc = colOf(env, GUL, 'website');
+  const nc = colOf(env, GUL, 'patient') - 1;
+  const vis = [2, 3, 4].map((r) => sh.row(r).slice(0, kc - 1)).sort((a, b) => String(a[nc]).localeCompare(String(b[nc])));
+  [2, 3, 4].forEach((r, i) => putVisible(sh, r, vis[i]));
+  assert.equal(sh.text(2, nc + 1), 'Ali Khan', "the sort moved Ali Khan onto Ali Raza's hidden key");
+  env.touch();
+  env.advance(61000);
+  env.ticks(5);
+  assert.equal(server.state.checkups.length, 3, 'no checkup made, none lost');
+  for (const [n, p] of people) {
+    const c = server.checkupById(idOf[n]);
+    assert.equal(c.name, n, 'the checkup was not renamed to the other Ali');
+    assert.equal(c.phone, p);
+    assert.equal(c.details, 'det ' + n);
+    assert.equal(c.follow_up, 'Called: ' + n, 'the notes stay with their own person');
+    assert.equal(cellOf(env, GUL, rowOf(env, GUL, n), 'sync key'), c.sheet_key, n + "'s row is linked to their own checkup");
+  }
+  quiet(env, server);
+});
+
+test('B1: a checkup row typed over with a person of the SAME first name and another phone is a new checkup: the first person keeps her checkup, notes and place on the nightly list', () => {
+  const rows = [['', 'Fatima Saleem', '', 'Checkup', '', 'Waiting', '', '', 'wants braces quote', '', '', '03001110601', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'Fatima Saleem');
+  server.editCheckup(c.id, { follow_up: 'Interested' });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'patient', 'Fatima Javed');
+  setCell(env, GUL, 2, 'contact', '03001110602');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(c.name, 'Fatima Saleem', 'the first checkup was not renamed');
+  assert.equal(c.phone, '03001110601');
+  assert.equal(c.follow_up, 'Interested');
+  assert.equal(c.details, 'wants braces quote');
+  const j = server.state.checkups.find((x) => x.name === 'Fatima Javed');
+  assert.ok(j, 'the new person has a checkup of her own');
+  assert.equal(j.phone, '03001110602');
+  assert.equal(j.follow_up, 'Not Contacted');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), j.sheet_key);
+  assert.ok(rowOf(env, GUL, 'Fatima Saleem'), 'Fatima Saleem has follow-up notes, so the website keeps her and her row comes back');
+});
+
+test('B2: a checkup row sorted onto the hidden key of a visit whose patient has the same first name does not overwrite the visit; nothing is deleted and nobody is told to delete the right row', () => {
+  const rows = [
+    ['', 'Ali Raza', '', 'Checkup', '', 'Waiting', '', '', 'pain upper left', '', '', '03001119999', ''],
+    ['9711', 'Ali Khan', '', 'RCT', '', 'Treatment', '', '', 'RCT 36 second sitting', '', '', '', ''],
+  ];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9711', name: 'Ali Khan', phone: null }] });
+  settle(env, 3);
+  const v = webVisit(server, 'Ali Khan');
+  const ck = server.state.checkups.find((x) => x.name === 'Ali Raza');
+  assert.ok(v && ck);
+  assert.equal(v.status, 'in_treatment');
+  const sh = env.tab(GUL);
+  const kc = colOf(env, GUL, 'website');
+  const vis = [2, 3].map((r) => sh.row(r).slice(0, kc - 1)).reverse();      // sorted by Mr#, largest first: the empty Mr# goes last
+  [2, 3].forEach((r, i) => putVisible(sh, r, vis[i]));
+  env.touch();                     // a sort fires on-change only
+  env.advance(61000);
+  env.ticks(6);
+  assert.equal(v.treatment_label, 'RCT', 'the visit kept its Treatment');
+  assert.equal(v.status, 'in_treatment', 'and its status');
+  assert.equal(v.details, 'RCT 36 second sitting');
+  assert.ok(server.checkupById(ck.id), 'the checkup is still on the website');
+  assert.equal(server.checkupById(ck.id).details, 'pain upper left');
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed');
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Ali Khan'), 'sync key'), server.visitById(v.id).sheet_key, "Ali Khan's row is his visit");
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Ali Raza'), 'sync key'), server.checkupById(ck.id).sheet_key, "Ali Raza's row is the checkup");
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Ali Raza'), 'mr'), '', 'no Mr# was written into the checkup row');
+  for (const r of [2, 3]) assert.equal(statusOf(env, GUL, r), '✓ On website', 'row ' + r);
+  quiet(env, server);
+});
+
+test('B2: an Mr# cleared by mistake on a visit row (same name) keeps the row on its visit; the website writes the Mr# back', () => {
+  const { env, server } = synced();
+  const r = rowOf(env, GUL, 'Sample Person Two');
+  const key = cellOf(env, GUL, r, 'sync key');
+  const n = server.state.visits.length;
+  setCell(env, GUL, r, 'mr', '');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(cellOf(env, GUL, r, 'sync key'), key, 'same key');
+  assert.equal(server.state.visits.length, n, 'no visit made or removed');
+  assert.equal(cellOf(env, GUL, r, 'mr'), '146', 'the Mr# came back');
+  assert.equal(server.state.removedLog.length, 0);
+});
+
+test('B4: front desk registers a checkup patient on the website and staff type the new Mr# into the row before the sync writes it: no visit, no second row', () => {
+  const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  server.addPatient({ mr: '50020', name: 'Check One', phone: '03001110301' });
+  server.editCheckup(c.id, { patient_mr: '50020' });
+  setCell(env, GUL, 2, 'mr', '50020');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.state.visits.length, 0, 'no visit for the registered checkup');
+  assert.equal(server.state.checkups.length, 2);
+  assert.equal(env.tab(GUL).used().rows, 3, 'no row was added back');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), c.sheet_key);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50020');
+  quiet(env, server);
+});
+
+// ------------------------------------------------------------------------------------------------ loop 5 (2026-10-10): row identity (RS5-1) and lost keys (RS5-2)
+const ckRow = (name, phone, treatment = 'Checkup', details = '') => ['', name, '', treatment, '', 'Waiting', '', '', details, '', '', phone, ''];
+
+test('RS5-1: a checkup row typed over one cell at a time (the name, a tick, then the phone) never renames the first checkup', () => {
+  const { env, server } = world({ rows: { [GUL]: [ckRow('First Person', '03001110701')] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'First Person');
+  server.editCheckup(c.id, { follow_up: 'Interested' });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'patient', 'Second Person');
+  env.tickAfter(20000);                       // the row is still being typed in (edited 20 s ago)
+  assert.equal(c.name, 'First Person', 'the name alone did not rename the checkup');
+  env.advance(15000);
+  setCell(env, GUL, 2, 'contact', '03001110799');
+  env.tickAfter(5000);
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(c.name, 'First Person');
+  assert.equal(c.phone, '03001110701');
+  assert.equal(c.follow_up, 'Interested', 'her follow-up stays hers');
+  const s = server.state.checkups.find((x) => x.name === 'Second Person');
+  assert.ok(s && s.id !== c.id, 'the second person has a checkup of her own');
+  assert.equal(s.phone, '03001110799');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), s.sheet_key);
+  assert.ok(rowOf(env, GUL, 'First Person'), 'the first person has follow-up notes: the website keeps her and her row comes back');
+});
+
+test('RS5-1: a person with the SAME first name typed over a checkup row (the name, a tick while the row is busy, then the phone) is a new checkup; the first keeps hers', () => {
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Fatima Saleem', '03001110601', 'Checkup', 'wants braces quote')] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'Fatima Saleem');
+  server.editCheckup(c.id, { follow_up: 'Interested' });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'patient', 'Fatima Javed');
+  env.tickAfter(20000);
+  assert.equal(c.name, 'Fatima Saleem', 'a name being typed over a linked row is held back while the row is busy');
+  env.advance(15000);
+  setCell(env, GUL, 2, 'contact', '03001110602');
+  env.tickAfter(20000);
+  assert.equal(c.phone, '03001110601', 'and so is the phone');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(c.name, 'Fatima Saleem', 'the first checkup was not renamed');
+  assert.equal(c.phone, '03001110601');
+  assert.equal(c.details, 'wants braces quote');
+  assert.equal(c.follow_up, 'Interested');
+  const j = server.state.checkups.find((x) => x.name === 'Fatima Javed');
+  assert.ok(j && j.id !== c.id);
+  assert.equal(j.phone, '03001110602');
+  assert.equal(j.follow_up, 'Not Contacted');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), j.sheet_key);
+});
+
+test('RS5-1: the phone typed first, then the name: the first checkup is not changed either', () => {
+  const { env, server } = world({ rows: { [GUL]: [ckRow('First Person', '03001110701')] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'First Person');
+  server.editCheckup(c.id, { follow_up: 'Interested' });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'contact', '03001110799');
+  env.tickAfter(20000);
+  assert.equal(c.phone, '03001110701', 'the phone of a row being typed in is not sent yet');
+  env.advance(15000);
+  setCell(env, GUL, 2, 'patient', 'Second Person');
+  env.tickAfter(5000);
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(c.name, 'First Person');
+  assert.equal(c.phone, '03001110701');
+  assert.ok(server.state.checkups.find((x) => x.name === 'Second Person' && x.phone === '03001110799' && x.id !== c.id));
+  // a phone corrected on its own is still sent, once the row is quiet
+  const r = rowOf(env, GUL, 'First Person');
+  setCell(env, GUL, r, 'contact', '03001110702');
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(c.phone, '03001110702', 'the same person with a corrected phone: the checkup follows');
+});
+
+test('RS5-1: a registered checkup row (its Mr# written back) typed over with another name and phone, the Mr# left in: the checkup keeps its patient and the row is refused', () => {
+  const { env, server } = world({ rows: { [GUL]: [ckRow('First Person', '03001110701')] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'First Person');
+  server.addPatient({ mr: '50030', name: 'First Person', phone: '03001110701' });
+  server.editCheckup(c.id, { patient_mr: '50030' });
+  env.ticks(2);
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50030');
+  setCell(env, GUL, 2, 'patient', 'Second Person');
+  env.tickAfter(20000);
+  env.advance(15000);
+  setCell(env, GUL, 2, 'contact', '03001110799');
+  env.tickAfter(5000);
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(c.name, 'First Person', 'the checkup linked to patient 50030 is not renamed');
+  assert.equal(c.phone, '03001110701');
+  assert.equal(c.patient_mr, '50030');
+  assert.equal(server.state.visits.length, 0, 'no visit');
+  assert.match(statusOf(env, GUL, 2), /^✗ Needs attention: the name in this row does not match Mr# 50030 on the website\./);
+});
+
+test('RS5-1: two checkups of one family on ONE phone, sorted with only the visible columns, keep their own person; the registered one keeps its patient and notes', () => {
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Zainab Family', '03001112222'), ckRow('Amna Family', '03001112222')] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const z = server.state.checkups.find((x) => x.name === 'Zainab Family');
+  const a = server.state.checkups.find((x) => x.name === 'Amna Family');
+  server.addPatient({ mr: '50031', name: 'Zainab Family', phone: '03001112222' });
+  server.editCheckup(z.id, { patient_mr: '50031', follow_up: 'Zainab starts braces' });
+  server.editCheckup(a.id, { follow_up: 'Amna calls back' });
+  env.ticks(2);
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Zainab'), 'mr'), '50031');
+  const sh = env.tab(GUL);
+  const kc = colOf(env, GUL, 'website');
+  const nc = colOf(env, GUL, 'patient') - 1;
+  const vis = [2, 3].map((r) => sh.row(r).slice(0, kc - 1)).sort((x, y) => String(x[nc]).localeCompare(String(y[nc])));
+  [2, 3].forEach((r, i) => putVisible(sh, r, vis[i]));
+  assert.equal(sh.text(2, nc + 1), 'Amna Family', "the sort moved Amna onto Zainab's hidden key");
+  env.touch();
+  env.advance(61000);
+  env.ticks(5);
+  assert.equal(server.state.checkups.length, 2, 'no checkup made, none lost');
+  assert.equal(server.state.visits.length, 0, 'the registered checkup did not become a visit');
+  assert.equal(z.name, 'Zainab Family');
+  assert.equal(z.patient_mr, '50031');
+  assert.equal(z.follow_up, 'Zainab starts braces');
+  assert.equal(a.name, 'Amna Family');
+  assert.equal(a.follow_up, 'Amna calls back');
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Zainab'), 'sync key'), z.sheet_key, "Zainab's row is her own checkup");
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Amna'), 'sync key'), a.sheet_key, "Amna's row is hers");
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Amna'), 'mr'), '', 'no Mr# in the unregistered row');
+  for (const r of [2, 3]) assert.equal(statusOf(env, GUL, r), '✓ On website', 'row ' + r);
+  assert.equal(server.state.removedLog.length, 0);
+  quiet(env, server);
+});
+
+test('RS5-2: a website checkup ("Scaling", phone saved as 0300-1117777) cut and pasted with the visible cells only is the same checkup: not deleted, not made twice', () => {
+  const { env, server } = synced();
+  const c = server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Amna Scaling', phone: '0300-1117777', checkup_for: 'Scaling', follow_up: 'Not Contacted' });
+  const d = server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Hina Checked', phone: '0300 1117778', checkup_for: 'Checkup', follow_up: 'Interested' });
+  env.ticks(3);
+  const sh = env.tab(GUL);
+  const kc = colOf(env, GUL, 'website');
+  const before = server.state.checkups.length;
+  for (const [who, to] of [['Amna Scaling', 12], ['Hina Checked', 13]]) {
+    const r = rowOf(env, GUL, who);
+    assert.ok(r, who + ' was added from the website');
+    const cells = []; for (let col = 1; col < kc; col++) cells.push(sh._get(r, col));
+    for (let col = 1; col < kc; col++) sh._set(r, col, null);
+    cells.forEach((cell, i) => { if (cell) sh._set(to, i + 1, cell); });
+    env.ctx.aajOnEdit({ range: sh.getRange(to, 1, 1, kc - 1), source: env.book });
+    env.touch();
+    env.advance(61000);
+    env.ticks(4);
+  }
+  assert.equal(server.state.checkups.length, before, 'no checkup deleted, none made');
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed as a deleted row');
+  assert.equal(server.checkupById(c.id).sheet_key, sh.text(12, colOf(env, GUL, 'sync key')), 'Amna Scaling is the row it was moved to');
+  assert.equal(server.checkupById(d.id).sheet_key, sh.text(13, colOf(env, GUL, 'sync key')), 'and so is Hina');
+  assert.equal(server.checkupById(d.id).follow_up, 'Interested');
+  assert.equal(statusOf(env, GUL, 12), '✓ On website');
+  assert.equal(statusOf(env, GUL, 13), '✓ On website');
+  assert.equal(server.state.checkups.filter((x) => x.name === 'Hina Checked').length, 1);
+  assert.equal([...Array(sh.used().rows).keys()].filter((i) => sh.text(i + 1, colOf(env, GUL, 'patient')) === 'Hina Checked').length, 1, 'Hina is in the sheet once');
+  quiet(env, server);
+});
+
+test('RS5-2: the hidden helper columns deleted: a website checkup ("Braces consultation") and a checkup without a phone keep their own checkups', () => {
+  const rows = [...SYNCED_ROWS, ckRow('No Phone Ck', '')];
+  const { env, server } = world({ patients: [...BASE_PATIENTS, ...SYNC_PATIENTS], rows: { [GUL]: rows } });
+  settle(env, 3);
+  server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Braces Consult', phone: '0300-1117779', checkup_for: 'Braces consultation' });
+  env.ticks(3);
+  const ids = server.state.checkups.map((x) => x.id).sort();
+  assert.equal(ids.length, 2);
+  const visits = server.state.visits.map((v) => v.id).sort();
+  const sh = env.tab(GUL);
+  const keyC = colOf(env, GUL, 'sync key'), baseC = colOf(env, GUL, 'sync base');
+  for (let r = 1; r <= 12; r++) { sh._set(r, keyC, null); sh._set(r, baseC, null); }
+  env.touch();
+  env.ticks(4);
+  assert.deepEqual(server.state.checkups.map((x) => x.id).sort(), ids, 'the same two checkups: none deleted, none made again');
+  assert.deepEqual(server.state.visits.map((v) => v.id).sort(), visits, 'the same visits');
+  assert.equal(server.state.removedLog.length, 0);
+  const keys = keysOf(env, GUL);
+  for (const x of server.state.checkups) assert.ok(keys.includes(x.sheet_key), x.name + ' carries the new key of its row');
+  quiet(env, server);
+});
+
+// ------------------------------------------------------------------------------------------------ loop 6 (2026-10-10): sheet-behaviour M1
+/** sorts rows `rs` of the tab by Patient Name with only the visible columns (the hidden helper columns stay where they were) */
+function sortVisibleByName(env, tab, rs) {
+  const sh = env.tab(tab);
+  const kc = colOf(env, tab, 'website');
+  const nc = colOf(env, tab, 'patient') - 1;
+  const vis = rs.map((r) => sh.row(r).slice(0, kc - 1)).sort((x, y) => String(x[nc]).localeCompare(String(y[nc])));
+  rs.forEach((r, i) => putVisible(sh, r, vis[i]));
+  return nc;
+}
+
+test('M1 (loop 6): two checkups of one family on ONE phone whose first names FIT (Syed Ali Raza / Ali Hamza), the first registered, sorted with only the visible columns: each keeps its own checkup, notes and patient link', () => {
+  const P = '03001114444';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Syed Ali Raza', P), ckRow('Ali Hamza', P)] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const rz = server.state.checkups.find((x) => x.name === 'Syed Ali Raza');
+  const hm = server.state.checkups.find((x) => x.name === 'Ali Hamza');
+  server.addPatient({ mr: '50040', name: 'Syed Ali Raza', phone: P });
+  server.editCheckup(rz.id, { patient_mr: '50040', follow_up: 'Raza starts braces' });
+  server.editCheckup(hm.id, { follow_up: 'Hamza calls back' });
+  env.ticks(2);
+  assert.equal(cellOf(env, GUL, exactRow(env, GUL, 'Syed Ali Raza'), 'mr'), '50040', 'the website wrote the Mr# into the registered row');
+  const nc = sortVisibleByName(env, GUL, [2, 3]);
+  assert.equal(env.tab(GUL).text(2, nc + 1), 'Ali Hamza', "the sort moved Ali Hamza onto Ali Raza's hidden key");
+  env.touch();
+  env.advance(61000);
+  env.ticks(5);
+  assert.equal(server.state.checkups.length, 2, 'no checkup made, none lost');
+  assert.equal(server.state.visits.length, 0, 'the registered checkup did not become a visit');
+  assert.equal(rz.name, 'Syed Ali Raza', 'Ali Raza\'s checkup was not renamed to his brother');
+  assert.equal(rz.patient_mr, '50040');
+  assert.equal(rz.follow_up, 'Raza starts braces');
+  assert.equal(hm.name, 'Ali Hamza');
+  assert.equal(hm.patient_mr, null);
+  assert.equal(hm.follow_up, 'Hamza calls back');
+  const rRow = exactRow(env, GUL, 'Syed Ali Raza'), hRow = exactRow(env, GUL, 'Ali Hamza');
+  assert.equal(cellOf(env, GUL, rRow, 'sync key'), rz.sheet_key, "Ali Raza's row is his own checkup");
+  assert.equal(cellOf(env, GUL, hRow, 'sync key'), hm.sheet_key, "Ali Hamza's row is his");
+  assert.equal(cellOf(env, GUL, rRow, 'mr'), '50040');
+  assert.equal(cellOf(env, GUL, hRow, 'mr'), '', 'no Mr# was written into the brother\'s row');
+  for (const r of [2, 3]) assert.equal(statusOf(env, GUL, r), '✓ On website', 'row ' + r);
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed');
+  assert.equal(env.tab(GUL).used().rows, 3, 'no row was added back');
+  quiet(env, server);
+});
+
+test('M1 (loop 6): Hassan / Hussain on one phone (first names two letters apart), neither registered, sorted with only the visible columns: names, notes and follow-up are not swapped', () => {
+  const P = '03001115555';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Hussain Ahmed', P, 'Checkup', 'wants braces quote'), ckRow('Hassan Ahmed', P, 'Checkup', 'pain lower right')] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const hu = server.state.checkups.find((x) => x.name === 'Hussain Ahmed');
+  const ha = server.state.checkups.find((x) => x.name === 'Hassan Ahmed');
+  server.editCheckup(hu.id, { follow_up: 'Interested' });
+  env.ticks(1);
+  const nc = sortVisibleByName(env, GUL, [2, 3]);
+  assert.equal(env.tab(GUL).text(2, nc + 1), 'Hassan Ahmed', "the sort moved Hassan onto Hussain's hidden key");
+  env.touch();
+  env.advance(61000);
+  env.ticks(5);
+  assert.equal(server.state.checkups.length, 2, 'no checkup made, none lost');
+  assert.equal(hu.name, 'Hussain Ahmed');
+  assert.equal(hu.details, 'wants braces quote');
+  assert.equal(hu.follow_up, 'Interested', 'the follow-up stays with Hussain');
+  assert.equal(ha.name, 'Hassan Ahmed');
+  assert.equal(ha.details, 'pain lower right');
+  assert.equal(ha.follow_up, 'Not Contacted');
+  assert.equal(cellOf(env, GUL, exactRow(env, GUL, 'Hussain Ahmed'), 'sync key'), hu.sheet_key, "Hussain's row is his own checkup");
+  assert.equal(cellOf(env, GUL, exactRow(env, GUL, 'Hassan Ahmed'), 'sync key'), ha.sheet_key, "Hassan's row is his");
+  for (const r of [2, 3]) assert.equal(statusOf(env, GUL, r), '✓ On website', 'row ' + r);
+  assert.equal(server.state.removedLog.length, 0);
+  quiet(env, server);
+});
+
+test('M1 (loop 6): a registered checkup row (its Mr# written back) typed over by a brother on the same phone, the Mr# cleared: the registered checkup keeps its name and patient; the brother gets his own checkup', () => {
+  const P = '03001117777';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Syed Ali Raza', P)] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const rz = server.state.checkups.find((x) => x.name === 'Syed Ali Raza');
+  server.addPatient({ mr: '50041', name: 'Syed Ali Raza', phone: P });
+  server.editCheckup(rz.id, { patient_mr: '50041', follow_up: 'Raza starts braces' });
+  env.ticks(2);
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50041');
+  setCell(env, GUL, 2, 'mr', '');
+  setCell(env, GUL, 2, 'patient', 'Ali Hamza');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(rz.name, 'Syed Ali Raza', 'the registered checkup was not renamed to the brother');
+  assert.equal(rz.patient_mr, '50041');
+  assert.equal(rz.follow_up, 'Raza starts braces');
+  const hm = server.state.checkups.find((x) => x.name === 'Ali Hamza');
+  assert.ok(hm && hm.id !== rz.id, 'the brother has a checkup of his own');
+  assert.equal(hm.patient_mr, null);
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), hm.sheet_key);
+  assert.equal(server.state.visits.length, 0);
+  assert.ok(exactRow(env, GUL, 'Syed Ali Raza'), 'a checkup that is already a patient is kept by the website and its row comes back');
+});
+
+test('loop 6 (minor): the same patient twice on the website\'s list: both rows say so; once staff set one of them to Cancelled, the other row goes back to a tick (it never asks to cancel the real visit too)', () => {
+  const { env, server } = world({ rows: { [GUL]: [] }, patients: [{ mr: '9801', name: 'Twice Patient', phone: '03001119801' }, { mr: '9802', name: 'Other Patient', phone: '03001119802' }] });
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: '9801', status: 'waiting', treatment: 'Scaling' });
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: '9801', status: 'waiting', treatment: 'Scaling' });
+  settle(env, 3);
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: '9802', status: 'waiting', treatment: 'Filling' });     // a new list arrives
+  env.ticks(3);
+  const DUP = "⚠ Same patient twice on today's list. Set one of them to Cancelled.";
+  assert.equal(statusOf(env, GUL, 2), DUP);
+  assert.equal(statusOf(env, GUL, 3), DUP);
+  setCell(env, GUL, 3, 'waiting', 'Cancelled');
+  settle(env, 3);
+  assert.equal(server.state.visits.filter((v) => v.mr === '9801' && v.status === 'cancelled').length, 1);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website', 'the visit left is not flagged any more');
+  assert.notEqual(statusOf(env, GUL, 3), DUP);
+});
+
+test('loop 6 (minor): a checkup registered as a patient and a website visit of that patient the same day are not "Same patient twice"', () => {
+  const P = '03001118888';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Reg Twice', P)] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'Reg Twice');
+  server.addPatient({ mr: '50042', name: 'Reg Twice', phone: P });
+  server.editCheckup(c.id, { patient_mr: '50042' });
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: '50042', status: 'waiting', treatment: 'Scaling' });
+  env.ticks(3);
+  const rows = [2, 3].filter((r) => cellOf(env, GUL, r, 'patient') === 'Reg Twice');
+  assert.equal(rows.length, 2, 'the checkup row and the visit added from the website');
+  for (const r of rows) assert.doesNotMatch(statusOf(env, GUL, r), /twice/, 'row ' + r + ': ' + statusOf(env, GUL, r));
+});
+
+test('M1 (loop 6): with a brother on the same phone, a slip in the surname is still corrected on the same checkup (nobody else has the old name)', () => {
+  const P = '03001116666';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Ali Raza', P), ckRow('Ali Hamza', P)] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const rz = server.state.checkups.find((x) => x.name === 'Ali Raza');
+  server.editCheckup(rz.id, { follow_up: 'Called once' });
+  env.ticks(1);
+  const key = cellOf(env, GUL, 2, 'sync key');
+  setCell(env, GUL, 2, 'patient', 'Ali Rasa');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), key, 'the same row key');
+  assert.equal(rz.name, 'Ali Rasa', 'the checkup follows the corrected name');
+  assert.equal(rz.follow_up, 'Called once');
+  assert.equal(server.state.checkups.length, 2);
+  quiet(env, server);
+});
+
+// ------------------------------------------------------------------------------------------------ loop 7 (2026-10-10): sheet-behaviour M1-M3, abuse-privacy M1
+/** sorts rows `rs` of the tab by the column `label` with only the visible columns (the hidden helper columns stay where they were) */
+function sortVisibleBy(env, tab, rs, label) {
+  const sh = env.tab(tab);
+  const kc = colOf(env, tab, 'website');
+  const c = colOf(env, tab, label) - 1;
+  const vis = rs.map((r) => sh.row(r).slice(0, kc - 1)).sort((x, y) => String(x[c]).localeCompare(String(y[c])));
+  rs.forEach((r, i) => putVisible(sh, r, vis[i]));
+}
+
+test('M1 (loop 7): a checkup registered as a patient and that patient\'s visit of the same day (same Mr#, name and phone), sorted by Treatment with only the visible columns: each row takes its own key; the visit keeps its treatment, Month and status, the checkup its own', () => {
+  const P = '03001117771';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Hira Naz', P)] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'Hira Naz');
+  server.addPatient({ mr: '50050', name: 'Hira Naz', phone: P });
+  server.editCheckup(c.id, { patient_mr: '50050', day_status: 'completed' });
+  const v = server.addVisit({ branch: 'GUL', date: TODAY, mr: '50050', status: 'waiting', treatment: 'Braces bonding', braces_month: 1 });
+  env.ticks(3);
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50050', 'the website wrote the Mr# into the checkup row');
+  assert.equal(cellOf(env, GUL, 3, 'treatment'), 'Braces bonding', 'the visit was added below the checkup');
+  const vNow = () => JSON.stringify([v.treatment_label, v.braces_month, v.status]);
+  const cNow = () => JSON.stringify([c.checkup_for, c.day_status, c.details, c.patient_mr]);
+  const before = { v: vNow(), c: cNow() };
+  sortVisibleBy(env, GUL, [2, 3], 'treatment');
+  assert.equal(cellOf(env, GUL, 2, 'treatment'), 'Braces bonding', "the sort moved the visit onto the checkup's hidden key");
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(vNow(), before.v, 'the visit was not turned into the checkup');
+  assert.equal(cNow(), before.c, 'the checkup was not turned into the visit');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), v.sheet_key, 'the bonding row now carries the visit\'s key');
+  assert.equal(cellOf(env, GUL, 3, 'sync key'), c.sheet_key, 'the checkup row carries the checkup\'s key');
+  for (const r of [2, 3]) assert.equal(statusOf(env, GUL, r), '✓ On website', 'row ' + r + ': ' + statusOf(env, GUL, r));
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed');
+  assert.equal(server.state.visits.length, 1);
+  assert.equal(server.state.checkups.length, 1);
+  quiet(env, server);
+});
+
+test('M1 (loop 7): two walk-ins with the SAME full name on two phones, sorted by Treatment with only the visible columns: phone, treatment, details and follow-up notes stay with their own person', () => {
+  const rows = [ckRow('Ayesha', '03001119992', 'Checkup', 'pain upper right'), ckRow('Ayesha', '03001119991', 'Braces checkup', 'wants a quote')];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const a2 = server.state.checkups.find((x) => x.phone === '03001119992');
+  const a1 = server.state.checkups.find((x) => x.phone === '03001119991');
+  server.editCheckup(a1.id, { follow_up: 'call about braces quote' });
+  env.ticks(1);
+  sortVisibleBy(env, GUL, [2, 3], 'treatment');
+  assert.equal(cellOf(env, GUL, 2, 'contact'), '03001119991', "the sort moved the second Ayesha onto the first one's hidden key");
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.state.checkups.length, 2, 'no checkup made, none lost');
+  assert.deepEqual([a1.phone, a1.checkup_for, a1.details, a1.follow_up], ['03001119991', 'Braces checkup', 'wants a quote', 'call about braces quote'], 'the follow-up stays with the Ayesha it was written for');
+  assert.deepEqual([a2.phone, a2.checkup_for, a2.details, a2.follow_up], ['03001119992', 'Checkup', 'pain upper right', 'Not Contacted']);
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), a1.sheet_key);
+  assert.equal(cellOf(env, GUL, 3, 'sync key'), a2.sheet_key);
+  assert.equal(server.state.removedLog.length, 0);
+  quiet(env, server);
+});
+
+test('M1 (loop 7): the same two Ayeshas sorted, and one row edited before the next minute (so the rows are not just swapped): each row is still not the other person; both find their own checkup by name and phone', () => {
+  const rows = [ckRow('Ayesha', '03001119994', 'Checkup', 'pain upper right'), ckRow('Ayesha', '03001119993', 'Braces checkup', 'wants a quote')];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const a2 = server.state.checkups.find((x) => x.phone === '03001119994');
+  const a1 = server.state.checkups.find((x) => x.phone === '03001119993');
+  server.editCheckup(a1.id, { follow_up: 'call about braces quote' });
+  env.ticks(1);
+  sortVisibleBy(env, GUL, [2, 3], 'treatment');
+  setCell(env, GUL, 2, 'waiting', 'Treatment');
+  env.touch();
+  env.advance(61000);
+  env.ticks(5);
+  assert.equal(server.state.checkups.length, 2, 'no checkup made, none lost');
+  assert.deepEqual([a1.phone, a1.details, a1.follow_up], ['03001119993', 'wants a quote', 'call about braces quote'], 'the follow-up stays with its own Ayesha');
+  assert.deepEqual([a2.phone, a2.details, a2.follow_up], ['03001119994', 'pain upper right', 'Not Contacted']);
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), a1.sheet_key, "row 2 now holds the first Ayesha's phone: it is her checkup");
+  assert.equal(cellOf(env, GUL, 3, 'sync key'), a2.sheet_key);
+  assert.equal(server.state.removedLog.length, 0);
+});
+
+test('M2 (loop 7): a Month typed into a checkup row (an existing braces patient whose card was forgotten): the row needs the Mr#, the person is not kept as a checkup nor put on the nightly list; typing the Mr# makes the visit', () => {
+  const P = '03001116001';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('Brace Forgot', P)] }, patients: [...BASE_PATIENTS, { mr: '9760', name: 'Brace Forgot', phone: P }] });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'Brace Forgot');
+  assert.ok(c, 'first a checkup');
+  setCell(env, GUL, 2, 'months', '6');
+  setCell(env, GUL, 2, 'treatment', 'Wire change');
+  env.advance(61000);
+  env.ticks(3);
+  assert.match(statusOf(env, GUL, 2), /^✗ Needs attention: add the Mr#/);
+  assert.notEqual(c.checkup_for, 'Wire change', 'the checkup was not turned into a wire change');
+  assert.equal(server.state.checkups.length, 0, 'the plain checkup is taken off the checkup list: the person is a braces patient');
+  assert.equal(server.state.visits.length, 0);
+  setCell(env, GUL, 2, 'mr', '9760');
+  env.advance(61000);
+  env.ticks(3);
+  const v = server.state.visits.find((x) => x.mr === '9760');
+  assert.ok(v, 'with the Mr# the row is the patient\'s visit');
+  assert.deepEqual([v.braces_month, v.treatment_label], [6, 'Wire change']);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  env.at(TODAY, '23:58'); env.ticks(1);
+  env.at(NEXT, '00:05'); env.ticks(1);
+  const ck = ckSheet(env);
+  assert.ok(!ck || !ck.values().some((r) => r.includes('Brace Forgot')), 'not on the nightly checkup list');
+});
+
+test('M2 (loop 7): a checkup registered as a patient whose row then gets Month 1 and "Braces bonding": the visit is made for that patient; the checkup keeps its own record and comes back as its own row', () => {
+  const P = '03001116002';
+  const { env, server } = world({ rows: { [GUL]: [ckRow('New Smile', P)] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'New Smile');
+  server.addPatient({ mr: '50051', name: 'New Smile', phone: P });
+  server.editCheckup(c.id, { patient_mr: '50051' });
+  env.ticks(2);
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50051');
+  setCell(env, GUL, 2, 'months', '1');
+  setCell(env, GUL, 2, 'treatment', 'Braces bonding');
+  env.advance(61000);
+  env.ticks(4);
+  const v = server.state.visits.find((x) => x.mr === '50051');
+  assert.ok(v, 'the bonding is a visit of patient 50051');
+  assert.deepEqual([v.braces_month, v.treatment_label], [1, 'Braces bonding']);
+  assert.equal(c.checkup_for, 'Checkup', 'the checkup was not turned into the bonding');
+  assert.equal(c.patient_mr, '50051');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), v.sheet_key, 'the typed row is the visit');
+  assert.ok([3, 4].some((r) => cellOf(env, GUL, r, 'sync key') === c.sheet_key), 'the registered checkup is kept by the website and comes back as its own row');
+  assert.equal(server.state.checkups.length, 1);
+});
+
+test('M2 (loop 7): the nightly checkup list never takes a row with a Month, even one the website filed as a checkup; such a row is named for the log', () => {
+  const env0 = createEnv();
+  const s = { cfg: { tab: GUL, branch: 'GUL' }, cols: env0.call('aajDetectColumns', fixture.headers[GUL]) };
+  const row = (mr, name, month, treatment, extra = {}) => ({ key: '', fp: '', cells: [mr, name, month, treatment, '', 'Waiting', '', '', '', '', '', '03001110500', ''], visit: '', checkup: false, ...extra });
+  const skipped = [];
+  const lines = env0.call('aajCheckupLines', s, [
+    row('', 'Plain Checkup', '', 'Checkup', { checkup: true, visit: 'c1' }),
+    row('', 'Brace Forgot', '6', 'Wire change', { checkup: true, visit: 'c2' }),
+    row('50051', 'New Smile', '1', 'Braces bonding', { checkup: true, visit: 'c3' }),
+    row('', 'Never Seen Month', '04 Photo', 'Checkup'),
+  ], TODAY, skipped);
+  assert.deepEqual(lines.map((l) => l.name), ['Plain Checkup']);
+  assert.deepEqual(skipped, ['Brace Forgot', 'New Smile']);
+});
+
+test('abuse-privacy M1 (loop 7): a retired Mr# typed with the same first name and another surname is a new Healthwire patient, never "use 50905"', () => {
+  const rows = [['10905', 'Ali Raza', '', 'RCT', '', 'Waiting', '', '', '', '', '', '', '']];
+  const patients = [{ mr: '50905', name: 'Ali Khanzada', notes: 'Mr# was 10905 until 09 Oct 2026 (the website now numbers from 50000)' }];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients });
+  settle(env, 3);
+  assert.equal(statusOf(env, GUL, 2), '⚠ New patient added with Healthwire Mr# 10905. Check the name and phone on the website.');
+  assert.deepEqual(server.state.visits.map((v) => v.mr), ['10905'], "the visit is on the new patient's own file, not on Ali Khanzada's");
+});
+
+test('M3 (loop 7): a Healthwire Mr# typed with a slip, then corrected in the row: the right patient gets the visit, the file made from the slip is removed, and the log says so', () => {
+  const rows = [['9888', 'Slip Person', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001116003', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  assert.ok(server.patientByMr('9888'), 'the slip made a patient file');
+  setCell(env, GUL, 2, 'mr', '9878');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(server.patientByMr('9888'), undefined, 'the file made from the slip is gone');
+  assert.ok(server.patientByMr('9878'));
+  assert.deepEqual(server.state.visits.map((v) => v.mr), ['9878']);
+  assert.match(env.tab('Aaj Sync log').values().map((r) => r.join(' ')).join('\n'), /So is the patient file made from this row \(Mr# 9888\)/);
+});
+
+// ------------------------------------------------------------------------------------------------ loop 8 (2026-10-10): released rows, deleted website rows, No show, adoption, names
+const logText = (env) => env.tab('Aaj Sync log').values().map((r) => r.join(' ')).join('\n');
+
+test('RS5-D4: a website visit cancelled on the website, its row deleted, then set back to Waiting there: the sync never deletes it, and its row comes back', () => {
+  const { env, server } = synced();
+  server.addPatient({ mr: '9796', name: 'Cancel Later', phone: '03001110096' });
+  const v = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9796', status: 'waiting' });
+  env.ticks(2);
+  const r = rowOf(env, GUL, 'Cancel Later');
+  assert.ok(r, 'added from the website');
+  server.editVisit(v.id, { status: 'cancelled' });
+  env.ticks(1);
+  env.deleteRows(GUL, r);
+  env.ticks(2);
+  assert.equal(rowOf(env, GUL, 'Cancel Later'), null, 'gone from the sheet');
+  assert.ok(server.state.released.has(v.id), 'released: its row left the sheet while it was Cancelled');
+  server.editVisit(v.id, { status: 'waiting' });       // the patient came after all
+  env.ticks(3);
+  assert.equal(server.visitById(v.id), v, 'not deleted as a deleted row');
+  assert.equal(v.status, 'waiting');
+  const back = rowOf(env, GUL, 'Cancel Later');
+  assert.ok(back, 'its row is back');
+  assert.equal(statusOf(env, GUL, back), '✓ Added from the website');
+  assert.equal(cellOf(env, GUL, back, 'sync key'), v.sheet_key);
+  assert.ok(!server.state.released.has(v.id), 'on the sheet again: an ordinary row');
+  assert.equal(server.state.removedLog.length, 0);
+  quiet(env, server);
+});
+
+test('RS5-D4: a visit made in the sheet (S- key) and a checkup, cancelled on the website, their rows deleted, then set to Waiting there: neither is deleted, both rows come back', () => {
+  const rows = [['9701', 'Sample Person One', '', 'Filling', '', 'Waiting', '', '', '', '', '', '03001110001', ''], ckRow('Rel Check', '03001110777'),
+    ['146', 'Sample Person Two', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110002', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const v = server.state.visits.find((x) => x.mr === '9701'), c = server.state.checkups.find((x) => x.name === 'Rel Check');
+  assert.match(v.sheet_key, /^S-/);
+  server.editVisit(v.id, { status: 'cancelled' });
+  server.editCheckup(c.id, { day_status: 'cancelled' });
+  env.ticks(1);
+  env.deleteRows(GUL, rowOf(env, GUL, 'Rel Check'));
+  env.deleteRows(GUL, rowOf(env, GUL, 'Sample Person One'));
+  env.ticks(2);
+  assert.ok(server.state.released.has(v.id) && server.state.released.has(c.id));
+  assert.equal(rowOf(env, GUL, 'Sample Person One'), null);
+  server.editVisit(v.id, { status: 'waiting' });
+  server.editCheckup(c.id, { day_status: 'waiting' });
+  env.ticks(3);
+  assert.equal(server.visitById(v.id), v, 'the visit is not deleted');
+  assert.equal(server.checkupById(c.id), c, 'the checkup is not deleted');
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Sample Person One'), 'sync key'), v.sheet_key, 'the visit row is back under its own key');
+  assert.equal(cellOf(env, GUL, rowOf(env, GUL, 'Rel Check'), 'sync key'), c.sheet_key, 'so is the checkup row');
+  env.ticks(2);
+  assert.equal(server.state.removedLog.length, 0);
+  assert.equal(server.state.visits.length, 2);
+  assert.equal(server.state.checkups.length, 1);
+});
+
+test('RS5-D2: a website-made row that staff delete while other rows settle (a new patient typed in another tab, a Status changed) does not come back with a tick; it is removed once the tabs are quiet', () => {
+  const LHR = 'Gulberg Lhr';
+  const { env, server } = world({ tabs: [GUL, LHR], rows: { [GUL]: SYNCED_ROWS, [LHR]: [] }, patients: [...BASE_PATIENTS, ...SYNC_PATIENTS] });
+  settle(env, 3);
+  server.addPatient({ mr: '9790', name: 'Echo Web', phone: '03001110790' });
+  const v = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9790', status: 'waiting' });
+  env.ticks(2);
+  const r = rowOf(env, GUL, 'Echo Web');
+  assert.ok(r);
+  assert.equal(v.sheet_key, 'W-' + v.id, 'claimed');
+  env.deleteRows(GUL, r);
+  env.typeRow(LHR, 2, ['9703', 'Sample Person Six', '', 'Monthly', '', 'Waiting', '', '', '', '', '', '03001110006', '']);     // settling in another tab
+  setCell(env, GUL, rowOf(env, GUL, 'Sample Person Three'), 'waiting', 'Treatment');                                             // another row of this tab is sent
+  env.tickAfter(5000);
+  assert.equal(rowOf(env, GUL, 'Echo Web'), null, 'the deleted website row is not added back while the removal is put off');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.visitById(v.id), undefined, 'removed once nothing settles any more (owner rule: a deleted row removes the visit)');
+  assert.equal(rowOf(env, GUL, 'Echo Web'), null);
+  assert.match(logText(env), /Echo Web .*the visit is removed from the website too/);
+});
+
+test('RS5-D2: the visible cells of a website-made row cleared (Delete key) while another row changes: the row is not added back; the visit goes like a deleted row', () => {
+  const { env, server } = synced();
+  server.addPatient({ mr: '9791', name: 'Clear Me', phone: '03001110791' });
+  const v = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9791', status: 'waiting' });
+  env.ticks(2);
+  const r = rowOf(env, GUL, 'Clear Me');
+  env.clearRow(GUL, r, 1, colOf(env, GUL, 'website') - 1);
+  setCell(env, GUL, rowOf(env, GUL, 'Sample Person Three'), 'waiting', 'Treatment');
+  env.tickAfter(5000);
+  assert.equal(rowOf(env, GUL, 'Clear Me'), null, 'not added back in the minute its name was cleared');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.visitById(v.id), undefined);
+  assert.equal(rowOf(env, GUL, 'Clear Me'), null);
+});
+
+test('RS5-D2: a website-made row cut and pasted with its visible cells only while the website changes: no second row; the pasted row keeps the visit', () => {
+  const { env, server } = synced();
+  server.addPatient({ mr: '9792', name: 'Move Me', phone: '03001110792' });
+  const v = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9792', status: 'waiting' });
+  env.ticks(2);
+  const sh = env.tab(GUL);
+  const kc = colOf(env, GUL, 'website');
+  const r = rowOf(env, GUL, 'Move Me');
+  const cells = []; for (let c = 1; c < kc; c++) cells.push(sh._get(r, c));
+  for (let c = 1; c < kc; c++) sh._set(r, c, null);
+  cells.forEach((cell, i) => { if (cell) sh._set(12, i + 1, cell); });
+  env.ctx.aajOnEdit({ range: sh.getRange(12, 1, 1, kc - 1), source: env.book });
+  server.editVisit(webVisit(server, 'Sample Person Two').id, { details: 'changed on the website' });
+  env.tickAfter(5000);
+  env.advance(61000);
+  env.ticks(3);
+  const rows = [...Array(14).keys()].map((i) => i + 2).filter((x) => cellOf(env, GUL, x, 'patients name') === 'Move Me');
+  assert.deepEqual(rows, [12], 'one row for the patient, the pasted one');
+  assert.equal(server.visitById(v.id), v, 'the same visit');
+  assert.equal(v.sheet_key, cellOf(env, GUL, 12, 'sync key'));
+  assert.equal(statusOf(env, GUL, 12), '✓ On website');
+});
+
+test('RS5-B2: deleting the row of a No show patient removes the visit (owner: "deleted patient means wrong entry, or patient didnt come"); with an invoice it stays No show and the row does not come back', () => {
+  const { env, server } = synced();
+  const v3 = webVisit(server, 'Sample Person Three');
+  server.editVisit(v3.id, { status: 'no_show' });
+  env.ticks(1);
+  env.deleteRows(GUL, rowOf(env, GUL, 'Sample Person Three'));
+  env.ticks(2);
+  assert.equal(server.visitById(v3.id), undefined, 'nothing attached: removed like a Waiting visit');
+  assert.equal(rowOf(env, GUL, 'Sample Person Three'), null, 'and its row is not put back');
+  const v5 = webVisit(server, 'Sample Person Five');
+  v5.attached = true;
+  server.editVisit(v5.id, { status: 'no_show' });
+  env.ticks(1);
+  env.deleteRows(GUL, rowOf(env, GUL, 'Sample Person Five'));
+  env.ticks(3);
+  assert.equal(server.visitById(v5.id), v5, 'an invoice on it: kept');
+  assert.equal(v5.status, 'no_show', 'as it was (No show), not marked Cancelled');
+  assert.equal(rowOf(env, GUL, 'Sample Person Five'), null, 'the row is not put back');
+  assert.match(logText(env), /Sample Person Five .*stays on the website as No show/);
+  quiet(env, server);
+});
+
+test('RS5-A1: a cancelled patient whose row was deleted is typed again when she turns up: the visit is Waiting again with what was typed (the row is not rewritten to Cancelled)', () => {
+  const { env, server } = synced();
+  const v = webVisit(server, 'Sample Person Three');
+  server.editVisit(v.id, { status: 'cancelled', treatment_label: 'Scaling' });
+  env.ticks(1);
+  env.deleteRows(GUL, rowOf(env, GUL, 'Sample Person Three'));
+  env.ticks(2);
+  const r = env.tab(GUL).used().rows + 1;
+  env.typeRow(GUL, r, ['9702', 'Sample Person Three', '', 'RCT', '', 'Waiting', '', '', 'came after all', '', '', '03001110003', '']);
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.state.visits.filter((x) => x.mr === '9702').length, 1, 'the same visit, adopted');
+  assert.equal(v.status, 'waiting');
+  assert.equal(v.treatment_label, 'RCT');
+  assert.equal(v.details, 'came after all');
+  assert.equal(cellOf(env, GUL, r, 'waiting'), 'Waiting', 'the row keeps what was typed');
+  assert.equal(cellOf(env, GUL, r, 'treatment'), 'RCT');
+  assert.equal(statusOf(env, GUL, r), '✓ On website');
+  // the same for a No show patient typed again with the Status cell left empty: Waiting again, and the website fills the cell
+  const v5 = webVisit(server, 'Sample Person Five');
+  server.editVisit(v5.id, { status: 'no_show' });
+  env.ticks(1);
+  v5.attached = true;                                   // an invoice on it: the deleted row keeps the visit (No show), the row stays deleted
+  env.deleteRows(GUL, rowOf(env, GUL, 'Sample Person Five'));
+  env.ticks(2);
+  assert.equal(server.visitById(v5.id), v5);
+  const r5 = env.tab(GUL).used().rows + 1;
+  env.typeRow(GUL, r5, ['9705', 'Sample Person Five', '', 'Consultation checkup', '', '', '', '', '', '', '', '', '']);
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(v5.status, 'waiting');
+  assert.equal(cellOf(env, GUL, r5, 'waiting'), 'Waiting', 'the empty Status cell is filled by the website');
+});
+
+test('RS5-N1: a correct Mr# typed with an everyday spelling of the name ("Umar Farooq" for "Umer Farooq") and no phone gets the visit with a plain tick (11 Oct 2026: it fits without doubt); "Sana Khan" with the Mr# of "Sara Khan" is refused without naming her', () => {
+  const rows = [['9811', 'Umar Farooq', '', 'Filling', '', 'Waiting', '', '', '', '', '', '', ''], ['9812', 'Sana Khan', '', 'Filling', '', 'Waiting', '', '', '', '', '', '', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9811', name: 'Umer Farooq' }, { mr: '9812', name: 'Sara Khan' }] });
+  settle(env, 3);
+  assert.deepEqual(server.state.visits.map((v) => v.mr), ['9811']);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  assert.equal(statusOf(env, GUL, 3), "✗ Needs attention: the name in this row does not match Mr# 9812 on the website. Check the Mr#, or type the name as the website has it.");
+});
+
+test('11 Oct 2026 (abuse-privacy M1/M2): "Ayesha Rajpoot" typed with the Mr# of Ayesha Khan, who is on today\'s list, is refused; Ayesha Khan\'s visit and empty phone are untouched; with the Mr# corrected the row goes through', () => {
+  const rows = [['9601', 'Ayesha Rajpoot', '', 'RCT', '', 'Completed', '', '', '', '', '', '03007779602', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9601', name: 'Ayesha Khan' }, { mr: '9602', name: 'Ayesha Rajpoot' }] });
+  const khan = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9601', status: 'waiting', treatment: 'Consultation' });
+  settle(env, 3);
+  assert.equal(statusOf(env, GUL, 2), '✗ Needs attention: the name in this row does not match Mr# 9601 on the website. Check the Mr#, or type the name as the website has it.');
+  assert.equal(khan.status, 'waiting'); assert.equal(khan.treatment_label, 'Consultation');
+  assert.equal(khan.sheet_key, 'W-' + khan.id, 'never adopted by the refused row (only her own website row, added to the sheet, holds it)');
+  assert.equal(server.patientByMr('9601').phone, null, 'no phone written into her file');
+  assert.equal(server.state.visits.filter((x) => x.mr === '9602').length, 0);
+  assert.equal(rowOf(env, GUL, 'Ayesha Khan') !== null, true, 'her own visit is added to the sheet as a website row');
+  // staff correct the Mr# to her own
+  setCell(env, GUL, 2, 'mr', '9602');
+  settle(env, 3);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  const raj = server.state.visits.find((x) => x.mr === '9602');
+  assert.ok(raj && raj.status === 'completed' && raj.treatment_label === 'RCT');
+  assert.equal(server.patientByMr('9602').phone, '03007779602', 'the right patient\'s empty phone is filled');
+  assert.equal(khan.status, 'waiting'); assert.equal(khan.treatment_label, 'Consultation'); assert.equal(server.patientByMr('9601').phone, null);
+});
+
+test('11 Oct 2026 (sheet-behaviour L2-residual): a linked row typed over with another person (the Mr# left in) is refused on EVERY answer, also after each Status edit; nothing reaches the first patient\'s visit; with the name put back the row goes through', () => {
+  const rows = [['9501', 'First Patient', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001119501', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9501', name: 'First Patient', phone: '03001119501' }, { mr: '9502', name: 'Second Person', phone: '03007770002' }] });
+  settle(env, 3);
+  const v = server.state.visits.find((x) => x.mr === '9501');
+  assert.ok(v);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  const REFUSED = '✗ Needs attention: the name in this row does not match Mr# 9501 on the website. Check the Mr# or the name: nothing in this row is saved until they match.';
+  setCell(env, GUL, 2, 'patient', 'Second Person');
+  setCell(env, GUL, 2, 'contact', '03007770002');
+  setCell(env, GUL, 2, 'treatment', 'Filling');
+  settle(env, 2);
+  assert.equal(statusOf(env, GUL, 2), REFUSED);
+  assert.equal(v.treatment_label, 'Consultation'); assert.equal(v.status, 'waiting');
+  // the next routine edits (Status) still get the refusal: never a plain tick on the first patient's visit
+  setCell(env, GUL, 2, 'waiting', 'Treatment');
+  settle(env, 2);
+  assert.equal(statusOf(env, GUL, 2), REFUSED);
+  setCell(env, GUL, 2, 'waiting', 'Completed');
+  settle(env, 2);
+  assert.equal(statusOf(env, GUL, 2), REFUSED);
+  assert.equal(v.status, 'waiting'); assert.equal(v.treatment_label, 'Consultation'); assert.equal(v.override, false);
+  assert.equal(server.patientByMr('9501').name, 'First Patient'); assert.equal(server.patientByMr('9501').phone, '03001119501');
+  assert.equal(server.state.visits.filter((x) => x.mr === '9501').length, 1);
+  assert.equal(server.state.visits.filter((x) => x.mr === '9502').length, 0, 'never re-pointed to another patient');
+  assert.equal(cellOf(env, GUL, 2, 'patient'), 'Second Person', 'what staff typed stays in the row for them to fix');
+  // the name and phone put back: the row goes through with what it shows now
+  setCell(env, GUL, 2, 'patient', 'First Patient');
+  setCell(env, GUL, 2, 'contact', '03001119501');
+  settle(env, 3);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+  assert.equal(v.status, 'completed'); assert.equal(v.treatment_label, 'Filling');
+});
+
+test('Lahore and Islamabad: a bare number in the Token column ("2" units) is sent as text, never as the website\'s token number (owner, 13:20)', () => {
+  const LHR = 'Gulberg Lhr';
+  const cols = web.detectColumns(fixture.headers[LHR]);
+  const row = fixture.rows[LHR][0].slice();
+  row[cols.mr] = '9701'; row[cols.name] = 'Sample Person One'; row[cols.token] = '2'; row[cols.month] = ''; row[cols.phone] = '03001110001';
+  const { env, server } = world({ tabs: [LHR], rows: { [LHR]: [row] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const sent = rowsSent(server).filter((r) => r.set.token);
+  assert.ok(sent.length >= 1);
+  assert.ok(sent.every((r) => r.set.token.t === '2' && r.set.token.v === null), JSON.stringify(sent.map((r) => r.set.token)));
+  assert.equal(cellOf(env, LHR, 2, 'token'), '2', 'the cell stays as typed');
+});
+
+test('a checkup that was deleted on the website: its row says "checkup", not "visit"', () => {
+  const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  server.removeCheckup(c.id);
+  env.ticks(2);
+  assert.equal(statusOf(env, GUL, 2), '✗ This checkup was deleted on the website. Delete this row.');
+});
+
+// ------------------------------------------------------------------------------------------------ loop 2 of 11 Oct 2026: rows the website said "deleted" about; install day; a filled-in file
+const GONE = '✗ This visit was deleted on the website. Delete this row.';
+const visitOfMr = (server, mr) => server.state.visits.filter((v) => v.mr === mr);
+
+test('RSG-1: front desk deletes a visit on the website (a wrong entry) and staff type a NEW patient over its row: the new patient reaches the website; nothing else changes', () => {
+  const { env, server } = synced();
+  server.addPatient({ mr: '9750', name: 'Sample Person Fifty', phone: '03001110050' });
+  const r = rowOf(env, GUL, 'Sample Person Five');
+  server.removeVisit(webVisit(server, 'Sample Person Five').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, r), GONE);
+  const before = server.state.visits.map((v) => v.id).sort();
+  env.typeRow(GUL, r, ['9750', 'Sample Person Fifty', '', 'Consultation', '', 'Waiting', '', '', 'new walk-in', '', '', '03001110050', '']);
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(visitOfMr(server, '9750').length, 1, 'the patient typed over the "deleted" row is on the website');
+  assert.equal(visitOfMr(server, '9750')[0].sheet_key, cellOf(env, GUL, r, 'sync key'), 'under the row\'s new key');
+  assert.equal(statusOf(env, GUL, r), '✓ On website');
+  assert.equal(visitOfMr(server, '9705').length, 0, 'the deleted visit is not made again');
+  assert.deepEqual(server.state.visits.map((v) => v.id).filter((id) => before.includes(id)).sort(), before, 'nobody else\'s visit is touched');
+  assert.equal(server.state.removedLog.length, 0, 'nothing removed');
+  quiet(env, server);
+});
+
+test('RSG-1: a "deleted on the website" row and a refused row in a sort of the visible columns: nobody\'s visit is removed, the deleted patient is not made again, each row keeps its own message', () => {
+  const { env, server } = synced();
+  env.typeRow(GUL, 8, ['60001', 'Typo Person', '', 'Ext', '', 'Waiting', '', '', '', '', '', '03001110060', '']);
+  env.advance(61000);
+  env.ticks(2);
+  const typoText = statusOf(env, GUL, 8);
+  assert.match(typoText, /^✗ Mr# 60001 is not on the website/);
+  server.removeVisit(webVisit(server, 'Sample Person Five').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, rowOf(env, GUL, 'Sample Person Five')), GONE);
+  const before = server.state.visits.map((v) => v.id + ':' + v.mr).sort();
+  sortVisibleBy(env, GUL, [2, 3, 4, 5, 6, 7, 8], 'treatment');
+  assert.equal(rowOf(env, GUL, 'Sample Person Five'), 3, 'the sort moved the "deleted" person to another row');
+  assert.equal(rowOf(env, GUL, 'Typo Person'), 4);
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.deepEqual(server.state.visits.map((v) => v.id + ':' + v.mr).sort(), before, 'every patient on the sheet keeps the same visit');
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed');
+  assert.equal(visitOfMr(server, '9705').length, 0, 'the visit front desk deleted is not made again');
+  assert.equal(statusOf(env, GUL, 3), GONE, 'the deleted person\'s row still says so');
+  assert.equal(statusOf(env, GUL, 4), typoText, 'the refused row keeps its own answer');
+  for (const name of ['Sample Person One', 'Sample Person Two', 'Sample Person Three', 'Sample Person Four', 'Sample Person Six']) {
+    const rr = rowOf(env, GUL, name);
+    assert.ok(/^[✓⚠]/.test(statusOf(env, GUL, rr)), name + ': ' + statusOf(env, GUL, rr));
+    assert.equal(cellOf(env, GUL, rr, 'sync key'), webVisit(server, name).sheet_key, name + ' carries its own visit\'s key');
+  }
+});
+
+test('RSG-1: the same sort with a row typed a moment ago in it (not answered by the website yet, so the rows did not only swap): the "deleted" memory still goes with its person; the deleted visit is not made again', () => {
+  const { env, server } = synced();
+  server.removeVisit(webVisit(server, 'Sample Person Five').id);
+  env.ticks(1);
+  server.addPatient({ mr: '9760', name: 'Brand New', phone: '03001110060' });
+  env.typeRow(GUL, 8, ['9760', 'Brand New', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001110060', '']);
+  env.tickAfter(5000);                                   // keyed, still settling: no memory yet
+  const before = server.state.visits.map((v) => v.id).sort();
+  sortVisibleBy(env, GUL, [2, 3, 4, 5, 6, 7, 8], 'treatment');
+  assert.equal(rowOf(env, GUL, 'Sample Person Five'), 4, 'the "deleted" person moved, in the same chain of moves as the new row');
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(visitOfMr(server, '9705').length, 0, 'the visit front desk deleted is not made again');
+  assert.equal(statusOf(env, GUL, 4), GONE);
+  assert.equal(server.state.removedLog.length, 0, 'nothing removed');
+  assert.deepEqual(server.state.visits.map((v) => v.id).filter((id) => before.includes(id)).sort(), before, 'every other patient keeps the same visit');
+  assert.equal(visitOfMr(server, '9760').length, 1, 'the new patient is on the website');
+});
+
+test('RSG-1: a checkup deleted on the website\'s Checkups page (a wrong entry), then a sort of the visible columns: no patient\'s visit is removed, the wrong checkup does not come back', () => {
+  const rows = [['9701', 'Sample Person One', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110001', ''], ckRow('Wrong Entry', '03009990001'),
+    ['146', 'Sample Person Two', '', 'Ext', '', 'Waiting', '', '', '', '', '', '03001110002', ''], ['9703', 'Sample Person Six', '', 'Filling', '', 'Waiting', '', '', '', '', '', '03001110006', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  server.removeCheckup(server.state.checkups.find((c) => c.name === 'Wrong Entry').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, 3), '✗ This checkup was deleted on the website. Delete this row.');
+  const before = server.state.visits.map((v) => v.id).sort();
+  sortVisibleBy(env, GUL, [2, 3, 4, 5], 'treatment');
+  assert.equal(rowOf(env, GUL, 'Wrong Entry'), 2);
+  env.touch();
+  env.advance(61000);
+  env.ticks(4);
+  assert.deepEqual(server.state.visits.map((v) => v.id).sort(), before, 'no visit removed or made');
+  assert.equal(server.state.checkups.length, 0, 'the deleted checkup is not made again');
+  assert.equal(server.state.removedLog.length, 0);
+  assert.equal(statusOf(env, GUL, 2), '✗ This checkup was deleted on the website. Delete this row.');
+});
+
+test('RSG-2: a row deleted, the patient typed again, then Ctrl+Z: the old row says "deleted on the website" at once (no stale tick), and the old visit never comes back behind it later', () => {
+  const { env, server } = synced();
+  const sh = env.tab(GUL);
+  const r3 = rowOf(env, GUL, 'Sample Person Three');
+  const width = sh.used().cols;
+  const saved = []; for (let c = 1; c <= width; c++) saved.push(sh._get(r3, c));
+  const v1 = webVisit(server, 'Sample Person Three');
+  env.deleteRows(GUL, r3);
+  env.ticks(2);
+  assert.equal(server.visitById(v1.id), undefined, 'removed');
+  const rN = sh.used().rows + 1;
+  env.typeRow(GUL, rN, ['9702', 'Sample Person Three', '', 'RCT', '', 'Waiting', '', '', 'typed again', '', '', '03001110003', '']);
+  env.advance(61000);
+  env.ticks(2);
+  const v2 = webVisit(server, 'Sample Person Three');
+  assert.ok(v2 && v2.id !== v1.id && v2.treatment_label === 'RCT', 'typed again: a new visit');
+  // Ctrl+Z of the delete: the row is back at its place with its hidden cells
+  sh.insertRowsAfter(sh.getMaxRows(), 1);
+  for (let rr = sh.used().rows; rr >= r3; rr--) for (let c = 1; c <= width; c++) { const x = sh._get(rr, c); sh._set(rr + 1, c, x); sh._set(rr, c, null); }
+  saved.forEach((cell, i) => { if (cell) sh._set(r3, i + 1, cell); });
+  env.ctx.aajOnChange({ changeType: 'INSERT_ROW', source: env.book });
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, r3), GONE, 'the row put back says at once that its visit is not on the website');
+  assert.equal(server.visitById(v1.id), undefined, 'not put back: the patient is on the list in the other row');
+  assert.equal(visitOfMr(server, '9702').length, 1);
+  // staff delete the row they typed again: the old visit is not put back later under the row that says "deleted"
+  const retyped = [...Array(sh.used().rows).keys()].map((i) => i + 1).find((x) => x !== r3 && sh.text(x, colOf(env, GUL, 'patients name')) === 'Sample Person Three');
+  assert.equal(cellOf(env, GUL, retyped, 'treatment'), 'RCT');
+  env.deleteRows(GUL, retyped);
+  env.ticks(3);
+  assert.equal(visitOfMr(server, '9702').length, 0, 'the row typed again went, and nothing came back by itself');
+  assert.equal(statusOf(env, GUL, r3), GONE, 'the row that said "deleted" is still honest');
+});
+
+// (RSG-2, a visit moved to another day and back: now in the RS8-B1 tests at the end of this file. The move lets go of the sheet key, so a
+// row made in the sheet is not linked again; a website-made row, whose key is the visit's own, is.)
+
+test('RSI-1: install day: rows Set up stamps as today\'s are not newer than what front desk did on the website that morning: a Cancelled or No show visit stays, a Waiting visit keeps its text', () => {
+  const rows = [['9701', 'Sample Person One', '', 'Scaling', '', 'Waiting', '', '', 'sheet a', '', '', '03001110001', ''],
+    ['146', 'Sample Person Two', '', 'Scaling', '', '', '', '', 'sheet b', '', '', '03001110002', ''],
+    ['9703', 'Sample Person Six', '', 'Filling', '', 'Waiting', '', '', 'sheet c', '', '', '03001110006', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS, install: false, helpers: false });
+  const hourAgo = env.clock.ms - 3600000;
+  const vA = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9701', status: 'waiting', treatment: 'Consultation', details: 'web a' });
+  const vB = server.addVisit({ branch: 'GUL', date: TODAY, mr: '146', status: 'cancelled', treatment: 'Scaling', details: 'phoned: not coming' });
+  const vC = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9703', status: 'no_show', treatment: 'Filling' });
+  for (const v of [vA, vB, vC]) v.updated_at = hourAgo;
+  scripted(env);
+  env.ctx.aajSetup();
+  env.ticks(2);
+  const firstSends = rowsSent(server).filter((x) => x.new);
+  assert.ok(firstSends.length >= 3 && firstSends.every((x) => x.edited_at === null), 'rows nobody edited since Set up carry no edit time: ' + JSON.stringify(firstSends.map((x) => x.edited_at)));
+  assert.equal(server.state.visits.length, 3, 'linked, nothing doubled');
+  assert.equal(vB.status, 'cancelled', 'the visit front desk cancelled stays Cancelled');
+  assert.equal(vC.status, 'no_show', 'the No show stays');
+  assert.equal(vA.treatment_label, 'Consultation', 'the waiting visit keeps the website\'s treatment');
+  assert.equal(vA.details, 'web a');
+  assert.equal(cellOf(env, GUL, 3, 'waiting'), 'Cancelled', 'the sheet shows the website\'s status');
+  assert.match(statusOf(env, GUL, 2), /^⚠ Website change kept for: Treatment/);
+  // an edit made after Set up is an ordinary edit: it carries its time and wins
+  setCell(env, GUL, 2, 'treatment details', 'typed later');
+  env.advance(61000);
+  env.ticks(2);
+  const later = rowsSent(server).filter((x) => x.key === vA.sheet_key && x.set.details === 'typed later');
+  assert.ok(later.length === 1 && Number.isFinite(later[0].edited_at), 'sent with its edit time');
+  assert.equal(vA.details, 'typed later');
+});
+
+test('RSX-1: a Healthwire Mr# typed with a slip, front desk fills that new file, then the Mr# is corrected: the right patient gets the visit, the filled-in file is kept and the log says to check it', () => {
+  const rows = [['9888', 'Slip Person', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001116003', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  server.editPatient('9888', { notes: 'allergy: penicillin' });
+  setCell(env, GUL, 2, 'mr', '9878');
+  env.advance(61000);
+  env.ticks(4);
+  assert.ok(server.patientByMr('9888'), 'the file front desk filled in is kept');
+  assert.equal(server.patientByMr('9888').notes, 'allergy: penicillin');
+  assert.deepEqual(server.state.visits.map((v) => v.mr), ['9878'], 'the visit is on the corrected Mr#');
+  assert.match(logText(env), /The patient file made from this row \(Mr# 9888\) is kept: details were saved on it on the website\. Check it/);
+});
+
+// ------------------------------------------------------------------------------------------------ fix loop 2 (2026-10-11): L2-residual, SB7-1, SB7-2
+test('L2-residual (titles): "Muhammad Usman" typed with the Mr# of Usman Tariq, and "Usman Tariq" with the Mr# of a file named "Muhammad Usman", are refused; nothing is made', () => {
+  const rows = [['9821', 'Muhammad Usman', '', 'RCT', '', 'Completed', '', '', '', '', '', '03001119821', ''], ['9822', 'Usman Tariq', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9821', name: 'Usman Tariq' }, { mr: '9822', name: 'Muhammad Usman' }] });
+  settle(env, 3);
+  assert.equal(server.state.visits.length, 0, 'no visit on either patient');
+  assert.equal(statusOf(env, GUL, 2), '✗ Needs attention: the name in this row does not match Mr# 9821 on the website. Check the Mr#, or type the name as the website has it.');
+  assert.equal(statusOf(env, GUL, 3), '✗ Needs attention: the name in this row does not match Mr# 9822 on the website. Check the Mr#, or type the name as the website has it.');
+  assert.equal(server.patientByMr('9821').phone, null, 'no phone written into Usman Tariq\'s file');
+});
+
+test('L2-residual (titles): Usman Tariq\'s linked row typed over with "Muhammad Usman", RCT, Completed (the Mr# left in): refused, his visit stays Waiting / Scaling', () => {
+  const rows = [['9831', 'Usman Tariq', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001119831', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9831', name: 'Usman Tariq', phone: '03001119831' }] });
+  settle(env, 3);
+  const v = server.state.visits.find((x) => x.mr === '9831');
+  assert.ok(v);
+  setCell(env, GUL, 2, 'patient', 'Muhammad Usman');
+  setCell(env, GUL, 2, 'treatment', 'RCT');
+  setCell(env, GUL, 2, 'waiting', 'Completed');
+  settle(env, 3);
+  assert.equal(statusOf(env, GUL, 2), '✗ Needs attention: the name in this row does not match Mr# 9831 on the website. Check the Mr# or the name: nothing in this row is saved until they match.');
+  assert.deepEqual([v.status, v.treatment_label], ['waiting', 'Scaling']);
+  assert.equal(server.patientByMr('9831').name, 'Usman Tariq');
+});
+
+test('SB7-1: a sort of the visible columns while the website answers the call that makes a NEW row: no visit is deleted, and every row ends on its own patient\'s visit', () => {
+  const NAMES = ['Race Person One', 'Race Person Two', 'Race Person Three', 'Race Person Four'];
+  const row = (i, tr) => ['980' + i, NAMES[i - 1], '', tr, '', 'Waiting', '', '', '', '', '', '0300111880' + i, ''];
+  const { env, server } = world({ rows: { [GUL]: [row(1, 'Scaling'), row(2, 'RCT'), row(4, 'Filling')] },
+    patients: [1, 2, 3, 4].map((i) => ({ mr: '980' + i, name: NAMES[i - 1], phone: '0300111880' + i })) });
+  settle(env, 3);
+  assert.equal(server.state.visits.length, 3);
+  env.typeRow(GUL, 5, row(3, 'Consultation'));
+  // during the call that makes Race Person Three's visit, somebody sorts the table by Treatment (only the visible columns move)
+  const send = env.fetchHandler;
+  let sorted = false;
+  env.fetchHandler = (req) => {
+    const out = send(req);
+    const tabs = JSON.parse(req.body).p_payload.tabs;
+    if (!sorted && tabs.some((t) => t.rows.some((x) => x.new && x.set.name === 'Race Person Three'))) {
+      sorted = true;
+      sortVisibleBy(env, GUL, [2, 3, 4, 5], 'treatment');
+      env.touch();
+    }
+    return out;
+  };
+  env.advance(61000);
+  env.ticks(1);
+  assert.ok(sorted, 'the sort landed during that call');
+  assert.equal(rowOf(env, GUL, 'Race Person Three'), 2, 'Race Person Three is in row 2 now; row 5 holds Race Person One');
+  const n0 = server.calls.length;
+  env.ticks(1);
+  assert.ok(server.calls.length > n0 && server.calls.slice(n0).every((c) => c.payload.check_removed === false), 'no removal pass in the minute that finds the key under somebody else');
+  env.ticks(5);
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed: ' + JSON.stringify(server.state.removedLog.map((x) => x.key)));
+  assert.equal(server.state.visits.length, 4, 'four visits, one each');
+  for (const n of NAMES) {
+    const r = exactRow(env, GUL, n);
+    const vs = visitsOfPatient(server, n);
+    assert.equal(vs.length, 1, n);
+    assert.equal(cellOf(env, GUL, r, 'sync key'), vs[0].sheet_key, n + ' sits on its own visit');
+    assert.equal(statusOf(env, GUL, r), '✓ On website', n + ': ' + statusOf(env, GUL, r));
+  }
+  quiet(env, server);
+});
+
+test('SB7-1: a key whose first answer never came back stays with its row while the row still shows the same Mr#, name and phone (the lost answer is found again, nothing doubles)', () => {
+  const { env, server } = world({ patients: BASE_PATIENTS });
+  env.ticks(1);
+  const sh = env.tab(GUL);
+  const bc = colOf(env, GUL, 'sync base');
+  const pending = JSON.parse(sh.text(2, bc));
+  assert.equal(pending.p, 1, 'the key is written with what will be sent');
+  assert.equal(pending.s.name, env.call('aajFieldKey', 'name', cellOf(env, GUL, 2, 'patient')));
+  env.advance(61000);
+  server.faults.lostAnswers = 1;
+  env.ticks(1);
+  const keysBefore = keysOf(env, GUL);
+  env.ticks(2);
+  assert.deepEqual(keysOf(env, GUL), keysBefore, 'the rows kept their keys');
+  assert.equal(server.state.visits.length + server.state.checkups.length, 6);
+  assert.equal(server.state.removedLog.length, 0);
+});
+
+test('SB7-2: install day: a row Set up stamped (no edit time) that says Completed completes the visit front desk added as Waiting; the website\'s Treatment stays and the row says so; a Cancelled visit stays Cancelled', () => {
+  const rows = [['9701', 'Sample Person One', '', 'RCT', '', 'Completed', '', '', 'done', '', '', '03001110001', ''],
+    ['146', 'Sample Person Two', '', 'Scaling', '', 'Completed', '', '', '', '', '', '03001110002', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS, install: false, helpers: false });
+  const hourAgo = env.clock.ms - 3600000;
+  const vA = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9701', status: 'waiting', treatment: 'Consultation' });
+  const vB = server.addVisit({ branch: 'GUL', date: TODAY, mr: '146', status: 'cancelled', treatment: 'Scaling', details: 'phoned: not coming' });
+  for (const v of [vA, vB]) v.updated_at = hourAgo;
+  scripted(env);
+  env.ctx.aajSetup();
+  env.ticks(3);
+  assert.ok(rowsSent(server).filter((x) => x.new).every((x) => x.edited_at === null), 'sent with no edit time');
+  assert.equal(server.state.visits.length, 2, 'linked, nothing doubled');
+  assert.equal(vA.status, 'completed', 'the sheet\'s Completed completes the visit (owner decision 1)');
+  assert.equal(vA.treatment_label, 'Consultation', 'the website\'s treatment stays');
+  assert.equal(vA.details, 'done', 'the website had no details: the sheet\'s are saved');
+  assert.equal(cellOf(env, GUL, 2, 'waiting'), 'Completed', 'the sheet\'s Completed is not overwritten with Waiting');
+  assert.equal(statusOf(env, GUL, 2), '⚠ Website change kept for: Treatment');
+  assert.equal(vB.status, 'cancelled', 'the visit front desk cancelled stays Cancelled');
+  assert.equal(cellOf(env, GUL, 3, 'waiting'), 'Cancelled');
+});
+
+// ------------------------------------------------------------------------------------------------ loop 8 of 11 Oct 2026: moves on the website, deleted rows at night, the Healthwire limit
+const DHA = 'DHA KHI';
+const GONE_CK = '✗ This checkup was deleted on the website. Delete this row.';
+
+test('RS8-B1: a checkup front desk moves to another branch on the website is never deleted: the new branch\'s tab gets it, the old row reads "deleted on the website", and deleting that row removes nothing', () => {
+  const { env, server } = world({ tabs: [GUL, DHA], rows: { [GUL]: CHECKUP_ROWS, [DHA]: [] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  assert.ok(c && c.sheet_key && c.branch === 'GUL', 'setup: the checkup was made from the Gulshan row');
+  server.editCheckup(c.id, { branch: 'DHA' });                 // the Checkups page: Branch corrected to DHA
+  env.advance(61000);
+  env.ticks(3);
+  assert.ok(server.state.checkups.includes(c), 'the checkup still exists');
+  assert.ok(!server.state.removedLog.some((x) => x.snapshot.id === c.id), 'no removal pass took it for a deleted row');
+  const rd = rowOf(env, DHA, 'Check One');
+  assert.ok(rd, 'it is in the DHA tab now');
+  assert.equal(statusOf(env, DHA, rd), '✓ Added from the website');
+  assert.equal(c.sheet_key, cellOf(env, DHA, rd, 'sync key'), 'claimed by its DHA row');
+  assert.equal(statusOf(env, GUL, 2), GONE_CK, 'the old Gulshan row says so');
+  env.deleteRows(GUL, 2);                                      // staff do what the row says
+  env.advance(61000);
+  env.ticks(3);
+  assert.ok(server.state.checkups.includes(c) && c.branch === 'DHA', 'deleting the old row removes nothing');
+  setCell(env, DHA, rd, 'treatment details', 'moved here');
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(c.details, 'moved here', 'the DHA row now keeps the checkup');
+  assert.equal(server.state.checkups.length, 2, 'nothing was made twice');
+});
+
+test('RS8-B1: a website-made checkup (W- key) moved to another branch: its old row reads "moved to another branch or day", and an edit of that row never makes the checkup again in the old tab', () => {
+  const { env, server } = world({ tabs: [GUL, DHA], rows: { [GUL]: CHECKUP_ROWS, [DHA]: [] }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const w = server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Web Mover', phone: '03001110399', checkup_for: 'Checkup' });
+  env.ticks(2);
+  const r = rowOf(env, GUL, 'Web Mover');
+  assert.ok(r && w.sheet_key === 'W-' + w.id, 'setup: added to the Gulshan tab and claimed there');
+  server.editCheckup(w.id, { branch: 'DHA' });
+  setCell(env, GUL, r, 'treatment details', 'typed after the move');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(statusOf(env, GUL, r), '✗ This checkup was moved to another branch or day on the website. Delete this row.');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(statusOf(env, GUL, r), '✗ This checkup was moved to another branch or day on the website. Delete this row.', 'and it keeps saying so');
+  assert.equal(server.state.checkups.filter((x) => x.name === 'Web Mover').length, 1, 'never made a second time in Gulshan');
+  assert.equal(w.details, '', 'the old row changed nothing');
+  assert.ok(rowOf(env, DHA, 'Web Mover'), 'the DHA tab has it');
+  assert.ok(!server.state.removedLog.some((x) => x.snapshot.id === w.id), 'nothing removed');
+});
+
+test('RSG-2 / RS8-B1: a visit front desk moves to another day reads "deleted on the website"; moved back to today it comes back as a website row (the old key went with the move), nothing doubles, and deleting the old row removes nothing', () => {
+  const { env, server } = synced();
+  const r = rowOf(env, GUL, 'Sample Person Three');
+  const v = webVisit(server, 'Sample Person Three');
+  server.editVisit(v.id, { date: '2026-10-10' });
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, r), GONE);
+  assert.equal(v.sheet_key, null, 'the move let go of the sheet key');
+  server.editVisit(v.id, { date: TODAY, details: 'back today' });
+  env.ticks(1);
+  const sh = env.tab(GUL), nc = colOf(env, GUL, 'patient');
+  let r2 = null;
+  for (let i = sh.used().rows; i >= 2 && !r2; i--) if (sh.text(i, nc) === 'Sample Person Three') r2 = i;
+  assert.ok(r2 && r2 !== r, 'the visit is added again as a website row');
+  assert.equal(statusOf(env, GUL, r2), '✓ Added from the website');
+  assert.equal(cellOf(env, GUL, r2, 'treatment details'), 'back today');
+  assert.equal(statusOf(env, GUL, r), GONE, 'the old row still says to delete it');
+  env.deleteRows(GUL, r);
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(visitsOfPatient(server, 'Sample Person Three').length, 1, 'one visit, never deleted');
+  const r3 = rowOf(env, GUL, 'Sample Person Three');
+  setCell(env, GUL, r3, 'waiting', 'Treatment');
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(v.status, 'in_treatment', 'later edits of the new row reach the visit');
+});
+
+test('RS8-C1: at night a row whose visit front desk deleted on the website is not reported as "never reached the website": the log says it was deleted there, and its archive row is marked so Admin -> Import skips it', () => {
+  const { env, server } = dayEnd();
+  const r = rowOf(env, GUL, 'Sample Person Five');
+  server.removeVisit(webVisit(server, 'Sample Person Five').id);
+  env.ticks(1);
+  assert.equal(statusOf(env, GUL, r), GONE);
+  env.at(NEXT, '00:05');
+  env.ticks(1);
+  assert.equal(env.props.document.get('listDate:' + GUL), NEXT, 'the archive went ahead');
+  const log = env.tab('Aaj Sync log').values().map((x) => x.join(' | ')).join('\n');
+  assert.doesNotMatch(log, /Sample Person Five \| Archived without reaching the website/, 'never told to import it again');
+  assert.doesNotMatch(log, /never reached the website/);
+  assert.match(log, /Sample Person Five \| Deleted on the website \(or moved to another branch or day there\): archived under 2026-10-09 marked "deleted on the website"\. Admin > Import skips it\./);
+  const arch = archiveSheet(env);
+  const nameCol = arch.row(1).indexOf('Patients Name') + 1, idCol = arch.row(1).indexOf('Website visit id') + 1;
+  let ar = 0;
+  for (let i = 2; i <= arch.used().rows; i++) if (arch.text(i, nameCol) === 'Sample Person Five') ar = i;
+  assert.ok(ar, 'the row is in the archive');
+  assert.equal(arch.text(ar, idCol), 'deleted on the website');
+  const t = web.readTab(arch.values());
+  assert.ok(!t.rows.some((x) => x.name === 'Sample Person Five'), 'Admin -> Import reads past it');
+  assert.equal(t.deletedOnWebsite, 1);
+  assert.ok(t.rows.some((x) => x.name === 'Sample Person One'), 'the other rows are read as before');
+});
+
+test('RS8-C1: a checkup deleted on the website (its row left as "deleted") is not added to the nightly checkup list', () => {
+  const w = ckWorld();
+  const c = w.server.state.checkups.find((x) => x.name === 'Check One');
+  w.server.removeCheckup(c.id);
+  w.env.ticks(2);
+  assert.equal(statusOf(w.env, GUL, 2), GONE_CK);
+  w.env.at(TODAY, '23:58');
+  w.env.ticks(1);
+  w.env.at(NEXT, '00:05');
+  w.env.ticks(1);
+  const ck = ckSheet(w.env);
+  const names = []; for (let i = 2; i <= ck.used().rows; i++) names.push(ck.text(i, 2));
+  assert.deepEqual(names, ['Check Two'], 'only the checkup that is still on the website');
+  const s = { cfg: { tab: GUL, branch: 'GUL' }, cols: w.env.call('aajDetectColumns', fixture.headers[GUL]) };
+  assert.equal(w.env.call('aajCheckupLines', s, [{ key: 'S-0123456789ab', gone: true, cells: ['', 'Gone Lead', '', 'Checkup', '', '', '', '', '', '', '', '0300 1234567', ''] }], TODAY).length, 0, 'aajCheckupLines skips a row the website deleted');
+  const arch = archiveSheet(w.env);
+  const idCol = arch.row(1).indexOf('Website visit id') + 1;
+  const ids = []; for (let i = 2; i <= arch.used().rows; i++) ids.push(arch.text(i, idCol));
+  assert.ok(ids.includes('deleted on the website'), 'the deleted checkup is marked in the archive');
+  assert.ok(ids.some((x) => /^checkup [0-9a-f-]{36}$/.test(x)), 'a checkup that is on the website is marked as a checkup (Admin -> Import skips it: never a visit)');
+});
+
+test('M-HW-SQUAT: a Healthwire Mr# above the highest one the website has plus 100 is refused as a probable typo; at the limit it is still a new patient', () => {
+  const rows = [['9811', 'Sample Limit One', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110811', ''],
+    ['9812', 'Sample Ahead One', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110812', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [{ mr: '9711', name: 'Sample Healthwire Top', phone: '03001110711' }] });
+  server.state.hwLimit = true;
+  settle(env, 3);
+  assert.ok(server.patientByMr('9811'), '9711 + 100 is made');
+  assert.equal(server.patientByMr('9812'), undefined, '9711 + 101 is not');
+  assert.equal(statusOf(env, GUL, 3), '✗ Mr# 9812 is not on the website and is higher than the newest Healthwire numbers it knows, so it looks like a typo. Check the Mr#. If it is right (a new Healthwire patient), ask Dr. Ali to import the latest Healthwire patients; this row is tried again every few minutes.');
+  assert.equal(visitOfMr(server, '9812').length, 0);
+});
+
+// ------------------------------------------------------------------------------------------------ fix loop 3 (2026-10-11): RW8-1 (a slip in the Mr# cell), RW8-2 (a duplicate row's other row deleted)
+const SLIP_PATIENTS = [{ mr: '9851', name: 'Slip Free Person', phone: '03001118851' }, { mr: '9852', name: 'Other Real Patient', phone: '03001118852' }];
+const slipRow = () => ['9851', 'Slip Free Person', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001118851', ''];
+
+test('RW8-1: a stray keystroke in the Mr# cell of a linked visit row (token 7 typed there): the visit with front desk\'s notes stays, nothing is removed or made, the website\'s Mr# is written back', () => {
+  const { env, server } = world({ rows: { [GUL]: [slipRow()] }, patients: SLIP_PATIENTS });
+  settle(env, 3);
+  const v = server.state.visits.find((x) => x.mr === '9851');
+  assert.ok(v);
+  const key = cellOf(env, GUL, 2, 'sync key');
+  server.editVisit(v.id, { notes: 'front desk: xray done' });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'mr', '7');
+  settle(env, 3);
+  assert.deepEqual(server.state.visits.map((x) => x.id), [v.id], 'the same visit, no other');
+  assert.equal(v.notes, 'front desk: xray done');
+  assert.equal(server.state.removedLog.length, 0, 'nothing was removed');
+  assert.equal(server.patientByMr('7'), undefined, 'no patient file is made for the slip');
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '9851', "the website's Mr# is back in the cell");
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), key, 'the row keeps its key');
+  assert.match(statusOf(env, GUL, 2), /^⚠ Mr# 7 is not this visit's patient, so Mr# 9851 is put back\. If this row is another patient, delete it and type that patient in a new row\.$/);
+  // the next edit of the row goes through to the same visit
+  setCell(env, GUL, 2, 'waiting', 'Treatment');
+  settle(env, 2);
+  assert.equal(v.status, 'in_treatment');
+  assert.equal(statusOf(env, GUL, 2), '✓ On website');
+});
+
+test('RW8-1: a typo of 50000 or more, a Healthwire number far ahead, another patient\'s Mr# or a letter typed into the Mr# cell of a linked row never deletes the visit', () => {
+  for (const typo of ['98510', '9951', '9852', '9851a']) {
+    const { env, server } = world({ rows: { [GUL]: [slipRow()] }, patients: SLIP_PATIENTS });
+    server.state.hwLimit = true;
+    settle(env, 3);
+    const v = server.state.visits.find((x) => x.mr === '9851');
+    server.editVisit(v.id, { notes: 'front desk notes' });
+    env.ticks(1);
+    setCell(env, GUL, 2, 'mr', typo);
+    settle(env, 3);
+    assert.deepEqual(server.state.visits.map((x) => x.id), [v.id], typo + ': the visit stays, no other is made');
+    assert.equal(v.notes, 'front desk notes', typo);
+    assert.equal(server.state.removedLog.length, 0, typo + ': nothing removed');
+    assert.equal(server.state.patients.length, 2, typo + ': no patient file made');
+    assert.equal(cellOf(env, GUL, 2, 'mr'), '9851', typo + ': written back');
+    assert.equal(server.state.visits.filter((x) => x.mr === '9852').length, 0, typo + ': the visit never moves to another patient');
+  }
+});
+
+test('RW8-1: a stray keystroke in the Mr# cell of a checkup row: the checkup stays (never removed), no patient file is made; with the Mr# cleared the row ticks again', () => {
+  const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  const key = c.sheet_key;
+  const nPatients = server.state.patients.length;
+  setCell(env, GUL, 2, 'mr', '7');
+  settle(env, 3);
+  assert.equal(server.checkupById(c.id), c, 'the checkup stays');
+  assert.equal(c.sheet_key, key);
+  assert.equal(server.state.removedLog.length, 0, 'nothing removed');
+  assert.equal(server.state.visits.length, 0, 'no visit');
+  assert.equal(server.state.patients.length, nPatients, 'no patient file (owner rule 6)');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), key, 'the row keeps the checkup\'s key');
+  assert.equal(statusOf(env, GUL, 2), '✗ Needs attention: Mr# 7 is not a patient on the website with this name, so this row stays a checkup. Clear the Mr# if this is a checkup patient (no Mr#), or check the number.');
+  setCell(env, GUL, 2, 'mr', '');
+  settle(env, 2);
+  assert.equal(statusOf(env, GUL, 2), '✓ On website', 'the refusal goes once the Mr# is cleared');
+  assert.equal(server.checkupById(c.id), c);
+  assert.equal(server.state.visits.length, 0);
+});
+
+test('RW8-1: another Mr# typed on a registered checkup row (same name): the checkup keeps its patient and the registered Mr# is written back', () => {
+  const { env, server } = ckWorld();
+  const c = server.state.checkups.find((x) => x.name === 'Check One');
+  server.addPatient({ mr: '50020', name: 'Check One', phone: '03001110301' });
+  server.editCheckup(c.id, { patient_mr: '50020' });
+  settle(env, 2);
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50020');
+  setCell(env, GUL, 2, 'mr', '50021');
+  settle(env, 3);
+  assert.equal(c.patient_mr, '50020');
+  assert.equal(server.checkupById(c.id), c, 'the checkup stays');
+  assert.equal(server.state.visits.length, 0);
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '50020', 'the registered Mr# is back');
+  assert.match(statusOf(env, GUL, 2), /^⚠ Mr# 50021 is not this checkup's patient, so Mr# 50020 is put back\./);
+});
+
+test('RW8-2: the same patient added on the website and typed in the sheet; staff delete the row added from the website: the typed row takes over that visit at once, front desk\'s notes stay, nothing is removed', () => {
+  const { env, server } = world({ rows: { [GUL]: [slipRow()] }, patients: [...SLIP_PATIENTS, { mr: '9853', name: 'Twice Entered', phone: '03001118853' }] });
+  settle(env, 3);
+  const wv = server.addVisit({ branch: 'GUL', date: TODAY, mr: '9853', treatment: 'Braces consultation' });
+  wv.notes = 'came with mother';
+  env.ticks(2);
+  const wr = rowOf(env, GUL, 'Twice Entered');
+  assert.ok(wr, 'added from the website');
+  env.typeRow(GUL, wr + 1, ['9853', 'Twice Entered', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001118853', '']);
+  settle(env, 2);
+  assert.match(statusOf(env, GUL, wr + 1), new RegExp('^✗ Already on this list in row ' + wr + ' \\(Mr# 9853\\)'));
+  env.deleteRows(GUL, wr);                      // staff delete the row the website added (not the one they typed)
+  env.ticks(1);                                 // one minute later
+  assert.equal(server.visitById(wv.id), wv, 'the website visit was never removed');
+  assert.equal(server.state.removedLog.length, 0);
+  assert.equal(wv.notes, 'came with mother');
+  assert.equal(wv.sheet_key, cellOf(env, GUL, wr, 'sync key'), 'the typed row holds the visit now');
+  env.ticks(2);
+  assert.equal(statusOf(env, GUL, wr), '✓ On website');
+  assert.equal(server.state.visits.filter((x) => x.mr === '9853').length, 1);
+});
+
+test('RW8-2: the same Mr# typed in two rows; staff delete the first (linked) row and keep the second: the second takes over the visit at once, the website notes stay', () => {
+  const rows = [slipRow(), ['9853', 'Twice Entered', '', 'RCT', '', 'Waiting', '', '', '', '', '', '03001118853', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: [...SLIP_PATIENTS, { mr: '9853', name: 'Twice Entered', phone: '03001118853' }] });
+  settle(env, 3);
+  const v = server.state.visits.find((x) => x.mr === '9853');
+  v.notes = 'xray taken';
+  env.typeRow(GUL, 4, ['9853', 'Twice Entered', '', 'RCT second sitting', '', 'Waiting', '', '', '', '', '', '03001118853', '']);
+  settle(env, 2);
+  assert.match(statusOf(env, GUL, 4), /^✗ Already on this list in row 3/);
+  env.deleteRows(GUL, 3);
+  env.ticks(1);
+  assert.equal(server.visitById(v.id), v, 'the visit was never removed');
+  assert.equal(server.state.removedLog.length, 0);
+  assert.equal(v.notes, 'xray taken');
+  assert.equal(v.sheet_key, cellOf(env, GUL, 3, 'sync key'));
+  env.ticks(2);
+  assert.equal(statusOf(env, GUL, 3), '✓ On website');
+});
+
+test('RW8-3: two weeks after the last Healthwire import, a new Healthwire patient typed in the sheet is still taken (the limit moves 10 a day); a slip far ahead is still refused, and the answer never tells front desk to add the patient on the website', () => {
+  const DAY = 86400000;
+  const rows = [['9967', 'Brand New Patient', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001119967', ''],
+    ['10300', 'Far Ahead Slip', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001110300', '']];
+  const { env, server } = world({ rows: { [GUL]: rows } });
+  server.state.hwLimit = true;
+  // Healthwire registered its patient 9866 two weeks ago (the last import); the sync has since made 9867-9966 from typed rows
+  server.addPatient({ mr: '9866', name: 'Hw Last Imported', phone: '03001110000', created: env.clock.ms - 14 * DAY });
+  for (let n = 9867; n <= 9966; n++) server.addPatient({ mr: String(n), name: 'Synced Person ' + n, phone: '0300' + (2000000 + n) }).sync_made = '2026-10-01';
+  settle(env, 3);
+  assert.ok(server.patientByMr('9967'), '9866 + 100 + 14 days x 10 = 10106: Healthwire\'s new patient 9967 is made');
+  assert.equal(visitOfMr(server, '9967').length, 1);
+  assert.equal(server.patientByMr('10300'), undefined, 'a number far above the limit (10300 > 10106) is still refused');
+  assert.equal(statusOf(env, GUL, 3), '✗ Mr# 10300 is not on the website and is higher than the newest Healthwire numbers it knows, so it looks like a typo. Check the Mr#. If it is right (a new Healthwire patient), ask Dr. Ali to import the latest Healthwire patients; this row is tried again every few minutes.');
+  assert.doesNotMatch(statusOf(env, GUL, 3), /on the website first/, 'front desk cannot give a Healthwire number (a new patient there gets 50000+)');
+});
+
+test('RW8-1: a checkup row that still shows a refused stray Mr# at midnight is still a checkup: it is on the nightly checkup list, never a patient file', () => {
+  const { env, server } = ckWorld();
+  setCell(env, GUL, 2, 'mr', '7');
+  settle(env, 3);
+  assert.match(statusOf(env, GUL, 2), /^✗ Needs attention: Mr# 7 is not a patient on the website with this name/);
+  quiet(env, server);
+  env.at(TODAY, '23:58'); env.ticks(1);
+  env.at(NEXT, '00:05'); env.ticks(1);
+  assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]).sort(), ['Check One', 'Check Two'], 'both checkup patients are leads');
+  assert.equal(server.patientByMr('7'), undefined);
+  assert.equal(server.state.checkups.length, 2, 'both checkups stay on the website');
+});
+
+test('RW8-1: a stray keystroke on a row whose new Healthwire patient file the sheet made today (token 7, a digit too many) is written back too; only the correction of a slip (two digits or fewer away) lets the row go', () => {
+  const rows = [['9790', 'New Hw Person', '', 'Consultation', '', 'Waiting', '', '', '', '', '', '03001119790', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  assert.ok(server.patientByMr('9790'), 'setup: the sheet made the file');
+  const v = server.state.visits.find((x) => x.mr === '9790');
+  for (const typo of ['7', '97901']) {
+    setCell(env, GUL, 2, 'mr', typo);
+    settle(env, 3);
+    assert.deepEqual(server.state.visits.map((x) => x.id), [v.id], typo + ': the same visit');
+    assert.ok(server.patientByMr('9790'), typo + ': the file stays');
+    assert.equal(server.patientByMr(typo), undefined, typo + ': no file for the slip');
+    assert.equal(cellOf(env, GUL, 2, 'mr'), '9790', typo + ': written back');
+    assert.equal(server.state.removedLog.length, 0, typo + ': nothing removed');
+  }
+});
+
+// ------------------------------------------------------------------------------------------------ fix loop 2 (2026-10-11, second round): RV9-1 (a copy left at midnight), RV9-2 (let-go records in Treatment / Completed)
+const NEXT2 = '2026-10-11';
+const RV9_PATIENTS = [...BASE_PATIENTS, { mr: '9712', name: 'Bravo Brace', phone: '03001110712' }];
+const rv9Rows = () => [
+  ['9701', 'Sample Person One', '', 'Scaling', '', 'Completed', '', '', 'polish done', '', '', '03001110001', ''],
+  ['9712', 'Bravo Brace', '6', 'Braces', '', 'Completed', '', '', 'wire', '', '', '03001110712', ''],
+  ['', 'Ck Echo Nine', '', 'Checkup', '', 'Completed', '', '', 'pain', '', '', '03009990905', ''],
+  ['9703', 'Sample Person Six', '', 'Filling', '', 'Waiting', '', '', '', '', '', '03001110006', ''],
+];
+/** midnight and the next morning: the archive runs, then three ticks at 08:01 of the next day */
+function rv9Night(env) {
+  env.at(TODAY, '23:58'); env.ticks(1);
+  env.at(NEXT, '00:05'); env.ticks(2);
+}
+function rv9Morning(env) {
+  env.at(NEXT, '08:01'); env.ticks(3);
+}
+const archDates = (env) => { const a = archiveSheet(env); return a ? a.values().slice(1).map((r) => r[0]) : []; };
+
+test('RV9-1: a whole row copied (hidden key too) and left on the tab until midnight: the archive clears both rows once, and the next morning makes nothing from yesterday', () => {
+  for (const variant of ['braces visit', 'checkup', 'copy with another treatment']) {
+    const { env, server } = world({ rows: { [GUL]: rv9Rows() }, patients: RV9_PATIENTS });
+    settle(env, 3);
+    assert.equal(server.state.visits.length, 3, variant + ': setup');
+    assert.equal(server.state.checkups.length, 1, variant + ': setup');
+    const sh = env.tab(GUL);
+    const src = variant === 'checkup' ? 4 : 3;
+    const dst = sh.used().rows + 1;
+    saveRows(sh, src, 1)[0].forEach((cell, j) => { if (cell) sh._set(dst, j + 1, cell); });      // the whole row, hidden cells too
+    if (variant === 'copy with another treatment') sh._set(dst, colOf(env, GUL, 'treatment'), { kind: 's', v: 'Polish' });
+    env.touch();
+    settle(env, 3);
+    assert.equal(statusOf(env, GUL, dst), `✗ Duplicate of row ${src}: delete this row.`, variant);
+    rv9Night(env);
+    assert.equal(env.props.document.get('listDate:' + GUL), NEXT, variant + ': a new list began');
+    assert.deepEqual(dataCells(env), [], variant + ': the tab is empty: the original and its copy are both cleared (sheet-behaviour RV9-1: before, the original stayed)');
+    assert.equal(archDates(env).length, 5, variant + ': four rows and the copy, each archived once (never "edited while archived" and copied again)');
+    assert.ok(!logText(env).includes('edited while they were being archived'), variant);
+    rv9Morning(env);
+    assert.deepEqual(server.visitsOf('GUL', NEXT), [], variant + ': no visit on the next day from yesterday\'s row');
+    assert.deepEqual(server.checkupsOf('GUL', NEXT), [], variant + ': no checkup on the next day');
+    assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]), ['Ck Echo Nine'], variant + ': the checkup patient is on the nightly list once');
+  }
+});
+
+test('RV9-1: the guide\'s path at midnight: four rows deleted at once (held), put back by the sync, then Ctrl+Z: the four "Duplicate of row N" rows nobody deleted are cleared with the rest, and the next morning makes nothing', () => {
+  const ph = (i) => '0302900000' + i;
+  const rows = [
+    ['9861', 'Rv Alpha', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(1), ''],
+    ['9862', 'Rv Bravo', '6', 'Braces', '', 'Completed', '', '', '', '', '', ph(2), ''],
+    ['', 'Ck Echo', '', 'Checkup', '', 'Completed', '', '', '', '', '', ph(5), ''],
+    ['', 'Ck Foxtrot', '', 'Checkup', '', 'Waiting', '', '', '', '', '', ph(6), ''],
+    ['9863', 'Rv Charlie', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(3), ''],
+    ['9864', 'Rv Delta', '', 'Scaling', '', 'Waiting', '', '', '', '', '', ph(4), ''],
+  ];
+  const patients = [1, 2, 3, 4].map((i) => ({ mr: String(9860 + i), name: 'Rv ' + ['Alpha', 'Bravo', 'Charlie', 'Delta'][i - 1], phone: ph(i) }));
+  const { env, server } = world({ rows: { [GUL]: rows }, patients });
+  settle(env, 3);
+  const sh = env.tab(GUL);
+  const saved = saveRows(sh, 3, 4);
+  env.deleteRows(GUL, 3, 4);
+  env.ticks(2);
+  undoDelete(env, GUL, 3, saved);
+  env.advance(61000);
+  env.ticks(3);
+  for (const name of ['Rv Bravo', 'Ck Echo', 'Ck Foxtrot', 'Rv Charlie']) assert.equal(rowsNamed(env, GUL, name).length, 2, name + ' twice (setup)');
+  rv9Night(env);
+  assert.deepEqual(dataCells(env), [], 'the tab is empty');
+  assert.equal(env.props.document.get('listDate:' + GUL), NEXT);
+  rv9Morning(env);
+  assert.deepEqual(server.visitsOf('GUL', NEXT), [], 'no visit on the next day (before: Rv Bravo Completed with Month 6, Rv Charlie Waiting)');
+  assert.deepEqual(server.checkupsOf('GUL', NEXT), [], 'no checkup on the next day (before: Ck Echo and Ck Foxtrot)');
+  assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]).sort(), ['Ck Echo', 'Ck Foxtrot'], 'each checkup patient once on the nightly list');
+});
+
+test('RV9-1 (safety net): a row of an earlier day that nobody edited since is never sent as a new row: it says "Left over", and the next archive clears it without copying it again', () => {
+  const { env, server } = world({ rows: { [GUL]: rv9Rows() }, patients: RV9_PATIENTS });
+  settle(env, 3);
+  const sh = env.tab(GUL);
+  const bravo = saveRows(sh, 3, 1);
+  const echo = saveRows(sh, 4, 1);
+  rv9Night(env);
+  assert.deepEqual(dataCells(env), []);
+  // yesterday's rows are back on the tab with their hidden cells (as if a clear had missed them)
+  [...bravo, ...echo].forEach((row, i) => row.forEach((cell, j) => { if (cell) sh._set(2 + i, j + 1, cell); }));
+  env.touch();
+  const from = server.calls.length;
+  rv9Morning(env);
+  assert.deepEqual(server.visitsOf('GUL', NEXT), [], 'no visit made from yesterday\'s row');
+  assert.deepEqual(server.checkupsOf('GUL', NEXT), [], 'no checkup made from yesterday\'s row');
+  assert.equal(sentRowsSince(server, from).length, 0, 'nothing sent for them');
+  assert.equal(statusOf(env, GUL, 2), `✗ Left over from ${TODAY} (archived that night): delete this row.`);
+  assert.equal(statusOf(env, GUL, 3), `✗ Left over from ${TODAY} (archived that night): delete this row.`);
+  assert.equal(server.visitsOf('GUL', TODAY).filter((v) => v.status === 'completed').length, 2, 'yesterday\'s visits are not touched');
+  // a row typed over today is today's row, as before
+  setCell(env, GUL, 3, 'patient', 'Morning Walk In');
+  setCell(env, GUL, 3, 'contact', '03001110777');
+  env.advance(61000);
+  env.ticks(3);
+  assert.deepEqual(server.checkupsOf('GUL', NEXT).map((c) => c.name), ['Morning Walk In'], 'the row typed over this morning is a checkup of the new day');
+  const before = archDates(env).length;
+  env.at(NEXT, '23:58'); env.ticks(1);
+  env.at(NEXT2, '00:05'); env.ticks(2);
+  assert.deepEqual(dataCells(env), [], 'the next archive clears the left-over row too');
+  assert.deepEqual(archDates(env).slice(before), [NEXT], 'only the new day\'s row is archived under the new date; the left-over row was archived on its own day');
+  assert.match(logText(env), /1 rows left over from an earlier day are cleared/);
+  assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]), ['Ck Echo Nine', 'Morning Walk In'], 'yesterday\'s checkup patient is not listed a second time');
+});
+
+test('RV9-2: an Mr# looked up in Healthwire typed into a Completed or Treatment checkup row: the patient\'s visit is made, the checkup goes, its row does not come back and the patient is no lead at night', () => {
+  for (const status of ['Completed', 'Treatment']) {
+    const rows = [['', 'Sana Recall', '', 'Checkup', '', status, '', 'Dr Haniya', 'scaling advised', '', '', '03001119710', ''],
+      ['', 'Check Two Nine', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03001119711', '']];
+    const { env, server } = world({ rows: { [GUL]: rows }, patients: [...BASE_PATIENTS, { mr: '9710', name: 'Sana Recall', phone: '03001119710' }] });
+    settle(env, 3);
+    const c = server.state.checkups.find((x) => x.name === 'Sana Recall');
+    assert.equal(c.day_status, status === 'Completed' ? 'completed' : 'in_treatment', status + ': setup');
+    setCell(env, GUL, 2, 'mr', '9710');
+    env.advance(61000);
+    env.ticks(4);
+    const v = server.state.visits.find((x) => x.mr === '9710');
+    assert.ok(v, status + ': the patient\'s visit');
+    assert.equal(v.status, status === 'Completed' ? 'completed' : 'in_treatment', status);
+    assert.equal(server.checkupById(c.id), undefined, status + ': the checkup went (sheet-behaviour RV9-2: before, it stayed and its row came back)');
+    assert.equal(rowsNamed(env, GUL, 'Sana Recall').length, 1, status + ': no row came back');
+    assert.equal(cellOf(env, GUL, 2, 'sync key'), v.sheet_key, status);
+    assert.match(logText(env), /the checkup is removed from the website and this person is not on the checkup list/);
+    env.at(TODAY, '23:58'); env.ticks(1);
+    env.at(NEXT, '00:05'); env.ticks(1);
+    assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]), ['Check Two Nine'], status + ': only the real checkup patient is a lead');
+  }
+});
+
+test('RV9-2: a Month typed into a Completed or Treatment checkup row: the row needs the Mr#, the checkup goes and is no lead at night; with the Mr# it is the patient\'s visit', () => {
+  for (const status of ['Completed', 'Treatment']) {
+    const P = '03001116011';
+    const rows = [['', 'Brace Forgot Nine', '', 'Checkup', '', status, '', '', '', '', '', P, '']];
+    const { env, server } = world({ rows: { [GUL]: rows }, patients: [...BASE_PATIENTS, { mr: '9761', name: 'Brace Forgot Nine', phone: P }] });
+    settle(env, 3);
+    const c = server.state.checkups.find((x) => x.name === 'Brace Forgot Nine');
+    setCell(env, GUL, 2, 'months', '6');
+    setCell(env, GUL, 2, 'treatment', 'Wire change');
+    env.advance(61000);
+    env.ticks(4);
+    assert.match(statusOf(env, GUL, 2), /^✗ Needs attention: add the Mr#/, status);
+    assert.equal(server.checkupById(c.id), undefined, status + ': the checkup went (a braces patient is no checkup)');
+    assert.equal(rowsNamed(env, GUL, 'Brace Forgot Nine').length, 1, status + ': no row came back');
+    assert.equal(c.checkup_for, 'Checkup', status + ': nothing of the row was put on the checkup');
+    setCell(env, GUL, 2, 'mr', '9761');
+    env.advance(61000);
+    env.ticks(3);
+    const v = server.state.visits.find((x) => x.mr === '9761');
+    assert.ok(v, status + ': with the Mr# the row is the patient\'s visit');
+    assert.deepEqual([v.braces_month, v.treatment_label], [6, 'Wire change'], status);
+    env.at(TODAY, '23:58'); env.ticks(1);
+    env.at(NEXT, '00:05'); env.ticks(1);
+    const ck = ckSheet(env);
+    assert.ok(!ck || !ck.values().some((r) => r.includes('Brace Forgot Nine')), status + ': not on the nightly checkup list');
+  }
+});
+
+test('RV9-2: a Healthwire Mr# typed with a slip on a Completed or Treatment row, then corrected: one visit, on the right file; the file made from the slip goes and no "Not removed" row comes back', () => {
+  for (const status of ['Completed', 'Treatment']) {
+    const rows = [['9858', 'Kamran New', '', 'Consultation', '', status, '', '', '', '', '', '03001116058', '']];
+    const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+    settle(env, 3);
+    assert.ok(server.patientByMr('9858'), status + ': the slip made a patient file');
+    setCell(env, GUL, 2, 'mr', '9853');
+    env.advance(61000);
+    env.ticks(4);
+    assert.equal(server.patientByMr('9858'), undefined, status + ': the file made from the slip is gone (sheet-behaviour RV9-2: before, it stayed with its visit)');
+    assert.deepEqual(server.state.visits.map((v) => [v.mr, v.status]), [['9853', status === 'Completed' ? 'completed' : 'in_treatment']], status + ': one visit, on the corrected Mr#');
+    assert.equal(rowsNamed(env, GUL, 'Kamran New').length, 1, status + ': no row came back');
+    assert.match(logText(env), /The Mr# in this row was corrected and the row was sent again: the visit under the old Mr# is removed from the website\. So is the patient file made from this row \(Mr# 9858\)\./);
+  }
+});
+
+test('RV9-2: a slip corrected on a visit that has an invoice is not let go: no second visit, the Mr# is written back and the row says to correct the file on the website', () => {
+  const rows = [['9868', 'Billed New', '', 'Consultation', '', 'Completed', '', '', '', '', '', '03001116068', '']];
+  const { env, server } = world({ rows: { [GUL]: rows }, patients: BASE_PATIENTS });
+  settle(env, 3);
+  const v = server.state.visits[0];
+  server.editVisit(v.id, { attached: true });
+  env.ticks(1);
+  setCell(env, GUL, 2, 'mr', '9863');
+  env.advance(61000);
+  env.ticks(3);
+  assert.deepEqual(server.state.visits.map((x) => x.id), [v.id], 'the same one visit');
+  assert.ok(server.patientByMr('9868'));
+  assert.equal(server.patientByMr('9863'), undefined, 'no file for the other number');
+  assert.equal(cellOf(env, GUL, 2, 'mr'), '9868', 'written back');
+  assert.equal(statusOf(env, GUL, 2), '⚠ Mr# 9868 is put back: this visit has an attached record (invoices) on the website, so the row is not moved to Mr# 9863. If 9863 is the right Mr#, correct the patient file on the website.');
+});
+
+test('a checkup patient added on the website and typed again in the sheet (the typed row refused as a duplicate, never deleted): one line on the nightly checkup list', () => {
+  const { env, server } = world({ rows: { [GUL]: [['9701', 'Sample Person One', '', 'Scaling', '', 'Waiting', '', '', '', '', '', '03001110001', '']] }, patients: BASE_PATIENTS });
+  settle(env, 2);
+  server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Nadia Twice', phone: '03008880001', checkup_for: 'Checkup' });
+  env.ticks(2);
+  assert.equal(rowOf(env, GUL, 'Nadia Twice'), 3, 'added from the website');
+  env.typeRow(GUL, 4, ['', 'Nadia Twice', '', 'Checkup', '', 'Waiting', '', '', 'toothache', '', '', '03008880001', '']);
+  settle(env, 3);
+  assert.match(statusOf(env, GUL, 4), /^✗ Already on this list in row 3/);
+  assert.equal(server.state.checkups.length, 1);
+  env.at(TODAY, '23:58'); env.ticks(1);
+  env.at(NEXT, '00:05'); env.ticks(2);
+  assert.deepEqual(ckSheet(env).values().slice(1).map((r) => r[1]), ['Nadia Twice'], 'one line for one person (before: the refused second row was listed too)');
+});
+
+console.log(`${passed} passed, ${failed} failed`);

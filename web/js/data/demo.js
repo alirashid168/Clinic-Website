@@ -1311,29 +1311,124 @@ export function createDemoAdapter() {
     async importAajSheet(rows, createPatients = false) {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can import the Aaj ki List');
       const today = todayISO();
-      const out = { given: rows.length, future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, cases: {}, unmatched: [] };
-      const find = (r) => db.patients.find((p) => r[2] && p.mr_number === r[2]) || (r[5] && db.patients.find((p) => p.phone === r[5]))
-        || (() => { const same = db.patients.filter((p) => p.full_name.toLowerCase() === String(r[3]).toLowerCase()); return same.length === 1 ? same[0] : null; })();
+      const out = { given: rows.length, future: 0, patients_created: 0, visits_inserted: 0, visits_updated: 0, staff_added: 0, cases_created: 0, tokens: 0, rows_unmatched: 0, checkups_skipped: 0, cases: {}, unmatched: [] };
+      // nothing is guessed: an Mr# is that patient (never somebody else on the same phone or name); a row without an Mr# is matched only by
+      // its phone and first name (exactly one patient), never by a name alone; a row without an Mr# whose Treatment says checkup is skipped
+      const digits = (t) => { let x = String(t || '').replace(/\D/g, ''); if (x.length === 10 && x[0] === '3') x = '0' + x; if (x.length === 12 && x.startsWith('92')) x = '0' + x.slice(2); return x.length >= 7 ? x : null; };
+      const first = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().split(/\s+/).find((w) => !/^(m|mr|mrs|ms|miss|dr|md|muhammad|mohammad|muhammed|mohammed|mohd|syed|syeda|sayed|hafiz|haji|baby|master|kid)$/.test(w)) || '';
+      // an Mr# is that patient only when the row's name fits them without doubt (the sync's check, private.aaj_check_mr): a row typed with
+      // another patient's Mr# is reported back, never filed on that patient
+      const words =(t) => String(t || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().split(/\s+/).filter((w) => w && !/^(m|mr|mrs|ms|miss|dr|md|muhammad|mohammad|muhammed|mohammed|mohd|syed|syeda|sayed|hafiz|haji|baby|master|kid)$/.test(w));
+      const lev = (a, b) => { let prev = Array.from({ length: b.length + 1 }, (_, j) => j); for (let i = 1; i <= a.length; i++) { const cur = [i]; for (let j = 1; j <= b.length; j++) cur.push(Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))); prev = cur; } return prev[b.length]; };
+      // private.aaj_name_sound: an everyday spelling of a first name ("Umar" / "Umer", "Aisha" / "Ayesha", "Nur" / "Noor") sounds the same
+      const sound = (t) => (t ? ({ o: 'u', e: 'i' }[t[0]] || t[0]) + t.slice(1).replace(/[aeiouyh]/g, '').replace(/[qzv]/g, (c) => ({ q: 'k', z: 's', v: 'w' }[c])).replace(/(.)\1+/g, '$1') : '');
+      const close = (a, b) => {           // private.aaj_name_close
+        const wa = words(a), wb = words(b), ga = first(a), gb = first(b);
+        if (!ga || !gb || wa.length > 4) return false;
+        if (ga === gb || (wa.length <= 2 && wa.includes(gb)) || (wb.length >= 2 && wa.length <= wb.length + 1 && wb.every((w) => wa.includes(w)))) return true;
+        if (wa[0] === ga && wb[0] === gb && (wa.length === 1 || (wa.length === wb.length && wa.slice(1).join(' ') === wb.slice(1).join(' ')))
+            && sound(ga) === sound(gb) && Math.abs(ga.length - gb.length) <= 1 && lev(ga, gb) <= 2) return true;
+        const m = Math.min(ga.length, gb.length);
+        return lev(ga, gb) <= (m >= 6 ? 2 : m === 5 ? 1 : 0);
+      };
+      const conflict = (a, b) => { const wa = words(a), wb = words(b); return wa.length >= 2 && wb.length >= 2 && !(wa.every((w) => wb.includes(w)) || wb.every((w) => wa.includes(w))); };
+      // private.aaj_name_spelling: one word without the everyday ways of writing it in English letters (Ayesha / Aisha, Noor / Nur, Umer / Umar)
+      const spell = (t) => {
+        let s = String(t || '').toLowerCase().replace(/[^a-z]/g, '').replace(/[qv]/g, (c) => ({ q: 'k', v: 'w' }[c]));
+        s = s.replace(/([aeiou])ye/g, '$1i').replace(/(.)y(?![aeiou])/g, '$1i').replace(/([^aeiou])y(?=[aeiou])/g, '$1i');
+        s = s.replace(/ee/g, 'i').replace(/oo/g, 'u').replace(/ou/g, 'u').replace(/^e/, 'i').replace(/[oe]/g, (c) => ({ o: 'u', e: 'a' }[c]));
+        return s.replace(/(.)\1+/g, '$1').replace(/([aiu])h$/, '$1');
+      };
+      // private.aaj_name_fits (11 Oct 2026): an Mr# is that patient only when the row's name fits them WITHOUT DOUBT: the same first name (or
+      // an everyday spelling of it) and no other surname. A name that is only close (another surname, a slip, another first name), or only the
+      // patient's phone with another name, is reported back with why, never filed on that patient
+      const fits = (r, p) => {
+        if (String(r[3]).trim().toLowerCase().replace(/\s+/g, ' ') === String(p.full_name || '').trim().toLowerCase().replace(/\s+/g, ' ')) return true;
+        const wa = words(r[3]), wb = words(p.full_name);
+        if (!wa.length || !wb.length || wa.length > 4) return false;
+        const ka = wa.map(spell), kb = wb.map(spell);
+        if (!ka[0] || ka[0] !== kb[0] || !(ka.every((w) => kb.includes(w)) || kb.every((w) => ka.includes(w)))) return false;
+        // Muhammad (M, Md, Mohd ...), Syed, Hafiz, Baby ... count as words when both names have two or more: "Muhammad Usman" is not "Usman Tariq"
+        const raw = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().split(/\s+/).filter((w) => w && !/^(mr|mrs|ms|miss|dr)$/.test(w))
+          .map((w) => (/^(m|md|mohd|mohammad|muhammed|mohammed)$/.test(w) ? 'muhammad' : w === 'sayed' ? 'syed' : w)).map(spell);
+        const ra = raw(r[3]), rb = raw(p.full_name);
+        return ra.length < 2 || rb.length < 2 || ra.every((w) => rb.includes(w)) || rb.every((w) => ra.includes(w));
+      };
+      const doubtWhy = (r) => {
+        const p = r[2] ? db.patients.find((x) => x.mr_number === r[2]) : null;
+        if (!p || fits(r, p) || !((first(r[3]) && close(r[3], p.full_name)) || (digits(r[5]) && digits(r[5]) === digits(p.phone)))) return null;
+        return `the name only partly matches Mr# ${p.mr_number} (${p.full_name}): another surname, another first name or only the phone. Check the Mr# or the name`;
+      };
+      // an old Mr# is that patient only with their whole name (no other surname), or with their phone and first name (private.aaj_check_mr)
+      const movedFits = (r, p) => (close(r[3], p.full_name) && !conflict(r[3], p.full_name))
+        || (!!digits(r[5]) && digits(r[5]) === digits(p.phone) && (!first(r[3]) || close(r[3], p.full_name)));
+      // a row without an Mr#: the one patient on its phone with its whole name, or else with its first name when the surnames do not conflict
+      // ("Ali Raza" is not his brother "Ali Hamza" on the family phone: reported back with why, like private.aaj_find_patient in the import)
+      const phoneWhy = {};
+      const find = (r) => {
+        if (r[2]) { const p = db.patients.find((x) => x.mr_number === r[2]) || null; return p && fits(r, p) ? p : null; }
+        const ph = digits(r[5]);
+        if (!ph || !first(r[3])) return null;
+        const exact = db.patients.filter((p) => digits(p.phone) === ph && normN(p.full_name) === normN(r[3]));
+        if (exact.length) return exact.length === 1 ? exact[0] : null;
+        const same = db.patients.filter((p) => digits(p.phone) === ph && first(p.full_name) === first(r[3]));
+        if (same.length !== 1) return null;
+        if (conflict(r[3], same[0].full_name)) { phoneWhy[r[3] + '|' + ph] = 'add the Mr# (another person with this first name is on this phone)'; return null; }
+        return same[0];
+      };
+      // an Mr# the website does not have is never a second file for a patient it has: the same name and phone under another Mr# (mr_other), or
+      // an old Mr# of that patient (renumbered to 50000+, or merged away; the notes say so) with their whole name (mr_moved). The other rows
+      // of that Mr# are held back with it.
+      const normN = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      const refusedWhy = (r) => {
+        if (!r[2] || db.patients.some((x) => x.mr_number === r[2])) return null;
+        const ph = digits(r[5]);
+        const o = ph && normN(r[3]) ? db.patients.find((x) => digits(x.phone) === ph && normN(x.full_name) === normN(r[3])) : null;
+        if (o) return 'this name and phone are Mr# ' + o.mr_number;
+        if (!/^\d{1,15}$/.test(String(r[2]))) return null;
+        const was = `Mr# was ${r[2]} until `, merged = `Merged with Mr# ${r[2]} (`;
+        const m = db.patients.find((x) => (String(x.notes || '').includes(was) || String(x.notes || '').includes(merged)) && movedFits(r, x));
+        if (m) return (String(m.notes || '').includes(was) ? 'Mr# was renumbered to ' : 'Mr# was merged into ') + m.mr_number;
+        if (Number(r[2]) >= 50000) return 'an Mr# of 50000 or more that the website never gave (a typo)';
+        // a Healthwire number above the limit: Healthwire has not given it yet (private.aaj_hw_limit, M-HW-SQUAT)
+        if (/^[1-9]\d{0,4}$/.test(String(r[2])) && Number(r[2]) > hwLimit) return `an Mr# above the newest Healthwire number the website takes (${hwLimit}): probably a typo. Check the Mr#, or import the Healthwire patients first`;
+        return null;
+      };
+      // the highest Healthwire number the website has (files made from typed sheet text do not count), taken before anything is made, plus 100,
+      // plus 10 a day since that patient was registered (at most 180 days): private.aaj_hw_limit
+      const hwTop = db.patients.reduce((m, p) => (p.legacy_source !== 'aaj_sheet_sync' && p.legacy_source !== 'aaj_ki_list' && /^[1-9]\d{0,4}$/.test(String(p.mr_number))
+        && Number(p.mr_number) < 50000 ? Math.max(m, Number(p.mr_number)) : m), 0);
+      const hwTopAt = (db.patients.find((p) => p.mr_number === String(hwTop)) || {}).created_at;
+      const hwDays = hwTopAt ? Math.max(0, Math.min(180, Math.round((Date.parse(today) - Date.parse(String(hwTopAt).slice(0, 10))) / 86400000))) : 0;
+      const hwLimit = hwTop + 100 + 10 * hwDays;
+      const heldWhy = {};
+      for (const r of rows) { if (r[3] && r[2] && r[0] < today && !heldWhy[r[2]]) { const w = refusedWhy(r); if (w) heldWhy[r[2]] = w; } }
       const seenUnmatched = {};
       for (const r of rows) {
         if (!r[3]) continue;
         if (r[0] >= today) { out.future++; continue; }
+        if (!r[2] && /\bch[ea]{1,2}c?k?[- ]?ups?\b/i.test(String(r[7] || ''))) { out.checkups_skipped++; continue; }
         let p = find(r);
-        if (!p && createPatients && (r[2] || r[5])) {
-          p = { id: uid(), mr_number: r[2] || String(db.mr_next++), full_name: r[3], phone: r[5], email: null, first_branch_id: r[1], referral_source: null, photo_consent_public: false,
+        const why = p ? null : (refusedWhy(r) || (r[2] && heldWhy[r[2]] ? `held back with the other row of this Mr# (${heldWhy[r[2]]})` : null) || phoneWhy[r[3] + '|' + digits(r[5])] || null);
+        // only a Healthwire Mr# (1 to 49999) becomes a new patient file: never a row without an Mr#, never a typo of 50000 or more (owner rules 3 and 4)
+        if (!p && !why && createPatients && /^[1-9]\d{0,4}$/.test(String(r[2] || '')) && Number(r[2]) < 50000 && !db.patients.some((x) => x.mr_number === r[2])) {
+          p = { id: uid(), mr_number: r[2], full_name: r[3], phone: r[5], email: null, first_branch_id: r[1], referral_source: null, photo_consent_public: false,
             created_at: r[0], notes: `Added from the Aaj ki List (${r[16]}, first seen ${r[0]})`, portal_user_id: null, legacy_source: 'aaj_ki_list' };
           db.patients.push(p); out.patients_created++;
         }
-        if (!p) { const k = `${r[3]}|${r[2] || ''}|${r[5] || ''}`; if (!seenUnmatched[k]) { seenUnmatched[k] = { name: r[3], mr: r[2], phone: r[5], rows: 0, first: r[0], last: r[0], tab: r[16] }; out.unmatched.push(seenUnmatched[k]); } seenUnmatched[k].rows++; seenUnmatched[k].last = r[0]; out.rows_unmatched++; continue; }
-        let bc = r[6] ? (activeCase(p.id) || db.braces_cases.find((b) => b.patient_id === p.id)) : null;
-        if (r[6] && !bc) {
+        if (!p) { const k = `${r[3]}|${r[2] || ''}|${r[5] || ''}`; if (!seenUnmatched[k]) { seenUnmatched[k] = { name: r[3], mr: r[2], phone: r[5], rows: 0, first: r[0], last: r[0], tab: r[16], why: doubtWhy(r) || (r[2] && db.patients.some((x) => x.mr_number === r[2]) ? 'Mr# belongs to another patient' : why) }; out.unmatched.push(seenUnmatched[k]); } seenUnmatched[k].rows++; seenUnmatched[k].last = r[0]; out.rows_unmatched++; continue; }
+        // a row without an Mr# filed by its phone and first name only (not its whole name) never starts or joins a braces case: its Month stays
+        // in the visit's notes (the database's import_aaj_sheet, abuse-privacy M1). A row with an Mr# is here only when its name fits without doubt.
+        const differs = !r[2] && !!first(r[3]) && normN(r[3]) !== normN(p.full_name);
+        let bc = r[6] && !differs ? (activeCase(p.id) || db.braces_cases.find((b) => b.patient_id === p.id)) : null;
+        if (r[6] && !bc && !differs) {
           const start = new Date(r[0] + 'T12:00:00Z'); start.setUTCDate(start.getUTCDate() - (r[6] - 1) * 30);
           bc = { id: uid(), patient_id: p.id, start_date: start.toISOString().slice(0, 10), extraction_plan: 'undecided', extractions_done: false, kit_name: null, total_fee: null,
             status: 'active', treatment_plan_by_dr_ali: null, notes: `From the Aaj ki List history: month rows from ${r[0]}` };
           db.braces_cases.push(bc); out.cases_created++; out.cases.active = (out.cases.active || 0) + 1;
         }
         let v = db.visits.find((x) => x.patient_id === p.id && x.visit_date === r[0]);
-        const note = [`Aaj ki List (${r[16]})`, r[13].length ? 'Also: ' + r[13].join(', ') : null, r[15] ? 'Reminder: ' + r[15] : null].filter(Boolean).join(' · ');
+        const note = [`Aaj ki List (${r[16]})`, r[6] && !bc ? 'Month ' + r[6] : null, r[13].length ? 'Also: ' + r[13].join(', ') : null, r[15] ? 'Reminder: ' + r[15] : null, differs ? `Sheet name: ${r[3]} (check the Mr#)` : null].filter(Boolean).join(' · ');
         if (v) {
           if (!(v.notes || '').includes('Aaj ki List (')) {
             v.treatment_label ||= r[7]; v.details_text ||= r[14]; v.braces_case_id ||= bc?.id || null; v.braces_month ||= bc ? r[6] : null;
