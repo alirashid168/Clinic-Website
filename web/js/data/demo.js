@@ -10,12 +10,12 @@
 
 import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '../lib/protocol.js';
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
-import { todayISO } from '../ui/dom.js';
+import { todayISO, localISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
-import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -42,10 +42,12 @@ function chk(over) {
   const now = new Date().toISOString();
   return { id: uid(), checkup_date: null, date_is_month: false, branch_id: null, patient_name: '', phone: null, city: null, doctors: null, checkup_for: null,
     details: null, token: null, day_status: null, est_fee: null, follow_up: 'Not Contacted', notes: null, source: 'website', source_tab: null, sheet_key: null,
-    patient_id: null, created_by: null, created_at: now, updated_at: now, ...over };
+    patient_id: null, created_by: null, created_at: now, updated_at: now,
+    ali_recommended: null, pricing_understood: null, wants_treatment: null, treatment_plan: null, ...over };
 }
 // The limits of the checkups table (its check constraints), so the demo refuses what the database refuses.
-const CHECKUP_LIMITS = { patient_name: [1, 200], phone: [0, 40], city: [0, 80], doctors: [0, 300], checkup_for: [0, 300], details: [0, 2000], token: [0, 40], notes: [0, 2000], follow_up: [1, 60] };
+const CHECKUP_LIMITS = { patient_name: [1, 200], phone: [0, 40], city: [0, 80], doctors: [0, 300], checkup_for: [0, 300], details: [0, 2000], token: [0, 40], notes: [0, 2000], follow_up: [1, 60],
+  treatment_plan: [0, 500] };
 function checkValid(c) {
   for (const [col, [min, max]] of Object.entries(CHECKUP_LIMITS)) {
     const v = c[col];
@@ -55,6 +57,9 @@ function checkValid(c) {
   }
   if (c.est_fee !== null && c.est_fee !== undefined && !(c.est_fee >= 0)) fail('new row for relation "checkups" violates check constraint "checkups_est_fee_check"');
   if (c.day_status !== null && c.day_status !== undefined && !DAY_STATUSES.includes(c.day_status)) fail('new row for relation "checkups" violates check constraint "checkups_day_status_check"');
+  // the answers of the Checkup Patient Form 2.0 (migration 20261011000300)
+  if (c.pricing_understood !== null && c.pricing_understood !== undefined && !Object.keys(PRICING_LABELS).includes(c.pricing_understood)) fail('new row for relation "checkups" violates check constraint "checkups_pricing_understood_check"');
+  for (const col of ['ali_recommended', 'wants_treatment']) if (c[col] !== null && c[col] !== undefined && typeof c[col] !== 'boolean') fail(`invalid input syntax for type boolean: "${c[col]}"`);
 }
 /** 'YYYY-MM' -> the first day of the month after it. */
 const monthAfter = (ym) => (ym.slice(5, 7) === '12' ? `${Number(ym.slice(0, 4)) + 1}-01-01` : `${ym.slice(0, 4)}-${String(Number(ym.slice(5, 7)) + 1).padStart(2, '0')}-01`);
@@ -270,12 +275,14 @@ function seed() {
   db.checkups[4].follow_up = 'Started';
   const at = (n) => new Date(Date.now() + n).toISOString();
   db.checkups.push(
-    chk({ checkup_date: today, branch_id: 2, patient_name: 'Bareera Khalid', phone: '0300-5550701', city: 'Karachi', doctors: 'Dr. Rabia (sample)', checkup_for: 'Checkup',
-      day_status: 'waiting', source: 'website', created_at: at(1) }),
+    chk({ checkup_date: today, branch_id: 2, patient_name: 'Bareera Khalid', phone: '0300-5550701', city: 'Karachi', doctors: 'Dr. Rabia (sample)', checkup_for: 'Braces',
+      day_status: 'waiting', source: 'website', created_at: at(1),
+      ali_recommended: true, pricing_understood: 'needs_explanation', wants_treatment: true, treatment_plan: 'Next month, after her exams' }),
     chk({ checkup_date: today, branch_id: 2, patient_name: 'Salma Nadeem', phone: '0300-5550702', city: 'Karachi', doctors: 'Dr. Hina (sample)', checkup_for: 'Scaling',
       details: 'Scaling advised', token: '7', day_status: 'completed', source: 'google_sheet', sheet_key: 'S-demo00000001', created_at: at(2) }),
-    chk({ checkup_date: today, branch_id: 1, patient_name: 'Imtiaz Gill', phone: '0300-5550703', city: 'Karachi', doctors: null, checkup_for: 'Checkup',
-      day_status: 'waiting', source: 'website', created_at: at(3) }));
+    chk({ checkup_date: today, branch_id: 1, patient_name: 'Imtiaz Gill', phone: '0300-5550703', city: 'Karachi', doctors: 'Dr. Amna (sample)', checkup_for: 'Scaling and polishing',
+      day_status: 'waiting', source: 'website', created_at: at(3),
+      ali_recommended: false, pricing_understood: 'yes', wants_treatment: false, treatment_plan: 'Wants to compare prices first' }));
   db.audit = [];
   // The demo's stand-in for the login server: logins the clinic made for patients ({ patient_id, email, password, must_change }).
   // Kept apart from every patient row, and never returned by any method, like the real login server's passwords.
@@ -319,7 +326,7 @@ export function createDemoAdapter() {
   const checkupVisible = (c) => (can('sheet.view') || can('patients.view')) && checkupBranchOk(c);
   const checkupView = (c) => ({ ...clone(c), phone_key: checkupPhone(c.phone), mr_number: c.patient_id && can('patients.view') ? patient(c.patient_id)?.mr_number ?? null : null });
   const monthText = (iso, withDay) => (withDay ? iso.slice(8, 10) + ' ' : '') + monthLabel(iso);
-  function checkupMatches({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '' } = {}) {
+  function checkupMatches({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', wants = '' } = {}) {
     const text = String(q || '').replace(/[%,()*\\"]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
     const digits = text.replace(/[^0-9]/g, '');
     const keys = [];
@@ -333,7 +340,8 @@ export function createDemoAdapter() {
       && (!month.test(to || '') || (c.checkup_date !== null && c.checkup_date < monthAfter(to)))
       && (!followUp || c.follow_up === followUp)
       && (!['website', 'google_sheet', 'archive'].includes(source) || c.source === source)
-      && (registered !== 'yes' || c.patient_id) && (registered !== 'no' || !c.patient_id))
+      && (registered !== 'yes' || c.patient_id) && (registered !== 'no' || !c.patient_id)
+      && (wants !== 'yes' || c.wants_treatment === true) && (wants !== 'no' || c.wants_treatment === false))
       .sort((a, b) => (a.checkup_date === b.checkup_date ? 0 : a.checkup_date === null ? 1 : b.checkup_date === null ? -1 : a.checkup_date < b.checkup_date ? 1 : -1)
         || (a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1) || (a.id < b.id ? -1 : 1));
   }
@@ -657,8 +665,8 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
     // The same rules as the database: read = sheet.view or patients.view; add and change = sheet.edit; all within the person's branches
     // (a row with no branch is open to everyone who may read); delete = admin, or sheet.edit on a row that is not from the old list.
-    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', page = 0, pageSize = 50 } = {}) {
-      const rows = checkupMatches({ q, branchId, from, to, followUp, source, registered });
+    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', wants = '', page = 0, pageSize = 50 } = {}) {
+      const rows = checkupMatches({ q, branchId, from, to, followUp, source, registered, wants });
       const first = Math.max(0, Number(page) || 0) * pageSize;
       return { rows: rows.slice(first, first + pageSize).map(checkupView), total: rows.length };
     },
@@ -1399,7 +1407,7 @@ export function createDemoAdapter() {
       const hwTop = db.patients.reduce((m, p) => (p.legacy_source !== 'aaj_sheet_sync' && p.legacy_source !== 'aaj_ki_list' && /^[1-9]\d{0,4}$/.test(String(p.mr_number))
         && Number(p.mr_number) < 50000 ? Math.max(m, Number(p.mr_number)) : m), 0);
       const hwTopAt = (db.patients.find((p) => p.mr_number === String(hwTop)) || {}).created_at;
-      const hwDays = hwTopAt ? Math.max(0, Math.min(180, Math.round((Date.parse(today) - Date.parse(String(hwTopAt).slice(0, 10))) / 86400000))) : 0;
+      const hwDays = hwTopAt ? Math.max(0, Math.min(180, Math.round((Date.parse(today) - Date.parse(localISO(new Date(hwTopAt)))) / 86400000))) : 0;
       const hwLimit = hwTop + 100 + 10 * hwDays;
       const heldWhy = {};
       for (const r of rows) { if (r[3] && r[2] && r[0] < today && !heldWhy[r[2]]) { const w = refusedWhy(r); if (w) heldWhy[r[2]] = w; } }

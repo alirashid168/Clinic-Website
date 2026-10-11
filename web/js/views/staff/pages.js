@@ -9,16 +9,37 @@ import { printReceipt } from './invoice.js';
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 
 // ---------------------------------------------------------------- today
+// The first page after login. Whoever keeps the Aaj ki List finds "+ Add checkup patient" (the checkup form, owner 11 Oct 2026) at the
+// top: the person goes on the Checkups page and on today's Aaj ki List of their branch.
 export async function renderDashboard(root) {
   const d = state.data;
   const s = state.session.staff;
   const day = todayISO();
-  const [rows, totalDues, review, complaints] = await Promise.all([
+  const [rows, totalDues, review, complaints, todaysCheckups] = await Promise.all([
     d.dashboard(day).catch(() => []),
     can('finance.view') ? d.totalDues().catch(() => null) : null,
     isAdmin() || can('complaints.view') ? d.reviewList().catch(() => []) : [],
     can('complaints.view') ? d.complaints().catch(() => []) : [],
+    // today's checkups of every branch the person may see: how many there are, and whether the checkup list is switched on at all
+    can('sheet.edit') && d.listDayCheckups ? d.listDayCheckups({ branchId: null, date: day }).catch(() => null) : Object.assign([], { missing: true }),
   ]);
+  let checkupCount = Array.isArray(todaysCheckups) ? todaysCheckups.length : null;
+  const countText = () => (checkupCount === null ? '' : ` ${checkupCount} checkup patient${checkupCount === 1 ? '' : 's'} on today's lists so far.`);
+  const countEl = h('span', {}, countText());
+  const addCheckup = async () => {
+    let form;
+    try { form = await import('./checkup-actions.js'); } catch (e) { toast(friendlyError(e), 'error'); return; }
+    const row = await form.checkupFormModal({ branchId: defaultBranchId() });
+    if (!row) return;
+    if (checkupCount !== null && row.checkup_date === day) { checkupCount += 1; countEl.textContent = countText(); }
+    toast(`${row.patient_name} added as a checkup patient.`, 'ok');
+  };
+  const checkupPanel = todaysCheckups?.missing ? null : h('section', { class: 'add-panel today-checkup', 'aria-label': 'Checkup patient' },
+    h('div', { class: 'add-panel-text' },
+      h('strong', {}, 'Checkup patient?'),
+      h('span', { class: 'muted' }, "Fill in the checkup form after the checkup. It goes on the Checkups page and on the branch's Aaj ki List for today.", countEl)),
+    h('button', { type: 'button', class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: addCheckup }, '+ Add checkup patient'),
+    can('sheet.view') ? h('a', { class: 'btn', href: '#/staff/checkups' }, 'Open the Checkups page') : null);
   // totalDues is a number; a capped fallback may mark itself truncated.
   const duesTotal = totalDues === null ? null : Number(typeof totalDues === 'object' ? totalDues.total ?? totalDues : totalDues);
   const duesPartial = !!totalDues?.truncated;
@@ -26,6 +47,7 @@ export async function renderDashboard(root) {
   const sum = (k) => visible.reduce((t, r) => t + (r[k] || 0), 0);
   mount(root,
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, ${s.full_name.split(' ')[0] === 'Dr.' ? s.full_name : s.full_name.split(' ')[0]}`), h('p', {}, shortDate(day)))),
+    checkupPanel,
     h('div', { class: 'stat-row' },
       h('div', { class: 'stat' }, h('strong', {}, sum('patients')), h('span', {}, 'Patients on today\'s lists')),
       h('div', { class: 'stat' }, h('strong', {}, sum('waiting')), h('span', {}, 'Waiting now')),

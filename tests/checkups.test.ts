@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  FOLLOW_UP_STATUSES, DAY_STATUSES, SOURCE_LABELS, DAY_STATUS_LABELS, IMPORT_BATCH, CLINIC_BRANCH, EXPORT_HEADER,
+  FOLLOW_UP_STATUSES, DAY_STATUSES, SOURCE_LABELS, DAY_STATUS_LABELS, IMPORT_BATCH, CLINIC_BRANCH, EXPORT_HEADER, CHECKUP_FOR_CHOICES, PRICING_LABELS, yesNo, hasFormAnswers,
   isEmptyCell, cleanText, checkupPhone, checkupKey, excelSerialToISO, monthCell, feeCell, monthLabel, canonicalStatus,
   dayListCheckups, detectCheckupColumns, findHeader, findCheckupSheet, readCheckupList, checkupsToSheet,
 } from '../web/js/lib/checkups.js';
@@ -46,8 +46,20 @@ test('constants: eleven follow-up statuses (no "scheduled" day status), the owne
   assert.deepEqual(SOURCE_LABELS, { website: 'Website', google_sheet: 'Google Sheet', archive: 'Old list' });
   assert.equal(IMPORT_BATCH, 250);
   assert.deepEqual(EXPORT_HEADER.slice(0, 11), HEADER);
-  assert.equal(EXPORT_HEADER.length, 17);
+  assert.equal(EXPORT_HEADER.length, 21);
+  assert.deepEqual(EXPORT_HEADER.slice(17), ['Dr. Ali recommended', 'Understood pricing', 'Wants to start', 'When / why not'], 'the answers of the checkup form come last');
   for (const code of Object.values(CLINIC_BRANCH)) assert.ok(['GUL', 'NN', 'DHA', 'LHR', 'ISB'].includes(code as string));
+});
+
+test('the checkup form (Checkup Patient Form 2.0): its "checkup for" choices, the three pricing answers the database allows, Yes / No', () => {
+  assert.deepEqual(CHECKUP_FOR_CHOICES, ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant']);
+  assert.ok(CHECKUP_FOR_CHOICES.every((c) => /^[A-Z]/.test(c) && c.slice(1) === c.slice(1).toLowerCase()), 'a capital first letter only');
+  assert.deepEqual(PRICING_LABELS, { yes: 'Yes', no: 'No', needs_explanation: 'Needs clearer explanation' }, 'the keys are the values of checkups_pricing_understood_check');
+  assert.deepEqual([yesNo(true), yesNo(false), yesNo(null), yesNo(undefined), yesNo('yes')], ['Yes', 'No', '', '', '']);
+  assert.equal(hasFormAnswers({ ali_recommended: null, pricing_understood: null, wants_treatment: null, treatment_plan: null }), false, 'a row from before the form');
+  assert.equal(hasFormAnswers({ patient_name: 'Sample' }), false, 'a row read before the database update (no answer columns at all)');
+  assert.equal(hasFormAnswers(null), false);
+  for (const one of [{ ali_recommended: false }, { wants_treatment: false }, { pricing_understood: 'no' }, { treatment_plan: 'soon' }]) assert.equal(hasFormAnswers(one), true, JSON.stringify(one));
 });
 
 test('keys: the strings the database gives for the same input (pinned in 27_checkups_test.sql too)', () => {
@@ -323,13 +335,16 @@ test('export and import again: archive rows come back with the same keys, websit
       details: null, day_status: 'no_show', est_fee: null, follow_up: 'Started', notes: null, source: 'google_sheet', source_tab: null, patient_id: 'p1', mr_number: '50001', created_at: '2026-10-08T10:00:00Z' },
     { id: 'e', checkup_date: '2025-03-01', date_is_month: true, branch_id: 2, patient_name: 'Sample Echo', phone: '0300-5550105', city: 'Karachi', doctors: null, checkup_for: 'Braces checkup',
       details: null, day_status: null, est_fee: 720000, follow_up: 'Started', notes: null, source: 'archive', source_tab: 'Sample tab B', patient_id: 'p2', mr_number: '50002', created_at: '2026-10-09T08:00:00Z' },
+    { id: 'f', checkup_date: '2026-10-11', date_is_month: false, branch_id: 2, patient_name: 'Sample Foxtrot', phone: '0300-5550106', city: 'Karachi', doctors: 'Dr. Sample (sample)', checkup_for: 'Braces',
+      details: null, day_status: 'waiting', est_fee: null, follow_up: 'Not Contacted', notes: null, source: 'website', source_tab: null, patient_id: null, mr_number: null, created_at: '2026-10-11T08:00:00Z',
+      ali_recommended: true, pricing_understood: 'needs_explanation', wants_treatment: false, treatment_plan: 'Wants to ask the family first' },
   ];
   const sheet = checkupsToSheet(rows, branches);
   assert.deepEqual(sheet[0], EXPORT_HEADER);
-  assert.equal(sheet.length, 6);
-  for (const line of sheet) assert.equal(line.length, 17);
+  assert.equal(sheet.length, 7);
+  for (const line of sheet) assert.equal(line.length, 21);
   assert.deepEqual(sheet[1], ['Dec 2024', 'Sample Alpha', '0300-5550101', 'Karachi', 'Gulshan (RJ Mall)', 'Dr. Sample (sample)', 'Scaling', 8000, 'Follow-up Sent', 'called twice', 'Sample tab A',
-    '', '', '', 'Old list', '', '2026-10-09']);
+    '', '', '', 'Old list', '', '2026-10-09', '', '', '', '']);
   assert.equal(typeof sheet[1][2], 'string', 'the phone stays text, so the leading 0 survives Excel');
   assert.equal(typeof sheet[1][7], 'number', 'the fee is the one number');
   assert.deepEqual(sheet[2].slice(0, 5), ['Not recorded', 'Sample Bravo', '0300-5550102', '', ''], 'no month, no city, no branch');
@@ -339,6 +354,8 @@ test('export and import again: archive rows come back with the same keys, websit
   assert.equal(sheet[3][0], 'Oct 2026');
   assert.deepEqual(sheet[4].slice(11, 16), ['2026-10-08', 'No show', '', 'Google Sheet', '50001']);
   assert.equal(sheet[5][15], '50002', 'the Mr# of a registered checkup');
+  assert.deepEqual(sheet[6].slice(17), ['Yes', 'Needs clearer explanation', 'No', 'Wants to ask the family first'], 'the answers of the checkup form, in words');
+  assert.ok(sheet.slice(1, 6).every((line) => line.slice(17).every((v) => v === '')), 'rows without answers (old list, sheet, before the form) leave those columns empty');
 
   const back = readCheckupList(sheet);
   assert.equal(back.headerAt, 0);
@@ -346,7 +363,7 @@ test('export and import again: archive rows come back with the same keys, websit
     [rows[0], rows[1], rows[4]].map((c) => checkupKey({ phone: c.phone, name: c.patient_name, month: c.checkup_date })), 'the old-list rows keep their keys');
   assert.deepEqual(back.rows.map((x) => [x.name, x.month, x.branch, x.est_fee, x.follow_up]),
     [['Sample Alpha', '2024-12-01', 'GUL', 8000, 'Follow-up Sent'], ['Sample Bravo', null, null, null, 'Not Contacted'], ['Sample Echo', '2025-03-01', 'NN', 720000, 'Started']]);
-  assert.deepEqual(back.skipped, [{ row: 4, reason: 'Already on the website (exported from it)' }, { row: 5, reason: 'Already on the website (exported from it)' }]);
+  assert.deepEqual(back.skipped, [{ row: 4, reason: 'Already on the website (exported from it)' }, { row: 5, reason: 'Already on the website (exported from it)' }, { row: 7, reason: 'Already on the website (exported from it)' }]);
   assert.equal(back.summary.ready, 3);
   assert.deepEqual(checkupsToSheet([], branches), [EXPORT_HEADER]);
   assert.deepEqual(checkupsToSheet(null, null), [EXPORT_HEADER]);

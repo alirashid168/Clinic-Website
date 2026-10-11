@@ -816,6 +816,20 @@ table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--ch
 .registered-mr { margin: var(--space-2) 0; font-size: var(--fs-3xl); font-weight: 800; letter-spacing: -.01em; color: var(--text-accent); }
 .registered-mr:focus-visible { outline-offset: 4px; }
 
+/* The checkup form (Checkup Patient Form 2.0): nine questions in the form's order, Yes / No answers as radio buttons, the rest under "More". */
+.checkup-form { align-items: start; } /* a two-line question next to a one-line one: the controls keep their own height */
+.checkup-form-wide { grid-column: 1 / -1; }
+fieldset.choice-group { margin: 0; }
+.choice-row { display: flex; flex-wrap: wrap; gap: 0 var(--space-4); }
+.choice { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--target); cursor: pointer; }
+input.input-readonly { background: var(--surface-sunken); color: var(--text-muted); }
+.form-more { margin-top: var(--space-1); }
+.form-more > summary { display: inline-block; min-height: var(--target); padding: var(--space-2) 0; font-weight: 600; font-size: var(--fs-ui); color: var(--text-accent); cursor: pointer; }
+.form-more[open] > summary { margin-bottom: var(--space-2); }
+.today-checkup { margin-top: var(--space-4); }
+.checkup-table td.checkup-plan { min-width: 130px; max-width: 220px; overflow-wrap: anywhere; }
+.checkup-table td.checkup-treat { min-width: 150px; }
+
 /* the Checkups page */
 .page-head-actions { gap: var(--space-3); }
 .checkup-filters {
@@ -843,7 +857,8 @@ table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--ch
 .saved-mark { font-size: var(--fs-xs); font-weight: 700; color: var(--status-ok-text); white-space: nowrap; }
 .checkup-name-text { overflow-wrap: anywhere; }
 .checkup-table td { vertical-align: top; }
-.checkup-table td.cell-td { min-width: 220px; padding: var(--space-1) var(--space-2); }
+/* (Notes 150px, and the two answer columns narrow: the list fits a 1366 px screen with its scroll bar, answers of the checkup form included) */
+.checkup-table td.cell-td { min-width: 150px; padding: var(--space-1) var(--space-2); }
 .checkup-table .cell-input { border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--control-bg); }
 .checkup-table .cell { min-height: 32px; padding: 0; }
 .row-actions { display: flex; flex-wrap: nowrap; gap: var(--space-2); } /* Register and Edit side by side: the rows stay short */

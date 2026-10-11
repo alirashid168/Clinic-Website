@@ -20,9 +20,19 @@ export const IMPORT_BATCH = 250;
 export const CLINIC_BRANCH = { 'rj mall': 'GUL', 'gulshan': 'GUL', 'gulshan (rj mall)': 'GUL',
   'north nazimabad': 'NN', 'n. nazimabad': 'NN', 'nn': 'NN', 'dha karachi': 'DHA', 'dha': 'DHA',
   'lahore gulberg': 'LHR', 'gulberg lahore': 'LHR', 'gulberg': 'LHR', 'lahore': 'LHR', 'islamabad': 'ISB', 'isb': 'ISB' };
-/** The columns of the Excel export, in order: the owner's eleven first, then the website's own. */
+// The clinic's "Checkup Patient Form 2.0" (owner, 11 Oct 2026: "the checkup 2.0 form is good, and we are using that form now").
+// "What was your checkup for?" offers these and "Other"; the answer is kept as written in checkup_for. "Did you understand the pricing
+// details?" is stored as a key (migration 20261011000300 allows only these three).
+export const CHECKUP_FOR_CHOICES = ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant'];
+export const PRICING_LABELS = { yes: 'Yes', no: 'No', needs_explanation: 'Needs clearer explanation' };
+/** true / false / null -> 'Yes' / 'No' / '' (a checkup added before the form, from the sheet or from the old list has no answers). */
+export const yesNo = (v) => (v === true ? 'Yes' : v === false ? 'No' : '');
+/** Does the checkup hold any answer of the form? Rows from before it (and from the sheet or the old list) hold none. */
+export const hasFormAnswers = (c) => !!c && (typeof c.ali_recommended === 'boolean' || typeof c.wants_treatment === 'boolean' || !!c.pricing_understood || !!c.treatment_plan);
+/** The columns of the Excel export, in order: the owner's eleven first, then the website's own, then the answers of the form. */
 export const EXPORT_HEADER = ['Month', 'Patient Name', 'Phone', 'City', 'Clinic', 'Doctor', 'Treatment / Checkup For', 'Est. Fee (Rs)', 'Status',
-  'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on'];
+  'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on',
+  'Dr. Ali recommended', 'Understood pricing', 'Wants to start', 'When / why not'];
 
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -309,6 +319,7 @@ export function checkupsToSheet(rows, branches) {
       c.est_fee === null || c.est_fee === undefined || c.est_fee === '' ? '' : Number(c.est_fee),
       text(c.follow_up), text(c.notes), text(c.source_tab),
       exactDay, DAY_STATUS_LABELS[c.day_status] || '', text(c.details), SOURCE_LABELS[c.source] || '', text(c.mr_number), karachiDate(c.created_at),
+      yesNo(c.ali_recommended), PRICING_LABELS[c.pricing_understood] || '', yesNo(c.wants_treatment), text(c.treatment_plan),
     ]);
   }
   return out;

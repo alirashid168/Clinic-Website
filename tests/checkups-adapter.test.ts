@@ -222,6 +222,43 @@ test('live: updateCheckup sends only the allowed columns (the token among them);
   assert.deepEqual(checkupPatch({ token: null }), { token: null });
 });
 
+test('live: the answers of the checkup form (Checkup Patient Form 2.0) are sent on add and update, as Yes / No booleans and a pricing key', async () => {
+  const { f, data } = await openPage((_t, ops) => (ops.some((o) => o[0] === 'insert') ? ok({ id: 'new-2', ...arg(ops, 'insert')![0] }) : ops.some((o) => o[0] === 'update') ? ok([{ id: 'c1' }]) : ok(null)));
+  await data.addCheckup({ checkup_date: '2026-10-11', branch_id: 2, patient_name: 'Sample Form', phone: '0300 5550111', doctors: 'Dr. Sample (sample)', checkup_for: 'Braces',
+    ali_recommended: true, pricing_understood: 'needs_explanation', wants_treatment: false, treatment_plan: '  Wants to ask the family first  ', day_status: 'waiting', follow_up: 'Not Contacted' });
+  const sent = arg(f.requests[0].ops, 'insert')![0];
+  assert.deepEqual([sent.ali_recommended, sent.pricing_understood, sent.wants_treatment, sent.treatment_plan], [true, 'needs_explanation', false, 'Wants to ask the family first']);
+  await data.updateCheckup('c1', { ali_recommended: false, pricing_understood: '', wants_treatment: true, treatment_plan: '   ' });
+  assert.deepEqual(arg(f.requests[1].ops, 'update')![0], { ali_recommended: false, pricing_understood: null, wants_treatment: true, treatment_plan: null }, 'an empty answer is "not answered"');
+  assert.deepEqual(checkupPatch({ ali_recommended: 'yes', wants_treatment: 1 }), { ali_recommended: null, wants_treatment: null }, 'only a real true / false is a Yes / No');
+  assert.deepEqual(checkupPatch({ ali_recommended: null, wants_treatment: undefined }), { ali_recommended: null }, 'null clears, undefined leaves it alone');
+  await data.addCheckup({ patient_name: 'Sample Old Form' });
+  assert.equal('wants_treatment' in arg(f.requests[2].ops, 'insert')![0], false, 'nothing about the answers is sent when the form did not ask them');
+});
+
+test('live: the "Wants to start" filter asks for wants_treatment true or false; anything else is no filter', async () => {
+  const { f, data } = await openPage(() => ok([], { count: 0 }));
+  await data.listCheckups({ wants: 'yes' });
+  assert.ok(has(f.requests[0].ops, 'eq', 'wants_treatment', true));
+  await data.listCheckups({ wants: 'no' });
+  assert.ok(has(f.requests[1].ops, 'eq', 'wants_treatment', false));
+  await data.listCheckups({ wants: 'maybe' });
+  assert.ok(!f.requests[2].ops.some((o: Op) => o[1] === 'wants_treatment'));
+  await data.exportCheckups({ wants: 'no' });
+  assert.ok(has(f.requests[3].ops, 'eq', 'wants_treatment', false), 'the Excel file follows the filter too');
+});
+
+test('live: a website updated before 20261011000300 is run says in plain words that the checkup form needs the database update', async () => {
+  const FORM_MISSING = 'CHECKUP_FORM_MISSING: The checkup form needs a database update (20261011000300_checkup_form_2.sql). Nothing was saved. Ask Dr. Ali to run the update, then try again.';
+  let { data } = await openPage(() => fail('PGRST204', "Could not find the 'ali_recommended' column of 'checkups' in the schema cache"));
+  await assert.rejects(() => data.addCheckup({ patient_name: 'Sample Form', ali_recommended: true }), (e: any) => e.code === 'CHECKUP_FORM_MISSING' && e.message === FORM_MISSING);
+  await assert.rejects(() => data.updateCheckup('c1', { wants_treatment: true }), (e: any) => e.code === 'CHECKUP_FORM_MISSING');
+  ({ data } = await openPage(() => fail('42703', 'column checkup_list.wants_treatment does not exist')));
+  await assert.rejects(() => data.listCheckups({ wants: 'yes' }), (e: any) => e.code === 'CHECKUP_FORM_MISSING', 'the "Wants to start" filter too');
+  ({ data } = await openPage(() => fail('PGRST204', "Could not find the 'something_else' column of 'checkups' in the schema cache")));
+  await assert.rejects(() => data.addCheckup({ patient_name: 'Sample Form' }), (e: any) => e.code === 'PGRST204', 'another missing column is shown as it is');
+});
+
 test('live: deleteCheckup says when nothing was removed', async () => {
   let rows: any[] = [{ id: 'c1' }];
   const { f, data } = await openPage(() => ok(rows));
@@ -334,6 +371,31 @@ test('demo: the seed has an old list of 60+ rows (every status, some without a m
   assert.deepEqual(await d.listDayCheckups({ branchId: 2, date: '2020-01-01' }), []);
   assert.ok(nn.every((c: any) => c.phone_key === c.phone.replace(/[^0-9]/g, '') && c.mr_number === null));
   assert.equal(typeof d.subscribeCheckups(2, () => {}), 'function');
+});
+
+test('demo: the checkup form answers are stored, read back, filtered on, and refused like the database refuses them', async () => {
+  const d = await demoAs('s-fd-nn');
+  const seeded = (await d.listDayCheckups({ branchId: 2, date: TODAY })).find((c: any) => c.source === 'website');
+  assert.deepEqual([seeded.ali_recommended, seeded.pricing_understood, seeded.wants_treatment, typeof seeded.treatment_plan], [true, 'needs_explanation', true, 'string'], 'a seeded checkup carries answers');
+  const sheet = (await d.listDayCheckups({ branchId: 2, date: TODAY })).find((c: any) => c.source === 'google_sheet');
+  assert.deepEqual([sheet.ali_recommended, sheet.pricing_understood, sheet.wants_treatment, sheet.treatment_plan], [null, null, null, null], 'a checkup from the sheet has none');
+  const row = await d.addCheckup({ checkup_date: TODAY, branch_id: 2, patient_name: 'Sample Form Person', phone: '0300 5550112', doctors: 'Dr. Hina (sample)', checkup_for: 'Root canal',
+    ali_recommended: false, pricing_understood: 'no', wants_treatment: false, treatment_plan: 'Wants to compare prices first', day_status: 'waiting' });
+  assert.deepEqual([row.ali_recommended, row.pricing_understood, row.wants_treatment, row.treatment_plan], [false, 'no', false, 'Wants to compare prices first']);
+  const no = (await d.listCheckups({ wants: 'no', pageSize: 500 })).rows;
+  assert.ok(no.some((c: any) => c.id === row.id) && no.every((c: any) => c.wants_treatment === false), 'Wants to start: No');
+  const yes = (await d.listCheckups({ wants: 'yes', pageSize: 500 })).rows;
+  assert.ok(yes.some((c: any) => c.id === seeded.id) && yes.every((c: any) => c.wants_treatment === true), 'Wants to start: Yes');
+  assert.equal((await d.exportCheckups({ wants: 'yes' })).length, yes.length, 'the Excel file follows the filter');
+  assert.equal((await d.listCheckups({ wants: 'maybe' })).total, (await d.listCheckups({})).total, 'anything else is no filter');
+  await assert.rejects(() => d.addCheckup({ checkup_date: TODAY, branch_id: 2, patient_name: 'Sample Bad', pricing_understood: 'maybe' }), /checkups_pricing_understood_check/);
+  await assert.rejects(() => d.updateCheckup(row.id, { treatment_plan: 'x'.repeat(501) }), /checkups_treatment_plan_check/);
+  assert.equal((await d.updateCheckup(row.id, { treatment_plan: 'x'.repeat(500) })).treatment_plan.length, 500);
+  // an old-list row gets answers on Edit, and can lose them again
+  const old = (await d.exportCheckups({})).find((c: any) => c.source === 'archive' && c.branch_id === 2);
+  const answered = await d.updateCheckup(old.id, { wants_treatment: true, treatment_plan: 'Called: will come next week' });
+  assert.deepEqual([answered.wants_treatment, answered.treatment_plan, answered.ali_recommended], [true, 'Called: will come next week', null]);
+  assert.equal((await d.updateCheckup(old.id, { wants_treatment: null })).wants_treatment, null);
 });
 
 test('demo: search, filters and paging follow the database\'s', async () => {
