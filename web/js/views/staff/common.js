@@ -91,18 +91,22 @@ export function combobox({ wrap, input, popup, listLabel, search, option, onPick
     }
   });
   wrap.addEventListener('focusout', (e) => { if (!wrap.contains(e.relatedTarget)) close(); });
-  return { close };
+  return { close, open: run };
 }
 
-/** Search-as-you-type patient picker (an ARIA combobox). */
-export function patientSearch({ placeholder = 'Search name, Mr# or phone', label = placeholder, onPick, onNew }) {
+/**
+ * Search-as-you-type patient picker (an ARIA combobox). onEnter(text) is optional: it runs on Enter when no option is
+ * chosen and resolves to true when it dealt with the text; otherwise the text comes back with the matches to choose from.
+ * The box is emptied at once on Enter, so the next one can be typed while the last is still being dealt with.
+ */
+export function patientSearch({ placeholder = 'Search name, Mr# or phone', label = placeholder, onPick, onNew, onEnter }) {
   const input = h('input', { type: 'search', placeholder, autocomplete: 'off', 'aria-label': label });
   const box = h('div', { class: 'suggestions', hidden: true });
   // The .suggestions box is the positioned popup; the listbox sits inside it with the "no match" note.
   const wrap = h('div', { style: { position: 'relative', flex: '1 1 280px', maxWidth: '420px' } }, input, box);
   const allowNew = !!onNew && can('patients.create');
   const isNew = (p) => p.newName !== undefined;
-  combobox({
+  const ctl = combobox({
     wrap, input, popup: box, listLabel: 'Matching patients',
     search: async (q) => [...(await state.data.searchPatients(q)).slice(0, 12), ...(allowNew ? [{ newName: q }] : [])],
     option: (p) => (isNew(p)
@@ -116,6 +120,13 @@ export function patientSearch({ placeholder = 'Search name, Mr# or phone', label
       announce(`Selected: ${p.full_name}, Mr# ${p.mr_number}`);
       onPick(p);
     },
+    // (Something typed meanwhile is never overwritten: then it says that nothing was added.)
+    onEnter: onEnter ? async (text) => {
+      if (!text) return;
+      input.value = '';
+      if (await onEnter(text)) return;
+      if (!input.value.trim()) { input.value = text; ctl.open(); } else toast(`Nothing was added for "${text}". Search for it again to choose the patient.`, 'error', 8000);
+    } : undefined,
     note: (q, items) => (items.length ? null : h('div', { class: 'muted', style: { padding: '10px' } }, 'No patient found.')),
     count: (items) => {
       const n = items.filter((p) => !isNew(p)).length;

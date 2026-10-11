@@ -772,15 +772,24 @@ export async function createSupabaseAdapter() {
     return Object.fromEntries(rows.map((r) => [r.patient_id, r]));
   }
 
+  // The visits (of a list) that have an invoice that is not void: the Invoice column of the Aaj ki List. Without billing.view
+  // the invoices are not visible (row-level security), so this is empty and the list does not show the column.
+  async function invoicedFor(visitIds) {
+    if (!visitIds.length) return new Set();
+    const rows = await byIdChunks(visitIds, (part) => sb.from('invoices').select('visit_id, status').in('visit_id', part).then(check));
+    return new Set(rows.filter((r) => r.status !== 'void').map((r) => r.visit_id));
+  }
+
   const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone,medical_history,photo_consent_public), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
   async function enrichVisits(rows) {
     const ids = [...new Set(rows.map((r) => r.patient_id))];
-    const [dues, flags] = await Promise.all([duesFor(ids), flagsFor(ids)]);
+    const [dues, flags, invoiced] = await Promise.all([duesFor(ids), flagsFor(ids), invoicedFor(rows.map((r) => r.id))]);
     return rows.map((v) => ({
       ...v,
       staff: (v.visit_staff || []).map((s) => ({ clinician_id: s.clinician_id, role: s.role, name: s.clinician?.display_name })),
       dues: dues[v.patient_id] ?? 0,
       see_dr_ali: !!flags[v.patient_id],
+      has_invoice: invoiced.has(v.id),
     }));
   }
   async function visitById(id) {
@@ -1174,7 +1183,7 @@ export async function createSupabaseAdapter() {
         if (patch.dues_override_by === true) patch.dues_override_by = uid;
         if (patch.protocol_override_by === true) patch.protocol_override_by = uid;
       }
-      delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff;
+      delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff; delete patch.has_invoice;
       check(await sb.from('visits').update(patch).eq('id', id));
       return visitById(id);
     },

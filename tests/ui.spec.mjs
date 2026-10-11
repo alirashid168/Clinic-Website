@@ -78,7 +78,9 @@ await step('front desk sees only their branch and the Aaj ki List', async () => 
   const options = await page.locator('.sheet-toolbar select').first().locator('option').allTextContents();
   assert.deepEqual(options, ['North Nazimabad']);
   assert.ok((await page.locator('table.sheet tbody tr').count()) >= 5);
-  assert.ok(await page.locator('.badge-dues').count(), 'dues flag visible');
+  // P.P, the sheet's dues column: red, written like the sheet (15k)
+  assert.ok(await page.locator('table.sheet tbody td.pp .pp-due').count(), 'dues visible in P.P');
+  assert.match(await page.locator('table.sheet tbody td.pp .pp-due').first().getAttribute('title'), /^Pending dues Rs/);
   await shot(page, '03-sheet-frontdesk');
 });
 await step('front desk registers a new patient and gets the next Mr# (the website numbers from 50000, clear of Healthwire)', async () => {
@@ -153,11 +155,11 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   const seeded = page.locator('table.sheet tbody tr.is-checkup');
   assert.ok((await seeded.count()) >= 2, 'the two seeded checkups of North Nazimabad');
   assert.ok(await seeded.first().locator('.badge-checkup:has-text("Checkup")').count(), 'badge');
-  assert.match(await seeded.first().locator('th').innerText(), /no Mr#/);
+  assert.match(await seeded.first().locator('td.mr-cell').innerText(), /no Mr#/);
   assert.equal(await seeded.first().locator('.quick-tap').count(), 0, 'no quick-tap button on a checkup row');
   const kinds = await page.locator('table.sheet tbody tr').evaluateAll((trs) => trs.map((t) => t.classList.contains('is-checkup')));
   assert.ok(kinds.indexOf(false) >= 0 && kinds.lastIndexOf(false) < kinds.indexOf(true), 'visit rows first, then the checkup rows');
-  assert.match(await page.locator('.page-head p').innerText(), /\d+ checkups/);
+  assert.match(await page.locator('.sheet-counts').innerText(), /Checkups \d+/);
   await shot(page, '14-sheet-checkups');
 });
 await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); details and status save; the row can be removed', async () => {
@@ -173,7 +175,7 @@ await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); det
   assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Scaling');
   assert.equal(await row.locator('input[aria-label^="Phone for"]').inputValue(), '0300 5550101');
   assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'waiting', 'today: waiting');
-  assert.doesNotMatch(await row.locator('th').innerText(), /Mr# \d/);
+  assert.doesNotMatch(await row.locator('td.mr-cell').innerText(), /\d/);
   await row.locator('input[aria-label^="Treatment details"]').fill('Scaling advised');
   await page.waitForTimeout(1200);
   await page.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
@@ -202,11 +204,16 @@ await step('front desk: a checkup patient whose phone belongs to a patient file 
   const mr = text.match(/Mr# (\d+)/)[1];
   const before = await page.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: `Mr# ${mr}` }).count();
   await m.getByRole('button', { name: `Add Mr# ${mr} to the list instead` }).click();
+  // (this patient is on the list already, so the list asks first; a second row is what this test adds)
+  await page.locator('.modal h2:has-text("is already on the list")').waitFor();
+  await page.locator('.modal').getByRole('button', { name: 'Add another row' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   await page.waitForFunction(([n, count]) => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')].filter((t) => t.textContent.includes(`Mr# ${n}`)).length === count, [mr, before + 1]);
   assert.equal(await page.locator('table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient Dup Check Person"])').count(), 0, 'no checkup was made');
 });
 await step('front desk: the status filter and the find box apply to the checkup rows, and the dues filter hides them', async () => {
+  // (status, doctor, group, dues and braces sit behind "Filters")
+  await page.getByRole('button', { name: /^Filters/ }).click();
   await page.locator('select[aria-label="Filter by status"]').selectOption('completed');
   const kinds = await page.locator('table.sheet tbody tr.is-checkup select[aria-label^="Status for"]').evaluateAll((els) => els.map((e) => e.value));
   assert.ok(kinds.every((v) => v === 'completed'), 'only completed checkups');
@@ -356,7 +363,7 @@ await step('a Group 3 doctor is refused on a Group 1/2 month', async () => {
   assert.ok(tried, 'found a Group 1/2 month row to test');
 });
 await step('photo month cannot be completed without photos', async () => {
-  const row = p2.locator('table.sheet tbody tr:has(.badge-photo)').first();
+  const row = p2.locator('table.sheet tbody tr:has(.photo-due)').first();
   if (await row.count()) {
     await row.locator('select[aria-label^="Status"]').selectOption('completed');
     await p2.waitForSelector('.toast-error');
@@ -1251,13 +1258,25 @@ await step('medical history is saved and shown on the patient page', async () =>
   assert.ok(await p7.locator('.badge:has-text("Consent signed")').count());
 });
 
-await step('Aaj ki List: all branches view and the day download button', async () => {
+await step('Aaj ki List: all branches view and the day download button; on a 1366px laptop its Branch column makes the list scroll sideways rather than squeeze Treatment Details', async () => {
   await p7.goto(BASE + '#/staff/sheet?branch=all');
   await p7.waitForSelector('table.sheet');
   await p7.waitForSelector('th:text("Branch"):not([hidden])');
   assert.ok((await p7.locator('table.sheet tbody tr').count()) >= 1);
   assert.ok(await p7.getByRole('button', { name: 'Download' }).count());
   assert.equal(await p7.locator('.add-panel:not([hidden])').count(), 0);
+  const cols = await p7.evaluate(() => {
+    const th = (t) => [...document.querySelectorAll('table.sheet thead th')].find((x) => x.textContent.replace('▾', '').trim() === t);
+    const details = th('Treatment Details');
+    const wrap = document.querySelector('.sheet-wrap');
+    const spill = [...document.querySelectorAll('table.sheet tbody .details-cell')].filter((c) => [...c.children].some((el) => el.getBoundingClientRect().right > c.closest('td').getBoundingClientRect().right + 0.5)).length;
+    const input = document.querySelector('table.sheet tbody input[aria-label^="Treatment details for"]');
+    return { viewport: window.innerWidth, branch: Math.round(th('Branch').getBoundingClientRect().width), details: Math.round(details.getBoundingClientRect().width),
+      headCut: details.scrollWidth > details.clientWidth, input: Math.round(input.getBoundingClientRect().width), sideScroll: wrap.scrollWidth > wrap.clientWidth, spill };
+  });
+  assert.equal(cols.viewport, 1366);
+  assert.ok(cols.branch >= 100 && cols.details >= 130 && !cols.headCut && cols.input >= 100, 'Treatment Details keeps its room: ' + JSON.stringify(cols));
+  assert.ok(cols.sideScroll && cols.spill === 0, 'the list scrolls sideways and nothing spills out of the details cell: ' + JSON.stringify(cols));
   await p7.locator('select[aria-label="Branch"]').selectOption({ index: 1 });
   await p7.waitForSelector('.add-panel:not([hidden])');
 });
@@ -1333,6 +1352,7 @@ await step('sheet filters (doctor, dues, find) and quick-tap treatment details',
   await p7.goto(BASE + '#/staff/sheet?branch=1');
   await p7.waitForSelector('table.sheet tbody tr');
   const total = await p7.locator('table.sheet tbody tr').count();
+  await p7.getByRole('button', { name: /^Filters/ }).click();
   await p7.locator('label:has-text("With dues") input').check();
   const withDues = await p7.locator('table.sheet tbody tr').count();
   assert.ok(withDues <= total);
@@ -1392,6 +1412,618 @@ await step('sheet works on a phone', async () => {
   await p6.waitForSelector('table.sheet tbody tr');
   await shot(p6, '10-sheet-mobile');
 });
+await step('phone width (390px): the Aaj ki List controls do not overlap, the page does not scroll sideways, and the name stays at the left edge', async () => {
+  const check = await p6.evaluate(() => {
+    const els = [...document.querySelectorAll('.sheet-head :is(h1, button, a, input, select), .sheet-subhead :is(button, .save-status), .add-panel :is(.add-label, button, input, .add-panel-text)')]
+      .filter((el) => el.getClientRects().length && !el.closest('[hidden]'));
+    const r = els.map((el) => el.getBoundingClientRect());
+    const name = (el) => (el.getAttribute('aria-label') || el.textContent).trim().slice(0, 30);
+    const overlaps = [];
+    for (let i = 0; i < r.length; i++) {
+      for (let j = i + 1; j < r.length; j++) {
+        if (els[i].contains(els[j]) || els[j].contains(els[i])) continue;
+        const [a, b] = [r[i], r[j]];
+        if (a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) overlaps.push(`${name(els[i])} / ${name(els[j])}`);
+      }
+    }
+    const offscreen = els.filter((el, i) => r[i].right > window.innerWidth + 1 || r[i].left < -1).map(name);
+    const wrap = document.querySelector('.sheet-wrap');
+    wrap.scrollLeft = 400;
+    const w = wrap.getBoundingClientRect();
+    const cell = document.querySelector('table.sheet tbody th.name-col').getBoundingClientRect();
+    return { n: els.length, overlaps, offscreen, sideScroll: document.documentElement.scrollWidth > window.innerWidth + 1, scrolled: wrap.scrollLeft, nameLeft: cell.left - w.left };
+  });
+  assert.ok(check.n >= 8, 'found the controls: ' + check.n);
+  assert.deepEqual(check.overlaps, [], 'no two controls overlap');
+  assert.deepEqual(check.offscreen, [], 'every control is on the screen');
+  assert.ok(!check.sideScroll, 'the page itself does not scroll sideways');
+  assert.ok(check.scrolled > 300 && Math.abs(check.nameLeft - 1) <= 2, 'the name column stays at the left edge: ' + JSON.stringify(check));
+  await p6.evaluate(() => { document.querySelector('.sheet-wrap').scrollLeft = 0; });
+});
+
+// ------------------------------------------------------------- the Aaj ki List like the clinic's Google Sheet, on a busy day
+// "?demo=busy" fills today's Gulshan list with 120 made-up patients ("Sample Patient 001" to "120", Mr# 7001 to 7120).
+const pb = await newPage({ width: 1366, height: 768 });
+const measureSheet = (pg) => pg.evaluate(() => {
+  const wrap = document.querySelector('.sheet-wrap');
+  const head = wrap.querySelector('thead').getBoundingClientRect();
+  const w = wrap.getBoundingClientRect();
+  const bottom = Math.min(w.top + wrap.clientTop + wrap.clientHeight, window.innerHeight);
+  const inSight = [...wrap.querySelectorAll('tbody tr')].filter((tr) => { const r = tr.getBoundingClientRect(); return r.top >= head.bottom - 0.5 && r.bottom <= bottom + 0.5; }).length;
+  const page = document.querySelector('.sheet-page').getBoundingClientRect();
+  const add = document.querySelector('.add-panel').getBoundingClientRect();
+  return { inSight, chrome: Math.round(w.top - page.top + add.height), pageScrolls: document.documentElement.scrollHeight > window.innerHeight + 1, addBottom: add.bottom };
+});
+await step('busy day at 1366x768: at least 20 patients in sight without scrolling the page, the header row stays put while the rows scroll, head and add line under 150px', async () => {
+  await loginAs(pb, 'Front desk \\(Gulshan\\)');
+  await pb.goto(BASE + '#/staff/sheet?demo=busy');
+  await pb.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr').length >= 120);
+  const m = await measureSheet(pb);
+  assert.ok(m.inSight >= 20, 'patient rows fully in sight: ' + JSON.stringify(m));
+  assert.ok(!m.pageScrolls, 'the page itself does not scroll: ' + JSON.stringify(m));
+  assert.ok(m.chrome <= 150, 'page head, toolbar and add line: ' + JSON.stringify(m));
+  assert.ok(m.addBottom <= 768, 'the add line is in sight at the bottom: ' + JSON.stringify(m));
+  const scrolled = await pb.evaluate(() => {
+    const wrap = document.querySelector('.sheet-wrap');
+    wrap.scrollTop = 900;
+    const w = wrap.getBoundingClientRect();
+    const th = wrap.querySelector('thead th.mr-cell').getBoundingClientRect();
+    const first = [...wrap.querySelectorAll('tbody tr')].find((tr) => tr.getBoundingClientRect().top >= th.bottom - 1);
+    return { top: wrap.scrollTop, headTop: th.top - w.top, firstRow: Number(first?.dataset.n) };
+  });
+  assert.ok(scrolled.top > 800 && Math.abs(scrolled.headTop - 1) <= 2 && scrolled.firstRow > 30, 'the header row stays at the top: ' + JSON.stringify(scrolled));
+  await pb.evaluate(() => { document.querySelector('.sheet-wrap').scrollTop = 0; });
+  await shot(pb, '20-sheet-busy-1366');
+});
+await step('busy day at 1920x1080: at least 28 patients in sight; at 1100px wide the Mr# and name columns stay put when the list scrolls sideways', async () => {
+  await pb.setViewportSize({ width: 1920, height: 1080 });
+  await pb.waitForTimeout(200);
+  const m = await measureSheet(pb);
+  assert.ok(m.inSight >= 28 && !m.pageScrolls, 'patient rows fully in sight: ' + JSON.stringify(m));
+  await shot(pb, '21-sheet-busy-1920');
+  await pb.setViewportSize({ width: 1100, height: 768 });
+  await pb.waitForTimeout(200);
+  const frozen = await pb.evaluate(() => {
+    const wrap = document.querySelector('.sheet-wrap');
+    wrap.scrollLeft = 300;
+    const w = wrap.getBoundingClientRect().left;
+    const at = (sel) => Math.round(document.querySelector(sel).getBoundingClientRect().left - w);
+    return { scrolled: wrap.scrollLeft, num: at('table.sheet tbody td.rownum'), mr: at('table.sheet tbody td.mr-cell'), name: at('table.sheet tbody th.name-col'), headName: at('table.sheet thead th.name-col') };
+  });
+  assert.ok(frozen.scrolled > 100, 'the list scrolled sideways: ' + JSON.stringify(frozen));
+  assert.ok(Math.abs(frozen.num - 1) <= 2 && Math.abs(frozen.mr - 35) <= 2 && Math.abs(frozen.name - 97) <= 2 && frozen.headName === frozen.name, 'row number, Mr# and name stay at the left: ' + JSON.stringify(frozen));
+  await pb.evaluate(() => { document.querySelector('.sheet-wrap').scrollLeft = 0; });
+  await pb.setViewportSize({ width: 1366, height: 768 });
+});
+await step('the columns are the sheet\'s, in the sheet\'s order, with the purple header row and the red P.P heading', async () => {
+  const heads = (await pb.locator('table.sheet thead th:visible').allInnerTexts()).map((t) => t.replace('▾', '').trim());
+  assert.deepEqual(heads, ['#', 'MR #', 'Patient Name', 'Month', 'Treatment', 'Token', 'Status', 'Group', 'Doctor Name', 'Treatment Details', 'P.P', 'Invoice', 'Contact No']);
+  const c = await pb.evaluate(() => {
+    const s = (sel) => getComputedStyle(document.querySelector(sel));
+    return { head: s('table.sheet thead th.mr-cell').backgroundColor, headText: s('table.sheet thead th.mr-cell').color, pp: s('table.sheet thead th.pp-head').backgroundColor,
+      ppText: s('table.sheet thead th.pp-head').color, dues: s('table.sheet tbody .pp-due').color, duesWeight: s('table.sheet tbody .pp-due').fontWeight };
+  });
+  assert.equal(c.head, 'rgb(90, 50, 134)', 'purple header row');
+  assert.equal(c.headText, 'rgb(255, 255, 255)');
+  const [r, g, b] = c.pp.match(/\d+/g).map(Number);
+  assert.ok(r >= 200 && g <= 30 && b <= 30 && c.ppText === 'rgb(255, 255, 255)', 'red P.P heading with white text: ' + JSON.stringify(c));
+  assert.ok(/^rgb\(2\d\d, 0, 0\)$/.test(c.dues) && Number(c.duesWeight) >= 700, 'dues in red bold: ' + JSON.stringify(c));
+  const pp = await pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 007' }).locator('td.pp').innerText();
+  assert.match(pp, /^11\.5k/, 'P.P written like the sheet');
+  assert.deepEqual(await pb.evaluate(async () => { const m = await import('/js/views/staff/sheet.js'); return [0, 500, 11500, 20000, 125000].map(m.shortRupees); }), ['0', '500', '11.5k', '20k', '125k']);
+});
+await step('status, group, month and doctor chips carry the sheet\'s colours; Invoice shows Done or Pending', async () => {
+  const chips = await pb.evaluate(() => {
+    const rows = [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')];
+    return {
+      status: rows.map((tr) => { const s = tr.querySelector('select[aria-label^="Status for"]'); return [s.value, s.className, getComputedStyle(s).backgroundColor]; }),
+      group: rows.map((tr) => { const s = tr.querySelector('select[aria-label^="Doctor group for"]'); return [s.value, s.className]; }),
+      month: rows.map((tr) => tr.querySelector('.month-pill')).filter(Boolean).map((el) => [el.textContent, el.className]),
+      people: [...document.querySelectorAll('table.sheet tbody .person')].map((el) => [el.getAttribute('title').replace(/ \((checked|assistant)\)$/, ''), (el.className.match(/\bgs-\w+/) || [''])[0]]),
+    };
+  });
+  const statusTone = { completed: 'gs-yellow', in_treatment: 'gs-green', scheduled: 'gs-blue', waiting: 'gs-orange', cancelled: 'gs-grey', no_show: 'gs-red' };
+  assert.ok(new Set(chips.status.map(([v]) => v)).size >= 4, 'the busy day has every state of a day half done');
+  for (const [v, cls] of chips.status) assert.ok(cls.split(' ').includes(statusTone[v]), `status ${v}: ${cls}`);
+  assert.ok(chips.status.some(([v, , bg]) => v === 'completed' && bg === 'rgb(255, 229, 160)'), 'Completed is the sheet\'s light yellow');
+  assert.ok(chips.status.some(([v, , bg]) => v === 'waiting' && bg === 'rgb(255, 200, 170)'), 'Waiting is light orange');
+  const groupTone = { '': 'gs-grey', 1: 'gs-blue', 2: 'gs-green', 3: 'gs-purple' };
+  assert.ok(new Set(chips.group.map(([v]) => v)).size >= 4, 'groups 1 to 3 and no group');
+  for (const [v, cls] of chips.group) assert.ok(cls.split(' ').includes(groupTone[v]), `group ${v}: ${cls}`);
+  assert.ok(chips.month.some(([t]) => /Photo/.test(t)) && chips.month.some(([t]) => !/Photo/.test(t)), 'photo months and other months');
+  for (const [text, cls] of chips.month) assert.ok(cls.split(' ').includes(/Photo/.test(text) ? 'gs-green' : 'gs-purple'), `month ${text}: ${cls}`);
+  assert.ok(chips.people.length >= 60, 'doctor chips: ' + chips.people.length);
+  const tone = new Map();
+  for (const [name, cls] of chips.people) {
+    assert.ok(cls, `${name} has a colour`);
+    if (tone.has(name)) assert.equal(cls, tone.get(name), `${name} keeps one colour on every row`);
+    tone.set(name, cls);
+  }
+  // Anyone who is not on the clinic's colour list gets a light colour picked from their id (the dark ones are the sheet's own doctors').
+  const picked = await pb.evaluate(async () => { const m = await import('/js/views/staff/sheet.js'); return ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((id) => [m.doctorTone(id, 'Dr. Made Up'), m.doctorTone(id, 'Dr. Made Up')]); });
+  assert.ok(picked.every(([a, b]) => a === b && !['darkred', 'brown'].includes(a)), JSON.stringify(picked));
+  assert.ok(await pb.locator('table.sheet tbody td span.chip.gs-green:text-is("Done")').count(), 'Done');
+  assert.ok(await pb.locator('table.sheet tbody td button.invoice-pending.gs-darkred:text-is("Pending")').count(), 'Pending (treated, no invoice yet)');
+  const unbilled = await pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')]
+    .map((tr) => [tr.querySelector('select[aria-label^="Status for"]').value, tr.querySelector('.invoice-pending, .invoice-none')]).filter(([, b]) => b)
+    .map(([status, b]) => ({ status, pending: b.classList.contains('invoice-pending'), grey: b.classList.contains('gs-grey'), label: b.getAttribute('aria-label'),
+      shown: [...b.childNodes].filter((n) => !(n.nodeType === 1 && n.classList.contains('sr-only'))).map((n) => n.textContent).join('').trim() })));
+  const notSeen = unbilled.filter((x) => ['waiting', 'scheduled'].includes(x.status));
+  assert.ok(notSeen.length > 10 && notSeen.every((x) => !x.pending && x.grey && x.shown === '' && /^No invoice yet for .+: make a new invoice$/.test(x.label)),
+    'not seen yet: an empty grey chip, "No invoice yet" for screen readers: ' + JSON.stringify(notSeen.find((x) => x.pending || x.shown)));
+  const seen = unbilled.filter((x) => ['in_treatment', 'completed'].includes(x.status));
+  assert.ok(seen.length && seen.every((x) => x.pending && x.shown === 'Pending' && /^Invoice pending for /.test(x.label)), 'seen and no invoice: Pending');
+  await shot(pb, '22-sheet-chips');
+});
+await step('busy day: an exact Mr# and Enter adds that patient at once (no extra click) and puts the cursor in the Treatment cell; Enter there saves and moves down', async () => {
+  const before = await pb.locator('table.sheet tbody tr').count();
+  const box = pb.locator('.add-panel input[type=search]');
+  await box.fill('9816');
+  await box.press('Enter');
+  const row = pb.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: 'Mr# 9816' });
+  await row.waitFor();
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label^="Treatment for"]') && document.activeElement.closest('tr')?.textContent.includes('Mr# 9816'));
+  assert.equal(await pb.locator('.modal').count(), 0, 'no dialog in the way');
+  assert.equal(await box.inputValue(), '', 'the add box is empty for the next one');
+  assert.equal(await pb.locator('table.sheet tbody tr').count(), before + 1);
+  await pb.keyboard.type('Monthly PC');
+  await pb.keyboard.press('Enter');
+  assert.equal(await pb.evaluate(() => document.activeElement?.closest('tr')?.previousElementSibling?.textContent.includes('Mr# 9816')), true, 'Enter moved down a row');
+  await pb.keyboard.press('ArrowUp');
+  assert.equal(await pb.evaluate(() => document.activeElement?.getAttribute('aria-label')), await row.locator('input[aria-label^="Treatment for"]').getAttribute('aria-label'), 'ArrowUp comes back to the same column');
+  await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Monthly PC');
+  // a name (not an exact Mr#) still shows the matches to choose from
+  await box.fill('Sample Patient 11');
+  await box.press('Enter');
+  await pb.locator('.add-panel .suggestions button', { hasText: 'Sample Patient 110' }).waitFor();
+  await box.fill('');
+  await pb.keyboard.press('Escape');
+});
+await step('busy day: every action of the old list is still reachable (row actions, notes, + add doctor with undo, quick-tap, group, dues check, quick filters, checkup Options, New invoice from Pending)', async () => {
+  // row actions behind a click on the name: guidance, upload photos, new invoice, take payment, Dr. Ali, profile, notes
+  const r10 = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 010' });
+  await r10.locator('.name-btn').click();
+  const m = pb.locator('.modal');
+  await m.locator('h2:has-text("Sample Patient 010 · Mr# 7010")').waitFor();
+  // (the front desk does not upload clinic photos: Dr. Ali's dialog below has that button)
+  for (const name of ['New invoice', 'Take payment', 'Next appointment with Dr. Ali', 'Open profile']) assert.ok(await m.getByRole('button', { name }).count(), name);
+  assert.ok(await m.locator('.stat').count(), 'braces guidance');
+  await m.getByLabel('Notes').fill('Bring the retainer case');
+  await pb.keyboard.press('Escape');
+  // (the sheet's note mark in the name cell's corner, "Note" for screen readers and the note in its tooltip)
+  await r10.locator('.name-btn .note-mark[title="Note: Bring the retainer case"]:has-text("Note")').waitFor();
+  await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  // flags beside the name
+  assert.ok(await pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 037' }).locator('.badge-ali').count(), 'See Dr. Ali');
+  assert.ok(await pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 023' }).locator('.badge-warn[title^="Medical history: Diabetes"]:has-text("Med")').count(), 'medical history');
+  // + add a doctor (the braces rule applies), remove with undo
+  const r82 = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 082' });
+  assert.equal(await r82.locator('.person').count(), 0);
+  await r82.locator('.add-person').click();
+  await pb.click('.modal button:has-text("Dr. Nida (sample)")');
+  await pb.waitForSelector('.toast:has-text("Dr. Nida (sample) added to Sample Patient 082")');
+  await pb.locator('.modal').getByRole('button', { name: 'Done' }).click();
+  await r82.locator('.person:has-text("Dr. Nida (sample)")').waitFor();
+  // one click on the chip's × removes, as before (on a laptop the × shows on the chip under the mouse), and Undo brings them back
+  await r82.locator('.person:has-text("Dr. Nida (sample)")').hover();
+  await r82.getByRole('button', { name: 'Remove Dr. Nida (sample) from Sample Patient 082' }).click();
+  await r82.locator('.person').waitFor({ state: 'detached' });
+  await pb.getByRole('button', { name: 'Undo' }).click();
+  await r82.locator('.person:has-text("Dr. Nida (sample)")').waitFor();
+  // and from the "+" dialog; its Undo stays on the bar above the list once the dialog is closed
+  await r82.locator('.add-person').click();
+  await pb.locator('.modal').getByRole('button', { name: 'Remove Dr. Nida (sample) from Sample Patient 082' }).click();
+  await r82.locator('.person').waitFor({ state: 'detached' });
+  await pb.locator('.modal').getByRole('button', { name: 'Done' }).click();
+  await pb.waitForSelector('.modal', { state: 'detached' });
+  await pb.getByRole('button', { name: 'Undo' }).click();
+  await r82.locator('.person:has-text("Dr. Nida (sample)")').waitFor();
+  // quick-tap treatment details
+  await r82.locator('.quick-tap').click();
+  await pb.locator('.modal button:has-text("016")').click();
+  await pb.locator('.modal button:has-text("PC")').first().click();
+  await pb.locator('.modal').getByRole('button', { name: 'Done' }).click();
+  assert.match(await r82.locator('input[aria-label^="Treatment details"]').inputValue(), /016 PC$/);
+  // the group chip saves at once and takes its colour
+  await r82.locator('select[aria-label^="Doctor group for"]').selectOption('2');
+  await pb.waitForFunction(() => [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes('Sample Patient 082'))?.querySelector('select[aria-label^="Doctor group for"]').classList.contains('gs-green'));
+  // status change with the dues check (warn mode: the front desk is told to clear dues first)
+  await pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 084' }).locator('select[aria-label^="Status for"]').selectOption('in_treatment');
+  await pb.waitForSelector('.toast:has-text("Clear dues first")');
+  // the status counts are quick filters
+  await pb.locator('.sheet-counts button', { hasText: 'Waiting' }).click();
+  const shown = await pb.locator('table.sheet tbody select[aria-label^="Status for"]').evaluateAll((els) => els.map((e) => e.value));
+  assert.ok(shown.length > 5 && shown.every((v) => v === 'waiting'), 'only waiting rows');
+  assert.equal(await pb.locator('.sheet-counts button', { hasText: 'Waiting' }).getAttribute('aria-pressed'), 'true');
+  await pb.locator('.sheet-counts button', { hasText: 'Waiting' }).click();
+  assert.ok((await pb.locator('table.sheet tbody tr').count()) > 120, 'a second click shows everyone again');
+  // the ▾ of a heading opens the filter for that column
+  await pb.getByRole('button', { name: 'Filter by doctor', exact: true }).click();
+  assert.equal(await pb.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Filter by doctor');
+  await pb.keyboard.press('Escape');
+  assert.ok(await pb.locator('#sheet-filter-panel').isHidden(), 'Escape closes the filters');
+  // a checkup row: its own cells, status and Options (follow-up, notes, register, remove)
+  const ck = pb.locator('table.sheet tbody tr.is-checkup', { has: pb.locator('input[aria-label="Name of checkup patient Imtiaz Gill"]') });
+  await ck.getByRole('button', { name: 'Checkup options for Imtiaz Gill' }).click();
+  for (const name of ['Register as patient', 'Open in the checkup list']) assert.ok(await pb.locator('.modal').getByRole('button', { name }).or(pb.locator('.modal').getByRole('link', { name })).count(), name);
+  await pb.locator('.modal').getByLabel('Notes').fill('Will call back');
+  await pb.locator('.modal').getByRole('button', { name: 'Done' }).click();
+  await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  // New invoice from a Pending chip
+  await pb.locator('table.sheet tbody button.invoice-pending.gs-darkred').first().click();
+  await pb.locator('.modal h2:has-text("New invoice ·")').waitFor();
+  await pb.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
+  await pb.waitForSelector('.modal', { state: 'detached' });
+  assert.ok(await pb.getByRole('link', { name: 'Queue board' }).count(), 'Queue board');
+});
+await step('busy day at 1366x768: every treatment of the list is whole in the Treatment column, and the cells themselves do not clip (that made typing slow on a long list)', async () => {
+  const r = await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    document.activeElement?.blur();
+    const input = document.querySelector('table.sheet tbody tr:not(.is-checkup) input[aria-label^="Treatment for"]');
+    const before = input.value;
+    const names = [...state.ref.treatments.map((t) => t.name), 'Monthly / Followup'];
+    const cut = names.filter((n) => { input.value = n; return input.scrollWidth > input.clientWidth; });
+    input.value = before; // (set without an input event: nothing is saved)
+    const clips = [...document.querySelector('table.sheet tbody tr').children].filter((td) => getComputedStyle(td).overflowX !== 'visible').map((td) => td.className);
+    return { n: names.length, cut, clips };
+  });
+  assert.ok(r.n >= 20 && r.cut.length === 0, 'cut short: ' + JSON.stringify(r));
+  assert.deepEqual(r.clips, [], 'cells that clip');
+});
+// Every chip's × that can be reached is in its chip and takes the click or tap (a × cut off by the cell would send it to
+// the next cell). On a touch screen each × is in sight. On a laptop a × shows only over the chip under the mouse (or with
+// the keyboard on it); the first chip of a row shows its name whole, a later one at least a few letters, or it is out of
+// sight whole, counted in the "+" ("+2", its tooltip naming who) and its × out of the Tab order. A name cut short is whole
+// in the chip's tooltip, and "Dr." (left off the chip) is still read out.
+const checkChips = () => {
+  const laptop = matchMedia('(min-width: 900px) and (hover: hover) and (pointer: fine)').matches;
+  const blocked = [];
+  const unreadable = [];
+  const firstCut = [];
+  const miscounted = [];
+  const hiddenReachable = [];
+  const shownUnhovered = [];
+  let hiddenChips = 0;
+  const all = [...document.querySelectorAll('table.sheet tbody .chip-remove')].filter((x) => x.getClientRects().length);
+  const xs = all.filter((x) => x.tabIndex >= 0);
+  for (const x of xs) {
+    if (laptop && getComputedStyle(x).opacity !== '0') shownUnhovered.push(x.getAttribute('aria-label'));
+    x.scrollIntoView({ block: 'center', inline: 'center' });
+    const r = x.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || !x.contains(hit)) blocked.push(`${x.getAttribute('aria-label')}: ${hit?.className || hit?.tagName}`);
+  }
+  for (const cell of document.querySelectorAll('table.sheet tbody .people')) {
+    const chips = [...cell.querySelectorAll('.person')];
+    if (!chips.length) continue;
+    const box = cell.querySelector('.people-chips').getBoundingClientRect();
+    const hidden = chips.filter((c) => c.getBoundingClientRect().top >= box.bottom - 1);
+    hiddenChips += hidden.length;
+    for (const c of hidden) if (c.querySelector('.chip-remove')?.tabIndex >= 0) hiddenReachable.push(c.title);
+    const count = cell.querySelector('.people-count');
+    const tip = (count.closest('button') || count).title;
+    if (count.textContent !== (hidden.length ? `+${hidden.length}` : count.dataset.plain) || hidden.some((c) => !tip.includes(c.title))) miscounted.push(`${count.textContent} ${tip}`);
+    chips.forEach((p, i) => {
+      const n = p.querySelector('.person-name');
+      const name = [...n.childNodes].filter((c) => c.nodeType === Node.TEXT_NODE).map((c) => c.textContent).join('').trim();
+      const cut = n.scrollWidth > n.clientWidth + 0.5;
+      if (/^Dr\b/.test(p.title) && !/^(Checked by )?Dr\.? /.test(n.textContent)) unreadable.push(`${name}: no "Dr." read out`);
+      if (cut && !p.title.includes(name)) unreadable.push(name);
+      if (laptop && i === 0 && cut) firstCut.push(name);
+      if (laptop && cut && !hidden.includes(p) && n.clientWidth < 40) unreadable.push(`${name}: ${n.clientWidth}px`);
+    });
+  }
+  const wrap = document.querySelector('.sheet-wrap');
+  wrap.scrollTop = 0; wrap.scrollLeft = 0; window.scrollTo(0, 0);
+  return { laptop, n: xs.length, all: all.length, people: document.querySelectorAll('table.sheet tbody .person').length, blocked, unreadable, firstCut, miscounted, hiddenChips, hiddenReachable, shownUnhovered };
+};
+await step('busy day at 1366x768: a chip\'s × shows only over the chip under the mouse or with the keyboard on it (it takes no room), the first name of a row is whole, the others show a few letters at least or are counted in the "+", and the "+" dialog lists who is on the visit with Remove and Undo', async () => {
+  await pb.mouse.move(0, 0);
+  const c = await pb.evaluate(checkChips);
+  assert.ok(c.laptop && c.people >= 140 && c.n >= 120, 'chips, each with a ×: ' + JSON.stringify(c));
+  assert.deepEqual(c.shownUnhovered, [], 'a × in sight with no mouse or keyboard on its chip');
+  assert.deepEqual(c.blocked, [], 'a × that does not take the click');
+  assert.deepEqual(c.firstCut, [], 'a first name cut short');
+  assert.deepEqual(c.unreadable, [], 'a name that cannot be read');
+  assert.deepEqual(c.miscounted, [], 'a "+" that does not count the chips out of sight');
+  assert.ok(c.hiddenChips > 0 && c.hiddenChips < 20, 'a few chips out of sight, counted in their "+": ' + c.hiddenChips);
+  assert.deepEqual(c.hiddenReachable, [], 'a chip out of sight whose × can be reached with Tab');
+  // the × shows on hover and with the keyboard, over the end of its chip
+  const r1x = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 001' });
+  const shown = async (x) => x.evaluate((el) => { const r = el.getBoundingClientRect(); const c = el.closest('.person').getBoundingClientRect(); return getComputedStyle(el).opacity === '1' && r.right <= c.right + 0.5 && r.left >= c.left - 0.5 && r.width >= 24 && r.height >= 24; });
+  await r1x.locator('.person').first().hover();
+  assert.ok(await shown(r1x.locator('.person').first().locator('.chip-remove')), 'the × over the chip under the mouse');
+  await pb.mouse.move(0, 0);
+  await r1x.locator('select[aria-label^="Doctor group for"]').focus();
+  await pb.keyboard.press('Tab');
+  assert.match(await pb.evaluate(() => document.activeElement?.getAttribute('aria-label')), /^Remove .+ from Sample Patient 001$/, 'Tab from Group reaches the first chip\'s ×');
+  assert.ok(await pb.evaluate(() => getComputedStyle(document.activeElement).opacity === '1'), 'and it shows');
+  await pb.evaluate(() => document.activeElement?.blur());
+  // the checker of Sample Patient 001, removed and brought back from the "+" dialog
+  const r1 = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 001' });
+  const name = (await r1.locator('.person.checker').getAttribute('title')).replace(/ \(checked\)$/, '');
+  await r1.locator('.add-person').click();
+  const dlg = pb.locator('.modal');
+  await dlg.locator('.people-on-list li', { hasText: `Checked by: ${name}` }).waitFor();
+  assert.ok(await dlg.locator('.people-on-list li', { hasText: /^Doctor: / }).count(), 'the doctor is listed too');
+  await dlg.getByRole('button', { name: `Remove ${name} (checker) from Sample Patient 001` }).click();
+  await r1.locator('.person.checker').waitFor({ state: 'detached' });
+  await dlg.locator('.people-on-undo', { hasText: `${name} removed.` }).waitFor();
+  assert.equal(await pb.evaluate(() => document.activeElement?.textContent), 'Undo', 'the cursor is on the Undo of the dialog');
+  await dlg.locator('.people-on-undo').getByRole('button', { name: 'Undo' }).click();
+  await r1.locator('.person.checker').waitFor();
+  await pb.waitForFunction((n) => document.activeElement?.getAttribute('aria-label') === `Remove ${n} (checker) from Sample Patient 001`, name);
+  await dlg.getByRole('button', { name: 'Done' }).click();
+  await pb.waitForSelector('.modal', { state: 'detached' });
+});
+await step('busy day at 1366x768: every flag beside a name (Med, Ali) is whole and in sight, even beside a long name, the name keeps over half its cell, and a note is the sheet\'s note mark', async () => {
+  // a long name with both flags (Sample Patient 037 has the Dr. Ali flag; it gets a medical history too)
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const p = (await state.data.listVisits({ branchId: 1, date: localISO() })).find((v) => v.patient.full_name === 'Sample Patient 037').patient;
+    await state.data.updatePatient(p.id, { full_name: 'Sample Patient 037 With A Much Longer Name', medical_history: { conditions: ['Asthma'] } });
+    document.activeElement?.blur();
+    document.dispatchEvent(new CustomEvent('sheet-reload'));
+  });
+  await pb.locator('table.sheet tbody .name-text:text-is("Sample Patient 037 With A Much Longer Name")').waitFor();
+  const names = await pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody .name-btn')].filter((b) => b.querySelector('.name-flags')).map((b) => {
+    const t = b.querySelector('.name-text');
+    const cell = b.closest('th').getBoundingClientRect();
+    const badges = [...b.querySelectorAll('.name-flags .badge')];
+    const whole = badges.every((x) => { const r = x.getBoundingClientRect(); return r.width > 10 && r.left >= cell.left - 0.5 && r.right <= cell.right + 0.5 && r.top >= cell.top - 0.5 && r.bottom <= cell.bottom + 0.5; });
+    return { name: t.textContent, flags: badges.map((x) => x.textContent), shown: t.clientWidth, full: t.scrollWidth, cell: Math.round(cell.width), whole };
+  }));
+  const long = names.find((x) => x.name === 'Sample Patient 037 With A Much Longer Name');
+  assert.ok(names.length >= 8 && long?.flags.length === 2 && names.find((x) => x.name === 'Sample Patient 111')?.flags.length === 2, JSON.stringify(names));
+  for (const x of names) assert.ok(x.whole && x.shown >= Math.min(x.full, 0.5 * x.cell), JSON.stringify(x));
+  assert.ok(long.shown < long.full, 'the long name is the one cut short (it is whole in the tooltip)');
+  // the flags and the note of Sample Patient 111 are read out in full with the name; the note mark sits in the cell's corner
+  assert.ok(await pb.getByRole('button', { name: /^Sample Patient 111\s*Medical\s*See Dr\. Ali\s*Note$/ }).count(), 'Medical, See Dr. Ali, Note');
+  const mark = await pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 111' }).locator('.note-mark').evaluate((el) => {
+    const r = el.getBoundingClientRect(); const c = el.closest('th').getBoundingClientRect();
+    return { w: r.width, top: Math.round(r.top - c.top), right: Math.round(c.right - r.right), title: el.title };
+  });
+  assert.ok(mark.w >= 5 && mark.top <= 1 && mark.right <= 3 && /^Note: /.test(mark.title), 'the note mark: ' + JSON.stringify(mark));
+});
+await step('busy day: the Mr# of a patient already on the list adds no second row (a booked patient is marked Waiting); picked from the matches, it asks first', async () => {
+  const box = pb.locator('.add-panel input[type=search]');
+  const count = () => pb.locator('table.sheet tbody tr').count();
+  const before = await count();
+  // Sample Patient 113 is booked: now Waiting with a token, the cursor in their Treatment cell
+  await box.fill('7113');
+  await box.press('Enter');
+  await pb.waitForSelector('.toast:has-text("Sample Patient 113 was booked: now Waiting with token")');
+  const r113 = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 113' });
+  assert.equal(await r113.count(), 1, 'one row for Sample Patient 113');
+  assert.equal(await r113.locator('select[aria-label^="Status for"]').inputValue(), 'waiting');
+  assert.match(await r113.locator('.token').innerText(), /\d/);
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label="Treatment for Sample Patient 113"]'));
+  // Saad Malik is Waiting already: the cursor goes to his Status
+  await box.fill('9826');
+  await box.press('Enter');
+  await pb.waitForSelector('.toast:has-text("Saad Malik is already on the list (token 3)")');
+  await pb.waitForFunction(() => document.activeElement?.matches('select[aria-label="Status for Saad Malik"]'));
+  assert.equal(await count(), before, 'no row added');
+  assert.equal(await box.inputValue(), '');
+  // picked from the matches: asked first, and "Go to the row" adds nothing
+  await box.fill('Saad Malik');
+  await pb.locator('.add-panel .suggestions button', { hasText: 'Mr# 9826' }).click();
+  await pb.locator('.modal h2:has-text("Saad Malik is already on the list (token 3)")').waitFor();
+  await pb.locator('.modal').getByRole('button', { name: 'Go to the row' }).click();
+  await pb.waitForFunction(() => document.activeElement?.matches('select[aria-label="Status for Saad Malik"]'));
+  assert.equal(await count(), before, 'still no row added');
+});
+await step('busy day, slow server: the add box is empty at once after Enter, so a second Mr# typed meanwhile is added too, and text typed while an add is on its way stays in the box', async () => {
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__fast = { searchPatients: d.searchPatients, addVisit: d.addVisit };
+    const later = (fn) => async (...a) => { await new Promise((r) => setTimeout(r, 450)); return fn.apply(d, a); };
+    d.searchPatients = later(window.__fast.searchPatients);
+    d.addVisit = later(window.__fast.addVisit);
+  });
+  const box = pb.locator('.add-panel input[type=search]');
+  const before = await pb.locator('table.sheet tbody tr').count();
+  await box.fill('9822');
+  await box.press('Enter');
+  assert.equal(await box.inputValue(), '', 'emptied at once');
+  await box.pressSequentially('9823');
+  await box.press('Enter');
+  await pb.waitForFunction((n) => document.querySelectorAll('table.sheet tbody tr').length === n + 2, before);
+  for (const mr of ['9822', '9823']) assert.equal(await pb.locator('table.sheet tbody tr', { hasText: `Mr# ${mr}` }).count(), 1, `Mr# ${mr} added once`);
+  await box.fill('9824');
+  await box.press('Enter');
+  await box.pressSequentially('Scal');
+  await pb.locator('table.sheet tbody tr', { hasText: 'Mr# 9824' }).waitFor();
+  await pb.waitForTimeout(300);
+  assert.equal(await box.inputValue(), 'Scal', 'what was typed meanwhile is kept');
+  assert.ok(await box.evaluate((el) => el === document.activeElement), 'and the cursor stays in the box');
+  await box.fill('');
+  await pb.keyboard.press('Escape');
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); Object.assign(state.data, window.__fast); });
+});
+await step('busy day, slow server: four Mr#s typed back to back are all added, and an add that comes back after the next Enter never takes the cursor out of the add box (no Treatment is changed)', async () => {
+  // Each add waits until the test lets it go, so it comes back after the next Mr# has been entered, with the box empty.
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__fastAdd = d.addVisit;
+    window.__held = [];
+    window.__adds = 0;
+    d.addVisit = async (...a) => { window.__adds++; await new Promise((r) => window.__held.push(r)); return window.__fastAdd.apply(d, a); };
+  });
+  const cells = () => pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const visits = await state.data.listVisits({ branchId: 1, date: localISO() });
+    const checkups = await state.data.listDayCheckups({ branchId: 1, date: localISO() });
+    return Object.fromEntries([...visits.map((v) => [v.id, `${v.patient.mr_number} ${v.treatment_label}|${v.details_text}`]), ...checkups.map((c) => [c.id, `${c.patient_name} ${c.checkup_for}|${c.details}`])]);
+  });
+  const before = await cells();
+  const box = pb.locator('.add-panel input[type=search]');
+  const adds = (n) => pb.waitForFunction((k) => window.__adds >= k, n);
+  const letGo = () => pb.evaluate(() => window.__held.shift()());
+  const inBox = () => pb.evaluate(() => document.activeElement?.matches('.add-panel input[type=search]'));
+  await box.focus();
+  await pb.keyboard.type('9828', { delay: 60 });
+  await pb.keyboard.press('Enter');
+  await adds(1);
+  await pb.keyboard.type('9829', { delay: 60 });
+  await pb.keyboard.press('Enter');
+  await adds(2);
+  await letGo(); // 9828 comes back now: the box is empty, but 9829 was entered since
+  await pb.locator('table.sheet tbody tr', { hasText: 'Mr# 9828' }).waitFor();
+  await pb.waitForTimeout(100);
+  assert.ok(await inBox(), 'the cursor stays in the add box');
+  await pb.keyboard.type('9830', { delay: 60 });
+  await pb.keyboard.press('Enter');
+  await adds(3);
+  await letGo(); // 9829
+  await pb.keyboard.type('9831', { delay: 60 });
+  await pb.keyboard.press('Enter');
+  await adds(4);
+  await letGo(); // 9830
+  await pb.locator('table.sheet tbody tr', { hasText: 'Mr# 9830' }).waitFor();
+  await pb.waitForTimeout(100);
+  assert.ok(await inBox(), 'still in the add box');
+  await letGo(); // 9831, the last one: nothing entered since, so the cursor goes to its Treatment cell as usual
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label="Treatment for Laraib Fatima"]'));
+  for (const mr of ['9828', '9829', '9830', '9831']) assert.equal(await pb.locator('table.sheet tbody tr', { hasText: `Mr# ${mr}` }).count(), 1, `Mr# ${mr} added once`);
+  await pb.evaluate(() => document.activeElement?.blur());
+  await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  const after = await cells();
+  const changed = Object.keys(before).filter((id) => after[id] !== before[id]).map((id) => `${before[id]} -> ${after[id]}`);
+  assert.deepEqual(changed, [], 'no Treatment or details changed');
+  const added = Object.keys(after).filter((id) => !(id in before)).map((id) => after[id]).sort();
+  assert.deepEqual(added, ['9828 Checkup|', '9829 Checkup|', '9830 Checkup|', '9831 Checkup|']);
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.addVisit = window.__fastAdd; });
+});
+await step('status change with the dues override: Dr. Ali starts treatment for a patient with dues when the clinic holds for dues', async () => {
+  const px = await newPage();
+  await loginAs(px, 'Dr. Ali Rashid');
+  await px.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setSetting('dues_hold_mode', 'block'); });
+  await px.goto(BASE + '#/staff/sheet?branch=1');
+  const row = px.locator('table.sheet tbody tr', { hasText: 'Fatima Noor' });
+  await row.waitFor();
+  assert.ok(await row.locator('td.pp .pp-due').count(), 'Fatima Noor has dues');
+  await row.locator('select[aria-label^="Status for"]').selectOption('in_treatment');
+  await px.locator('.modal h2:has-text("Pending dues")').waitFor();
+  await px.locator('.modal').getByRole('button', { name: 'Override and start treatment' }).click();
+  await px.waitForFunction(() => {
+    const s = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes('Fatima Noor'))?.querySelector('select[aria-label^="Status for"]');
+    return s?.value === 'in_treatment' && s.classList.contains('gs-green');
+  });
+  assert.ok(await px.getByRole('button', { name: 'Download', exact: true }).count(), 'Download for Dr. Ali');
+  // the row's actions behind the name include uploading photos for someone allowed to
+  await row.locator('.name-btn').click();
+  await px.locator('.modal').getByRole('button', { name: 'Upload photos' }).click();
+  await px.locator('.modal h2:has-text("Upload photos · Fatima Noor")').waitFor();
+  await px.keyboard.press('Escape');
+  await px.keyboard.press('Escape');
+  await px.close();
+});
+await step('busy day: the add box is a few Tabs from the toolbar (it comes before the list in the page), and a toast sits above the add line, clear of its buttons and of the Treatment cell of the patient just added', async () => {
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  let tabs = 0;
+  while (tabs < 20 && !(await pb.evaluate(() => document.activeElement?.matches('.add-panel input[type=search]')))) { await pb.keyboard.press('Tab'); tabs++; }
+  assert.ok(tabs <= 12, 'Tab presses from Find to the add box: ' + tabs);
+  await pb.keyboard.type('9817');
+  await pb.keyboard.press('Enter');
+  await pb.waitForSelector('.toast:has-text("Iqra Shahid added")');
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label="Treatment for Iqra Shahid"]'));
+  const r = await pb.evaluate(() => {
+    const t = [...document.querySelectorAll('.toast')].find((el) => el.textContent.includes('Iqra Shahid added')).getBoundingClientRect();
+    const covers = (el) => { const b = el.getBoundingClientRect(); return !(b.right <= t.left || b.left >= t.right || b.bottom <= t.top || b.top >= t.bottom); };
+    return { addLine: covers(document.querySelector('.add-panel')), cell: covers(document.activeElement), toast: [t.left, t.top, t.right, t.bottom].map(Math.round) };
+  });
+  assert.ok(!r.addLine && !r.cell, 'the toast covers neither the add line nor the cell being typed in: ' + JSON.stringify(r));
+});
+await step('busy day: an Mr# and Enter while a quick filter or Find text hides the new row clears them, so the row is in sight with the cursor in its Treatment cell', async () => {
+  const box = pb.locator('.add-panel input[type=search]');
+  const find = pb.locator('input[aria-label="Find on this list"]');
+  await pb.locator('.sheet-counts button', { hasText: 'Completed' }).click();
+  await box.fill('9818');
+  await box.press('Enter');
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label^="Treatment for"]') && document.activeElement.closest('tr')?.textContent.includes('Mr# 9818'));
+  assert.match(await pb.locator('.sheet-counts button[aria-pressed="true"]').innerText(), /^All/);
+  await find.fill('Sample Patient 00');
+  await box.fill('9819');
+  await box.press('Enter');
+  await pb.waitForFunction(() => document.activeElement?.matches('input[aria-label^="Treatment for"]') && document.activeElement.closest('tr')?.textContent.includes('Mr# 9819'));
+  assert.equal(await find.inputValue(), '');
+  assert.ok((await pb.locator('table.sheet tbody tr').count()) > 120, 'everyone is shown again');
+});
+await step('busy day: a status or group picked right after typing in the same row keeps what was typed (the server\'s answer does not have it yet)', async () => {
+  const rowOf = (name) => pb.locator('table.sheet tbody tr', { hasText: name });
+  // (the row is drawn again from the server's answer: marked before, it is a new row after)
+  const redrawn = (name) => pb.waitForFunction((n) => { const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes(n)); return tr && !tr.dataset.before; }, name);
+  const typeThenPick = async (name, text, label, value) => {
+    await rowOf(name).locator('input[aria-label^="Treatment details for"]').click();
+    await pb.keyboard.type(text);
+    await rowOf(name).evaluate((tr) => { tr.dataset.before = 'yes'; });
+    await rowOf(name).locator(`select[aria-label^="${label}"]`).selectOption(value);
+    await redrawn(name);
+    assert.equal(await rowOf(name).locator('input[aria-label^="Treatment details for"]').inputValue(), text, `${name}: what was typed is still in the cell`);
+  };
+  await typeThenPick('Sample Patient 090', 'UL 016', 'Status for', 'in_treatment');
+  await typeThenPick('Sample Patient 096', 'brac 35', 'Doctor group for', '2');
+  // and it is saved (the typed change waits about half a second before it is sent)
+  const savedNow = () => pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const list = await state.data.listVisits({ branchId: 1, date: localISO() });
+    return Object.fromEntries(list.filter((v) => /^Sample Patient 09[06]$/.test(v.patient.full_name)).map((v) => [v.patient.full_name, [v.status, v.doctor_group_id, v.details_text]]));
+  });
+  const want = { 'Sample Patient 090': ['in_treatment', 3, 'UL 016'], 'Sample Patient 096': ['waiting', 2, 'brac 35'] };
+  let saved = await savedNow();
+  for (let i = 0; i < 25 && JSON.stringify(saved) !== JSON.stringify(want); i++) { await pb.waitForTimeout(200); saved = await savedNow(); }
+  assert.deepEqual(saved, want);
+});
+await step('busy day, slow server: a reload in the background that comes back while someone types in a cell does not wipe what they typed; it is drawn once they leave the list', async () => {
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__listVisits = d.listVisits;
+    // (the list is read at once and its answer arrives 900 ms later, so it does not have what is typed meanwhile)
+    d.listVisits = async (...a) => { const list = await window.__listVisits.apply(d, a); await new Promise((r) => setTimeout(r, 900)); return list; };
+    document.activeElement?.blur();
+    document.dispatchEvent(new CustomEvent('sheet-reload')); // (as a live update or the 20-second check)
+  });
+  const details = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 020' }).locator('input[aria-label^="Treatment details for"]');
+  await details.click();
+  await pb.keyboard.press('End');
+  await pb.keyboard.type(' brac35');
+  await pb.waitForTimeout(1300); // the reload has come back meanwhile
+  assert.equal(await details.inputValue(), 'U L 018 PC refresh brac35');
+  await pb.keyboard.type(' ok');
+  await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  assert.equal(await details.inputValue(), 'U L 018 PC refresh brac35 ok');
+  // leaving the list: the reload that waited is drawn, with what was saved
+  await details.evaluate((el) => { el.closest('tr').dataset.before = 'yes'; });
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  await pb.waitForFunction(() => { const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes('Sample Patient 020')); return tr && !tr.dataset.before; }, null, { timeout: 10000 });
+  assert.equal(await details.inputValue(), 'U L 018 PC refresh brac35 ok');
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.listVisits = window.__listVisits; });
+});
+await step('busy day on a phone (390px, touch, 44px rows): every chip\'s × is in sight and takes the tap, and a name cut short is whole in the tooltip', async () => {
+  const pt = await newPage({ width: 390, height: 844 }, { isMobile: true, hasTouch: true });
+  await loginAs(pt, 'Front desk \\(Gulshan\\)');
+  await pt.goto(BASE + '#/staff/sheet?demo=busy');
+  await pt.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr').length >= 120);
+  const c = await pt.evaluate(checkChips);
+  assert.ok(c.n >= 140, 'chips: ' + JSON.stringify(c));
+  assert.deepEqual(c.blocked, [], 'a × that cannot be tapped');
+  assert.deepEqual(c.unreadable, [], 'a name that cannot be read');
+  // the Filters panel opens on the screen, and the page does not scroll sideways
+  await pt.getByRole('button', { name: 'Filters', exact: true }).click();
+  const f = await pt.evaluate(() => { const r = document.querySelector('#sheet-filter-panel').getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), sideScroll: document.documentElement.scrollWidth > window.innerWidth + 1 }; });
+  assert.ok(f.left >= 0 && f.right <= 390 && !f.sideScroll, 'the Filters panel is on the screen: ' + JSON.stringify(f));
+  await pt.close();
+});
+await pb.close(); // (the busy list is not used again)
 
 // ------------------------------------------------------------- change password (account menu and phone drawer)
 // The demo has no real passwords: the first current password is accepted whatever it is, the one chosen is remembered for the page.
@@ -1873,6 +2505,7 @@ await step('Admin: the Aaj ki List "All branches" shows the checkup rows with th
   assert.ok(branches.length >= 3 && branches.every((b) => b.trim().length > 2), 'every checkup row names its branch');
   assert.ok(branches.some((b) => /North Nazimabad/.test(b)) && branches.some((b) => /Gulshan/.test(b)));
   assert.equal(await pk.locator('.add-panel:not([hidden])').count(), 0, 'no add panel in All branches');
+  assert.equal(await pk.locator('table.sheet thead th.branch-cell').evaluate((th) => getComputedStyle(th).color), 'rgb(255, 255, 255)', 'the Branch heading is white on the purple header row');
   const [download] = await Promise.all([pk.waitForEvent('download'), pk.getByRole('button', { name: 'Download', exact: true }).click()]);
   const csv = fs.readFileSync(await download.path(), 'utf8').replace(/^﻿/, '');
   const [head, ...lines] = csv.split('\n');
@@ -1931,6 +2564,8 @@ await step('Edit on an old-list row tells Dr. Ali (and only Dr. Ali) that import
 await step('Front desk (North Nazimabad) on the Checkups page sees the imported North Nazimabad row and the no-branch row, never the RJ Mall or Lahore rows, and cannot remove an old-list row', async () => {
   await pk.getByRole('button', { name: 'Try another role' }).click();
   await pk.waitForSelector('.topbar', { state: 'detached' });
+  // The logout ends on the home page; a login page opened before that would be replaced by it.
+  await pk.waitForSelector('.door');
   await pk.goto(BASE + '#/login/staff');
   await pk.getByRole('button', { name: /Front desk \(North Nazimabad\)/ }).click();
   await pk.waitForSelector('.topbar');
@@ -2026,7 +2661,7 @@ await step('before the database update: the Aaj ki List works without checkup ro
   assert.equal(await pm.locator('table.sheet tbody tr.is-checkup').count(), 0);
   assert.equal(await pm.getByRole('button', { name: '+ Checkup patient' }).count(), 0);
   assert.ok(await pm.getByRole('button', { name: '+ New walk-in' }).count(), 'the walk-in button stays');
-  assert.doesNotMatch(await pm.locator('.page-head p').innerText(), /checkups/);
+  assert.doesNotMatch(await pm.locator('.sheet-counts').innerText(), /Checkups/);
   await pm.goto(BASE + '#/staff/checkups');
   await pm.waitForSelector('.empty:has-text("not switched on yet")');
   assert.equal(await pm.getByRole('button', { name: '+ Add checkup' }).count(), 0);
@@ -2126,10 +2761,12 @@ await step('Register needs both "Register new patients" and list editing: with l
   // (the accountant's page: its own in-memory demo data, not used again after this)
   await pa.getByRole('button', { name: 'Try another role' }).click();
   await pa.waitForSelector('.topbar', { state: 'detached' });
+  await pa.waitForSelector('.door'); // (the logout ends on the home page; see the step above)
   await loginAs(pa, 'Dr. Ali Rashid');
   await pa.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-nn', 'sheet.edit', false); });
   await pa.getByRole('button', { name: 'Try another role' }).click();
   await pa.waitForSelector('.topbar', { state: 'detached' });
+  await pa.waitForSelector('.door');
   await loginAs(pa, 'Front desk.*North Nazimabad');
   const rights = await pa.evaluate(async () => { const { can } = await import('/js/state.js'); return [can('patients.create'), can('sheet.edit'), can('sheet.view')]; });
   assert.deepEqual(rights, [true, false, true], 'may register patients and see the list, but not edit it');

@@ -188,6 +188,7 @@ function seed() {
     tokenCount[branch] = (tokenCount[branch] || 0) + (status === 'scheduled' ? 0 : 1);
     const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: today, token_no: status === 'scheduled' ? null : tokenCount[branch],
       status, treatment_label: label, braces_case_id: month ? bc.id : null, braces_month: month, details_text: details,
+      doctor_group_id: month && protocolFor(month).treatingGroups.length === 1 ? protocolFor(month).treatingGroups[0] : null,
       photo_required: month ? protocolFor(month).photoRequired : false, photos_uploaded: status === 'completed',
       checker_required: month ? protocolFor(month).checkerGroup !== null : false, checked_by: status === 'completed' ? cl('Dr. Bushra (sample)') : null,
       checked_in_at: today + 'T13:' + String(10 + db.visits.length % 40).padStart(2, '0') + ':00', created_at: new Date().toISOString(), notes: null };
@@ -311,7 +312,9 @@ export function createDemoAdapter() {
     const p = patient(v.patient_id);
     return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, medical_history: clone(p.medical_history) || {}, photo_consent_public: !!p.photo_consent_public },
       staff: db.visit_staff.filter((s) => s.visit_id === v.id).map((s) => ({ ...s, name: clinician(s.clinician_id)?.display_name })),
-      dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id) };
+      dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id),
+      // As in the database: invoices are seen with billing.view only, so without it no visit has one.
+      has_invoice: can('billing.view') && db.invoices.some((i) => i.visit_id === v.id && i.status !== 'void') };
   };
 
   // Checkups (patients without a patient file): which rows this person may see, how a row is shown, and the Checkups page's filters.
@@ -343,6 +346,8 @@ export function createDemoAdapter() {
       const rule = protocolFor(v.braces_month);
       v.photo_required = rule.photoRequired && v.braces_month <= LAST_DEFINED_MONTH;
       v.checker_required = rule.checkerGroup !== null;
+      // The database's default: a month treated by one group only gets that group.
+      if (v.doctor_group_id == null && rule.treatingGroups.length === 1) v.doctor_group_id = rule.treatingGroups[0];
     }
     if (!prev || prev.status !== v.status) {
       if (v.status === 'waiting' && !v.checked_in_at) v.checked_in_at = new Date().toISOString();
@@ -602,6 +607,71 @@ export function createDemoAdapter() {
         .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999)).map(enrichVisit);
     },
     subscribeVisits() { return () => {}; },
+    // A busy day to try the Aaj ki List with (the list's "?demo=busy", demo only): 120 more made-up patients on one branch's
+    // list for the day, in every state of a day half done. Names "Sample Patient 001" to "120", Mr# from 7001, phones
+    // 0300 555 3001 onwards; once per branch and day. (Sample Patient 111 has all three flags: medical history, Dr. Ali, a note.)
+    async fillBusyDay({ branchId, date = todayISO() }) {
+      need('sheet.view');
+      const branch = Number(branchId);
+      db.busy_days ||= [];
+      if (!db.branches.some((b) => b.id === branch) || !branchOk(branch) || db.busy_days.includes(`${branch}|${date}`)) return 0;
+      const base = 7000 + 200 * db.busy_days.length;
+      db.busy_days.push(`${branch}|${date}`);
+      const doctorsIn = (g) => db.clinicians.filter((c) => c.is_doctor && c.doctor_group_id === g);
+      const anyDoctor = db.clinicians.filter((c) => c.is_doctor);
+      const assistants = db.clinicians.filter((c) => !c.is_doctor);
+      const other = ['Retainer Pick', 'Checkup', 'Scaling', 'RCT', 'Bracket Fix', 'Followup', 'Filling', 'Extraction', 'Hygiene Appointment'];
+      const otherDetails = ['Scaling done', 'RCT 2nd sitting', 'Filling UR6', 'Retainer given', 'X-ray advised', 'Bracket rebond LL3'];
+      const wire = (m) => (m < 3 ? '012' : m < 4 ? '014' : m < 8 ? '016' : '018');
+      const invoice = (patientId, visitId, amount, issued, paid) => {
+        const inv = { id: uid(), invoice_no: 'INV-' + date.slice(0, 4) + '-' + String(db.invoices.length + 1).padStart(6, '0'), patient_id: patientId, branch_id: branch,
+          visit_id: visitId, issue_date: issued, subtotal: amount, discount_amount: 0, total: amount, status: 'issued', template_key: 'classic',
+          items: [{ description: visitId ? 'Visit (sample)' : 'Braces instalment (sample)', quantity: 1, unit_price: amount }] };
+        db.invoices.push(inv);
+        if (paid) db.payments.push({ id: uid(), patient_id: patientId, invoice_id: inv.id, branch_id: branch, amount: paid, method: 'cash', received_at: issued + 'T15:00:00' });
+      };
+      let token = Math.max(0, ...db.visits.filter((v) => v.branch_id === branch && v.visit_date === date && v.token_no).map((v) => v.token_no));
+      for (let i = 1; i <= 120; i++) {
+        const p = { id: uid(), mr_number: String(base + i), full_name: `Sample Patient ${String(i).padStart(3, '0')}`, phone: '0300555' + String(3000 + base - 7000 + i),
+          email: null, first_branch_id: branch, referral_source: 'Walk-in', photo_consent_public: false, created_at: daysAgo(200), notes: null, portal_user_id: null,
+          medical_history: i % 23 === 0 || i === 111 ? { conditions: ['Diabetes'], allergies: i % 2 ? 'Penicillin' : '' } : {} };
+        db.patients.push(p);
+        const status = i <= 70 ? 'completed' : i <= 80 ? 'in_treatment' : i <= 112 ? 'waiting' : 'scheduled';
+        const done = status === 'completed';
+        const month = i % 3 ? ((i * 7) % 18) + 1 : null;
+        const rule = month ? protocolFor(month) : null;
+        let bc = null;
+        if (month) {
+          bc = { id: uid(), patient_id: p.id, start_date: daysAgo(month * 30), extraction_plan: ['undecided', 'extraction', 'non_extraction'][i % 3],
+            extractions_done: false, kit_name: 'Sample kit A', total_fee: 60000, status: 'active', treatment_plan_by_dr_ali: 'Standard plan' };
+          db.braces_cases.push(bc);
+        }
+        const group = rule ? rule.treatingGroups[i % rule.treatingGroups.length] : [1, 2, 3, null][i % 4];
+        const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: date, token_no: status === 'scheduled' ? null : ++token, status,
+          treatment_label: month ? 'Monthly' : other[i % other.length], braces_case_id: bc?.id ?? null, braces_month: month, doctor_group_id: group,
+          details_text: done ? (month ? `U L ${wire(month)} PC refresh` : otherDetails[i % otherDetails.length]) : '',
+          photo_required: !!rule?.photoRequired, photos_uploaded: done && !!rule?.photoRequired, checker_required: rule ? rule.checkerGroup !== null : false, checked_by: null,
+          checked_in_at: status === 'scheduled' ? null : `${date}T${String(12 + Math.floor(i / 20)).padStart(2, '0')}:${String((i * 7) % 60).padStart(2, '0')}:00`,
+          created_at: new Date().toISOString(), notes: i % 29 === 0 || i === 111 ? 'Wants an evening slot next time' : null };
+        db.visits.push(v);
+        if (done || status === 'in_treatment' || i % 9 === 0) {
+          const pool = group ? doctorsIn(group) : anyDoctor;
+          db.visit_staff.push({ visit_id: v.id, clinician_id: pool[i % pool.length].id, role: 'doctor' });
+          if (i % 5 === 0) db.visit_staff.push({ visit_id: v.id, clinician_id: assistants[i % assistants.length].id, role: 'assistant' });
+        }
+        if (done && rule?.checkerGroup) {
+          const checker = doctorsIn(rule.checkerGroup)[i % doctorsIn(rule.checkerGroup).length];
+          v.checked_by = checker.id;
+          db.visit_staff.push({ visit_id: v.id, clinician_id: checker.id, role: 'checker' });
+        }
+        // Dues on some patients (an older instalment part paid), and an invoice for most of today's finished visits.
+        const owe = i % 7 === 0 ? 11500 : i % 11 === 0 ? 20000 : i % 13 === 0 ? 500 : 0;
+        if (owe) invoice(p.id, null, owe + 5000, daysAgo(40), 5000);
+        if ((done || status === 'in_treatment') && i % 6) invoice(p.id, v.id, 3000, date, 3000);
+        if (i % 37 === 0) db.patient_flags.push({ id: uid(), patient_id: p.id, kind: 'see_dr_ali', reason: 'Sample: check the bite', raised_by: 's-asst', raised_at: daysAgo(1) + 'T16:00:00', cleared_at: null });
+      }
+      return 120;
+    },
     async addVisit(row) {
       need('sheet.edit');
       if (!branchOk(row.branch_id)) fail('new row violates row-level security policy (branch)');
