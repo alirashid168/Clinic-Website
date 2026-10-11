@@ -98,6 +98,10 @@ insert into public.payments (patient_id, branch_id, amount, method)
 select id, current_setting('test.nn')::smallint, 2000, 'cash' from public.patients where mr_number = '31001';
 insert into public.invoices (patient_id, branch_id, issue_date, subtotal, status)
 select id, current_setting('test.gul')::smallint, date '2026-09-01', 1000, 'issued' from public.patients where mr_number = '31004';
+-- Booked owes 2,500 of an invoice made for this visit (visit_id), but on another day and at another branch.
+insert into public.invoices (patient_id, branch_id, issue_date, subtotal, status, visit_id)
+select v.patient_id, current_setting('test.gul')::smallint, date '2026-09-10', 2500, 'issued', v.id
+  from public.visits v join public.patients p on p.id = v.patient_id and p.mr_number = '31005' where v.visit_date = '2026-09-14';
 -- Checkup patients of that day (no Mr#), and three that must not be on North Nazimabad's list: one who has become a patient with a
 -- visit on that list, an old-list month row, and one at Gulshan.
 insert into public.checkups (checkup_date, branch_id, patient_name, phone, checkup_for, token, day_status, source, created_at) values
@@ -131,6 +135,9 @@ begin
     'end_day takes only the branch and the day: nothing the browser sends is stored');
   perform pg_temp.check(to_regclass('public.checkups_branch_day_idx') is not null and to_regclass('public.visits_branch_date_idx') is not null,
     'indexes: checkups (branch_id, checkup_date) and visits (branch_id, visit_date) are there for the day lists');
+  perform pg_temp.check(to_regclass('public.invoices_visit_idx') is not null
+    and (select indexdef from pg_indexes where schemaname = 'public' and indexname = 'invoices_visit_idx') like '%(visit_id)%',
+    'index: invoices (visit_id) is there, so has_invoice does not read every invoice for every row');
 end $$;
 
 -- 2. Who may end a day, where, and when.
@@ -190,6 +197,8 @@ begin
   inchair := (select x from jsonb_array_elements(s) x where x->>'name' = 'Sample In Chair');
   perform pg_temp.check((inchair->>'dues')::numeric = 1000 and not (inchair->>'has_invoice')::boolean,
     'copy: dues come from every invoice, "has invoice" only from one for this visit or this day at this branch');
+  perform pg_temp.check((select (x->>'has_invoice')::boolean and (x->>'dues')::numeric = 2500 from jsonb_array_elements(s) x where x->>'name' = 'Sample Booked'),
+    'copy: an invoice made for this visit counts as "has invoice" even when it was made on another day or at another branch');
   seven := (select x from jsonb_array_elements(s) x where x->>'name' = 'Sample Done Seven');
   perform pg_temp.check(seven->>'phone' is null and (seven->>'dues')::numeric = 0, 'copy: the placeholder phone 0000000 is left out; no dues is 0');
   kit := (select x from jsonb_array_elements(s) x where x->>'name' = 'Checkup Done Kit');

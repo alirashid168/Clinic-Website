@@ -19,8 +19,8 @@
 --      and with who ended it. Fast over years of lists: one index probe per day, and counts only for the lines of the page.
 --   5. public.day_list_copy(branch, day): one day's list, read only: the saved copy when the day was ended, otherwise the list
 --      as it is stored now, built by the same function as the copy (so both have the same columns and order).
---   6. An index on checkups (branch_id, checkup_date) for the day lists. Visits already have visits_branch_date_idx
---      (branch_id, visit_date) from 20261005000100_core_schema.sql.
+--   6. An index on checkups (branch_id, checkup_date) for the day lists, and one on invoices (visit_id) for each row's
+--      has_invoice. Visits already have visits_branch_date_idx (branch_id, visit_date) from 20261005000100_core_schema.sql.
 --
 -- Additive and safe to run more than once. Needs 20261009000250_checkups.sql (checkups) first. It does not touch any function
 -- of the Google Sheet sync (20261009000300, 20261011000100).
@@ -90,9 +90,11 @@ select r.role, 'sheet.end_day', r.role = 'admin' or coalesce(rp.allowed, false)
 on conflict (role, permission_key) do nothing;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 3. Index for the checkups of a day (the old list's month rows are left out, as the day list leaves them out)
+-- 3. Indexes for the checkups of a day (the old list's month rows are left out, as the day list leaves them out) and for a
+--    visit's invoice (has_invoice on every row; without it each row reads all the invoices, years of them after the import)
 -- ---------------------------------------------------------------------------------------------------------------
 create index if not exists checkups_branch_day_idx on public.checkups (branch_id, checkup_date) where not date_is_month;
+create index if not exists invoices_visit_idx on public.invoices (visit_id) where visit_id is not null;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- 4. One day's list, built on the server
@@ -150,9 +152,11 @@ as $$
                            from public.visit_staff vs join public.clinicians c on c.id = vs.clinician_id
                           where vs.visit_id = v.id),
              'details', v.details_text, 'notes', v.notes, 'dues', m.dues,
-             'has_invoice', exists (select 1 from public.invoices i
-                                     where i.status = 'issued'
-                                       and (i.visit_id = v.id or (i.patient_id = v.patient_id and i.branch_id = v.branch_id and i.issue_date = v.visit_date))),
+             -- Two checks rather than one with an OR, so each uses its index (invoices_visit_idx, invoices_patient_idx).
+             'has_invoice', exists (select 1 from public.invoices i where i.visit_id = v.id and i.status = 'issued')
+                         or exists (select 1 from public.invoices i
+                                     where i.patient_id = v.patient_id and i.branch_id = v.branch_id and i.issue_date = v.visit_date
+                                       and i.status = 'issued'),
              'phone', v.patient_phone, 'created_at', v.created_at) as j,
            case v.status when 'waiting' then 0 when 'in_treatment' then 1 when 'scheduled' then 2 when 'completed' then 4
                          when 'cancelled' then 5 when 'no_show' then 6 else 3 end as status_rank,
