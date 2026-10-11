@@ -50,7 +50,7 @@
 --     file's own name letter for letter). A row whose name fits only with doubt (the same first name with another
 --     surname, a slip or another first name, a caste word in front, or only the patient's own phone) is REFUSED like a name that does not
 --     fit (orchestrator decision, 11 Oct 2026): no visit, no checkup, no phone, no braces case, nothing on the patient file, with the same
---     answer, audited and counted the same way. A refusal never names another patient. At most 120 visits and 30 Healthwire patients per branch and day are made by the sync
+--     answer, audited and counted the same way. A refusal never names another patient. At most 250 visits (twice a busy day) and 30 Healthwire patients per branch and day are made by the sync
 --     (once the visit cap is full, every row that would make a visit gets the same answer, so a full day is no name check either), 20
 --     calls a minute are accepted, and every refused lookup is audited (key, Mr#, typed name and phone, outcome) and capped: 200 a day,
 --     and at most 5 in one call (the rest of that call waits). The same row sent again is one lookup; a new guess is a new one. Once the
@@ -94,7 +94,8 @@
 --     row is not put back), never a visit or checkup in Treatment or Completed
 --     (kept, row put back: a checkup too, sheet-behaviour RV-2), never more
 --     than 3 rows or a quarter of a tab at
---     once, never more than 15 a day per branch. Every removal is in audit_log
+--     once, never more than 15 a day per branch, or 35 in 100 of the day's
+--     rows on a busy day (RS12-1). Every removal is in audit_log
 --     (SHEET_REMOVED, with the whole row) and is undone by putting the row back
 --     in the sheet, or by select public.aaj_undo_removal(<audit_log id>). A
 --     row put back whose visit cannot come back at that moment (the patient
@@ -209,7 +210,10 @@ create table if not exists private.aaj_sync_config (     -- 'rules': override (d
 );
 insert into private.aaj_sync_config (key, value) values ('rules', 'override') on conflict (key) do nothing;
 insert into private.aaj_sync_config (key, value) values ('calls_per_minute', '20') on conflict (key) do nothing;     -- the door's rate limit (a busy minute is about 10 calls)
-insert into private.aaj_sync_config (key, value) values ('visits_per_branch_day', '120') on conflict (key) do nothing;   -- visits the sync may make for one branch and day (the busiest tab has about 50 rows)
+-- visits the sync may make for one branch and day: twice the owner's busy day ("sometimes on a busy day, we have like 120 patients", 11 Oct
+-- 2026, RS12-1). The old default 120 is raised when this runs again; a value Dr. Ali set himself stays
+insert into private.aaj_sync_config (key, value) values ('visits_per_branch_day', '250')
+  on conflict (key) do update set value = excluded.value where private.aaj_sync_config.value = '120';
 insert into private.aaj_sync_config (key, value) values ('new_patients_per_branch_day', '30') on conflict (key) do nothing;   -- Healthwire patients the sync may make for one branch and day (install day: 29 for all five tabs)
 
 -- one row per call, to rate limit the door
@@ -783,7 +787,7 @@ create or replace function private.aaj_visit_cap_hit(p_branch smallint, p_date d
 language sql stable set search_path = public, extensions
 as $$
   select (select count(*) from public.visits x where x.branch_id = p_branch and x.visit_date = p_date and x.created_by = private.aaj_sync_actor())
-         >= coalesce((select value::int from private.aaj_sync_config where key = 'visits_per_branch_day'), 120)
+         >= coalesce((select value::int from private.aaj_sync_config where key = 'visits_per_branch_day'), 250)
 $$;
 
 -- ---------------------------------------------------------------------
@@ -1071,7 +1075,7 @@ as $$
 declare
   v public.visits; c public.checkups; bc public.braces_cases; pp public.patients;
   v_out jsonb := '[]'::jsonb; v_pres text[] := coalesce(p_present, '{}');
-  v_n int; v_total int; v_done int; v_hold boolean; v_code text; v_why text;
+  v_n int; v_total int; v_done int; v_cap int; v_hold boolean; v_code text; v_why text;
   v_day timestamptz := ((now() at time zone 'Asia/Karachi')::date)::timestamp at time zone 'Asia/Karachi';
   v_attached text; v_staff jsonb; v_text jsonb; v_msg text; v_casej jsonb; v_patj jsonb; v_patkept text; v_letgo boolean;
 begin
@@ -1094,9 +1098,12 @@ begin
        and not exists (select 1 from private.aaj_released rl where rl.checkup_id = x.id)) y;
   select count(*) into v_done from public.audit_log
    where action = 'SHEET_REMOVED' and new_data->>'branch' = v_code and at >= v_day and new_data->>'action' in ('deleted', 'kept_cancelled');
-  v_hold := v_n > 3 or (v_n >= 2 and (cardinality(v_pres) = 0 or v_n * 4 >= v_total)) or v_done + v_n > 15;
+  -- the day's removals: at least 15, and 35 in 100 of the rows the sheet has had today (the ones removed today included), so a busy day of 120
+  -- patients may lose 42 wrong entries and no-shows (owner, 11 Oct 2026: "sometimes on a busy day, we have like 120 patients"; RS12-1)
+  v_cap := greatest(15, ceil(0.35 * (v_total + v_done))::int);
+  v_hold := v_n > 3 or (v_n >= 2 and (cardinality(v_pres) = 0 or v_n * 4 >= v_total)) or v_done + v_n > v_cap;
   if v_hold then
-    v_why := case when v_done + v_n > 15 and v_n <= 3 then 'Needs attention: too many rows were deleted from this tab today, so nothing was removed from the website. Delete wrong entries on the website.'
+    v_why := case when v_done + v_n > v_cap and v_n <= 3 then 'Needs attention: too many rows were deleted from this tab today, so nothing was removed from the website. Delete wrong entries on the website.'
                   else format('Needs attention: %s rows disappeared at once, so nothing was removed from the website. Delete wrong entries on the website, or delete fewer rows at a time.', v_n) end;
   end if;
 
@@ -2062,18 +2069,20 @@ begin
             n.status := case when v_create then (case when v_err like 'DUES%' then 'waiting' else 'in_treatment' end)::public.visit_status else v.status end;
           else
             -- the owner's rule (9 Oct 2026): a row marked Completed in the sheet completes the visit. The website's photo, checker and
-            -- dues rules are skipped, and the record says exactly that.
+            -- dues rules are skipped, and the record says exactly that. Skipping the photo or check step is the owner's normal path
+            -- ("its fine to skip them"): the row stays a tick, so it does not count toward the tab heading's "need attention" (RS13-M1).
+            -- Dues not held stay a warning: front desk may still collect them (the website holds dues only when Dr. Ali turns that on).
             if p_admin is null then raise; end if;
             if v_err like 'DUES%' then
               n.dues_override_by := p_admin; n.dues_override_reason := private.aaj_override_reason();
               v_msgs := v_msgs || format('Completed from the sheet. Pending dues Rs %s were not held (owner rule).', to_char(public.patient_dues(n.patient_id), 'FM999,999,999'));
               v_over := array_append(v_over, 'dues'::text);
+              v_level := 'warn';
             else
               n.protocol_override_by := p_admin; n.protocol_override_reason := private.aaj_override_reason();
-              v_msgs := v_msgs || format('Completed from the sheet. The website''s %s step was skipped (owner rule).', case when v_err like 'PHOTO%' then 'photo' else 'check' end);
+              v_msgs := v_msgs || format('Completed from the sheet (owner rule: the website''s %s step is not needed).', case when v_err like 'PHOTO%' then 'photo' else 'check' end);
               v_over := v_over || case when v_err like 'PHOTO%' then 'photo' else 'check' end;
             end if;
-            v_level := 'warn';
           end if;
           continue;
       end;
@@ -2115,7 +2124,8 @@ begin
                  protocol_override_reason = coalesce(protocol_override_reason, private.aaj_override_reason())
            where id = n.id and protocol_override_by is null;
           insert into public.visit_staff (visit_id, clinician_id, role) values (n.id, r.id, case when r.is_doctor then 'doctor' else 'assistant' end::public.visit_staff_role);
-          v_msgs := v_msgs || format('%s is outside this month''s doctor group. Saved because the visit is Completed in the sheet (owner rule).', r.display_name); v_level := 'warn'; v_over := array_append(v_over, 'group'::text);
+          -- the owner's rule working, nothing for staff to do: a tick, not counted as "need attention" (RS13-M1)
+          v_msgs := v_msgs || format('%s is outside this month''s doctor group. Saved because the visit is Completed in the sheet (owner rule).', r.display_name); v_over := array_append(v_over, 'group'::text);
         end if;
       end;
     end loop;

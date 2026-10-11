@@ -86,7 +86,7 @@ insert into private.sync_secrets (name, secret_hash) values ('aaj_sheet_export',
   on conflict (name) do update set secret_hash = excluded.secret_hash;
 -- the defaults of the door's settings (the migration's own values, before this file changes them)
 select pg_temp.check((select value = '20' from private.aaj_sync_config where key = 'calls_per_minute'), 'the door accepts at most 20 calls a minute by default (a busy minute is about 10)');
-select pg_temp.check((select value = '120' from private.aaj_sync_config where key = 'visits_per_branch_day'), 'the sync may make at most 120 visits for one branch and day by default');
+select pg_temp.check((select value = '250' from private.aaj_sync_config where key = 'visits_per_branch_day'), 'the sync may make at most 250 visits for one branch and day by default (twice a busy day of 120 patients, RS12-1)');
 select pg_temp.check((select value = 'override' from private.aaj_sync_config where key = 'rules'), 'the Completed rule defaults to the owner''s choice (override)');
 -- this file makes more than 20 calls in one go: the rate limit has its own case near the end
 update private.aaj_sync_config set value = '100000' where key = 'calls_per_minute';
@@ -808,9 +808,9 @@ select pg_temp.check((select v.braces_month = 5 and v.braces_case_id = (select i
   'month 5 goes on the patient''s active braces case');
 select pg_temp.check((select v.status = 'completed' and v.protocol_override_by = pg_temp.s25_admin() and v.protocol_override_reason = 'Completed in the Google Sheet (owner rule, 9 Oct 2026)'
                              and v.braces_month = 1 from pg_temp.s25_vis(pg_temp.s25_k(61)) v)
-                     and pg_temp.s25_res((select resp from s25_resp where n = 'r1'), 1)->>'level' = 'warn'
-                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r1'), 1) = 'Completed from the sheet. The website''s photo step was skipped (owner rule).',
-  'a Completed row on a photo month completes the visit; the override says "Completed in the Google Sheet (owner rule, 9 Oct 2026)" and the row says so');
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'r1'), 1)->>'level' = 'ok'
+                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r1'), 1) = 'Completed from the sheet (owner rule: the website''s photo step is not needed).',
+  'a Completed row on a photo month completes the visit; the override says "Completed in the Google Sheet (owner rule, 9 Oct 2026)" and the row says so as a tick (the owner''s normal path, not "need attention": RS13-M1)');
 select pg_temp.check((select count(*) = 1 and bool_and(actor = '00000000-0000-0000-0000-0000000aa500') and bool_and(new_data->'overrides' = '["photo"]'::jsonb)
                         from public.audit_log where action = 'SHEET_SYNC' and row_id = (pg_temp.s25_vis(pg_temp.s25_k(61))).id::text),
   'the audit actor of that completion is the Google Sheet sync, and the override is listed in it');
@@ -832,7 +832,8 @@ select pg_temp.check((select v.status = 'completed' and v.protocol_override_by =
                              and v.sheet_cells->'doctors'->'pending' = '[]'::jsonb from pg_temp.s25_vis(pg_temp.s25_k(62)) v)
                      and pg_temp.s25_docs(pg_temp.s25_k(62)) = 'Dr. Samrah Khan:doctor' and private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(62))).id)->>'doctors' = 'Dr. Samrah Khan'
                      and pg_temp.s25_res((select resp from s25_resp where n = 'r1c'))->'kept_website' = '[]'::jsonb
-                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r1c')) = 'Completed from the sheet. The website''s check step was skipped (owner rule).',
+                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r1c')) = 'Completed from the sheet (owner rule: the website''s check step is not needed).'
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'r1c'))->>'level' = 'ok',
   'the doctor typed first is added when the row is marked Completed later (status alone is sent): the owner-rule override of the completion lets the group rule pass, and the cell was never rewritten');
 select pg_temp.check((select count(*) = 1 from public.audit_log where action = 'SHEET_SYNC' and row_id = (pg_temp.s25_vis(pg_temp.s25_k(62))).id::text and new_data->'overrides' @> '["check"]'::jsonb
                              and new_data->'changed' @> '["status"]'::jsonb and actor = '00000000-0000-0000-0000-0000000aa500'),
@@ -872,8 +873,9 @@ select pg_temp.check(pg_temp.s25_docs(pg_temp.s25_k(1301)) = 'Dr. Samrah Khan:do
 insert into s25_resp select 'r2', pg_temp.s25_sync(pg_temp.s25_one('ISB', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(60),
   '{"status":{"t":"Completed","v":"completed"}}', false, '{"status":"Waiting"}', (pg_temp.s25_now_ms() + 1000)))));
 select pg_temp.check((select v.status = 'completed' and v.protocol_override_by = pg_temp.s25_admin() and v.protocol_override_reason = 'Completed in the Google Sheet (owner rule, 9 Oct 2026)' from pg_temp.s25_vis(pg_temp.s25_k(60)) v)
-                     and pg_temp.s25_out((select resp from s25_resp where n = 'r2')) = 'updated' and pg_temp.s25_msg((select resp from s25_resp where n = 'r2')) = 'Completed from the sheet. The website''s check step was skipped (owner rule).',
-  'a Waiting visit marked Completed in the sheet: the checker rule is skipped, recorded as the owner rule');
+                     and pg_temp.s25_out((select resp from s25_resp where n = 'r2')) = 'updated' and pg_temp.s25_msg((select resp from s25_resp where n = 'r2')) = 'Completed from the sheet (owner rule: the website''s check step is not needed).'
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'r2'))->>'level' = 'ok',
+  'a Waiting visit marked Completed in the sheet: the checker rule is skipped, recorded as the owner rule, and the row is a tick');
 select pg_temp.check((select count(*) from public.audit_log where table_name = 'visits' and action = 'SHEET_SYNC' and new_data->'overrides' = '["check"]'::jsonb and row_id = (pg_temp.s25_vis(pg_temp.s25_k(60))).id::text) = 1, 'the override is in the audit row');
 -- a doctor outside the month's group on a visit that is Completed in the sheet: added, recorded as the owner rule
 insert into public.patients (mr_number, full_name, phone, first_branch_id) values ('26021', 'Group Test', '03120000021', 5);
@@ -885,8 +887,9 @@ alter table public.visits enable trigger visits_before_write;
 insert into s25_resp select 'r2g', pg_temp.s25_sync(pg_temp.s25_one('ISB', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(66),
   '{"mr":"26021","name":"Group Test","status":{"t":"Completed","v":"completed"},"doctors":{"t":"Dr. Samrah Khan","v":["Dr. Samrah Khan"]}}'))));
 select pg_temp.check(pg_temp.s25_docs(pg_temp.s25_k(66)) = 'Dr. Samrah Khan:doctor' and (select v.protocol_override_by = pg_temp.s25_admin() and v.protocol_override_reason = 'Completed in the Google Sheet (owner rule, 9 Oct 2026)' from pg_temp.s25_vis(pg_temp.s25_k(66)) v)
-                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r2g')) like 'Dr. Samrah Khan is outside this month''s doctor group. Saved because the visit is Completed in the sheet (owner rule).',
-  'a doctor outside the month''s group on a Completed row is added, recorded as the owner rule');
+                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r2g')) like 'Dr. Samrah Khan is outside this month''s doctor group. Saved because the visit is Completed in the sheet (owner rule).'
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'r2g'))->>'level' = 'ok',
+  'a doctor outside the month''s group on a Completed row is added, recorded as the owner rule, and the row is a tick');
 
 -- dues hold (block mode): a Completed row completes, and the dues are not held; a Treatment row is held back by the website's rule
 insert into public.invoices (patient_id, branch_id) values (:pq, 3);
@@ -895,8 +898,9 @@ update public.app_settings set value = '"block"' where key = 'dues_hold_mode';
 insert into s25_resp select 'r3', pg_temp.s25_sync(pg_temp.s25_one('DHA', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(63),
   '{"mr":"25013","name":"Qasim Ali","status":{"t":"Completed","v":"completed"}}'))));
 select pg_temp.check((select v.status = 'completed' and v.dues_override_by = pg_temp.s25_admin() and v.dues_override_reason = 'Completed in the Google Sheet (owner rule, 9 Oct 2026)' from pg_temp.s25_vis(pg_temp.s25_k(63)) v)
-                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r3')) = 'Completed from the sheet. Pending dues Rs 5,000 were not held (owner rule).',
-  'dues hold: a Completed row completes (not every patient owes money); the dues override is recorded as the owner rule');
+                     and pg_temp.s25_msg((select resp from s25_resp where n = 'r3')) = 'Completed from the sheet. Pending dues Rs 5,000 were not held (owner rule).'
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'r3'))->>'level' = 'warn',
+  'dues hold: a Completed row completes (not every patient owes money); the dues override is recorded as the owner rule and stays a warning (front desk may still collect)');
 insert into s25_resp select 'r3b', pg_temp.s25_sync(pg_temp.s25_one('NN', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(67),
   '{"mr":"25013","name":"Qasim Ali","status":{"t":"Treatment","v":"in_treatment"}}'))));
 select pg_temp.check((select v.status = 'waiting' and v.dues_override_by is null from pg_temp.s25_vis(pg_temp.s25_k(67)) v)
@@ -1146,12 +1150,12 @@ drop table public.zz_attach_25;
 insert into s25_resp select 'rm9', pg_temp.s25_sync(pg_temp.s25_pl(jsonb_build_array(pg_temp.s25_tab('NN', '[]', pg_temp.s25_nn_keys(array[pg_temp.s25_k(130), pg_temp.s25_k(131)]))), true));
 select pg_temp.check((select resp->'tabs'->0->'removed' = '[]'::jsonb from s25_resp where n = 'rm9'), 'visits that are already Cancelled are left alone when their rows are gone');
 
--- no more than 15 removals a day for a branch: after that rows are put back
+-- no more than 15 removals a day for a branch with a small day (35 in 100 of the day's rows is less than 15 here): after that rows are put back
 insert into public.audit_log (table_name, row_id, action, new_data, actor)
   select 'visits', null, 'SHEET_REMOVED', jsonb_build_object('branch', 'NN', 'action', 'deleted', 'key', 'S-fffffffff' || lpad(to_hex(g), 3, '0')), '00000000-0000-0000-0000-0000000aa500' from generate_series(1, 10) g;
 insert into s25_resp select 'rm10', pg_temp.s25_sync(pg_temp.s25_pl(jsonb_build_array(pg_temp.s25_tab('NN', '[]', pg_temp.s25_nn_keys(array[pg_temp.s25_k(104)]))), true));
 select pg_temp.check((select x->>'action' = 'restore' and x->>'message' like 'Needs attention: too many rows were deleted from this tab today%' from (select pg_temp.s25_rm((select resp from s25_resp where n = 'rm10'), pg_temp.s25_k(104)) x) y)
-                     and exists (select 1 from public.visits where sheet_key = pg_temp.s25_k(104) and status <> 'cancelled'), 'after 15 removals in a day for a branch the next one is held, not applied');
+                     and exists (select 1 from public.visits where sheet_key = pg_temp.s25_k(104) and status <> 'cancelled'), 'after 15 removals in a day for a branch with a small day the next one is held, not applied (15 is the least; a busy day: RS12-1 at the end)');
 delete from public.audit_log where action = 'SHEET_REMOVED' and new_data->>'key' like 'S-fffffffff%';
 
 -- a quarter of a small tab gone at once is held: 2 rows of 8 held, 2 rows of 9 removed
@@ -1567,7 +1571,7 @@ select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'nn3')
   'the patient file''s own name, letter for letter, with their own phone is a plain tick');
 
 -- (c) the sync makes only so many visits for a branch and day, whoever sends them
-select pg_temp.check((select value = '120' from private.aaj_sync_config where key = 'visits_per_branch_day'), 'the default cap is 120 visits a day for one branch (the busiest tab of the real sheet has about 50 rows)');
+select pg_temp.check((select value = '250' from private.aaj_sync_config where key = 'visits_per_branch_day'), 'the default cap is 250 visits a day for one branch (twice the owner''s busy day of about 120 patients)');
 insert into public.patients (mr_number, full_name, phone, first_branch_id) values
   ('26060', 'Cap One', '03150000060', 5), ('26061', 'Cap Two', '03150000061', 5), ('26062', 'Cap Three', '03150000062', 5), ('26063', 'Cap Website', '03150000063', 5);
 insert into public.visits (patient_id, branch_id, visit_date, status) select id, 5, pg_temp.s25_today(), 'waiting' from public.patients where mr_number = '26063';
@@ -1587,7 +1591,7 @@ select pg_temp.check((select string_agg(pg_temp.s25_out(resp, g::int), ',' order
 select pg_temp.check(not exists (select 1 from public.patients where mr_number = '9955')
                      and (select patients = (select count(*) from public.patients) and visits + 2 = (select count(*) from public.visits) from s25_cnt where n = 'cap0'),
   'the refused Healthwire row made no patient either (the cap is checked before the patient is made)');
-update private.aaj_sync_config set value = '120' where key = 'visits_per_branch_day';
+update private.aaj_sync_config set value = '250' where key = 'visits_per_branch_day';
 
 -- (d) the checkup's sheet key is the sync's own: signed-in staff (the front desk) cannot write it; Dr. Ali and the SQL editor can
 insert into public.checkups (checkup_date, branch_id, patient_name, source) values (pg_temp.s25_today(), 1, 'Guard Target', 'website');
@@ -1915,7 +1919,7 @@ select pg_temp.check((select patients = (select count(*) from public.patients) a
   'nothing is made or looked up for those rows');
 select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'g9'), 3) = 'duplicate',
   'a patient already on today''s list (the sheet sees them anyway) is still recognised at the cap: here as the same patient in another row');
-update private.aaj_sync_config set value = '120' where key = 'visits_per_branch_day';
+update private.aaj_sync_config set value = '250' where key = 'visits_per_branch_day';
 -- (c) a surname alone is not a fit: "Qureshi" typed with the Mr# of "Zubaida Qureshi" is refused and names nobody
 insert into s25_resp select 'g10', pg_temp.s25_sync(pg_temp.s25_one('NN', jsonb_build_array(
   pg_temp.s25_row(pg_temp.s25_k(1765), '{"mr":"28041","name":"Qureshi"}'),
@@ -2878,6 +2882,59 @@ select pg_temp.check((select resp->>'ok' = 'true' from s25_resp where n = 'lg9')
                      and exists (select 1 from public.visits v join public.patients p on p.id = v.patient_id where p.mr_number = '19958' and v.status = 'completed' and v.sheet_key is null),
   'RV9-2: Dr. Ali''s undo puts the visit and the file made from the slip back (as a website row)');
 update private.aaj_sync_config set value = '30' where key = 'new_patients_per_branch_day';
+
+-- =====================================================================
+-- (sheet-behaviour RS12-1, 11 Oct 2026) a busy day. The owner: "sometimes on a busy day, we have like 120 patients". 130 rows typed in one
+-- tab all become visits (the old cap of 120 refused the last 10), and 40 of them deleted one at a time (no-shows, wrong entries) are all
+-- removed: the day's removals may reach 35 in 100 of the rows the sheet has had today (the old 15 put the 16th row back, again and again).
+-- In the DHA tab (emptied first: its own list and its own count of the day's removals)
+-- =====================================================================
+delete from public.invoices where visit_id in (select id from public.visits where branch_id = 3 and visit_date = pg_temp.s25_today());
+delete from public.visits where branch_id = 3 and visit_date = pg_temp.s25_today();
+delete from public.checkups where branch_id = 3 and checkup_date = pg_temp.s25_today();
+delete from public.audit_log where action = 'SHEET_REMOVED' and new_data->>'branch' = 'DHA';
+insert into public.patients (mr_number, full_name, phone, first_branch_id)
+  select (31000 + g)::text, 'Busy Day ' || g, '0316' || lpad(g::text, 7, '0'), 3 from generate_series(1, 130) g;
+create temp table s25_busy as select g, pg_temp.s25_k(4000 + g) as k from generate_series(1, 130) g;
+create temp table s25_busy_gone (g int primary key);
+-- the tab as the sheet sends it: every row still on it
+create or replace function pg_temp.s25_busy_present() returns text[] language sql as $$
+  select array(select k from s25_busy b where not exists (select 1 from s25_busy_gone x where x.g = b.g) order by g) $$;
+grant execute on all functions in schema pg_temp to authenticated, anon;
+do $$
+declare b int;
+begin
+  for b in 0..5 loop       -- 25 rows a call, as the script sends them
+    insert into s25_resp select 'busy' || b, pg_temp.s25_sync(pg_temp.s25_pl(jsonb_build_array(pg_temp.s25_tab('DHA',
+      (select jsonb_agg(pg_temp.s25_row(k, jsonb_build_object('mr', (31000 + g)::text, 'name', 'Busy Day ' || g, 'status', jsonb_build_object('t', 'Scheduled', 'v', 'scheduled'))) order by g)
+         from s25_busy where g > b * 25 and g <= b * 25 + 25),
+      pg_temp.s25_busy_present())), false));
+  end loop;
+end $$;
+select pg_temp.check((select count(*) from s25_resp, jsonb_array_elements(resp->'tabs'->0->'results') x where n like 'busy_' and x->>'outcome' = 'created') = 130
+                     and (select count(*) from public.visits where branch_id = 3 and visit_date = pg_temp.s25_today()) = 130,
+  'RS12-1: 130 rows typed in one tab on a busy day are all made (the cap is 250 visits a branch and day; before, rows 121 to 130 were refused)');
+-- 46 rows deleted, one a minute: every one is removed (35 in 100 of the day's 130 rows is 46)
+do $$
+declare d int;
+begin
+  for d in 1..46 loop
+    insert into s25_busy_gone values (d * 2);
+    insert into s25_resp select 'busyrm' || d, pg_temp.s25_sync(pg_temp.s25_pl(jsonb_build_array(pg_temp.s25_tab('DHA', '[]', pg_temp.s25_busy_present())), true));
+  end loop;
+end $$;
+select pg_temp.check((select count(*) from s25_resp, jsonb_array_elements(resp->'tabs'->0->'removed') x where n like 'busyrm%' and x->>'action' = 'deleted') = 46
+                     and not exists (select 1 from s25_resp, jsonb_array_elements(resp->'tabs'->0->'removed') x where n like 'busyrm%' and x->>'action' <> 'deleted')
+                     and (select count(*) from public.visits where branch_id = 3 and visit_date = pg_temp.s25_today()) = 84
+                     and (select count(*) from public.audit_log where action = 'SHEET_REMOVED' and new_data->>'branch' = 'DHA' and new_data->>'action' = 'deleted') = 46,
+  'RS12-1: on that busy day 46 rows deleted one at a time are all removed from the website and audited (before: from the 16th on every deleted row came back)');
+-- the 47th is more than 35 in 100 of the day: held, its row comes back with the reason
+insert into s25_busy_gone values (95);
+insert into s25_resp select 'busyrm47', pg_temp.s25_sync(pg_temp.s25_pl(jsonb_build_array(pg_temp.s25_tab('DHA', '[]', pg_temp.s25_busy_present())), true));
+select pg_temp.check((select x->>'action' = 'restore' and x->>'message' like 'Needs attention: too many rows were deleted from this tab today%'
+                        from (select pg_temp.s25_rm((select resp from s25_resp where n = 'busyrm47'), (select k from s25_busy where g = 95)) x) y)
+                     and exists (select 1 from public.visits where sheet_key = (select k from s25_busy where g = 95)),
+  'RS12-1: the 47th deletion of that day (more than 35 in 100 of its 130 rows) is held and its row put back, as before at the 16th of a small day');
 
 update private.aaj_sync_config set value = '20' where key = 'calls_per_minute';
 select setval('public.mr_number_seq', last_value, is_called) from s25_seq;

@@ -1,6 +1,7 @@
 // A fake Google for apps-script/AajSync.js: SpreadsheetApp (tabs, ranges, hidden columns, a tab's basic filter, creating a second
-// spreadsheet), PropertiesService, LockService, ScriptApp triggers, Utilities, UrlFetchApp, SpreadsheetApp.getUi()
-// with scripted answers, and a clock. The script file is loaded into a separate JavaScript context with
+// spreadsheet), Google Sheets tables (env.addTable, env.sortTable, env.deleteTableRow; no basic filter over a table) and the Advanced Sheets
+// service that reads and widens them (Sheets.Spreadsheets.get / batchUpdate updateTable; createEnv({ sheetsService: false }) = not turned
+// on), PropertiesService, LockService, ScriptApp triggers, Utilities, UrlFetchApp, SpreadsheetApp.getUi() with scripted answers, and a clock. The script file is loaded into a separate JavaScript context with
 // node:vm, exactly as Google would run it (plain script, its top-level names become globals).
 //
 // Time is simulated. Every Google call advances the clock by a plausible cost (COST below), so "how long does a
@@ -120,10 +121,14 @@ function makeEnv(options = {}) {
     }
     setNumberFormat(fmt) { charge('write', env.cost.write); this.sheet.formats = this.sheet.formats || new Map(); this.sheet.formats.set(this.c, fmt); return this; }
     getFontColors() { charge('read', env.cost.read); return this._each((cell, r, c) => this.sheet.fonts.get(r + ',' + c) || '#000000'); }
-    // Data > Create a filter: one basic filter per sheet (Google throws when the sheet has one already)
+    // Data > Create a filter: one basic filter per sheet (Google throws when the sheet has one already), never over a table (a table has its own)
     createFilter() {
       charge('structure', env.cost.structure);
       if (this.sheet.filter) throw new Error('You can\'t create a filter in a sheet that already has a filter.');
+      if (this.sheet.tables.some((t) => t.range.r <= this.r + this.nr - 1 && this.r <= t.range.r + t.range.nr - 1 && t.range.c <= this.c + this.nc - 1 && this.c <= t.range.c + t.range.nc - 1)) {
+        env.stats.filterOverTable = (env.stats.filterOverTable || 0) + 1;
+        throw new Error('You can\'t create a filter over a table. Tables have their own filters.');
+      }
       this.sheet.filter = new Filter(this.sheet, this);
       env.stats.filtersCreated = (env.stats.filtersCreated || 0) + 1;
       return this.sheet.filter;
@@ -143,6 +148,7 @@ function makeEnv(options = {}) {
   class Sheet {
     constructor(book, name, { maxRows = 1000, maxCols = 26 } = {}) {
       this.book = book; this.name = name; this.cells = new TrackedMap(); this.fonts = new Map(); this.hidden = new Set(); this.maxRows = maxRows; this.maxCols = maxCols; this.id = ++env.sheetSeq;
+      this.tables = [];      // Google Sheets tables on this tab: {tableId, name, range: {r, c, nr, nc}, columns: [{columnIndex, columnName, columnType}], footer}
     }
     _get(r, c) { return this.cells.get(r + ',' + c) || null; }
     _set(r, c, cell) { if (cell) this.cells.set(r + ',' + c, cell); else this.cells.delete(r + ',' + c); }
@@ -333,7 +339,68 @@ function makeEnv(options = {}) {
     static now() { return env.clock.ms; }
   }
 
-  env.sandbox = { SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date: MockDate, console, Logger: { log() {} } };
+  // ---------- the Advanced Sheets service (Sheets API v4): only what the script uses, the tables of a spreadsheet ----------
+  // A GridRange is 0-based and end-exclusive; like the real JSON, a field that is 0 is left out (sheetId 0, startRowIndex 0).
+  const grid = (sheet, g) => {
+    const o = { sheetId: sheet.id, startRowIndex: g.r - 1, endRowIndex: g.r - 1 + g.nr, startColumnIndex: g.c - 1, endColumnIndex: g.c - 1 + g.nc };
+    for (const k of Object.keys(o)) if (o[k] === 0) delete o[k];
+    return o;
+  };
+  env.sheetsErrors = {};          // {get: 'message'} or {update: 'message'}: that call throws (the API refuses or is down)
+  env.sheetsCalls = [];
+  const Sheets = {
+    Spreadsheets: {
+      get(id, opts = {}) {
+        charge('fetch', env.cost.fetch);
+        env.sheetsCalls.push({ kind: 'get', id, opts });
+        if (env.sheetsErrors.get) throw new Error(env.sheetsErrors.get);
+        const b = env.books.find((x) => x.id === id);
+        if (!b) throw new Error('Requested entity was not found.');
+        if (!/tables/.test(opts.fields || '')) throw new Error('the mock only answers fields with sheets.tables');
+        return {
+          sheets: b.sheets.map((s) => {
+            const out = { properties: { sheetId: s.id, title: s.name } };
+            if (!s.id) delete out.properties.sheetId;
+            if (s.tables.length) out.tables = s.tables.map((t) => ({ tableId: t.tableId, name: t.name, range: grid(s, t.range) }));
+            return out;
+          }),
+        };
+      },
+      batchUpdate(resource, id) {
+        charge('fetch', env.cost.fetch);
+        env.sheetsCalls.push({ kind: 'batchUpdate', id, resource: JSON.parse(JSON.stringify(resource)) });
+        if (env.sheetsErrors.update) throw new Error(env.sheetsErrors.update);
+        const b = env.books.find((x) => x.id === id);
+        if (!b) throw new Error('Requested entity was not found.');
+        for (const rq of resource.requests || []) {
+          const u = rq.updateTable;
+          if (!u || Object.keys(rq).length !== 1) throw new Error('the mock only knows updateTable');
+          if (!u.fields || !u.table || !u.table.tableId) throw new Error('Invalid requests[0].updateTable: fields and table.tableId are required');
+          let sheet = null, t = null;
+          for (const s of b.sheets) for (const x of s.tables) if (x.tableId === u.table.tableId) { sheet = s; t = x; }
+          if (!t) throw new Error('Invalid requests[0].updateTable: No table with id: ' + u.table.tableId);
+          if (u.fields !== 'range') throw new Error('the mock only updates the range');
+          const g = u.table.range || {};
+          if ((g.sheetId || 0) !== sheet.id) throw new Error('Invalid requests[0].updateTable: the range is on another sheet');
+          const nr = { r: (g.startRowIndex || 0) + 1, c: (g.startColumnIndex || 0) + 1 };
+          nr.nr = (g.endRowIndex || 0) - (nr.r - 1); nr.nc = (g.endColumnIndex || 0) - (nr.c - 1);
+          if (!(nr.nr >= 1 && nr.nc >= 1)) throw new Error('Invalid requests[0].updateTable: empty range');
+          for (const o of sheet.tables) if (o !== t && o.range.r <= nr.r + nr.nr - 1 && nr.r <= o.range.r + o.range.nr - 1 && o.range.c <= nr.c + nr.nc - 1 && nr.c <= o.range.c + o.range.nc - 1) throw new Error('Invalid requests[0].updateTable: tables cannot overlap');
+          // the columns the table keeps keep their name and type; a new column is named by its header cell
+          const cols = [];
+          for (let c = nr.c; c < nr.c + nr.nc; c++) {
+            const old = t.columns.find((x) => x.columnIndex === c - t.range.c);
+            cols.push(old && c < t.range.c + t.range.nc ? { ...old, columnIndex: c - nr.c } : { columnIndex: c - nr.c, columnName: display(sheet._get(nr.r, c)) || 'Column ' + (c - nr.c + 1), columnType: 'TEXT' });
+          }
+          t.range = nr; t.columns = cols;
+          env.stats.tablesUpdated = (env.stats.tablesUpdated || 0) + 1;
+        }
+        return { spreadsheetId: id, replies: (resource.requests || []).map(() => ({})) };
+      },
+    },
+  };
+
+  env.sandbox = { SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date: MockDate, console, Logger: { log() {} }, Sheets: options.sheetsService === false ? undefined : Sheets };
   env.Sheet = Sheet; env.Book = Book; env.Range = Range; env.Filter = Filter;
   return env;
 }
@@ -347,11 +414,13 @@ export function createEnv(options = {}) {
   const varNames = [...src.matchAll(/^var\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
   const sb = env.sandbox;
   const NL = String.fromCharCode(10);
-  const wrapper = '(function (SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date, console, Logger) {' + NL + src + NL + ';var __api = {};' + NL
+  // Sheets (the Advanced Sheets service) is a parameter only when it is turned on: otherwise the name does not exist, as in Google
+  const params = 'SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date, console, Logger' + (sb.Sheets ? ', Sheets' : '');
+  const wrapper = '(function (' + params + ') {' + NL + src + NL + ';var __api = {};' + NL
     + fnNames.map((n) => '__api.' + n + ' = ' + n + ';').join(NL)
     + varNames.map((n) => NL + 'Object.defineProperty(__api, ' + JSON.stringify(n) + ', { get: function () { return ' + n + '; }, set: function (v) { ' + n + ' = v; }, enumerable: true });').join('')
     + NL + 'return __api;' + NL + '})';
-  const ctx = vm.runInNewContext(wrapper, {}, { filename: 'AajSync.js' })(sb.SpreadsheetApp, sb.PropertiesService, sb.LockService, sb.ScriptApp, sb.Utilities, sb.UrlFetchApp, sb.Date, sb.console, sb.Logger);
+  const ctx = vm.runInNewContext(wrapper, {}, { filename: 'AajSync.js' })(sb.SpreadsheetApp, sb.PropertiesService, sb.LockService, sb.ScriptApp, sb.Utilities, sb.UrlFetchApp, sb.Date, sb.console, sb.Logger, sb.Sheets);
   env.ctx = ctx;
   env.source = src;
 
@@ -408,6 +477,39 @@ export function createEnv(options = {}) {
   env.openErrors = {};
   // tests that move cells around directly (a sort, a paste of hidden columns) call this, as Google's on-change trigger would
   env.touch = () => { if (installed('aajOnChange')) ctx.aajOnChange({ changeType: 'OTHER', source: env.book }); };
+  // ----- Google Sheets tables (Insert > Table; all five real branch tabs are tables, without a basic filter) -----
+  let tableSeq = 0;
+  // a table over rows r..r+nr-1 and columns c..c+nc-1 (header in its first row); footer = the coloured last row the real Gulshan table has
+  env.addTable = (tabName, { r = 1, c = 1, nr, nc, name = tabName.replace(/\s+/g, '_'), footer = false, types = {} } = {}) => {
+    const sh = env.tab(tabName);
+    const t = { tableId: String(1000000 + (++tableSeq)), name, range: { r, c, nr: nr || Math.max(2, sh.used().rows), nc: nc || sh.used().cols }, footer, columns: [] };
+    for (let j = 0; j < t.range.nc; j++) t.columns.push({ columnIndex: j, columnName: display(sh._get(r, c + j)) || 'Column ' + (j + 1), columnType: types[j] || 'TEXT' });
+    sh.tables.push(t);
+    return t;
+  };
+  const tableOf = (sh) => { if (sh.tables.length !== 1) throw new Error('the test tab has ' + sh.tables.length + ' tables'); return sh.tables[0]; };
+  const cellText = (cell) => (cell ? String(cell.v) : '');
+  // the sort in a table column's menu: the table's data rows are sorted by one of its columns, only the table's columns move (hidden ones in it
+  // too), empty cells last in both directions; a stable sort, as in Sheets. Google runs the on-change trigger
+  env.sortTable = (tabName, col, dir = 1) => {
+    const sh = env.tab(tabName), t = tableOf(sh), { r, c, nr, nc } = t.range;
+    if (col < c || col >= c + nc) throw new Error('column ' + col + ' is not in the table');
+    const data = [];
+    for (let rr = r + 1; rr < r + nr; rr++) { const row = []; for (let j = 0; j < nc; j++) row.push(sh._get(rr, c + j)); data.push(row); }
+    data.sort((a, b) => { const ea = !cellText(a[col - c]), eb = !cellText(b[col - c]); if (ea !== eb) return ea ? 1 : -1; return dir * cellText(a[col - c]).localeCompare(cellText(b[col - c]), 'en', { numeric: true }); });
+    data.forEach((row, i) => row.forEach((cell, j) => sh._set(r + 1 + i, c + j, cell)));
+    env.touch();
+  };
+  // a table row deleted from the table's own menu: the cells of the table's columns below move up one row (other columns stay), the table
+  // gets one row shorter. Google runs the on-change trigger
+  env.deleteTableRow = (tabName, row) => {
+    const sh = env.tab(tabName), t = tableOf(sh), { r, c, nr, nc } = t.range;
+    if (row <= r || row >= r + nr) throw new Error('row ' + row + ' is not a data row of the table');
+    const last = Math.max(sh.used().rows, r + nr - 1);
+    for (let rr = row; rr <= last; rr++) for (let j = 0; j < nc; j++) sh._set(rr, c + j, sh._get(rr + 1, c + j));
+    t.range.nr -= 1;
+    env.touch();
+  };
   env.clearRow = (tabName, r, fromCol = 1, toCol = null, { trigger = true } = {}) => {
     const sh = env.tab(tabName); const to = toCol || sh.used().cols;
     for (let c = fromCol; c <= to; c++) sh._set(r, c, null);

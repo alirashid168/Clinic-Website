@@ -10,6 +10,8 @@
  *   checkup patient (no patient file) when its Treatment says checkup (any other Treatment: "Needs attention: add the Mr#"); at night
  *   the checkup patients are also added to the "Checkup karwaliya" sheet.
  *   A row deleted in the sheet is removed from the website too (the website refuses when something real hangs on it).
+ *   The branch tabs are Google Sheets tables: the Advanced Sheets service ("Sheets", apps-script/appsscript.json) lets Set up widen each
+ *   table over the hidden columns, so a sort moves whole rows. Without it the sync still works (the log says what to do by hand).
  *   Setup, step by step: docs/AAJ-SYNC-SETUP.md
  *   Rules and the website's side of the conversation: .omc/handoffs/aaj-sync-design.md (sections 2, 6 and "Changes during build").
  *
@@ -586,7 +588,10 @@ function aajFindMoves(grid, cols, hc, listDate, branch) {
   var day0 = aajDayStartMs_(listDate), edFor = function (m, from) { return m.old && (Number(edOf[from]) || 0) >= day0 ? '' : edOf[from]; };
   for (r in claim) if (Object.prototype.hasOwnProperty.call(claim, r)) out[r] = { key: claim[r].m.key, baseText: claim[r].m.baseText, from: claim[r].r, edited: edFor(claim[r].m, claim[r].r) };
   // a "deleted" or earlier-day memory left behind by a sort that was not a closed exchange (or on a blank row) goes to the one row that shows
-  // exactly its person (and does not hold its own): the deleted visit is not made again, yesterday's patient is never sent as a visit of today
+  // exactly its person (and does not hold its own): the deleted visit is not made again, yesterday's patient is never sent as a visit of today.
+  // So does any memory whose only place is a blank row: "Delete cells, shift up" (or a sort over a blank row) moved its person off its key. A
+  // row the website added a minute ago is claimed only by the next call; sent as a new row it would be added a second time, and with a
+  // phone-less checkup a second checkup made (RS12-2)
   var mineHolds = {};
   for (i = 0; i < places.length; i++) if (!places[i].m.bad && holds(places[i])) mineHolds[places[i].r] = true;
   var idOf = function (rr) { return textOf(AAJ_ID_FIELDS, function (mf) { return aajFieldKey(mf, grid[rr - 1][cols[mf]]); }); };
@@ -596,7 +601,8 @@ function aajFindMoves(grid, cols, hc, listDate, branch) {
   };
   for (i = 0; i < memList.length; i++) {
     var gm = memList[i];
-    if (!(gm.gone || gm.old) || gm.places.length + (gm.places.length ? 0 : gm.lost.length) !== 1) continue;
+    var onBlank = !gm.places.length && gm.lost.length === 1;
+    if (!(gm.gone || gm.old || onBlank) || gm.places.length + (gm.places.length ? 0 : gm.lost.length) !== 1) continue;
     var gr = gm.places.length ? gm.places[0] : gm.lost[0];
     if ((gm.places.length && idOf(gr) === gm.idWas) || keyTaken(gm.key)) continue;     // (a place given another memory here still hands on its own)
     var hits = [];
@@ -647,7 +653,8 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
     listDate: listDate, branch: opts.branch || '', cols: cols, hc: hc, grid: grid, nowMs: nowMs, rows: [], present: [], newKeys: [], rekeys: [], stamps: [],
     releases: [], releaseBusy: false, named: 0, tooMany: false, lastNamed: 1, keyRow: {}, statusText: {}, headers: [], final: !!opts.final, swaps: [],
     doubled: [],                   // keys on two rows that show the same person (the lower row is a pure copy, RV-1 / RV-3)
-    unanswered: false              // a key whose first answer never came back left its person (aajPendingMoved): no removal pass this minute
+    unanswered: false,             // a key whose first answer never came back left its person (aajPendingMoved): no removal pass this minute
+    releasedKeys: {}               // the keys of the rows released this minute (aajReconcileTab never adds their record back in the same minute)
   };
   // rows that only changed places in a sort of the visible columns take the key and memory of the person now in them (written before the send)
   var moves = aajFindMoves(grid, cols, hc, listDate, opts.branch || '');
@@ -675,7 +682,11 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
     var swapRec = swapped ? { r: r, key: keyText, base: baseText, edited: moves[r].edited } : null;
     if (hc.status >= 0) scan.statusText[r] = aajText(cells[hc.status]);
     if (!nameText) {
-      if (keyText || baseText) { scan.releases.push(r); if (edited && (nowMs - edited) < busyMs) scan.releaseBusy = true; }      // a name just cleared: it may be retyped in a moment
+      if (keyText || baseText) {
+        scan.releases.push(r);
+        if (keyText) scan.releasedKeys[keyText] = true;
+        if (edited && (nowMs - edited) < busyMs) scan.releaseBusy = true;      // a name just cleared: it may be retyped in a moment
+      }
       continue;
     }
     scan.named++;
@@ -1181,8 +1192,16 @@ function aajReconcileTab(scan, resp, ctx) {
   // when this call's removal pass says so ("restore" / "kept", with the reason), or when it was "released" (its row left the sheet while it
   // was Cancelled / No show, "removed" in the list) and has been set to work again on the website since (RS5-D2, RS5-D4).
   if (visits) {
-    var rowKeys = {};
-    for (i = 0; i < scan.rows.length; i++) rowKeys[scan.rows[i].key] = true;
+    var rowKeys = {}, waitMr = {}, waitCk = {};
+    for (i = 0; i < scan.rows.length; i++) {
+      var kr = scan.rows[i];
+      rowKeys[kr.key] = true;
+      // a new row that waits for its quiet minute (or was not sent): it adopts the visit of its Mr#, or the checkup of its name and phone, when sent
+      if (kr.state === 'new' && !kr.push && !kr.bad) {
+        if (kr.texts.mr) waitMr[aajMrOf(kr.texts.mr).mr || kr.texts.mr] = true;
+        else waitCk[aajNormName(kr.raw.name) + '|' + (aajFirstPhone(kr.raw.phone) || '')] = true;
+      }
+    }
     for (i = 0; i < visits.length; i++) {
       var v = visits[i];
       if (typeof v.key !== 'string' || !AAJ_KEY_RE.test(v.key)) continue;      // not a key the sync made: never added as a row (it would become text in the hidden key column)
@@ -1192,6 +1211,11 @@ function aajReconcileTab(scan, resp, ctx) {
       if (!isRestore) {
         if (v.removed === true) { if (v.status === 'Cancelled' || v.status === 'No show') continue; }     // released: back only once it works again
         else if (v.claimed === true) continue;      // its row was deleted, cleared or moved: the website has not said to put it back
+        // Not claimed yet (the website added it a minute ago; its key reaches the website with the next call), but its row was on the sheet: its
+        // key was on a row released this minute, or a new row that waits shows its person. That row was moved ("Delete cells, shift up", a sort
+        // over a blank row) and adopts it when it is sent; added again it would be on the sheet twice (RS12-2). The list is asked for again.
+        var waits = v.mr ? !!waitMr[String(v.mr)] : (v.kind === 'checkup' && !!waitCk[aajNormName(v.name) + '|' + (aajPhoneOf(v.phone) || '')]);
+        if (scan.releasedKeys[v.key] || waits) { out.deferred = true; continue; }
       }
       var cellsText = {}, s = {}, w = {};
       for (var af = 0; af < AAJ_FIELDS.length; af++) {
@@ -1360,28 +1384,98 @@ function aajEnsureFilter_(sh, hc) {
   return 'created';
 }
 
-/** aajEnsureFilter_ for a tab that was read, logged when it changed something (or failed: once a day). A tick looks every FILTER_EVERY_MS. */
-function aajFilterTab_(ctx, s, fromTick) {
-  var st = ctx.st, nowMs = Date.now();
-  if (fromTick) {
-    if (nowMs - (Number(st.get('filterAt:' + s.cfg.tab)) || 0) < AAJ.FILTER_EVERY_MS) return;
-    st.set('filterAt:' + s.cfg.tab, nowMs);
+/**
+ * The Google Sheets tables of this spreadsheet, read once per run with the Advanced Sheets service (appsscript.json enables it as "Sheets"):
+ * {id, tables: {sheetId: [table]}}, or {off: why} when the service is not turned on or does not answer. The real branch tabs are tables
+ * (Gulshan_KHI A1:M123 and so on, RS12-3).
+ */
+function aajTables_(ctx) {
+  if (ctx.tables) return ctx.tables;
+  var out;
+  if (typeof Sheets === 'undefined' || !Sheets || !Sheets.Spreadsheets) out = { off: 'the Google Sheets API service is not turned on in the script' };
+  else {
+    try {
+      var id = SpreadsheetApp.getActiveSpreadsheet().getId();
+      var got = Sheets.Spreadsheets.get(id, { fields: 'sheets(properties(sheetId,title),tables(tableId,name,range))' });
+      var by = {}, list = (got && got.sheets) || [];
+      for (var i = 0; i < list.length; i++) by[(list[i].properties && list[i].properties.sheetId) || 0] = list[i].tables || [];     // (a 0 is left out of the answer)
+      out = { id: id, tables: by };
+    } catch (e) { out = { off: 'the Google Sheets API did not answer: ' + aajErrText_(e) }; }
   }
+  ctx.tables = out;
+  return out;
+}
+
+/** The table of a tab's list (the one holding row 1 and the name column), or null when the tab is not a table. */
+function aajListTable_(tb, s) {
+  var list = tb.tables[s.sheet.getSheetId()] || [];
+  for (var i = 0; i < list.length; i++) {
+    var g = list[i].range || {};
+    if (!(g.startRowIndex || 0) && (g.startColumnIndex || 0) <= s.cols.name && s.cols.name < (g.endColumnIndex || 0)) return list[i];
+  }
+  return null;
+}
+
+/**
+ * A tab that is a table: the table must reach over the hidden helper columns, because a table's sort moves only its own columns and the keys
+ * would stay behind. Its range is widened to the last helper column; its rows (header and footer too), its columns and their types stay as
+ * they are. Returns 'widened' or 'ok'.
+ */
+function aajWidenTable_(tb, s, t, helperEnd) {
+  var g = t.range || {}, i;
+  if ((g.endColumnIndex || 0) >= helperEnd) return 'ok';
+  Sheets.Spreadsheets.batchUpdate({ requests: [{ updateTable: { table: { tableId: t.tableId, range: { sheetId: s.sheet.getSheetId(), startRowIndex: g.startRowIndex || 0,
+    endRowIndex: g.endRowIndex, startColumnIndex: g.startColumnIndex || 0, endColumnIndex: helperEnd } }, fields: 'range' } }] }, tb.id);
+  var hide = [s.hc.key, s.hc.base, s.hc.edited];
+  for (i = 0; i < hide.length; i++) if (!s.sheet.isColumnHiddenByUser(hide[i] + 1)) s.sheet.hideColumns(hide[i] + 1);
+  return 'widened';
+}
+
+var AAJ_TABLE_HOW = ' Dr. Ali: drag the right edge of the table over the hidden columns (Sync key, Sync base, Sync edited), or turn the table into a normal range (table menu, Convert to range), then run Set up again. See the setup guide.';
+
+/**
+ * Makes a tab's sort move whole rows, hidden helper columns included: a table is widened over them (aajWidenTable_); a tab that is not a
+ * table gets a header filter over them (aajEnsureFilter_; never over a table, Google refuses). When the Advanced Sheets service is off or
+ * refuses, nothing is changed and the log says what to do by hand (once a day). Set up, and a full-read tick every FILTER_EVERY_MS.
+ */
+function aajFilterTab_(ctx, s, fromTick) {
+  var st = ctx.st, nowMs = Date.now(), tab = s.cfg.tab;
+  if (fromTick) {
+    // (helper columns made again this minute, aajReadTab_: right of the table, so it is widened now, not ten minutes later)
+    if (!s.helpersMade && nowMs - (Number(st.get('filterAt:' + tab)) || 0) < AAJ.FILTER_EVERY_MS) return;
+    st.set('filterAt:' + tab, nowMs);
+  }
+  var tb = aajTables_(ctx);
+  var problem = function (text) {
+    ctx.tableNote = text;
+    if (fromTick && st.get('filterErr:' + tab) === ctx.today) return;
+    st.set('filterErr:' + tab, ctx.today);
+    aajLog_(ctx, tab, '', text);
+  };
+  if (tb.off) {
+    problem('Could not check whether this tab is a table (' + tb.off + '). If it is one, sorting it leaves the hidden columns behind. Dr. Ali: add the Google Sheets API in the script editor (Services, +) and run Set up again. See the setup guide.');
+    return;
+  }
+  var t = aajListTable_(tb, s), done;
   try {
-    var done = aajEnsureFilter_(s.sheet, s.hc);
-    if (done === 'created') aajLog_(ctx, s.cfg.tab, '', 'A filter was added to row 1 (it covers the hidden columns too). Sort with its buttons in row 1.');
-    else if (done === 'widened') aajLog_(ctx, s.cfg.tab, '', 'The filter in row 1 now covers the hidden columns too, so its sort buttons move whole rows.');
-    st.del('filterErr:' + s.cfg.tab);
+    if (t) {
+      done = aajWidenTable_(tb, s, t, Math.max(s.hc.status, s.hc.key, s.hc.base, s.hc.edited) + 1);
+      if (done === 'widened') aajLog_(ctx, tab, '', 'The table now reaches over the hidden columns, so its sort moves whole rows.');
+    } else {
+      done = aajEnsureFilter_(s.sheet, s.hc);
+      if (done === 'created') aajLog_(ctx, tab, '', 'A filter was added to row 1 (it covers the hidden columns too). Sort with its buttons in row 1.');
+      else if (done === 'widened') aajLog_(ctx, tab, '', 'The filter in row 1 now covers the hidden columns too, so its sort buttons move whole rows.');
+    }
+    st.del('filterErr:' + tab);
   } catch (e) {
-    if (fromTick && st.get('filterErr:' + s.cfg.tab) === ctx.today) return;
-    st.set('filterErr:' + s.cfg.tab, ctx.today);
-    aajLog_(ctx, s.cfg.tab, '', 'The filter in row 1 could not be set (' + aajErrText_(e) + '). The sync works without it; to sort, select every column first.');
+    if (t) problem('The table could not be made to reach over the hidden columns (' + aajErrText_(e) + '). Sorting it leaves them behind.' + AAJ_TABLE_HOW);
+    else problem('The filter in row 1 could not be set (' + aajErrText_(e) + '). The sync works without it; to sort, select every column first.');
   }
 }
 
 /** Reads a tab into s.grid / s.cols / s.hc (creating the helper columns when they are missing). s.problem says why not. */
 function aajReadTab_(s) {
-  s.problem = null;
+  s.problem = null; s.helpersMade = false;
   var sh = s.sheet;
   var lastRow = Math.min(sh.getLastRow(), AAJ.MAX_READ_ROWS), lastCol = sh.getLastColumn();
   if (lastRow < 1 || lastCol < 1) { s.problem = 'row 1 does not look like the list header'; return; }
@@ -1390,6 +1484,7 @@ function aajReadTab_(s) {
   var hc = aajFindHelpers(grid[0]);
   if (hc.status < 0 || hc.key < 0 || hc.base < 0 || hc.edited < 0) {
     aajEnsureHelpers_(sh, grid[0]);
+    s.helpersMade = true;
     lastRow = Math.min(sh.getLastRow(), AAJ.MAX_READ_ROWS); lastCol = sh.getLastColumn();
     grid = sh.getRange(1, 1, lastRow, lastCol).getDisplayValues();
     hc = aajFindHelpers(grid[0]);
@@ -1603,14 +1698,21 @@ function aajFreshCheck_(e) {
   return out;
 }
 
-/** The first blank rows after the last patient row (stray cells further down are skipped, never overwritten). */
+/**
+ * The first blank rows after the last patient row (stray cells further down are skipped, never overwritten). A row released this minute
+ * (aajPrewrite_ cleared its helper cells before the call) counts as blank when nothing else is in it, so an added row leaves no gap (RS12-2).
+ */
 function aajFreeRows_(scan, count, maxRows) {
-  var rows = [], r = Math.max(scan.lastNamed + 1, 2);
+  var rows = [], r = Math.max(scan.lastNamed + 1, 2), hc = scan.hc || {}, rel = {}, i;
+  for (i = 0; i < (scan.releases || []).length; i++) rel[scan.releases[i]] = true;
   while (rows.length < count) {
     var blank = true;
     if (r <= scan.grid.length) {
       var cells = scan.grid[r - 1];
-      for (var c = 0; c < cells.length; c++) if (aajText(cells[c]) !== '') { blank = false; break; }
+      for (var c = 0; c < cells.length; c++) {
+        if (rel[r] && (c === hc.status || c === hc.key || c === hc.base || c === hc.edited)) continue;
+        if (aajText(cells[c]) !== '') { blank = false; break; }
+      }
     }
     if (blank) rows.push(r);
     r++;
@@ -2594,7 +2696,7 @@ function aajHelp() {
     'Never delete more than three rows at once: the website puts them back and asks you to look.\n' +
     'A row marked Completed completes the visit on the website.\n' +
     'Never delete or unhide the hidden columns next to Website.\n' +
-    'To sort, use the filter buttons in row 1. Never sort only some of the columns.\n' +
+    'To sort, click the small arrow in a heading of the list (the table\'s menu, or the filter button in row 1) and choose Sort A to Z or Z to A: that moves whole rows, the hidden columns too. Never select only some columns and sort them.\n' +
     'The time in the Website heading should be recent. If it is older than 10 minutes during clinic hours, tell Dr. Ali.\n' +
     'At night the day is copied to the archive and the tabs start empty.',
     ui.ButtonSet.OK);
@@ -2652,8 +2754,9 @@ function aajSetup() {
   var url = '';
   try { url = id ? SpreadsheetApp.openById(id).getUrl() : ''; } catch (e) { url = ''; }
   aajOnOpen();
-  var ckNow = aajLoadState_().get('ckNote');
-  ui.alert('Aaj Sync', 'Done. The "Website" column shows a tick when a row is on the website.' + (url ? '\nArchive: ' + url : '') + (ckNow ? '\n\n' + ckNow + '\nThe sync itself works; only the nightly list of checkup patients is off until this is fixed.' : ''), ui.ButtonSet.OK);
+  var stNow = aajLoadState_(), ckNow = stNow.get('ckNote'), tbNow = stNow.get('tableNote');
+  ui.alert('Aaj Sync', 'Done. The "Website" column shows a tick when a row is on the website.' + (url ? '\nArchive: ' + url : '') + (ckNow ? '\n\n' + ckNow + '\nThe sync itself works; only the nightly list of checkup patients is off until this is fixed.' : '')
+    + (tbNow ? '\n\nSorting: ' + tbNow + ' (The sync works; the Aaj Sync log names the tabs.)' : ''), ui.ButtonSet.OK);
 }
 
 /** Can this account open and edit the checkup sheet? '' when it can, otherwise the note to show (nothing is written to it). */
@@ -2733,7 +2836,8 @@ function aajSetupLocked_(ui, ss) {
       aajArchiveTab_(ctx, s, { noWait: true, noFinal: true, noCheckups: true });
     }
   }
-  // 2b. every tab's header filter covers the hidden helper columns too, so its sort buttons move whole rows (aajEnsureFilter_)
+  // 2b. every tab's sort moves whole rows, the hidden helper columns too: a table is widened over them, another tab gets a header filter
+  // over them (aajFilterTab_). What could not be done is said in the last box
   for (i = 0; i < sheets.length; i++) {
     s = sheets[i];
     if (!s.sheet) continue;
@@ -2742,6 +2846,7 @@ function aajSetupLocked_(ui, ss) {
     aajFilterTab_(ctx, s, false);
     st.set('filterAt:' + s.cfg.tab, Date.now());
   }
+  if (ctx.tableNote) st.set('tableNote', ctx.tableNote); else st.del('tableNote');
   // 3. the old export timer
   var triggers = ScriptApp.getProjectTriggers();
   var ours = { aajSyncTick: true, aajOnEdit: true, aajOnChange: true, aajOnOpen: true };
