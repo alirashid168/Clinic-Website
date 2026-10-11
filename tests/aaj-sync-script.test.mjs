@@ -762,7 +762,7 @@ test('one bad row does not hold up the others: a photo-month Completed is saved 
   assert.match(headerOf(env, GUL), /1 need attention/, 'only the oversized cell: the owner-rule completion is not a problem (RS13-M1)');
 });
 
-test('tokens: the sheet numbers per group (token 1 three times), the website numbers once per day: typed tokens stay, the clash is reported', () => {
+test('tokens: the sheet numbers per treatment category (token 1 three times), the website numbers once per day: typed tokens stay, a repeated number is normal (plain tick)', () => {
   const rows = [
     ['9821', 'Walk A', '', 'Checkup', '1', 'Waiting', 'Group 1', '', '', '', '', '03008880001', ''],
     ['9822', 'Walk B', '', 'Checkup', '1', 'Waiting', 'Group 2', '', '', '', '', '03008880002', ''],
@@ -773,9 +773,9 @@ test('tokens: the sheet numbers per group (token 1 three times), the website num
   const { env, server } = world({ rows: { [GUL]: rows }, patients });
   settle(env, 3);
   assert.deepEqual([2, 3, 4, 5].map((r) => cellOf(env, GUL, r, 'token')), ['1', '1', '1', '2'], 'the typed tokens are untouched');
-  assert.match(statusOf(env, GUL, 3), /Token 1 is already used by Walk A\. Token not changed on the website\./);
-  assert.match(statusOf(env, GUL, 4), /Token 1 is already used/);
-  assert.equal(statusOf(env, GUL, 2), '\u2713 On website');
+  // owner, 11 Oct 2026: checkup, monthly, surgery and Dr. Ali each have their own tokens, so the same number twice is no problem
+  for (const r of [2, 3, 4, 5]) assert.equal(statusOf(env, GUL, r), '\u2713 On website', 'a plain tick, no warning: row ' + r);
+  assert.doesNotMatch(headerOf(env, GUL), /need attention/, 'a repeated token is not counted as a problem');
   const tokens = ['Walk A', 'Walk B', 'Walk C', 'Walk D'].map((n) => webVisit(server, n).token);
   assert.equal(new Set(tokens).size, 4, 'the website kept one token per patient: ' + tokens);
   quiet(env, server);
