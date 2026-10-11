@@ -1,0 +1,41 @@
+{
+  "_about": "SYNTHETIC rows in the formats of the real Aj ki List tabs (checked against the 2026-10-09 snapshot): the five header variants, 146.0, 04 Photo, Kit 80k, 1 pfm, Group 1/Group 2, Group 4, several doctors, phones with and without the leading 0, two numbers in one cell, stray cells far below the list. No real names or numbers.",
+  "headers": {
+    "Gulshan KHI": ["MR #", "Patients Name", "Months", "Treatment", "Token", "Waiting", "Group", "Doctor Name", "Treatment Details ", "P.P", "Healthwire", "Contact No", "Reminder Status"],
+    "North Nazimabad": ["Mr #", "Patient Name", "Monthly ", "Treatment", "Token No", "Waiting", "Group", "Doctor'S Name", "Treatment Details", "P.P", "Healthwire", "Contact No", "Reminder Status", "Column 13", "Column 14", "Column 16"],
+    "DHA KHI": ["Mr#", "Patient Name", "Month", "Treatment", "Token No ", "Waiting", "Column 13", "Doctor'S Name", "Treatment Details", "P.P", "Healthwire", "Contact No", "Reminder Status"],
+    "Gulberg Lhr": ["Mr #", "Patient Name", "Month", "Treatment", "Token #", "Status", "Group", "Doctor Name", "Treatment Details", "P P", "Healthwire", "Contact No", "Reminder"],
+    "Islamabad": ["Mr #", "Patient Name", "Month", "Treatment", "Token #", "Status", "Group", "Doctor Name", "Treatment Details", "P P", "Healthwire", "Contact No", "Reminder"]
+  },
+  "rows": {
+    "Gulshan KHI": [
+      ["9701", "Sample Person One", "5", "Monthly", "1", "Completed", "Group 1", "Dr Haniya, Dr. Samrah Khan", "U L 018 Pc", "35k", "Done", "03001110001", ""],
+      ["146.0", "Sample Person Two", "04 Photo", "Monthly", "2", "Treatment", "Group 1, Group 2", "Dr. Zunash, Dr. Maheen Fatima, Dr. Ali Rashid", "Brac 16 13 45 46", "", "Pending", "3001110002", "Called"],
+      ["", "Sample Person Three", "", "Checkup", "3", "Waiting", "", "Hira Anis", "", "", "", "03001110003 / 03211110003", ""],
+      ["", "sample person four lhr", "", "Scaling checkup", "", "Scheduled", "Group 4", "", "", "", "", "", ""],
+      ["NEW", "Sample Person Five", "", "Consultation checkup", "Kit 80k", "Waiting", "", "Dr Verda", "", "", "", "", ""],
+      ["9703", "Sample Person Six", "11-12", "Monthly", "1 pfm", "completed", "Group", "", "", "0", "", "0300 1110006", ""]
+    ],
+    "North Nazimabad": [
+      ["9711", "Sample Person Seven", "21 Photo", "Monthly", "4", "Completed", "Group 3", "Dr. Zunash, Dr. Maheen Fatima", "U L 016", "70k", "Done", "03001110007", "Reminder sent", "", "", ""],
+      ["", "Sample Person Eight", "", "RCT checkup", "5", "Treatment", "", "Dr Haniya", "", "", "", "03001110008", "", "", "", ""]
+    ],
+    "DHA KHI": [
+      ["8641", "Sample Person Nine", "2", "Monthly", "1", "Completed", "Group 1", "Dr. Ali Rashid", "U L014 Ext", "", "Done", "03001110009", ""],
+      ["8641", "Sample Person Ten", "8", "Monthly", "1", "Completed", "Group 2", "Dr. Ali Rashid", "U018 Upper Pc", "", "", "03001110010", ""],
+      ["", "umer", "", "Checkup", "", "Waiting", "", "", "", "", "", "", ""]
+    ],
+    "Gulberg Lhr": [
+      ["9721", "Sample Person Eleven", "6 Photo", "Monthly", "Kit 80k", "Completed", "Group 2, Group 1", "Dr Haniya, Dr. Samrah Khan", "Brac 16 13 U L 016", "35k", "Done", "03001110011", "Called"],
+      ["", "Sample Person Twelve", "", "Zirconia checkup", "4 Zirconia", "Waiting", "", "", "", "", "", "03001110012", ""],
+      ["9722", "Sample Person Thirteen", "7", "Monthly", "1 pfm", "In treatment", "Group 3", "", "", "", "", "03001110013", ""]
+    ],
+    "Islamabad": [
+      ["9731", "Sample Person Fourteen", "3", "Monthly", "Kit 80k", "Completed", "Group 3", "Dr Verda", "", "", "Done", "03001110014", ""],
+      ["9732", "Sample Person Fifteen", "", "Checkup", "Dr Verda", "Waiting", "", "", "", "", "", "03001110015", ""]
+    ]
+  },
+  "stray": {
+    "DHA KHI": [[30, 10, "P.P"], [146, 10, "P.P"], [899, 7, "Group"], [907, 7, "Group 3"], [997, 7, "Group"]]
+  }
+}

@@ -46,6 +46,12 @@ async function loginAs(page, label) {
   await page.getByRole('button', { name: new RegExp(label) }).click();
   await page.waitForSelector('.topbar');
 }
+// "Try another role" takes the staff screen away at once, but the logout itself ends a moment later by moving to the home page. A step that
+// goes to the login page before then is sent back to the home page, so wait for the home page (its doors) before going anywhere.
+async function tryAnotherRole(page) {
+  await page.getByRole('button', { name: 'Try another role' }).click();
+  await page.waitForSelector('.door');
+}
 
 // ------------------------------------------------------------- public
 const page = await newPage();
@@ -1124,11 +1130,15 @@ await step('Dr. Ali imports a Healthwire transactions export on the Import page'
 await step('Dr. Ali imports an Aaj ki List tab: branch and date chosen, visits with doctors land on the patients', async () => {
   await p7.goto(BASE + '#/staff/admin?tab=import');
   await p7.waitForSelector('h2:text("4. Aaj ki List history")');
+  // Rows: an Mr#; no Mr# but the phone and first name of a patient file (the only way a row without an Mr# is matched, never a name
+  // alone); no Mr# and a phone nobody has (not matched, listed afterwards); no Mr# and a Treatment that says checkup (a checkup patient,
+  // not a visit: not counted and not sent; those go to the checkup list through "5. Checkup list").
   const csv = [
     "Tt Mr #,Tt Patient Name,Monthly,Tt Treatment,Token No,Waiting,Group,Doctor's Name,Tt Treatment Details,P.P,Healthwire,Tt Contact No,Reminder Status",
     '9811,Areeba Siddiqui,4,Monthly,3,Completed,,"Dr. Hina (sample), Assistant Uzma (sample)",U L 016 Pc refresh,,Done,,',
-    ',Hamza Qureshi,8,Monthly,4,Completed,Group 3,Dr Nida,U L 018,,,,Called',
-    ',Nobody Here At All,,Checkup,5,Completed,,Dr. Nobody Listed,,,,,',
+    ',Hamza Qureshi,8,Monthly,4,Completed,Group 3,Dr Nida,U L 018,,,0301 0734521,Called',
+    ',Nobody Here At All,,Filling,5,Completed,,Dr. Nobody Listed,,,,0300 5550000,',
+    ',Checkup Only Sample,,Checkup,6,Completed,,Dr Nida,,,,0300 5550999,',
     ''].join('\n');
   const aaj = p7.locator('section.panel:has(h2:text("4. Aaj ki List history")) input[type=file]');
   await aaj.setInputFiles({ name: 'aaj-ki-list-sample.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
@@ -1138,11 +1148,16 @@ await step('Dr. Ali imports an Aaj ki List tab: branch and date chosen, visits w
   await p7.locator('section[data-tab] input[type=date]').dispatchEvent('change');
   await p7.waitForSelector('button:has-text("Import 3 visits")');
   assert.match(await p7.locator('main').innerText(), /Dr\. Nobody Listed \(1\)/, 'unknown doctor name listed');
+  await p7.locator('.alert:has-text("1 row has no Mr# and a Treatment that says checkup")').waitFor();
   await p7.getByRole('button', { name: 'Import 3 visits' }).click();
   await p7.waitForSelector('.alert:has-text("Visits: 2 added")');
   const text = await p7.locator('main').innerText();
   assert.match(text, /Doctors and assistants added to 3 visit slots/);
+  assert.match(text, /Checkup patients not imported as visits: 1/);
   assert.match(text, /1 names could not be matched/);
+  const unmatched = await p7.locator('table.list', { has: p7.locator('th', { hasText: 'Name on the sheet' }) }).locator('tbody').innerText();
+  assert.match(unmatched, /Nobody Here At All/);
+  assert.doesNotMatch(unmatched, /Checkup Only Sample/, 'the checkup row is skipped, not listed as a patient that could not be matched');
   await p7.goto(BASE + '#/staff/patients');
   await p7.fill('input[type=search]', '9811');
   await p7.locator('table.list tbody tr:has-text("9811") a').first().click();
@@ -2562,10 +2577,14 @@ await step('Edit on an old-list row tells Dr. Ali (and only Dr. Ali) that import
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
 await step('Front desk (North Nazimabad) on the Checkups page sees the imported North Nazimabad row and the no-branch row, never the RJ Mall or Lahore rows, and cannot remove an old-list row', async () => {
+<<<<<<< sheet-view
   await pk.getByRole('button', { name: 'Try another role' }).click();
   await pk.waitForSelector('.topbar', { state: 'detached' });
   // The logout ends on the home page; a login page opened before that would be replaced by it.
   await pk.waitForSelector('.door');
+=======
+  await tryAnotherRole(pk);
+>>>>>>> golive
   await pk.goto(BASE + '#/login/staff');
   await pk.getByRole('button', { name: /Front desk \(North Nazimabad\)/ }).click();
   await pk.waitForSelector('.topbar');
@@ -2596,7 +2615,8 @@ await step('Front desk (North Nazimabad) on the Checkups page sees the imported 
 });
 
 
-// Rows of the Aaj ki List history that have no Mr# are checkup patients: the import must never create a patient file for them.
+// Rows of the Aaj ki List history that have no Mr# never get a patient file; those whose Treatment says checkup are checkup patients and are
+// not sent as visits at all (they belong on the checkup list).
 const pi = await newPage();
 await pi.route('**/js/data/index.js', (r) => r.fulfill({
   contentType: 'text/javascript',
@@ -2612,25 +2632,28 @@ export function getData() {
 }
 `,
 }));
-await step('Import "4. Aaj ki List history": rows without an Mr# never get a new patient file, rows with an Mr# keep the "Add patient records" choice', async () => {
+await step('Import "4. Aaj ki List history": rows without an Mr# never get a new patient file (a checkup row is not even sent), rows with an Mr# keep the "Add patient records" choice', async () => {
   await loginAs(pi, 'Dr. Ali Rashid');
   await pi.goto(BASE + '#/staff/admin?tab=import');
   await pi.waitForSelector('h2:text("4. Aaj ki List history")');
   const csv = [
     "Tt Mr #,Tt Patient Name,Monthly,Tt Treatment,Token No,Waiting,Group,Doctor's Name,Tt Treatment Details,P.P,Healthwire,Tt Contact No,Reminder Status",
     '9811,Areeba Siddiqui,4,Monthly,3,Completed,,"Dr. Hina (sample)",U L 016 Pc refresh,,Done,,',
-    ',Brand New Nobody,,Checkup,6,Completed,,Dr Nida,,,,0300 5559999,', ''].join('\n');
+    ',Brand New Nobody,,Checkup,6,Completed,,Dr Nida,,,,0300 5559999,',
+    ',Forgot Mr Person,,Filling,7,Completed,,Dr Nida,,,,0300 5558888,', ''].join('\n');
   const aaj = pi.locator('section.panel:has(h2:text("4. Aaj ki List history")) input[type=file]');
   await aaj.setInputFiles({ name: 'aaj-ki-list-sample.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
   await pi.waitForSelector('section[data-tab]');
   await pi.locator('section[data-tab] select[aria-label^="Branch for"]').selectOption('2');
   await pi.locator('section[data-tab] input[type=date]').fill('2026-08-20');
   await pi.locator('section[data-tab] input[type=date]').dispatchEvent('change');
-  const box = pi.locator('label:has-text("Rows without an Mr# are checkup patients") input[type=checkbox]');
+  const box = pi.locator('label:has-text("Rows without an Mr# never get a patient file") input[type=checkbox]');
   assert.ok(await box.isChecked(), 'the box stays ticked by default');
+  await pi.locator('.alert:has-text("1 row has no Mr# and a Treatment that says checkup")').waitFor();
   await pi.getByRole('button', { name: 'Import 2 visits' }).click();
   await pi.waitForSelector('.alert:has-text("Visits:")');
-  assert.deepEqual(await pi.evaluate(() => window.__aajCalls), [{ create: true, mr: [true] }, { create: false, mr: [false] }]);
+  assert.deepEqual(await pi.evaluate(() => window.__aajCalls), [{ create: true, mr: [true] }, { create: false, mr: [false] }], 'the checkup row is not sent; the row whose Mr# was forgotten is sent without "Add patient records"');
+  await pi.locator('.alert:has-text("Checkup patients not imported as visits: 1")').waitFor();
   await pi.locator('.topsearch input').fill('Brand New Nobody');
   await pi.locator('.search-results:has-text("No patient matches")').waitFor();
 });
@@ -2759,6 +2782,7 @@ await step('phone: the Checkups page has a row on the first screen (More filters
 // ------------------------------------------------------------- Register needs both "Register new patients" and list editing
 await step('Register needs both "Register new patients" and list editing: with list editing off for a person the button is not offered, and the data layer says no', async () => {
   // (the accountant's page: its own in-memory demo data, not used again after this)
+<<<<<<< sheet-view
   await pa.getByRole('button', { name: 'Try another role' }).click();
   await pa.waitForSelector('.topbar', { state: 'detached' });
   await pa.waitForSelector('.door'); // (the logout ends on the home page; see the step above)
@@ -2767,6 +2791,12 @@ await step('Register needs both "Register new patients" and list editing: with l
   await pa.getByRole('button', { name: 'Try another role' }).click();
   await pa.waitForSelector('.topbar', { state: 'detached' });
   await pa.waitForSelector('.door');
+=======
+  await tryAnotherRole(pa);
+  await loginAs(pa, 'Dr. Ali Rashid');
+  await pa.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-nn', 'sheet.edit', false); });
+  await tryAnotherRole(pa);
+>>>>>>> golive
   await loginAs(pa, 'Front desk.*North Nazimabad');
   const rights = await pa.evaluate(async () => { const { can } = await import('/js/state.js'); return [can('patients.create'), can('sheet.edit'), can('sheet.view')]; });
   assert.deepEqual(rights, [true, false, true], 'may register patients and see the list, but not edit it');
