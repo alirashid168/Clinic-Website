@@ -24,6 +24,7 @@ export function dayEndControls({ getList, onEnded }) {
   const d = state.data;
   let shown = { key: '', closing: null }; // the note on screen: for which list, and its saved copy
   let justEnded = null; // { key, from }: the next day's list opened by "End the day", which says so
+  let noteSig = null; // what the note says now (see showNote)
   let seq = 0;
   const mayEnd = () => can('sheet.end_day') && typeof d.endDay === 'function';
   const keyOf = (l) => `${l.branchId}|${l.date}`;
@@ -36,6 +37,11 @@ export function dayEndControls({ getList, onEnded }) {
     shown = { key, closing };
     const [branchId, date] = key.split('|');
     const after = !closing && justEnded?.key === key ? justEnded.from : null;
+    // Written only when the message changes: the note is a live region, so a screen reader would say it again each time it is
+    // replaced, and refresh() runs on every reload of the list (every 20 seconds, and on every change anyone makes).
+    const sig = [key, closing?.closed_at, closing?.closed_by_name, after, mayEnd()].join('|');
+    if (sig === noteSig) return;
+    noteSig = sig;
     note.hidden = !closing && !after;
     if (closing) {
       mount(note,
@@ -87,7 +93,8 @@ export function dayEndControls({ getList, onEnded }) {
         justEnded = { key: keyOf({ branchId: list.branchId, date: next }), from: list.date };
         onEnded(next); // not awaited: the dialog closes now, the next day's list loads behind it
       } },
-    ]);
+    // Starts on Cancel, so a second Enter (or a held key) does not end the day; the counts are read out as the description.
+    ], { destructive: true });
   }
 
   return { button, historyLink, note, refresh };

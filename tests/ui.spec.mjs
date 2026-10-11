@@ -2224,6 +2224,10 @@ await step('End the day: the front desk ends today\'s list; the dialog gives the
     `${statuses.length} patients (${checkups} of them checkup patients): ${done} completed, ${busy} still waiting or in treatment. A copy of the list is saved in History.`);
   assert.match(await m.innerText(), new RegExp(`The ${busy} patients still waiting or in treatment stay as they are`));
   assert.match(await m.innerText(), new RegExp(`After that the list for ${tomorrow.label} opens`));
+  // It starts on Cancel (a second Enter or a held key does not end the day), and the counts are the dialog's description.
+  assert.equal(await pd.evaluate(() => document.activeElement?.textContent), 'Cancel', 'the dialog starts on Cancel');
+  assert.equal(await m.evaluate((el) => document.getElementById(el.getAttribute('aria-describedby'))?.classList.contains('modal-body')), true,
+    'the counts are read out with the title');
   await shot(pd, '20-end-the-day-dialog');
   await m.getByRole('button', { name: 'End the day' }).click();
   await pd.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
@@ -2243,6 +2247,24 @@ await step('End the day: an ended day says when and by whom (with a link to its 
   await note.locator('text=This day was ended').waitFor();
   assert.match((await note.innerText()).trim(), /^This day was ended at \d{2}:\d{2} by Front desk \(North Nazimabad\)\. Ending it again updates the copy\. See the saved copy$/);
   assert.equal(await pd.locator('table.sheet tbody tr input[aria-label^="Treatment details"]').first().isDisabled(), false, 'the rows can still be edited');
+  // The note is a live region: the reloads of the list (every 20 seconds, on every change) must not write it again, or a
+  // screen reader says it each time.
+  const reloads = await pd.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const el = document.querySelector('.day-end-note');
+    let changes = 0;
+    const watch = new MutationObserver((list) => { changes += list.length; });
+    watch.observe(el, { childList: true, subtree: true, characterData: true, attributes: true });
+    const real = state.data.dayClosing;
+    let asked = 0;
+    state.data.dayClosing = (...args) => { asked += 1; return real.apply(state.data, args); };
+    for (let i = 0; i < 3; i += 1) { document.dispatchEvent(new CustomEvent('sheet-reload')); await new Promise((r) => setTimeout(r, 300)); }
+    state.data.dayClosing = real;
+    watch.disconnect();
+    return { changes, asked };
+  });
+  assert.ok(reloads.asked >= 3, 'each reload looked the day up again');
+  assert.equal(reloads.changes, 0, 'the note was not written again');
   await shot(pd, '22-sheet-ended-day-banner');
   // A checkup patient finishes after the day was ended; the day is ended again.
   const checkup = pd.locator('table.sheet tbody tr.is-checkup', { has: pd.locator('select[aria-label^="Status for"] option:checked[value="waiting"]') }).first();
