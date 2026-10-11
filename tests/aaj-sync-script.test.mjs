@@ -124,8 +124,8 @@ function validateRequest(req) {
  * trigger state set as aajSetup leaves it. `patients` are added to the website first.
  */
 const CK_ID = '1wdRT8RqHLF-x2X6AVqLnvGkYrFWZEB3BGbx1CowMe_Y';
-function world({ tabs = ['Gulshan KHI'], rows = {}, patients = [], install = true, helpers = true, date = TODAY, at = '08:00', fixtureRows = true, checkupBook = true } = {}) {
-  const env = createEnv();
+function world({ tabs = ['Gulshan KHI'], rows = {}, patients = [], install = true, helpers = true, date = TODAY, at = '08:00', fixtureRows = true, checkupBook = true, envOptions = {} } = {}) {
+  const env = createEnv(envOptions);
   if (checkupBook) env.checkupBook = env.addBook(CK_ID, 'Checkup karwaliya');
   const server = createServer({ now: () => env.clock.ms });
   env.fetchHandler = (req) => { validateRequest(req); return server.handler(req); };
@@ -716,7 +716,32 @@ test('status words of a checkup row: the same words, except Scheduled (a checkup
   quiet(env, server);
 });
 
-test('one bad row does not hold up the others: a photo-month Completed is saved with the website\'s warning, a row with an oversized cell says so', () => {
+test('RS13-M1: a routine Completed braces row (the website\'s photo step skipped, owner rule) is a tick and does not count toward "need attention"; the row that needs its Mr# is the only one counted', () => {
+  const people = [1, 2, 3, 4, 5, 6].map((i) => ({ mr: String(9710 + i), name: 'Braces Sample ' + 'ABCDEF'[i - 1], phone: '0300222000' + i }));
+  const rows = people.map((p, i) => [p.mr, p.name, String(i + 2), 'Monthly', '', 'Completed', '', '', '', '', '', p.phone, '']);
+  rows.push(['9701', 'Sample Person One', '9', 'Monthly', '', 'Waiting', '', '', '', '', '', '03001110001', '']);
+  rows.push(['', 'Forgot Mrnumber', '05', 'Monthly', '', 'Waiting', '', '', '', '', '', '03002220099', '']);
+  const { env, server } = world({ patients: [...BASE_PATIENTS, ...people], rows: { [GUL]: rows } });
+  server.state.photoMonths.push(2, 3, 4, 5, 6, 7, 9);
+  settle(env, 3);
+  const OWNER = "✓ Completed from the sheet (owner rule: the website's photo step is not needed).";
+  for (let r = 2; r <= 7; r++) assert.equal(statusOf(env, GUL, r), OWNER, 'row ' + r);
+  for (const p of people) {
+    assert.equal(webVisit(server, p.name).status, 'completed', p.name + ' is completed on the website');
+    assert.equal(webVisit(server, p.name).override, 'Completed in the Google Sheet (owner rule, 9 Oct 2026)', 'and the override is still recorded');
+  }
+  assert.match(statusOf(env, GUL, 9), /^✗ Needs attention: add the Mr#/);
+  assert.match(headerOf(env, GUL), /^Website \u00b7 \d\d:\d\d \u00b7 1 need attention$/, 'only the row without its Mr#');
+  // a row marked Completed later in the day (Waiting first): the same tick, the count does not move
+  setCell(env, GUL, 8, 'waiting', 'Completed');
+  env.advance(61000);
+  env.ticks(2);
+  assert.equal(webVisit(server, 'Sample Person One').status, 'completed');
+  assert.equal(statusOf(env, GUL, 8), OWNER);
+  assert.match(headerOf(env, GUL), /^Website \u00b7 \d\d:\d\d \u00b7 1 need attention$/);
+});
+
+test('one bad row does not hold up the others: a photo-month Completed is saved (a tick, owner rule), a row with an oversized cell says so', () => {
   const rows = [
     ['9701', 'Sample Person One', '4', 'Monthly', '1', 'Waiting', '', '', '', '', '', '03001110001', ''],
     ['9703', 'Sample Person Six', '', 'Checkup', '2', 'Waiting', '', '', 'x'.repeat(600), '', '', '03001110006', ''],
@@ -729,12 +754,12 @@ test('one bad row does not hold up the others: a photo-month Completed is saved 
   env.advance(61000);
   env.ticks(2);
   assert.equal(webVisit(server, 'Sample Person One').status, 'completed');
-  assert.match(statusOf(env, GUL, 2), /^\u26a0 Completed from the sheet\. The website's photo step was skipped \(owner rule\)\.$/);
+  assert.match(statusOf(env, GUL, 2), /^\u2713 Completed from the sheet \(owner rule: the website's photo step is not needed\)\.$/, 'a tick, not a warning (RS13-M1)');
   assert.equal(webVisit(server, 'Sample Person One').override, 'Completed in the Google Sheet (owner rule, 9 Oct 2026)', 'and the override says exactly that');
   assert.match(statusOf(env, GUL, 3), /^✗ Too long: details \(max 500 letters\)\.$/);
   assert.equal(statusOf(env, GUL, 4), '✓ On website', 'the row after the bad one went through');
   assert.equal(webVisit(server, 'Sample Person Two').token, 3);
-  assert.match(headerOf(env, GUL), /2 need attention/);
+  assert.match(headerOf(env, GUL), /1 need attention/, 'only the oversized cell: the owner-rule completion is not a problem (RS13-M1)');
 });
 
 test('tokens: the sheet numbers per group (token 1 three times), the website numbers once per day: typed tokens stay, the clash is reported', () => {
@@ -1815,7 +1840,7 @@ test('Open the archive and Help show something useful', () => {
   assert.match(env.dialogs[env.dialogs.length - 1].text, /^The archive is here:\nhttps:\/\/docs\.google\.com\/spreadsheets\/d\/book-\d+\/edit$/);
   env.ctx.aajHelp();
   const help = env.dialogs[env.dialogs.length - 1].text;
-  for (const bit of ['checkup', 'Deleting a row', 'Completed', 'hidden columns', 'filter buttons in row 1', '10 minutes', 'archive']) assert.ok(help.includes(bit), bit);
+  for (const bit of ['checkup', 'Deleting a row', 'Completed', 'hidden columns', 'the table\'s menu', 'Sort A to Z', '10 minutes', 'archive']) assert.ok(help.includes(bit), bit);
   const w = world({ install: false, helpers: false });
   w.env.responder = () => 'OK';
   w.env.ctx.aajShowArchive();
@@ -1989,7 +2014,9 @@ test('the script is pure ASCII (symbols are written as \\u escapes), so pasting 
   const bad = [...src].filter((c) => c.charCodeAt(0) > 126 || (c.charCodeAt(0) < 32 && c !== '\n'));
   assert.equal(bad.length, 0, 'non-ASCII or control characters: ' + bad.map((c) => c.charCodeAt(0).toString(16)).join(' '));
   assert.ok(!src.includes('\r'), 'LF line ends');
-  assert.ok(src.length < 150 * 1024, 'size ' + src.length);
+  // Google takes much larger script files (whole libraries are pasted into projects); this bound only stops the file growing unnoticed. Raised
+  // from 150 to 180 KB in round 12 (the table code, RS12-3)
+  assert.ok(src.length < 180 * 1024, 'size ' + src.length);
 });
 
 test('another person who can edit the sheet and presses "Sync now" is told it is Dr. Ali\'s job; no header is overwritten, nothing is sent', () => {
@@ -5532,6 +5559,250 @@ test('the minute tick puts the header filter back when staff removed it (at most
     settle(env, 3);
     assert.ok(server.state.visits.some((v) => v.mr === '9799'), 'the sync works without the filter');
   } finally { env.Range.prototype.createFilter = real; }
+});
+
+// ------------------------------------------------------------------------------------------------ round 12 (2026-10-11): RS12-2 (a website row moved in its first minute), RS12-1 (a busy day), RS12-3 (the tabs are Google Sheets tables)
+/** the website adds a second row at the bottom; in the minute before the sheet's next call claims it, a wrong entry above is removed with "Delete cells, shift up" */
+function rs12p8(kind) {
+  const { env, server } = world({ rows: { [GUL]: [sbVisit(1, 'RCT'), sbVisit(2, 'Filling'), sbVisit(3)] }, patients: SB_PATIENTS });
+  settle(env, 3);
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: SB_PATIENTS[4].mr, treatment: 'Consultation' });     // Sb Echo, added on the website
+  env.ticks(3);
+  assert.equal(statusOf(env, GUL, 5), '✓ Added from the website');
+  if (kind === 'visit') server.addVisit({ branch: 'GUL', date: TODAY, mr: SB_PATIENTS[0].mr, treatment: 'Consultation' });
+  else server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Webwalk Inn', phone: kind === 'checkup with phone' ? '03009990077' : '', checkup_for: 'Checkup' });
+  env.ticks(1);                                               // added at the bottom; its key reaches the website only with the next call
+  const who = kind === 'visit' ? SB_PATIENTS[0].name : 'Webwalk Inn';
+  assert.equal(rowOf(env, GUL, who), 6, kind + ': added at the bottom');
+  const records = () => (kind === 'visit' ? server.state.visits.filter((v) => v.mr === SB_PATIENTS[0].mr) : server.state.checkups.filter((c) => c.name === 'Webwalk Inn'));
+  assert.equal(records().length, 1);
+  shiftUpVisible(env, GUL, 2);                                // Sb Bravo (a wrong entry) removed: every person one row up, the hidden cells stay, row 6 is blank
+  env.advance(61000);
+  env.ticks(1);
+  const firstKey = cellOf(env, GUL, rowOf(env, GUL, who), 'sync key');
+  for (let k = 0; k < 5; k++) { env.advance(61000); env.ticks(1); }
+  return { env, server, who, records, firstKey };
+}
+
+test('RS12-2: a row the website added a minute ago, moved before the next call ("Delete cells, shift up" of a wrong entry above it): one row, one record, one nightly line (visit; checkup with a phone; checkup without a phone)', () => {
+  for (const kind of ['visit', 'checkup with phone', 'checkup without phone']) {
+    const { env, server, who, records, firstKey } = rs12p8(kind);
+    assert.deepEqual(rowsNamed(env, GUL, who).length, 1, `${kind}: one row (before: the website row was added a second time)`);
+    assert.equal(records().length, 1, `${kind}: one record on the website (before, without a phone: a second checkup)`);
+    assert.equal(firstKey, 'W-' + records()[0].id, kind + ': the minute after the move its row already carries the record\'s key (its key was left on the blank row)');
+    const r = rowOf(env, GUL, who);
+    assert.ok(statusOf(env, GUL, r).startsWith('✓'), `${kind}: ${statusOf(env, GUL, r)}`);
+    assert.equal(cellOf(env, GUL, r, 'sync key'), records()[0].sheet_key || 'W-' + records()[0].id, kind + ': the row carries the record\'s own key');
+    for (const name of ['Sb Charlie', 'Sb Delta', 'Sb Echo']) assert.equal(rowsNamed(env, GUL, name).length, 1, `${kind}: ${name} once`);
+    assert.equal(server.state.visits.filter((v) => v.mr === SB_PATIENTS[4].mr).length, 1, kind + ': Sb Echo once');
+    quiet(env, server);
+    const lines = kind === 'visit' ? (env.at(TODAY, '23:58'), env.ticks(1), env.at(NEXT, '00:05'), env.ticks(2), ckSheet(env) ? ckSheet(env).values().slice(1).map((x) => x[1]) : []) : nightLines(env);
+    assert.equal(lines.filter((n) => n === 'Webwalk Inn').length, kind === 'visit' ? 0 : 1, `${kind}: one nightly line for one walk-in (before: two)`);
+    assert.equal(archiveSheet(env).values().slice(1).filter((x) => x.includes(who)).length, 1, kind + ': one archive line');
+  }
+});
+
+test('RS12-2 (guard): a website row moved in its first minute and edited in that minute (so no row shows exactly its cells) is not added again while its row settles; that row adopts it', () => {
+  for (const kind of ['visit', 'checkup with phone', 'checkup without phone']) {
+    const { env, server } = world({ rows: { [GUL]: [sbVisit(1, 'RCT'), sbVisit(2, 'Filling'), sbVisit(3)] }, patients: SB_PATIENTS });
+    settle(env, 3);
+    if (kind === 'visit') server.addVisit({ branch: 'GUL', date: TODAY, mr: SB_PATIENTS[0].mr, treatment: 'Consultation' });
+    else server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Webwalk Inn', phone: kind === 'checkup with phone' ? '03009990077' : '', checkup_for: 'Checkup' });
+    env.ticks(1);
+    const who = kind === 'visit' ? SB_PATIENTS[0].name : 'Webwalk Inn';
+    assert.equal(rowOf(env, GUL, who), 5);
+    // Sb Bravo removed with "Delete cells, shift up" (the rows that move onto older keys go to the website at once, so its list comes back this
+    // minute), and the new person goes in to the doctor in the same minute: her row is busy and shows another Status than the website sent
+    shiftUpVisible(env, GUL, 2);
+    setCell(env, GUL, 4, 'waiting', 'Treatment');
+    env.ticks(1);                                             // the next minute: her row is still busy (typed less than 60 s ago)
+    assert.equal(rowsNamed(env, GUL, who).length, 1, kind + ': not added again while her row settles');
+    for (let k = 0; k < 5; k++) { env.advance(61000); env.ticks(1); }
+    assert.equal(rowsNamed(env, GUL, who).length, 1, kind + ': one row');
+    const recs = kind === 'visit' ? server.state.visits.filter((v) => v.mr === SB_PATIENTS[0].mr) : server.state.checkups.filter((c) => c.name === 'Webwalk Inn');
+    assert.equal(recs.length, 1, kind + ': one record');
+    assert.equal(kind === 'visit' ? recs[0].status : recs[0].day_status, 'in_treatment', kind + ': the Status typed after the move reached the one record');
+    for (const name of ['Sb Charlie', 'Sb Delta']) assert.equal(rowsNamed(env, GUL, name).length, 1, `${kind}: ${name} once`);
+    assert.equal(server.state.visits.length, kind === 'visit' ? 3 : 2, kind + ': only the wrong entry\'s visit is gone');
+  }
+});
+
+test('RS12-2: a row released in the same minute at the bottom of the list (its cells cleared) is reused by a row the website adds: no blank gap', () => {
+  const { env, server } = world({ rows: { [GUL]: [sbVisit(1, 'RCT'), sbVisit(2, 'Filling'), sbVisit(3)] }, patients: SB_PATIENTS });
+  settle(env, 3);
+  env.clearRow(GUL, 4, 1, colOf(env, GUL, 'website') - 1);   // Sb Delta's cells cleared (a wrong entry): its hidden key stays a moment
+  server.addVisit({ branch: 'GUL', date: TODAY, mr: SB_PATIENTS[0].mr, treatment: 'Consultation' });
+  env.ticks(1);
+  assert.equal(rowOf(env, GUL, SB_PATIENTS[0].name), 4, 'the website row goes into the row that was just released (before: row 5, below a blank row)');
+  assert.equal(cellOf(env, GUL, 4, 'sync key'), 'W-' + server.state.visits.find((v) => v.mr === SB_PATIENTS[0].mr).id);
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.state.visits.filter((v) => v.mr === SB_PATIENTS[3].mr).length, 0, 'the cleared wrong entry is removed like a deleted row');
+  assert.equal(server.state.visits.filter((v) => v.mr === SB_PATIENTS[0].mr).length, 1);
+  assert.equal(rowsNamed(env, GUL, SB_PATIENTS[0].name).length, 1);
+});
+
+/** the tab's table as [first row, first column, rows, columns] */
+const tableBox = (t) => [t.range.r, t.range.c, t.range.nr, t.range.nc];
+
+test('RS12-3: the Apps Script manifest turns on the Advanced Sheets service as "Sheets" (v4), which reads and widens the tables', () => {
+  const m = JSON.parse(fs.readFileSync(new URL('../apps-script/appsscript.json', import.meta.url), 'utf8'));
+  assert.deepEqual(m.dependencies.enabledAdvancedServices.find((x) => x.serviceId === 'sheets'), { userSymbol: 'Sheets', version: 'v4', serviceId: 'sheets' });
+  assert.equal(m.runtimeVersion, 'V8');
+  assert.ok(!('oauthScopes' in m), 'no fixed scopes (they would have to list every service the script uses)');
+});
+
+test('RS12-3: Set up widens each branch tab\'s table over the hidden helper columns (its rows, footer, column names and types stay; the helpers stay hidden); no filter is tried over a table; a second Set up and the minute checks change nothing; a narrowed table is widened again', () => {
+  const { env } = world({ tabs: TABS, patients: ALL_PATIENTS, install: false, helpers: false });
+  const tables = {}, before = {};
+  for (const t of TABS) {
+    tables[t] = env.addTable(t, { nr: env.tab(t).used().rows + 10, footer: t === GUL, types: t === GUL ? { 4: 'NUMBER', 5: 'DROPDOWN' } : {} });
+    before[t] = clone(tables[t]);
+  }
+  scripted(env);
+  env.ctx.aajSetup();
+  for (const t of TABS) {
+    const sh = env.tab(t), tb = tables[t], n = before[t].columns.length;
+    assert.deepEqual(tableBox(tb), [1, 1, before[t].range.nr, colOf(env, t, 'sync edited')], t + ': the table reaches over the four helper columns; its rows stay');
+    assert.deepEqual(tb.columns.slice(0, n), before[t].columns, t + ': its own columns keep their names and types');
+    assert.deepEqual(tb.columns.slice(n).map((c) => c.columnName), ['Website', 'Sync key', 'Sync base', 'Sync edited'], t + ': the new columns are the helper columns');
+    assert.equal(tb.footer, before[t].footer, t + ': the footer row stays');
+    for (const h of ['sync key', 'sync base', 'sync edited']) assert.ok(sh.isColumnHiddenByUser(colOf(env, t, h)), t + ': ' + h + ' hidden');
+    assert.ok(!sh.isColumnHiddenByUser(colOf(env, t, 'website')), t + ': the Website column shows');
+    assert.equal(sh.filter || null, null, t + ': no basic filter');
+  }
+  assert.equal(env.stats.filterOverTable || 0, 0, 'no filter was tried over a table (Google refuses one)');
+  assert.equal(env.stats.tablesUpdated, 5);
+  assert.match(logText(env), /Gulshan KHI.*The table now reaches over the hidden columns, so its sort moves whole rows/);
+  assert.ok(!/Sorting:/.test(env.dialogs[env.dialogs.length - 1].text), 'the last box has nothing to say about sorting');
+  scripted(env);
+  env.ctx.aajSetup();
+  for (let k = 0; k < 12; k++) { env.advance(61000); env.touch(); env.ticks(1); }
+  assert.equal(env.stats.tablesUpdated, 5, 'a second Set up and the minute checks widen nothing again');
+  assert.ok(env.sheetsCalls.filter((c) => c.kind === 'get').length >= 3, 'the minute check looks at the tables (every ten minutes)');
+  // somebody drags the table's edge back over the visible columns only: within ten minutes it reaches over the helper columns again
+  tables[GUL].range.nc = 13;
+  for (let k = 0; k < 11; k++) { env.advance(61000); env.touch(); env.ticks(1); }
+  assert.deepEqual(tableBox(tables[GUL]), [1, 1, before[GUL].range.nr, colOf(env, GUL, 'sync edited')]);
+});
+
+// the real Gulshan tab: a table A1:M30 with a footer, the helper columns right of it; visits, two walk-ins called Sana with no phone, a checkup with a phone
+const tbRows = () => [sbVisit(0), ['', 'Sana Walkin', '', 'Checkup', '', 'Completed', '', 'Dr Haniya', 'first sana', '', '', '', ''], sbVisit(1, 'RCT'),
+  ['', 'Ck Phone', '', 'Checkup', '', 'Waiting', '', '', 'pain lower right', '', '', '03009990011', ''], sbVisit(2, 'Filling'),
+  ['', 'Sana Walkin', '', 'Checkup', '', 'Treatment', '', '', 'second sana', '', '', '', ''], sbVisit(3)];
+function tableWorld(widen) {
+  const { env, server } = world({ rows: { [GUL]: tbRows() }, patients: SB_PATIENTS });
+  const t = env.addTable(GUL, { nr: 30, nc: 13, footer: true });
+  if (!widen) env.sheetsErrors.update = 'Invalid requests[0].updateTable: the table could not be changed.';
+  settle(env, 3);
+  return { env, server, sh: env.tab(GUL), t };
+}
+
+test('RS12-3: sorts with the table\'s own menu and a table row deleted: with the table widened they move whole rows (nothing is sent); not widened (the API refused) the hidden keys stay behind and every row still finds its own visit or checkup', () => {
+  for (const widen of [true, false]) {
+    const tag = widen ? 'widened' : 'not widened';
+    const { env, server, t } = tableWorld(widen);
+    assert.equal(t.range.nc, widen ? colOf(env, GUL, 'sync edited') : 13, tag + ': setup');
+    if (!widen) {
+      assert.equal((logText(env).match(/The table could not be made to reach over the hidden columns/g) || []).length, 1, 'said once in the log');
+      assert.match(logText(env), /drag the right edge of the table over the hidden columns/);
+    }
+    assert.equal(env.stats.filterOverTable || 0, 0, tag + ': no filter tried over the table');
+    assert.equal(server.state.checkups.length, 3, tag);
+    assert.equal(server.state.visits.length, 4, tag);
+    const ids = () => JSON.stringify([server.state.visits.map((v) => [v.id, v.mr, v.details, v.status]).sort(), server.state.checkups.map((c) => [c.id, c.name, c.details, c.day_status]).sort()]);
+    const first = ids();
+    for (const [label, dir] of [['patient', 1], ['mr', -1], ['treatment', 1], ['waiting', -1], ['patient', -1]]) {
+      const from = server.calls.length;
+      env.sortTable(GUL, colOf(env, GUL, label), dir);
+      env.advance(61000);
+      env.ticks(3);
+      if (widen) assert.equal(sentRowsSince(server, from).length, 0, `${tag}, sort by ${label}: whole rows moved, nothing to send`);
+      assert.equal(ids(), first, `${tag}, sort by ${label}: the same visits and checkups, each with its own details and status`);
+      assert.equal(server.state.removedLog.length, 0, `${tag}, sort by ${label}: nothing removed`);
+      assert.equal(rowsNamed(env, GUL, 'Sana Walkin').length, 2, `${tag}, sort by ${label}: two Sana rows`);
+      ckRowsMatch(env, server, 'Sana Walkin');
+      ckRowsMatch(env, server, 'Ck Phone');
+      for (const p of SB_PATIENTS.slice(0, 4)) {
+        const r = rowOf(env, GUL, p.name);
+        assert.equal(cellOf(env, GUL, r, 'sync key'), webVisit(server, p.name).sheet_key, `${tag}, sort by ${label}: ${p.name} carries its own visit's key`);
+        assert.ok(statusOf(env, GUL, r).startsWith('✓'), `${tag}, sort by ${label}: ${p.name}: ${statusOf(env, GUL, r)}`);
+      }
+    }
+    // a wrong entry deleted from the table's menu: only the table's columns move up (the helper columns too when they are in it)
+    env.deleteTableRow(GUL, rowOf(env, GUL, 'Sb Delta'));
+    env.advance(61000);
+    env.ticks(4);
+    assert.equal(server.state.visits.filter((v) => v.mr === SB_PATIENTS[3].mr).length, 0, tag + ': the deleted wrong entry is removed from the website');
+    assert.equal(server.state.visits.length, 3, tag + ': the other visits stay');
+    assert.equal(server.state.checkups.length, 3, tag + ': the checkups stay');
+    ckRowsMatch(env, server, 'Sana Walkin');
+    for (const p of SB_PATIENTS.slice(0, 3)) assert.equal(cellOf(env, GUL, rowOf(env, GUL, p.name), 'sync key'), webVisit(server, p.name).sheet_key, `${tag}: ${p.name} after the delete`);
+    quiet(env, server);
+    assert.equal(nightLines(env).filter((n) => n === 'Sana Walkin').length, 2, tag + ': two nightly lines for the two Sanas');
+  }
+});
+
+test('RS12-3: a helper column made again (staff deleted it) lands right of the table: the table reaches over it in the same minute, not ten minutes later; nothing is doubled or removed', () => {
+  const { env, server, t } = tableWorld(true);
+  const sh = env.tab(GUL), c = colOf(env, GUL, 'sync base');
+  for (let r = 1; r <= sh.used().rows; r++) sh._set(r, c, null);         // the Sync base column emptied, header too (as good as deleted)
+  env.touch();
+  env.advance(61000);
+  env.ticks(1);
+  const nb = colOf(env, GUL, 'sync base');
+  assert.ok(nb > c, 'made again, right of the other helper columns');
+  assert.equal(t.range.nc, nb, 'the table reaches over it at once');
+  assert.ok(sh.isColumnHiddenByUser(nb), 'and it is hidden');
+  env.advance(61000);
+  env.ticks(3);
+  assert.equal(server.state.visits.length, 4);
+  assert.equal(server.state.checkups.length, 3);
+  assert.equal(server.state.removedLog.length, 0);
+  ckRowsMatch(env, server, 'Sana Walkin');
+});
+
+test('RS12-3 with RS12-2: a row the website added a minute ago, then a table row deleted above it: one row and one record, widened or not', () => {
+  for (const widen of [true, false]) {
+    for (const kind of ['visit', 'checkup without phone']) {
+      const tag = (widen ? 'widened' : 'not widened') + ', ' + kind;
+      const { env, server } = tableWorld(widen);
+      server.addVisit({ branch: 'GUL', date: TODAY, mr: SB_PATIENTS[4].mr, treatment: 'Consultation' });     // Sb Echo, added and claimed
+      env.ticks(3);
+      if (kind === 'visit') server.addVisit({ branch: 'GUL', date: TODAY, mr: SB_PATIENTS[5].mr, treatment: 'Consultation' });
+      else server.addCheckup({ branch: 'GUL', date: TODAY, name: 'Webwalk Inn', phone: '', checkup_for: 'Checkup' });
+      env.ticks(1);
+      const who = kind === 'visit' ? SB_PATIENTS[5].name : 'Webwalk Inn';
+      assert.equal(rowOf(env, GUL, who), 10, tag + ': added below the list, inside the table');
+      env.deleteTableRow(GUL, 2);                             // Sb Alpha removed (a wrong entry) from the table's menu
+      for (let k = 0; k < 6; k++) { env.advance(61000); env.ticks(1); }
+      assert.equal(rowsNamed(env, GUL, who).length, 1, tag + ': one row');
+      assert.equal(rowsNamed(env, GUL, SB_PATIENTS[4].name).length, 1, tag + ': Sb Echo once');
+      const recs = kind === 'visit' ? server.state.visits.filter((v) => v.mr === SB_PATIENTS[5].mr) : server.state.checkups.filter((c) => c.name === 'Webwalk Inn');
+      assert.equal(recs.length, 1, tag + ': one record');
+      assert.equal(server.state.visits.filter((v) => v.mr === SB_PATIENTS[0].mr).length, 0, tag + ': the wrong entry is removed');
+      assert.equal(server.state.checkups.filter((c) => c.name === 'Sana Walkin').length, 2, tag + ': the Sanas keep their checkups');
+    }
+  }
+});
+
+test('RS12-3: the Advanced Sheets service not turned on: nothing is changed on the tabs (no filter is tried, the tab may be a table), the last box of Set up and the log say what to do by hand, and the sync works', () => {
+  const { env, server } = world({ tabs: [GUL], patients: [...BASE_PATIENTS, ...SB_PATIENTS], install: false, helpers: false, envOptions: { sheetsService: false } });
+  const t = env.addTable(GUL, { nr: 30, nc: 13 });
+  scripted(env);
+  env.ctx.aajSetup();
+  const done = env.dialogs[env.dialogs.length - 1].text;
+  assert.match(done, /^Done\./);
+  assert.match(done, /Sorting: Could not check whether this tab is a table \(the Google Sheets API service is not turned on in the script\)/);
+  assert.match(done, /add the Google Sheets API in the script editor \(Services, \+\) and run Set up again/);
+  assert.deepEqual(tableBox(t), [1, 1, 30, 13], 'the table is not changed');
+  assert.equal(env.tab(GUL).filter || null, null, 'no filter');
+  assert.equal(env.stats.filterOverTable || 0, 0, 'no filter was tried');
+  for (let k = 0; k < 25; k++) { env.advance(61000); env.touch(); env.ticks(1); }
+  assert.equal((logText(env).match(/Could not check whether this tab is a table/g) || []).length, 1, 'once a day in the log (Set up\'s line), not every ten minutes');
+  env.typeRow(GUL, 9, sbVisit(5));
+  settle(env, 3);
+  assert.ok(server.state.visits.some((v) => v.mr === SB_PATIENTS[5].mr), 'the sync works');
 });
 
 console.log(`${passed} passed, ${failed} failed`);

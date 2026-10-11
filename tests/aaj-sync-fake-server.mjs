@@ -344,7 +344,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       const st = set.status.v;
       if (st === 'completed' && v.braces_month && S.photoMonths.includes(v.braces_month) && !v.override) {
         v.override = OVERRIDE;
-        warns.push("Completed from the sheet. The website's photo step was skipped (owner rule).");
+        warns.push({ ok: "Completed from the sheet (owner rule: the website's photo step is not needed)." });      // the owner's normal path: a tick (RS13-M1)
       }
       v.status = st;
     }
@@ -472,7 +472,11 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
 
   function finish(res, warns) {
     if (res.error) { res.outcome = 'error'; res.level = 'error'; res.message = res.error; delete res.error; return res; }
-    if (warns.length) { res.level = 'warn'; res.message = warns.join(' '); }
+    // a message given as { ok: text } is information, not a warning: alone it leaves the row a tick (private.aaj_sync_row, RS13-M1)
+    if (warns.length) {
+      res.level = warns.some((w) => typeof w === 'string') ? 'warn' : (res.level || 'ok');
+      res.message = warns.map((w) => (typeof w === 'string' ? w : w.ok)).join(' ');
+    }
     return res;
   }
 
@@ -716,8 +720,9 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
     const total = S.visits.filter((v) => v.branch === tab.branch && v.date === date && v.sheet_key && v.status !== 'cancelled' && !S.released.has(v.id)).length
       + S.checkups.filter((c) => c.branch === tab.branch && c.date === date && c.sheet_key && c.day_status !== 'cancelled' && !S.released.has(c.id)).length;
     const done = S.removedToday[tab.branch] || 0;
-    const hold = n > 3 || (n >= 2 && (present.length === 0 || n * 4 >= total)) || done + n > 15;
-    const why = done + n > 15 && n <= 3
+    const cap = Math.max(15, Math.ceil(0.35 * (total + done)));      // 35 in 100 of the day's rows, at least 15 (RS12-1)
+    const hold = n > 3 || (n >= 2 && (present.length === 0 || n * 4 >= total)) || done + n > cap;
+    const why = done + n > cap && n <= 3
       ? 'Needs attention: too many rows were deleted from this tab today, so nothing was removed from the website. Delete wrong entries on the website.'
       : `Needs attention: ${n} rows disappeared at once, so nothing was removed from the website. Delete wrong entries on the website, or delete fewer rows at a time.`;
     for (const v of vcands) {
