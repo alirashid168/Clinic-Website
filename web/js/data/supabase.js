@@ -1288,7 +1288,8 @@ export async function createSupabaseAdapter() {
     },
     /**
      * Admin: up to 500 old answers of the Google Form "Checkup Patient Form 2.0" (the rows readFormResponses() makes). dryRun: the preview
-     * (the database does everything and undoes it). -> { given, inserted, filled_day, filled_month, already, same, skipped: [{ row, reason }], skipped_count, dry_run }
+     * (the database does everything and undoes it). -> { given, inserted, filled_day, filled_month, already, same, skipped: [{ row, reason }], skipped_count,
+     * other_name (answers whose phone is on that day's list under another person's name), dry_run }
      */
     async importCheckupForm(rows, { dryRun = false } = {}) {
       try {

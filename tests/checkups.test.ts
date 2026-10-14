@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {
   FOLLOW_UP_STATUSES, DAY_STATUSES, SOURCE_LABELS, DAY_STATUS_LABELS, IMPORT_BATCH, CLINIC_BRANCH, EXPORT_HEADER, CHECKUP_FOR_CHOICES, PRICING_LABELS, yesNo, hasFormAnswers, formComplete,
   isEmptyCell, cleanText, checkupPhone, checkupKey, excelSerialToISO, monthCell, feeCell, monthLabel, canonicalStatus,
-  dayListCheckups, detectCheckupColumns, findHeader, findCheckupSheet, readCheckupList, checkupsToSheet,
+  dayListCheckups, detectCheckupColumns, findHeader, findCheckupSheet, readCheckupList, checkupsToSheet, nameNorm, nameSpelling, nameFits, splitChoices, joinChoices,
 } from '../web/js/lib/checkups.js';
 
 const EM = String.fromCharCode(0x2014);   // the owner's list writes "nothing" as an em dash
@@ -87,6 +87,31 @@ test('keys: the strings the database gives for the same input (pinned in 27_chec
   assert.notEqual(checkupKey({ phone: '03005550142', name: 'Sample Person', month: '2024-11-30' }), checkupKey({ phone: '03005550142', name: 'Sample Person', month: '2024-12-01' }));
   assert.notEqual(checkupKey({ phone: '03005550143', name: 'Sample Person', month: '2024-12-01' }), checkupKey({ phone: '03005550142', name: 'Sample Person', month: '2024-12-01' }));
   assert.equal(checkupKey(), '||');
+});
+
+test('names: one phone, two names - the same person only without doubt (private.aaj_name_fits), so two children on a parent\'s phone stay two people', () => {
+  assert.equal(nameNorm('  Sample-Person  (Jr.) '), 'sample person jr');
+  assert.equal(nameNorm('علی'), '', 'Urdu script: nothing to compare');
+  assert.deepEqual(['Ayesha', 'Aisha', 'Umer', 'Umar', 'Noor', 'Nur', 'Heera', 'Hira'].map(nameSpelling), ['aisha', 'aisha', 'umar', 'umar', 'nur', 'nur', 'hira', 'hira']);
+  assert.notEqual(nameSpelling('Hira'), nameSpelling('Hina'));
+  for (const [a, b] of [['Sample Import Twice', 'sample  import twice'], ['Aisha Sampleton', 'Ayesha Sampleton'], ['Muhammad Usman Sampleton', 'Usman Sampleton'],
+    ['Ayesha', 'Ayesha Khan'], ['Ayesha Khan', 'Ayesha'], ['M Usman Ali', 'Muhammad Usman Ali']]) assert.equal(nameFits(a, b), true, `${a} / ${b}`);
+  for (const [a, b] of [['Sample Sister Aiza', 'Sample Brother Bilal'], ['Sample Mother Rubina', 'Sample Son Faraz'], ['Hira Sample', 'Hamza Sample'],
+    ['Ayesha Khan', 'Ayesha Rajpoot'], ['Muhammad Usman', 'Usman Tariq'], ['Ali Hassan', 'Hassan Ali'], ['', ''], ['Sample', '']]) assert.equal(nameFits(a, b), false, `${a} / ${b}`);
+});
+
+test('tick-box answers: "Braces, Extraction" is two ticks; anything else is the "Other" text; ticks and Other are stored joined with ", "', () => {
+  assert.deepEqual(splitChoices('Extraction, braces', CHECKUP_FOR_CHOICES), { picked: ['Braces', 'Extraction'], other: '' }, 'the list\'s order and spelling');
+  assert.deepEqual(splitChoices('General Checkup, Crown/Bridge, Gum  treatment', CHECKUP_FOR_CHOICES), { picked: ['General checkup', 'Crown / bridge'], other: 'Gum treatment' });
+  assert.deepEqual(splitChoices('Scaling & Polishing', CHECKUP_FOR_CHOICES), { picked: ['Scaling and polishing'], other: '' });
+  assert.deepEqual(splitChoices(null, CHECKUP_FOR_CHOICES), { picked: [], other: '' });
+  assert.deepEqual(splitChoices('Whitening', CHECKUP_FOR_CHOICES), { picked: [], other: 'Whitening' });
+  const people = ['Dr. Hina (sample)', 'Dr. Rabia (sample)'];
+  assert.deepEqual(splitChoices('Dr. Rabia (sample) / dr hina (sample) & Assistant Sample', people, { split: /,|\/|&/ }), { picked: people, other: 'Assistant Sample' });
+  assert.deepEqual(splitChoices('Hina', people, { split: /,/, match: (p) => (p === 'Hina' ? people[0] : null) }), { picked: [people[0]], other: '' }, 'a matcher of its own');
+  assert.equal(joinChoices(['Braces', 'Extraction'], ' Gum   treatment '), 'Braces, Extraction, Gum treatment');
+  assert.equal(joinChoices([], ''), null);
+  assert.equal(joinChoices(['Braces'], null), 'Braces');
 });
 
 test('isEmptyCell and cleanText: dashes and blanks are "nothing"; text is trimmed and cut', () => {

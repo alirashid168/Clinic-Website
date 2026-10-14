@@ -2,9 +2,10 @@
 -- Everything below uses made-up people (phones 0300-555xxxx / 0312xxxxxxx) and made-up answers.
 --   1. the schema: the source 'google_form', form_submitted_at, the table of imported answers, the function's rights;
 --   2. who may import (admin only) and who may set form_submitted_at (the import only);
---   3. where an answer goes: the day's checkup (website or Google Sheet; by phone, or by name when one side has no phone; the oldest),
+--   3. where an answer goes: the day's checkup (website or Google Sheet; by phone and name, or by name when one side has no phone; the oldest),
 --      the old list's row of that month (its follow-up stays), or a new row shown like a website entry; skips; cleaning; the preview
---      undoes everything and counts the same; the same file again changes nothing, also after a removal;
+--      undoes everything and counts the same; the same file again changes nothing, also after a removal; two people on one phone on
+--      one day are two checkups (3b);
 --   4. the Google Sheet sync does not see any of it: today's list and its hash stay the same, an answer of today waits, and no imported
 --      row is on a list the sync keeps.
 \set ON_ERROR_STOP 1
@@ -267,6 +268,55 @@ select pg_temp.check((select (r->>'already')::int = 10 and (r->>'inserted')::int
                      and not exists (select 1 from public.checkups where patient_name = 'Sample Import Utc')
                      and (select checkup_id is null and outcome = 'inserted' from private.checkup_form_imports where form_key like '2026-08-28 13:00:00|%'),
   'a row from the Google Form removed since is not brought back by the next import (its key stays, without the checkup)');
+
+-- 3b. One phone, two people (a parent's phone for two children who came together): never one checkup.
+-- (a) nothing on the website yet: the two answers of 14 Aug at Gulshan are two new checkups, each with its own answers
+insert into f31_res select 'siblings_new_preview', pg_temp.imp(jsonb_build_array(
+  pg_temp.ans(40, '2026-08-14T11:00:00+05:00', 'Sample Sister Aiza', '0300-5553130', 'GUL', '{"checkup_for": "Braces", "wants_treatment": true, "treatment_plan": "Next month"}'),
+  pg_temp.ans(41, '2026-08-14T11:04:00+05:00', 'Sample Brother Bilal', '0300-5553130', 'GUL',
+    '{"checkup_for": "Root canal", "wants_treatment": false, "treatment_plan": "Too costly now", "ali_recommended": false}')), true);
+insert into f31_res select 'siblings_new', pg_temp.imp(jsonb_build_array(
+  pg_temp.ans(40, '2026-08-14T11:00:00+05:00', 'Sample Sister Aiza', '0300-5553130', 'GUL', '{"checkup_for": "Braces", "wants_treatment": true, "treatment_plan": "Next month"}'),
+  pg_temp.ans(41, '2026-08-14T11:04:00+05:00', 'Sample Brother Bilal', '0300-5553130', 'GUL',
+    '{"checkup_for": "Root canal", "wants_treatment": false, "treatment_plan": "Too costly now", "ali_recommended": false}')));
+select pg_temp.check((select (r->>'inserted')::int = 2 and (r->>'same')::int = 0 and (r->>'filled_day')::int = 0 and (r->>'other_name')::int = 1 from f31_res where n = 'siblings_new')
+                     and (select p.r - 'dry_run' = i.r - 'dry_run' from f31_res p, f31_res i where p.n = 'siblings_new_preview' and i.n = 'siblings_new'),
+  'two people on one phone, same day and branch: two new checkups (the preview says so too, with 1 "same phone, another name")');
+select pg_temp.check((select array_agg(concat_ws('|', patient_name, checkup_for, wants_treatment, treatment_plan, ali_recommended) order by created_at)
+                        from public.checkups where phone = '0300-5553130')
+                     = array['Sample Sister Aiza|Braces|t|Next month|t', 'Sample Brother Bilal|Root canal|f|Too costly now|f'],
+  '... each with their own name and answers (the brother is not "already on the website")');
+-- (b) both on the Google Sheet's list of 3 Sep at Lahore (the sister first); the brother's answer comes first in the file
+do $$
+declare v_lhr smallint := current_setting('test.lhr')::smallint;
+begin
+  insert into public.checkups (checkup_date, branch_id, patient_name, phone, checkup_for, day_status, source, sheet_key, created_at) values
+    ('2026-09-03', v_lhr, 'Sample Sister Hira', '03120003131', 'Checkup', 'completed', 'google_sheet', 'S-00000000f331', '2026-09-03 10:00+05'),
+    ('2026-09-03', v_lhr, 'Sample Brother Hamza', '03120003131', 'Checkup', 'completed', 'google_sheet', 'S-00000000f332', '2026-09-03 10:05+05'),
+    -- the same person written another way on the sheet: an everyday spelling of the first name, Muhammad in front
+    ('2026-09-04', v_lhr, 'Ayesha Sampleton', '03120003133', 'Checkup', 'completed', 'google_sheet', 'S-00000000f333', '2026-09-04 10:00+05'),
+    ('2026-09-04', v_lhr, 'Usman Sampleton', '03120003134', 'Checkup', 'completed', 'google_sheet', 'S-00000000f334', '2026-09-04 10:00+05'),
+    -- a mother and her son on one phone, the son's row older; the mother's answer must find her own row
+    ('2026-09-05', v_lhr, 'Sample Son Faraz', '03120003135', 'Checkup', 'completed', 'google_sheet', 'S-00000000f335', '2026-09-05 09:00+05'),
+    ('2026-09-05', v_lhr, 'Sample Mother Rubina', '03120003135', 'Checkup', 'completed', 'google_sheet', 'S-00000000f336', '2026-09-05 09:30+05');
+end $$;
+insert into f31_res select 'siblings_sheet', pg_temp.imp(jsonb_build_array(
+  pg_temp.ans(50, '2026-09-03T12:00:00+05:00', 'Sample Brother Hamza', '0312-0003131', 'LHR', '{"checkup_for": "Extraction", "wants_treatment": false, "treatment_plan": "Later"}'),
+  pg_temp.ans(51, '2026-09-03T12:03:00+05:00', 'Sample Sister Hira', '0312-0003131', 'LHR', '{"checkup_for": "Braces", "wants_treatment": true, "treatment_plan": "This week"}'),
+  pg_temp.ans(52, '2026-09-04T12:00:00+05:00', 'Aisha Sampleton', '0312-0003133', 'LHR', '{"checkup_for": "Implant"}'),
+  pg_temp.ans(53, '2026-09-04T12:00:00+05:00', 'Muhammad Usman Sampleton', '0312-0003134', 'LHR', '{"checkup_for": "Crown / bridge"}'),
+  pg_temp.ans(54, '2026-09-05T12:00:00+05:00', 'Sample Mother Rubina', '0312-0003135', 'LHR', '{"checkup_for": "Smile makeover", "treatment_plan": "Only came with her son", "wants_treatment": false}')));
+select pg_temp.check((select (r->>'filled_day')::int = 5 and (r->>'inserted')::int = 0 and (r->>'same')::int = 0 and (r->>'other_name')::int = 0 from f31_res where n = 'siblings_sheet'),
+  'the sheet''s list holds both people of one phone: each answer goes onto its own person''s row (5 onto the day''s checkup, none new)');
+select pg_temp.check((select array_agg(concat_ws('|', patient_name, checkup_for, wants_treatment, treatment_plan) order by created_at, patient_name)
+                        from public.checkups where phone in ('03120003131', '03120003135'))
+                     = array['Sample Sister Hira|Braces|t|This week', 'Sample Brother Hamza|Extraction|f|Later',
+                             'Sample Son Faraz|Checkup', 'Sample Mother Rubina|Smile makeover|f|Only came with her son'],
+  '... the brother''s answers on the brother, the sister''s on the sister, the mother''s on the mother (not on the older row of her son, which keeps none)');
+select pg_temp.check((select bool_and(form_submitted_at is not null) from public.checkups where sheet_key in ('S-00000000f333', 'S-00000000f334'))
+                     and (select checkup_for from public.checkups where sheet_key = 'S-00000000f333') = 'Implant'
+                     and (select checkup_for from public.checkups where sheet_key = 'S-00000000f334') = 'Crown / bridge',
+  'the same person written another way ("Aisha" for "Ayesha", "Muhammad Usman" for "Usman") is still the same checkup');
 
 -- 4. The Google Sheet sync does not see the import.
 -- Today's North Nazimabad list: a checkup from the website and one from the sheet. The list's hash before an import with an answer of

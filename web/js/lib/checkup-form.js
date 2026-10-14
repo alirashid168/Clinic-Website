@@ -9,7 +9,7 @@
 //   | If yes then when? If no then why not? | REMINDERS
 // The columns are FOUND by their headings (never by position). REMINDERS is the team's own column: their follow-up notes, not a question.
 // The owner (12 Oct 2026): "yes please bring the old 470 entries too, and design the form submitted entries all in similar way too."
-import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, cleanText, isEmptyCell, checkupPhone } from './checkups.js';
+import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, cleanText, isEmptyCell, checkupPhone, splitChoices, joinChoices } from './checkups.js';
 import { matchClinician } from './legacy.js';
 
 export const FORM_SOURCE_TAB = 'Checkup Form 2.0';
@@ -187,15 +187,24 @@ export function formCheckupFor(raw) {
   return { value: joined.value, cut: text.cut || joined.cut };
 }
 
-/** The website's doctors (state.ref.clinicians) -> "Who did your Checkup?" text -> the doctor's name as the website writes it, or the text as written. */
+/**
+ * The website's doctors (state.ref.clinicians) -> "Who did your Checkup?" text -> { value, cut, listed, other }: the doctors on the list written
+ * as the website writes them, or the text as written. The form's question is tick boxes, so an answer can name several ("Dr A, Dr B"; typed
+ * under Other also "Dr A / Dr B"): each one on the list is written the website's way, in the list's order, then the rest as written, joined
+ * with ", " (what the website's own form stores). listed: every name is on the list; other: the part that is not (null when none).
+ */
 export function doctorNamer(clinicians) {
   const list = (clinicians || []).filter((c) => c && c.is_doctor !== false && c.active !== false)
     .map((c) => ({ displayName: c.display_name, aliases: c.aliases || [] }));
+  const names = list.map((c) => c.displayName);
+  const match = (part) => matchClinician(part, list)?.displayName ?? null;
   return (raw) => {
     const text = cleanText(isEmptyCell(raw) ? null : String(raw).replace(/\s+/g, ' '), 300);
-    if (text.value === null) return { value: null, cut: false, listed: false };
-    const hit = list.length ? matchClinician(text.value, list) : null;
-    return hit ? { value: hit.displayName, cut: false, listed: true } : { ...text, listed: false };
+    if (text.value === null) return { value: null, cut: false, listed: false, other: null };
+    const parts = list.length ? splitChoices(text.value, names, { match, split: /,|\/|&/ }) : { picked: [], other: text.value };
+    if (!parts.picked.length) return { ...text, listed: false, other: text.value };
+    const joined = cleanText(joinChoices(parts.picked, parts.other), 300);
+    return { value: joined.value, cut: text.cut || joined.cut, listed: !parts.other, other: parts.other || null };
   };
 }
 
@@ -275,7 +284,7 @@ export function readFormResponses(rows2d, { clinicians = [] } = {}) {
     bump(summary.perReminder, reminder.kind);
 
     const doctors = doctorOf(at('doctor'));
-    if (doctors.value !== null && !doctors.listed) bump(summary.doctorsNotListed, doctors.value);
+    if (doctors.value !== null && !doctors.listed) bump(summary.doctorsNotListed, doctors.other);
     const checkupFor = formCheckupFor(at('checkupFor'));
     const plan = cleanText(isEmptyCell(at('plan')) ? null : String(at('plan')).replace(/\s+/g, ' '), 500);
     const note = cleanText(notes.length ? notes.join('; ') : null, 2000);

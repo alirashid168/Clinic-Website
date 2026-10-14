@@ -2,7 +2,8 @@
 // and a treatment, but no Mr#: they get a patient file (and an Mr#) only when they start treatment.
 import { h, mount, modal, field, select, toast, friendlyError, announce, showFormErrors, clearFieldErrors, localISO, shortDate, busy } from '../../ui/dom.js';
 import { state, can, isAdmin, myBranches, branchName, cityName } from '../../state.js';
-import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, PRICING_LABELS, checkupPhone, formComplete } from '../../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, PRICING_LABELS, checkupPhone, formComplete, splitChoices, joinChoices } from '../../lib/checkups.js';
+import { matchClinician } from '../../lib/legacy.js';
 import { commitOnFinish } from './common.js';
 
 const digitsOf = (v) => String(v || '').replace(/\D/g, '');
@@ -65,23 +66,36 @@ function choiceQuestion(question, choices, current, { required = false } = {}) {
   return { el: h('div', { class: 'field' }, set), first: radios[0], value: () => radios.find((r) => r.checked)?.value ?? null };
 }
 
-// A drop-down with "Other" at the end, which shows a text box for the answer. value() is the choice, the text typed for Other, or null.
-// An answer that is not one of the choices (a checkup from before the form, or from the sheet) opens as Other with its own text, so a
-// row saved without touching it keeps what it had.
-function choiceSelect(label, choices, current, { otherLabel, required = false }) {
-  const text = String(current ?? '').trim();
-  const hit = choices.includes(text) ? text : null;
-  const sel = h('select', {},
-    h('option', { value: '' }, required ? 'Choose…' : 'Not recorded'),
-    choices.map((c) => h('option', { value: c, selected: c === hit }, c)),
-    h('option', { value: OTHER, selected: !!text && !hit }, 'Other'));
-  const other = h('input', { maxlength: 300, autocomplete: 'off', value: text && !hit ? text : '' });
-  const otherField = field(otherLabel, other, null, { required: true });
-  const sync = () => { otherField.hidden = sel.value !== OTHER; };
-  sel.addEventListener('change', sync);
+// A question answered with tick boxes, several at once, as on the Google Form ("Braces" and "Extraction"; two doctors): a fieldset whose
+// legend is the question, one box per choice and "Other", which shows a text box for the rest. The answer is stored the Google Form's own
+// way, the ticked choices joined with ", " and then the Other text, so an answer given here and one imported from the form look the same.
+// Stored text opens as ticks (match finds the choice a part is; split says what separates the parts), and a part that is not a choice goes
+// into Other. value() is the text to store, or null; a group left as it opened gives back the text it opened with, letter for letter.
+// first: the box setFieldError() marks and listens on (a tick anywhere in the group tells it the error is fixed).
+function choiceChecks(question, choices, current, { otherLabel, required = false, match = null, split = /,/ }) {
+  const name = `cq-${++formSeq}`;
+  const opened = String(current ?? '').trim();
+  const start = splitChoices(opened, choices, { match, split });
+  const boxes = choices.map((c) => h('input', { type: 'checkbox', name, value: c, checked: start.picked.includes(c) }));
+  const otherBox = h('input', { type: 'checkbox', name, value: OTHER, checked: !!start.other });
+  const other = h('input', { maxlength: 300, autocomplete: 'off', value: start.other });
+  const otherField = field(otherLabel, other, 'Several are fine: separate them with commas.', { required: true });
+  const first = boxes[0] || otherBox;
+  const set = h('fieldset', { class: 'fieldset-plain choice-group choice-many' },
+    h('legend', {}, question, required ? h('span', { class: 'req' }, ' (required)') : null),
+    h('div', { class: 'choice-row' }, [...boxes, otherBox].map((b, i) => h('label', { class: 'choice' }, b, h('span', {}, i < choices.length ? choices[i] : 'Other')))));
+  set.addEventListener('change', (e) => { if (e.target !== first) first.dispatchEvent(new Event('change')); });
+  const sync = () => { otherField.hidden = !otherBox.checked; };
+  otherBox.addEventListener('change', sync);
   sync();
-  // (one cell of the form's grid: the text box opens right under its drop-down)
-  return { sel, other, el: h('div', {}, field(label, sel, null, { required }), otherField), value: () => (sel.value === OTHER ? other.value.trim().replace(/\s+/g, ' ') || null : sel.value || null) };
+  const value = () => {
+    const picked = boxes.filter((b) => b.checked).map((b) => b.value);
+    const rest = otherBox.checked ? other.value.trim().replace(/\s+/g, ' ') : '';
+    if (opened && picked.join('\n') === start.picked.join('\n') && rest === start.other) return opened;
+    return joinChoices(picked, rest);
+  };
+  // (a whole line of the form's grid, the boxes in columns; the text box opens right under them)
+  return { first, otherBox, other, el: h('div', { class: 'checkup-form-wide' }, h('div', { class: 'field' }, set), otherField), ticked: () => boxes.some((b) => b.checked) || otherBox.checked, value };
 }
 
 /**
@@ -118,12 +132,16 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
     branchValue = () => Number(branch.value) || null;
   }
 
-  const doctors = state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => c.display_name);
-  const doctor = choiceSelect('Who did your checkup?', doctors, row?.doctors, { otherLabel: 'Other: who did the checkup?', required: !editing });
+  // The doctors: the website's list. A name in a stored answer is ticked when it is one of them as the sheet writes people ("Dr Hina",
+  // "Hina", several joined with , / or &).
+  const doctorList = state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => ({ displayName: c.display_name, aliases: c.aliases || [] }));
+  const doctors = doctorList.map((c) => c.displayName);
+  const asDoctor = (part) => matchClinician(part, doctorList)?.displayName ?? null;
+  const doctor = choiceChecks('Who did your checkup?', doctors, row?.doctors, { otherLabel: 'Other: who did the checkup?', required: !editing, match: asDoctor, split: /,|\/|&/ });
   const ali = choiceQuestion('Did Dr. Ali recommend your treatment?', YES_NO, asYesNo(row?.ali_recommended), { required: needAnswers });
   // (the plain word "Checkup" that marks a checkup row in the sheet is no answer: filling in the form asks it)
   const forNow = fill && /^checkup$/i.test(String(row.checkup_for ?? '').trim()) ? null : row?.checkup_for;
-  const checkupFor = choiceSelect('What was your checkup for?', CHECKUP_FOR_CHOICES, forNow, { otherLabel: 'Other: what was the checkup for?', required: !editing });
+  const checkupFor = choiceChecks('What was your checkup for?', CHECKUP_FOR_CHOICES, forNow, { otherLabel: 'Other: what was the checkup for?', required: !editing });
   const pricing = choiceQuestion('Did you understand the pricing details?', Object.entries(PRICING_LABELS), row?.pricing_understood || null, { required: needAnswers });
   const wants = choiceQuestion('Would you like to start the treatment?', YES_NO, asYesNo(row?.wants_treatment), { required: needAnswers });
   const plan = h('input', { maxlength: 500, autocomplete: 'off', value: row?.treatment_plan || '' });
@@ -155,11 +173,11 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
     if (editing ? !name.value.trim() : name.value.trim().length < 2) out.push({ input: name, message: 'Write the patient name.' });
     if (!editing && !branchValue()) out.push({ input: branch, message: 'Choose the branch.' });
     if (!editing && digitsOf(phone.value).length < 10) out.push({ input: phone, message: PHONE_HINT });
-    if (!editing && !doctor.sel.value) out.push({ input: doctor.sel, message: 'Choose who did the checkup.' });
-    if (doctor.sel.value === OTHER && !doctor.other.value.trim()) out.push({ input: doctor.other, message: 'Write who did the checkup.' });
+    if (!editing && !doctor.ticked()) out.push({ input: doctor.first, message: 'Choose who did the checkup.' });
+    if (doctor.otherBox.checked && !doctor.other.value.trim()) out.push({ input: doctor.other, message: 'Write who did the checkup.' });
     if (needAnswers && ali.value() === null) out.push({ input: ali.first, message: 'Choose whether Dr. Ali recommended the treatment.' });
-    if (!editing && !checkupFor.sel.value) out.push({ input: checkupFor.sel, message: 'Choose what the checkup was for.' });
-    if (checkupFor.sel.value === OTHER && !checkupFor.other.value.trim()) out.push({ input: checkupFor.other, message: 'Write what the checkup was for.' });
+    if (!editing && !checkupFor.ticked()) out.push({ input: checkupFor.first, message: 'Choose what the checkup was for.' });
+    if (checkupFor.otherBox.checked && !checkupFor.other.value.trim()) out.push({ input: checkupFor.other, message: 'Write what the checkup was for.' });
     if (needAnswers && !pricing.value()) out.push({ input: pricing.first, message: 'Choose whether the pricing was understood.' });
     if (needAnswers && wants.value() === null) out.push({ input: wants.first, message: 'Choose whether they want to start the treatment.' });
     if (needAnswers && !plan.value.trim()) out.push({ input: plan, message: 'Write when they want to start, or why not.' });

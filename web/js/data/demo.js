@@ -15,7 +15,7 @@ import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
-import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel, nameFits, nameNorm } from '../lib/checkups.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -797,7 +797,7 @@ export function createDemoAdapter() {
       if (rows.length > 500) fail('TOO_MANY_ROWS: send at most 500 rows at a time.');
       const list = dryRun ? clone(db.checkups) : db.checkups;
       const keys = dryRun ? new Map(formKeys) : formKeys;
-      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, dry_run: !!dryRun };
+      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, other_name: 0, dry_run: !!dryRun };
       const skip = (row, reason) => { out.skipped_count++; if (out.skipped.length < 100) out.skipped.push({ row, reason }); };
       const text = (v, max) => cleanText(typeof v === 'string' ? v : null, max).value;
       const karachi = (ms) => new Date(ms + 5 * 3600000).toISOString();     // Karachi's wall clock (+05:00 all year), as YYYY-MM-DDTHH:MM:SS
@@ -826,11 +826,17 @@ export function createDemoAdapter() {
         const wants = typeof w.wants_treatment === 'boolean' ? w.wants_treatment : null;
         const pricing = Object.keys(PRICING_LABELS).includes(w.pricing_understood) ? w.pricing_understood : null;
         const plan = text(w.treatment_plan, 500), doctors = text(w.doctors, 300), checkupFor = text(w.checkup_for, 300), follow = text(w.follow_up, 60), notes = text(w.notes, 2000);
-        // the checkup of that day at that branch (the oldest), else the old list's row of that person and month
+        // the checkup of that person on that day at that branch: the same phone and name (private.aaj_name_fits; another name on the same
+        // phone is another person, e.g. two children on a parent's phone), or the same name without a phone; the same name letter for letter
+        // first, then the oldest. Else the old list's row of that person and month.
         let kind = 'filled_day';
-        let c = list.filter((x) => x.checkup_date === date && !x.date_is_month && x.source !== 'archive' && (x.branch_id ?? null) === branch
-          && ((pk && checkupPhone(x.phone) === pk) || ((!pk || !checkupPhone(x.phone)) && nameKey(x.patient_name) === name.toLowerCase())))
-          .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1))[0];
+        const day = list.filter((x) => x.checkup_date === date && !x.date_is_month && x.source !== 'archive' && (x.branch_id ?? null) === branch);
+        const samePhone = pk ? day.filter((x) => checkupPhone(x.phone) === pk) : [];
+        let c = day.filter((x) => (samePhone.includes(x) && (!nameNorm(name) || !nameNorm(x.patient_name) || nameFits(name, x.patient_name)))
+          || ((!pk || !checkupPhone(x.phone)) && nameKey(x.patient_name) === name.toLowerCase()))
+          .sort((a, b) => (Number(nameKey(b.patient_name) === name.toLowerCase()) - Number(nameKey(a.patient_name) === name.toLowerCase()))
+            || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1))[0];
+        if (!c && samePhone.length) out.other_name++;
         if (!c) {
           kind = 'filled_month';
           c = list.find((x) => x.source === 'archive' && checkupKey({ phone: x.phone, name: x.patient_name, month: x.checkup_date }) === checkupKey({ phone, name, month: date }));

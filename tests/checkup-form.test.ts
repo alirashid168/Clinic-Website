@@ -120,15 +120,22 @@ test('"What was your checkup for?": the form\'s choices are written the website\
   for (const c of CHECKUP_FOR_CHOICES) assert.equal(formCheckupFor(c.toUpperCase()).value, c);
 });
 
-test('"Who did your Checkup?": a doctor on the website\'s list is written as the website writes it; anyone else as written', () => {
+test('"Who did your Checkup?": a doctor on the website\'s list is written as the website writes it, also several ticked at once; anyone else as written', () => {
   const name = doctorNamer(CLINICIANS);
-  assert.deepEqual(name('dr. sample hina (SAMPLE)'), { value: 'Dr. Sample Hina (sample)', cut: false, listed: true });
-  assert.deepEqual(name('Dr Hina S'), { value: 'Dr. Sample Hina (sample)', cut: false, listed: true }, 'an alias from Clinic setup');
-  assert.deepEqual(name('Assistant Sample Bilal (sample)'), { value: 'Assistant Sample Bilal (sample)', cut: false, listed: false }, 'only doctors are matched (the website\'s form lists doctors)');
-  assert.deepEqual(name('Dr. Sample Gone (sample)'), { value: 'Dr. Sample Gone (sample)', cut: false, listed: false }, 'a doctor no longer active is kept as written');
-  assert.deepEqual(name('Somebody   Else'), { value: 'Somebody Else', cut: false, listed: false });
-  assert.deepEqual(name(''), { value: null, cut: false, listed: false });
-  assert.deepEqual(doctorNamer([])('Dr. Sample Hina (sample)'), { value: 'Dr. Sample Hina (sample)', cut: false, listed: false }, 'no list: as written');
+  assert.deepEqual(name('dr. sample hina (SAMPLE)'), { value: 'Dr. Sample Hina (sample)', cut: false, listed: true, other: null });
+  assert.deepEqual(name('Dr Hina S'), { value: 'Dr. Sample Hina (sample)', cut: false, listed: true, other: null }, 'an alias from Clinic setup');
+  assert.deepEqual(name('Assistant Sample Bilal (sample)'), { value: 'Assistant Sample Bilal (sample)', cut: false, listed: false, other: 'Assistant Sample Bilal (sample)' },
+    'only doctors are matched (the website\'s form lists doctors)');
+  assert.deepEqual(name('Dr. Sample Gone (sample)'), { value: 'Dr. Sample Gone (sample)', cut: false, listed: false, other: 'Dr. Sample Gone (sample)' }, 'a doctor no longer active is kept as written');
+  assert.deepEqual(name('Somebody   Else'), { value: 'Somebody Else', cut: false, listed: false, other: 'Somebody Else' });
+  assert.deepEqual(name(''), { value: null, cut: false, listed: false, other: null });
+  assert.deepEqual(doctorNamer([])('Dr. Sample Hina (sample)'), { value: 'Dr. Sample Hina (sample)', cut: false, listed: false, other: 'Dr. Sample Hina (sample)' }, 'no list: as written');
+  // the form's question is tick boxes: two doctors ticked come as "A, B" (in the form's order); written the website's way, in its list's order
+  assert.deepEqual(name('Dr Sample Rabia (sample), Dr Hina S'), { value: 'Dr. Sample Hina (sample), Dr. Sample Rabia (sample)', cut: false, listed: true, other: null },
+    'what the website\'s own form stores for those two ticks');
+  assert.deepEqual(name('Dr. Sample Hina (sample) / Somebody Else'), { value: 'Dr. Sample Hina (sample), Somebody Else', cut: false, listed: false, other: 'Somebody Else' },
+    'a doctor of the list and an "Other" name: the doctor first, the rest as written');
+  assert.deepEqual(name('Somebody, Else'), { value: 'Somebody, Else', cut: false, listed: false, other: 'Somebody, Else' }, 'nobody of the list: exactly as written');
 });
 
 // A tab laid out like the real one (made up): one header row, then the answers. Row numbers are the sheet's (the header is row 1).

@@ -730,6 +730,42 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   assert.equal(full.source, 'website');
 });
 
+test('demo: two people on one phone on one day (a parent\'s phone for two children) are two checkups in the import, as in the database', async () => {
+  const d = await demoAs('s-fd-nn');
+  // both already on the list of 3 Sep at North Nazimabad (the sister first); a mother and her son on another phone (the son first)
+  const hira = await d.addCheckup({ checkup_date: '2026-09-03', branch_id: 2, patient_name: 'Sample Sister Hira', phone: '03120009090', checkup_for: 'Checkup' });
+  const hamza = await d.addCheckup({ checkup_date: '2026-09-03', branch_id: 2, patient_name: 'Sample Brother Hamza', phone: '03120009090', checkup_for: 'Checkup' });
+  const son = await d.addCheckup({ checkup_date: '2026-09-05', branch_id: 2, patient_name: 'Sample Son Faraz', phone: '03120009091', checkup_for: 'Checkup' });
+  const mother = await d.addCheckup({ checkup_date: '2026-09-05', branch_id: 2, patient_name: 'Sample Mother Rubina', phone: '03120009091', checkup_for: 'Checkup' });
+  const ayesha = await d.addCheckup({ checkup_date: '2026-09-04', branch_id: 2, patient_name: 'Ayesha Sampleton', phone: '03120009092', checkup_for: 'Checkup' });
+  await d.signInDemo('s-admin');
+  const rows = [
+    // nothing on the website yet: two answers of 14 Aug at Gulshan on one phone
+    answer(2, '2026-08-14T11:00:00+05:00', 'Sample Sister Aiza', '0300-5550901', 'GUL', { checkup_for: 'Braces', wants_treatment: true, treatment_plan: 'Next month' }),
+    answer(3, '2026-08-14T11:04:00+05:00', 'Sample Brother Bilal', '0300-5550901', 'GUL', { checkup_for: 'Root canal', wants_treatment: false, treatment_plan: 'Too costly now' }),
+    // the brother's answer first in the file
+    answer(4, '2026-09-03T12:00:00+05:00', 'Sample Brother Hamza', '0312-0009090', 'NN', { checkup_for: 'Extraction', wants_treatment: false, treatment_plan: 'Later' }),
+    answer(5, '2026-09-03T12:03:00+05:00', 'Sample Sister Hira', '0312-0009090', 'NN', { checkup_for: 'Braces', wants_treatment: true, treatment_plan: 'This week' }),
+    answer(6, '2026-09-05T12:00:00+05:00', 'Sample Mother Rubina', '0312-0009091', 'NN', { checkup_for: 'Smile makeover', wants_treatment: false, treatment_plan: 'Only came with her son' }),
+    // the same person written another way: an everyday spelling of the first name
+    answer(7, '2026-09-04T12:00:00+05:00', 'Aisha Sampleton', '0312-0009092', 'NN', { checkup_for: 'Implant' }),
+  ];
+  const preview = await d.importCheckupForm(rows, { dryRun: true });
+  const r = await d.importCheckupForm(rows);
+  assert.deepEqual({ ...preview, dry_run: false }, r, 'the preview says the same');
+  assert.deepEqual([r.inserted, r.filled_day, r.same, r.other_name], [2, 4, 0, 1], 'the two new siblings are two new checkups (1 "same phone, another name"); each answer on the list goes on its own person');
+  const all = await d.exportCheckups({});
+  const by = (id: string) => all.find((c: any) => c.id === id);
+  const plain = (c: any) => [c.patient_name, c.checkup_for, c.wants_treatment, c.treatment_plan];
+  assert.deepEqual(all.filter((c: any) => c.phone === '0300-5550901').map(plain).sort(),
+    [['Sample Brother Bilal', 'Root canal', false, 'Too costly now'], ['Sample Sister Aiza', 'Braces', true, 'Next month']], 'both siblings, each with their own answers');
+  assert.deepEqual([plain(by(hira.id)), plain(by(hamza.id))], [['Sample Sister Hira', 'Braces', true, 'This week'], ['Sample Brother Hamza', 'Extraction', false, 'Later']],
+    'the sister\'s answer on the sister, the brother\'s on the brother (not both on the older row)');
+  assert.deepEqual([plain(by(son.id)), plain(by(mother.id))], [['Sample Son Faraz', 'Checkup', null, null], ['Sample Mother Rubina', 'Smile makeover', false, 'Only came with her son']],
+    'the mother\'s answer on her own row, not on her son\'s older one');
+  assert.equal(by(ayesha.id).checkup_for, 'Implant', '"Aisha" for "Ayesha": the same person');
+});
+
 test('demo: Admin -> Import of the Aaj ki List history never files a row whose name fits its Mr# only with doubt (it comes back with why), and never files a row without an Mr# on a brother of the same first name (abuse-privacy M1, M2; 11 Oct 2026)', async () => {
   const d = await demoAs('s-admin');
   const pa = await d.createPatient({ mr_number: '77131', full_name: 'Ayesha Khan', phone: '03160000131', first_branch_id: 2 });

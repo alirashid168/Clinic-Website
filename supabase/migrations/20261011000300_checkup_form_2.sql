@@ -16,7 +16,8 @@
 -- The owner (12 Oct 2026): "yes please bring the old 470 entries too, and design the form submitted entries all in similar
 -- way too." The answers given on the Google Form itself (Aug to Oct 2026, the "Form Responses 2" tab of "Checkup karwaliya")
 -- are imported by Dr. Ali on Admin -> Import, through public.import_checkup_form() (section 3 below). An imported answer goes
---   - onto the checkup of that person at that branch on that day when the website or the Google Sheet already has one,
+--   - onto the checkup of that person at that branch on that day when the website or the Google Sheet already has one (the same phone
+--     AND the same name: two children on a parent's phone are two checkups),
 --   - else onto the old list's row of that person and month (private.checkup_key), which keeps its follow-up status,
 --   - else into a new row: source 'google_form', source_tab 'Checkup Form 2.0', the day of the answer (date_is_month false).
 -- form_submitted_at says when the answer was given on the Google Form (null: never imported from it).
@@ -33,7 +34,8 @@
 -- made, so without this the Checkups page would not see the answers. It is dropped and made again (CREATE OR REPLACE
 -- cannot put new columns in the middle) with the same definition, rights and security_invoker; nothing depends on it.
 --
--- Additive and safe to run more than once. Needs 20261009000250_checkups.sql and 20261009000260_checkups_functions.sql.
+-- Additive and safe to run more than once. Needs 20261009000250_checkups.sql, 20261009000260_checkups_functions.sql and (for the names
+-- the import compares, private.aaj_norm_name and private.aaj_name_fits) 20261009000300_aaj_two_way_sync.sql.
 -- =============================================================================
 
 do $$
@@ -41,6 +43,9 @@ begin
   if to_regclass('public.checkups') is null or to_regprocedure('private.checkup_phone(text)') is null
      or to_regprocedure('private.checkup_key(text,text,date)') is null or to_regprocedure('private.checkup_text(text,integer)') is null then
     raise exception 'Apply 20261009000250_checkups.sql and 20261009000260_checkups_functions.sql before this file.';
+  end if;
+  if to_regprocedure('private.aaj_norm_name(text)') is null or to_regprocedure('private.aaj_name_fits(text,text)') is null then
+    raise exception 'Apply 20261009000300_aaj_two_way_sync.sql before this file.';
   end if;
 end $$;
 
@@ -131,8 +136,16 @@ create index if not exists checkup_form_imports_checkup_idx on private.checkup_f
 -- Google Sheet) is skipped with the reason; today's answers come in with the next day's import.
 -- Where an answer goes, in this order:
 --   1. already imported (its key)                                                  -> nothing changes ("already")
---   2. a checkup of that day at that branch from the website, the Google Sheet or an earlier answer: the same phone (as digits), or
---      the same name when one of the two has no phone; the oldest of them         -> its empty answers are filled in ("filled_day")
+--   2. a checkup of that day at that branch from the website, the Google Sheet or an earlier answer: the same phone (as digits) and the
+--      same name, or the same name letter for letter when one of the two has no phone; the same name letter for letter first, then the
+--      oldest                                                                       -> its empty answers are filled in ("filled_day")
+--      With a phone the names are compared as the Aaj ki List compares a typed name with a patient's (private.aaj_name_fits): the same
+--      first name (titles such as Muhammad, M, Syed skipped; an everyday spelling is the same name: "Aisha" / "Ayesha", "Umer" / "Umar")
+--      and no other name: "Ayesha" is "Ayesha Khan" and "Muhammad Usman Ali" is "Usman Ali", but "Ayesha Khan" is not "Ayesha Rajpoot".
+--      A parent's phone is often given for two children who came together: "Sample Sister Aiza" and "Sample Brother Bilal" on one phone
+--      are two checkups (the second answer is never put on the first one's row; in the owner's file 11 days have such a pair). A name
+--      nobody can read (Urdu script) on either side is matched by the phone alone. An answer whose phone is on that day's list at that
+--      branch only under another name is counted in other_name too (it becomes its own checkup in 3 or 4).
 --   3. the old list's row of that person and month (private.checkup_key)          -> its empty answers are filled in ("filled_month")
 --   4. otherwise                                                                    -> a new checkup ("inserted"): source 'google_form',
 --      source_tab 'Checkup Form 2.0', the day of the answer, Completed (the form is filled in after the checkup, as on the website),
@@ -143,7 +156,8 @@ create index if not exists checkup_form_imports_checkup_idx on private.checkup_f
 -- checkup's own. A checkup that already holds everything the answer says is "same". form_submitted_at is set on the checkup that changed.
 -- p_dry_run (the preview): everything is done and then undone, so the counts are exactly what the import would do.
 -- Result: given / inserted / filled_day / filled_month / already / same / skipped (up to 100 listed as { row, reason }) / skipped_count
--- and dry_run. given = inserted + filled_day + filled_month + already + same + skipped_count.
+-- / other_name and dry_run. given = inserted + filled_day + filled_month + already + same + skipped_count (other_name is part of
+-- inserted + filled_month: the answers that share a phone with another person on that day's list).
 create or replace function public.import_checkup_form(p_rows jsonb, p_dry_run boolean default false)
 returns jsonb
 language plpgsql security definer set search_path = public
@@ -151,10 +165,10 @@ as $$
 declare
   v_today date := (now() at time zone 'Asia/Karachi')::date;
   v_open date := ((now() at time zone 'Asia/Karachi') - interval '3 hours')::date;    -- the first day the sync may still be keeping
-  n_given int; n_ins int := 0; n_day int := 0; n_month int := 0; n_already int := 0; n_same int := 0; n_skip int := 0;
+  n_given int; n_ins int := 0; n_day int := 0; n_month int := 0; n_already int := 0; n_same int := 0; n_skip int := 0; n_other int := 0;
   v_skipped jsonb := '[]'::jsonb;
   e record; c public.checkups;
-  v_row int; v_name text; v_ts timestamptz; v_date date; v_why text; v_phone text; v_pk text; v_nk text; v_key text; v_branch smallint;
+  v_row int; v_name text; v_ts timestamptz; v_date date; v_why text; v_phone text; v_pk text; v_nk text; v_named boolean; v_key text; v_branch smallint;
   v_ali boolean; v_pricing text; v_wants boolean; v_plan text; v_doctors text; v_for text; v_follow text; v_notes text; v_kind text; v_id uuid;
   n_ali boolean; n_pricing text; n_wants boolean; n_plan text; n_doctors text; n_for text; n_phone text; n_branch smallint; n_follow text; n_notes text;
 begin
@@ -214,15 +228,25 @@ begin
       v_follow := private.checkup_text(e.r->>'follow_up', 60);
       v_notes := private.checkup_text(e.r->>'notes', 2000);
 
-      -- 2. the checkup of that day at that branch (the oldest, when the person is on the day's list twice)
+      -- 2. the checkup of that person on that day at that branch: the same phone and name (another name on the same phone is another
+      --    person: a parent's phone for two children), or the same name without a phone; the same name letter for letter first, then the oldest
       v_kind := 'filled_day';
+      v_named := private.aaj_norm_name(v_name) <> '';      -- false: a name nobody can read (Urdu script, only dots)
       select * into c from public.checkups x
        where x.checkup_date = v_date and not x.date_is_month and x.source <> 'archive' and x.branch_id is not distinct from v_branch
-         and ((v_pk is not null and private.checkup_phone(x.phone) = v_pk)
+         and ((v_pk is not null and private.checkup_phone(x.phone) = v_pk
+               and (not v_named or private.aaj_norm_name(x.patient_name) = '' or private.aaj_name_fits(v_name, x.patient_name)))
               or ((v_pk is null or private.checkup_phone(x.phone) is null) and lower(btrim(regexp_replace(x.patient_name, '\s+', ' ', 'g'))) = v_nk))
-       order by x.created_at, x.id
+       order by lower(btrim(regexp_replace(x.patient_name, '\s+', ' ', 'g'))) = v_nk desc, x.created_at, x.id
        limit 1
        for update;
+      -- (the phone is on that day's list under another name only: counted, so the preview can say why it becomes a checkup of its own)
+      if c.id is null and v_pk is not null and exists (
+           select 1 from public.checkups x
+            where x.checkup_date = v_date and not x.date_is_month and x.source <> 'archive' and x.branch_id is not distinct from v_branch
+              and private.checkup_phone(x.phone) = v_pk) then
+        n_other := n_other + 1;
+      end if;
       -- 3. the old list's row of that person and month (the unique index of 20261009000260)
       if c.id is null then
         v_kind := 'filled_month';
@@ -276,7 +300,7 @@ begin
   end;
 
   return jsonb_build_object('given', n_given, 'inserted', n_ins, 'filled_day', n_day, 'filled_month', n_month, 'already', n_already, 'same', n_same,
-                            'skipped', v_skipped, 'skipped_count', n_skip, 'dry_run', coalesce(p_dry_run, false));
+                            'skipped', v_skipped, 'skipped_count', n_skip, 'other_name', n_other, 'dry_run', coalesce(p_dry_run, false));
 end $$;
 
 revoke all on function public.import_checkup_form(jsonb, boolean) from public, anon;
