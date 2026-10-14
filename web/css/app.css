@@ -932,6 +932,17 @@ table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--ch
 }
 .pager-info { font-size: var(--fs-ui); font-weight: 600; }
 
+/* the History of Aaj ki List: one line per day and branch (the whole line is the link), and one day's list read only */
+.day-history-list { list-style: none; margin: 0; padding: 0; }
+.day-history-list > li + li { border-top: 1px solid var(--border); }
+.day-history-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-1); color: var(--text); text-decoration: none; }
+.day-history-line:hover { background: var(--surface-hover); }
+.day-history-line:hover .day-history-text { text-decoration: underline; }
+.day-history-text { overflow-wrap: anywhere; }
+.back-line { margin: 0 0 var(--space-2); }
+.day-copy .status-chip { display: inline-block; cursor: default; }
+.day-copy-name { font-weight: 600; overflow-wrap: anywhere; }
+
 /* queue board */
 .queue { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
 .queue-col { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); padding: var(--space-3); min-height: 180px; }

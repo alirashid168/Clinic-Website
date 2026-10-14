@@ -21,6 +21,7 @@ export const PERMISSIONS = [
     { key: 'sheet.view', label: 'View Aaj ki List / queue', category: 'Daily list', defaults: [Y, Y, Y, Y, Y] },
     { key: 'sheet.edit', label: 'Add and edit Aaj ki List entries', category: 'Daily list', defaults: [Y, Y, Y, Y, N] },
     { key: 'treatment.enter', label: 'Enter treatment done / braces details', category: 'Daily list', defaults: [N, Y, Y, N, N] },
+    { key: 'sheet.end_day', label: 'End the day on the Aaj ki List', category: 'Daily list', defaults: [Y, Y, Y, Y, N] },
     { key: 'braces.manage', label: 'Manage braces cases (plan, extraction)', category: 'Braces', defaults: [N, N, Y, N, N] },
     { key: 'braces.override', label: 'Override braces protocol rules', category: 'Braces', defaults: [N, N, N, N, N] },
     { key: 'retainers.manage', label: 'Manage retainer cases', category: 'Braces', defaults: [N, Y, Y, Y, N] },
