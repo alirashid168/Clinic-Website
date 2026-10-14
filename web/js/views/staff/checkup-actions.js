@@ -2,7 +2,7 @@
 // and a treatment, but no Mr#: they get a patient file (and an Mr#) only when they start treatment.
 import { h, mount, modal, field, select, toast, friendlyError, announce, showFormErrors, clearFieldErrors, localISO, shortDate, busy } from '../../ui/dom.js';
 import { state, can, isAdmin, myBranches, branchName, cityName } from '../../state.js';
-import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, PRICING_LABELS, checkupPhone, formComplete, splitChoices, joinChoices } from '../../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, CHECKUP_FOR_CHOICES, PRICING_LABELS, checkupPhone, formComplete, hasFormAnswers, nameFits, nameNorm, splitChoices, joinChoices } from '../../lib/checkups.js';
 import { matchClinician } from '../../lib/legacy.js';
 import { commitOnFinish } from './common.js';
 
@@ -200,6 +200,13 @@ function discardGuard(snapshot) {
   });
 }
 
+// Is the name typed in the form the person of checkup c, which has the same phone? The phone alone is not enough: a parent's phone is often
+// given for two children (in the owner's Google Form file 11 days have two names on one phone). The names must fit as the import compares
+// them (nameFits, the rule of private.aaj_name_fits); a name nobody can read (Urdu script) on either side, or none typed yet, goes by the phone.
+const sameName = (typed, c) => !nameNorm(typed) || !nameNorm(c.patient_name) || nameFits(typed, c.patient_name);
+// What saving the answers on c would do to answers it already has.
+const answeredText = (c) => `${formComplete(c) ? 'Its checkup form is already filled in' : 'It already has answers from the checkup form'}: saving these answers on it would replace them.`;
+
 // Text typed under "More" for a checkup that already has some is added after it (cut to the column's 2,000 characters); undefined leaves it.
 function addedText(had, typed) {
   const t = typed.trim();
@@ -261,16 +268,27 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       return true;
     };
     // "Add checkup patient" pressed while the warning is there (above the questions, so out of sight on a phone by then): asked once more.
-    // -> 'back', 'add' (a different person with the same phone) or the checkup to save the answers on.
+    // -> 'back', 'add' (a different person with the same phone) or the checkup to save the answers on. Saving on that checkup is the
+    // highlighted choice (it has focus) only when the names fit and it has no answers yet; otherwise both people are named, and "Add as a
+    // different person" is: Enter must never write one person's answers over another's.
     const sameDayChoice = (matches, day) => new Promise((answer) => {
-      const one = matches.length === 1 ? matches[0] : null;
+      const typed = name.value.trim().replace(/\s+/g, ' ');
+      const fitting = matches.filter((c) => sameName(typed, c));
+      const one = matches.length === 1 ? matches[0] : fitting.length === 1 ? fitting[0] : null;     // the checkup the answers could go on
+      const safe = !!one && sameName(typed, one) && !hasFormAnswers(one);
+      const listed = matches.map((c) => `${c.patient_name} (${c.phone})`).join(', ');
       let choice = 'back';
       modal(`Already on the list for ${shortDate(day)}`, h('div', {},
-        h('p', {}, `${matches.map((c) => `${c.patient_name} (${c.phone})`).join(', ')} ${one ? 'is' : 'are'} already on the list for ${shortDate(day)} with this phone number.`),
-        h('p', {}, one ? 'Same person? Save the answers on that checkup, so they are not on the list twice.' : 'Same person? Go back and save the answers on their checkup, so they are not on the list twice.')), [
+        safe
+          ? [h('p', {}, `${listed} ${matches.length === 1 ? 'is' : 'are'} already on the list for ${shortDate(day)} with this phone number.`),
+            h('p', {}, `Same person${matches.length > 1 ? ` as ${one.patient_name}` : ''}? Save the answers on that checkup, so they are not on the list twice.`)]
+          : [h('p', {}, `You typed ${typed}; the list for ${shortDate(day)} has ${listed} on this phone number.`),
+            !one || !sameName(typed, one) ? h('p', {}, 'Another person on the same phone (often a family member) is added as a checkup of their own.') : null,
+            one && hasFormAnswers(one) ? h('p', {}, `${one.patient_name}: ${answeredText(one)}`) : null,
+            !one ? h('p', {}, 'The same person? Go back and save the answers on their checkup.') : null]), [
         { label: 'Go back' },
-        { label: 'Add as a different person', onClick: () => { choice = 'add'; } },
-        ...(one ? [{ label: 'Save the answers on that checkup', primary: true, onClick: () => { choice = one; } }] : []),
+        { label: 'Add as a different person', primary: !safe, onClick: () => { choice = 'add'; } },
+        ...(one ? [{ label: hasFormAnswers(one) ? 'Replace the answers on that checkup' : 'Save the answers on that checkup', primary: safe, onClick: () => { choice = one; } }] : []),
       ], { onClose: () => answer(choice) });
     });
 
@@ -287,14 +305,21 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
           : [],
       ]);
       if (mine !== dupSeq || done) return;
-      sameDayNow = sameDay;
+      // the checkups whose name fits the typed one first; another name, or answers already given, are said (and the button says "Replace")
+      const typed = name.value.trim().replace(/\s+/g, ' ');
+      sameDayNow = [...sameDay].sort((a, b) => Number(sameName(typed, b)) - Number(sameName(typed, a)));
       const phoneDigits = digitsOf(phone.value);
       const sorted = [...rows].sort((a, b) => Number(digitsOf(b.phone) === phoneDigits && phoneDigits.length >= 7) - Number(digitsOf(a.phone) === phoneDigits && phoneDigits.length >= 7)).slice(0, 3);
       mount(warn,
-        sameDay.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sameDay.slice(0, 3).map((c) => h('div', { class: 'dup-line' },
-          h('span', {}, h('strong', {}, `Already on the list for ${shortDate(day)}: `), `${c.patient_name} (${c.phone}). `,
-            formComplete(c) ? 'Its checkup form is already filled in. ' : '', 'Same person? Save the answers on this checkup, so they are not on the list twice.'),
-          h('button', { type: 'button', class: 'btn btn-small', 'aria-label': `Save the answers on this checkup: ${c.patient_name}`, onclick: busy(() => saveAnswersOn(c)) }, 'Save the answers on this checkup')))) : null,
+        sameDayNow.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sameDayNow.slice(0, 3).map((c) => {
+          const fits = sameName(typed, c);
+          const action = hasFormAnswers(c) ? 'Replace the answers on this checkup' : 'Save the answers on this checkup';
+          return h('div', { class: 'dup-line' },
+            h('span', {}, h('strong', {}, `Already on the list for ${shortDate(day)}: `), `${c.patient_name} (${c.phone}). `,
+              fits ? '' : `You typed ${typed}: another person on the same phone (often a family member) is added as a checkup of their own. `,
+              hasFormAnswers(c) ? answeredText(c) : fits ? 'Same person? Save the answers on this checkup, so they are not on the list twice.' : ''),
+            h('button', { type: 'button', class: 'btn btn-small', 'aria-label': `${action}: ${c.patient_name}`, onclick: busy(() => saveAnswersOn(c)) }, action));
+        })) : null,
         sorted.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sorted.map((p) => {
           const samePhone = phoneDigits.length >= 7 && digitsOf(p.phone) === phoneDigits;
           return h('div', { class: 'dup-line' },
@@ -334,7 +359,12 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
         const day = fixedDay ? date : dateIn.value;
         if (sameDayNow.length) {
           const choice = await sameDayChoice(sameDayNow, day);
-          if (choice === 'back') { warn.querySelector('button')?.focus(); return false; }
+          if (choice === 'back') {
+            // back at the warning's button when it only saves; when it would replace answers or the name is another, at the name instead
+            const first = sameDayNow[0];
+            (first && sameName(name.value, first) && !hasFormAnswers(first) ? warn.querySelector('button') : name)?.focus();
+            return false;
+          }
           if (choice !== 'add') return (await saveAnswersOn(choice)) ? undefined : false;
         }
         const answers = q.values();

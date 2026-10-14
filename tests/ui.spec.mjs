@@ -326,8 +326,8 @@ await step('front desk: the same phone number twice on one day\'s list is flagge
   await checkupRow(page, 'Twice Typed Person').waitFor();
   const second = await add('Twice Typed Person', '0300-555 0955');
   await second.locator('.alert-warning:has-text("Already on the list for")').waitFor();
-  assert.match(await second.locator('.alert-warning').innerText(), /Twice Typed Person \(0300 5550955\)\. Its checkup form is already filled in\. Same person\? Save the answers on this checkup, so they are not on the list twice\./);
-  assert.ok(await second.locator('.alert-warning').getByRole('button', { name: 'Save the answers on this checkup: Twice Typed Person' }).count(), 'with a button that does it');
+  assert.match(await second.locator('.alert-warning').innerText(), /Twice Typed Person \(0300 5550955\)\. Its checkup form is already filled in: saving these answers on it would replace them\./);
+  assert.ok(await second.locator('.alert-warning').getByRole('button', { name: 'Replace the answers on this checkup: Twice Typed Person' }).count(), 'with a button that says what it does');
   // a different number is not flagged, and adding anyway stays possible
   await second.getByLabel(/^Mobile number/).fill('0300 5550957');
   await second.getByLabel(/^Mobile number/).press('Tab');
@@ -529,6 +529,69 @@ await step('Today page: the form for someone already on today\'s list (typed int
   assert.match(await found.innerText(), /Google Sheet/);
   assert.match(await found.innerText(), /Will ask her husband first/);
   assert.match(await found.innerText(), /Dr\. Ali recommended: No/);
+});
+// A parent's phone is often given for two children (in the owner's Google Form file 11 days have two names on one phone): as in the import,
+// two names on one phone on one day are two checkups, and the first person's answers are never replaced by pressing Enter.
+await step('Today page: two names on one phone on one day (a parent\'s phone) are two checkups; "Add as a different person" has focus and the first person\'s answers stay', async () => {
+  await page.locator('.topnav a:has-text("Today")').click();
+  const panel = page.locator('section.today-checkup');
+  await panel.waitFor();
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = page.locator('.modal').first();
+  await fillCheckupForm(m, { name: 'Sample Mother Review', phone: '0300 5550990', checkupFor: 'Braces', wants: 'Yes', plan: 'Mother plan' });
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await page.waitForSelector('.toast:has-text("Sample Mother Review added as a checkup patient.")');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  // the son, on his mother's phone
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Mobile number/).fill('0300-555 0990');
+  await m.getByLabel(/^Mobile number/).press('Tab');
+  const warning = m.locator('.alert-warning', { hasText: 'Already on the list for' });
+  await warning.waitFor();
+  // (the name first: the warning grows when it names both people, so the boxes below it are ticked after that)
+  await m.getByLabel(/^Patient full name/).fill('Sample Son Review');
+  await m.getByLabel(/^Patient full name/).press('Tab');
+  await page.waitForFunction(() => /You typed Sample Son Review/.test(document.querySelector('.modal .alert-warning')?.textContent || ''));
+  await fillCheckupForm(m, { name: 'Sample Son Review', checkupFor: 'Extraction', wants: 'No', plan: 'Son plan' });
+  assert.match(await warning.innerText(), /Sample Mother Review \(0300 5550990\)\. You typed Sample Son Review: another person on the same phone \(often a family member\) is added as a checkup of their own\. Its checkup form is already filled in: saving these answers on it would replace them\./);
+  assert.ok(await warning.getByRole('button', { name: 'Replace the answers on this checkup: Sample Mother Review' }).count(), 'the warning\'s button says it would replace');
+  await warning.scrollIntoViewIfNeeded();
+  await shot(page, 'family-1-warning');
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  const ask = page.locator('.modal', { hasText: 'on this phone number' });
+  await ask.waitFor();
+  assert.match(await ask.innerText(), /You typed Sample Son Review; the list for .+ has Sample Mother Review \(0300 5550990\) on this phone number\./);
+  assert.match(await ask.innerText(), /Another person on the same phone \(often a family member\) is added as a checkup of their own\./);
+  assert.match(await ask.innerText(), /Sample Mother Review: Its checkup form is already filled in: saving these answers on it would replace them\./);
+  assert.deepEqual(await ask.locator('.modal-actions button').allInnerTexts(), ['Go back', 'Add as a different person', 'Replace the answers on that checkup']);
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Add as a different person', 'the safe choice has focus');
+  assert.match(await ask.getByRole('button', { name: 'Add as a different person' }).getAttribute('class'), /btn-primary/, 'and is the highlighted one');
+  await shot(page, 'family-2-dialog');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('.toast:has-text("Sample Son Review added as a checkup patient.")');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  await page.goto(BASE + '#/staff/checkups?q=5550990');
+  await page.waitForFunction(() => document.querySelector('.checkup-table-wrap')?.getAttribute('aria-busy') === 'false' && document.querySelectorAll('table.checkup-table tbody tr[data-id]').length > 1);
+  const found = page.locator('table.checkup-table tbody tr[data-id]');
+  assert.equal(await found.count(), 2, 'two checkups on the Checkups page');
+  const mother = found.filter({ hasText: 'Sample Mother Review' });
+  const son = found.filter({ hasText: 'Sample Son Review' });
+  assert.match(await mother.innerText(), /Mother plan/, 'the mother keeps her own answers');
+  assert.doesNotMatch(await mother.innerText(), /Son plan/);
+  assert.match(await son.innerText(), /Son plan/);
+  await shot(page, 'family-3-result');
+  // leave today's list as it was
+  await page.goto(BASE + '#/staff/sheet');
+  for (const who of ['Sample Mother Review', 'Sample Son Review']) {
+    const row = checkupRow(page, who);
+    await row.waitFor();
+    await row.getByRole('button', { name: /Checkup options/ }).click();
+    await page.locator('.modal').getByRole('button', { name: 'Remove from the list' }).click();
+    await page.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
+    await row.waitFor({ state: 'detached' });
+  }
+  await page.locator('.topnav a:has-text("Today")').click();   // (the next step opens the Aaj ki List afresh)
+  await page.locator('section.today-checkup').waitFor();
 });
 await step('Aaj ki List: a checkup typed in on arrival gets its answers with "Fill in the checkup form" (its options) or through "+ Add checkup patient" (asked before a second row is made)', async () => {
   // two arrivals typed in before the checkup (no answers), as the sheet or the desk makes them
@@ -2326,7 +2389,8 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
   await pk.waitForFunction(() => document.querySelectorAll('table.checkup-table tbody tr[data-id]').length === 1);
   const beta = rowsOf(pk).first();
   assert.equal(await beta.locator('select[aria-label^="Follow-up status"]').inputValue(), 'Interested', 'the old list\'s row keeps its follow-up status');
-  assert.equal(await beta.locator('input[aria-label^="Notes for"]').inputValue(), 'Wants to think; Reminder: treatment started');
+  assert.equal(await beta.locator('input[aria-label^="Notes for"]').inputValue(), 'Wants to think; Reminder: treatment started; On the Google Form: "What was your checkup for?" Braces',
+    'its own treatment ("Braces consult") stays; what the form said is in the notes');
   assert.match(await beta.innerText(), /Old list: Sample tab B, answers from the Google Form/);
   assert.match(await beta.innerText(), /After Eid/);
   // the Source filter

@@ -5,7 +5,8 @@
 --   3. where an answer goes: the day's checkup (website or Google Sheet; by phone and name, or by name when one side has no phone; the oldest),
 --      the old list's row of that month (its follow-up stays), or a new row shown like a website entry; skips; cleaning; the preview
 --      undoes everything and counts the same; the same file again changes nothing, also after a removal; two people on one phone on
---      one day are two checkups (3b);
+--      one day are two checkups (3b); a second answer of one person that says otherwise is a checkup of its own, and what the form says
+--      that a checkup keeps its own text for is in its notes (3c);
 --   4. the Google Sheet sync does not see any of it: today's list and its hash stay the same, an answer of today waits, and no imported
 --      row is on a list the sync keeps.
 \set ON_ERROR_STOP 1
@@ -91,6 +92,8 @@ begin
     and has_function_privilege('authenticated', 'public.import_checkup_form(jsonb,boolean)', 'execute')
     and not has_function_privilege('anon', 'public.import_checkup_form(jsonb,boolean)', 'execute'),
     'import_checkup_form: security definer, signed-in people may call it (it checks for admin itself), the public may not');
+  perform pg_temp.check(not has_function_privilege('authenticated', 'private.checkup_form_agrees(public.checkups,boolean,text,boolean,text)', 'execute'),
+    'its helper private.checkup_form_agrees is not callable through the API');
 end $$;
 
 -- 2. Who may import, and who may set form_submitted_at.
@@ -161,8 +164,10 @@ create temp table f31_rows as select jsonb_build_array(
   pg_temp.ans(5, '2026-08-23T12:00:00+05:00', 'Sample Import Nophone', '0300-5553104', 'NN', '{"ali_recommended": false, "pricing_understood": "needs_explanation"}'),
   pg_temp.ans(6, '2026-08-21T13:00:00+05:00', 'Sample Import Day', '0300-5553101', 'GUL'),
   pg_temp.ans(7, '2026-08-24T09:00:00+05:00', 'Sample Import Twice', '0300-5553106', 'LHR', '{"pricing_understood": null}'),
-  pg_temp.ans(8, '2026-08-24T09:05:00+05:00', 'Sample Import Twice', '0300-5553106', 'LHR', '{"pricing_understood": "no", "wants_treatment": false}'),
+  pg_temp.ans(8, '2026-08-24T09:05:00+05:00', 'Sample Import Twice', '0300-5553106', 'LHR', '{"pricing_understood": "no"}'),
   pg_temp.ans(9, '2026-08-25T15:00:00+05:00', 'Sample Import Full', '0300-5553105', 'NN'),
+  pg_temp.ans(17, '2026-08-25T15:30:00+05:00', 'Sample Import Full', '0300-5553105', 'NN', '{"doctors": "Dr. Other (sample)", "checkup_for": "Implant", "ali_recommended": false,
+    "pricing_understood": "no", "wants_treatment": false, "treatment_plan": "will think"}'),
   pg_temp.ans(10, '2026-08-26T10:00:00+05:00', '   ', '0300-5553107', 'NN'),
   pg_temp.ans(11, 'soon', 'Sample Import Bad Date', null, 'NN'),
   pg_temp.ans(12, '2026-08-26T10:00:00', 'Sample Import No Offset', null, 'NN'),
@@ -185,11 +190,13 @@ select pg_temp.check((select (select count(*) from public.checkups) = b.n_checku
 insert into f31_res select 'import', pg_temp.imp(rows) from f31_rows;
 select pg_temp.check((select p.r - 'dry_run' = i.r - 'dry_run' from f31_res p, f31_res i where p.n = 'preview' and i.n = 'import'),
   'the preview counts exactly what the import then does');
--- new: rows 6 (another branch), 7, 15 and 16; onto that day's checkup: 2, 3, 5 and 8 (8 fills in what 7 left empty); onto the old list's row: 4;
--- nothing new: 9; skipped: 10 to 14
-select pg_temp.check((select array[(r->>'given')::int, (r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'already')::int, (r->>'same')::int, (r->>'skipped_count')::int]
-                        from f31_res where n = 'import') = array[15, 4, 4, 1, 0, 1, 5],
-  'the counts: 4 new, 4 onto the day''s checkup, 1 onto the old list''s row, 1 with nothing new, 5 skipped (given = the sum)');
+-- new: rows 6 (another branch), 7, 9 (the website's checkup of that day holds other answers), 15 and 16; onto that day's checkup: 2, 3, 5
+-- and 8 (8 fills in what 7 left empty); onto the old list's row: 4; nothing new: 17 (the website's checkup holds these very answers);
+-- skipped: 10 to 14
+select pg_temp.check((select array[(r->>'given')::int, (r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'already')::int, (r->>'same')::int, (r->>'skipped_count')::int,
+                              (r->>'other_answers')::int, (r->>'other_name')::int]
+                        from f31_res where n = 'import') = array[16, 5, 4, 1, 0, 1, 5, 1, 0],
+  'the counts: 5 new (1 of them a second answer that says otherwise), 4 onto the day''s checkup, 1 onto the old list''s row, 1 with nothing new, 5 skipped (given = the sum)');
 select pg_temp.check((select r->'skipped' from f31_res where n = 'import') = jsonb_build_array(
     jsonb_build_object('row', 10, 'reason', 'No patient name'), jsonb_build_object('row', 11, 'reason', 'The date could not be read'),
     jsonb_build_object('row', 12, 'reason', 'The date could not be read'),
@@ -210,9 +217,10 @@ begin
     and c.form_submitted_at is not null, 'the Google Sheet''s checkup of that day: the answers; its follow-up status (not Not Contacted) and notes stay; its sheet key stays');
   c := pg_temp.one('Sample Import Archive');
   perform pg_temp.check(c.source = 'archive' and c.date_is_month and c.checkup_date = '2026-08-01' and c.branch_id = current_setting('test.nn')::smallint
-    and c.doctors = 'Dr. Sample (sample)' and c.checkup_for = 'Scaling' and c.follow_up = 'Interested' and c.notes = 'called once; Reminder: not on whatsapp'
+    and c.doctors = 'Dr. Sample (sample)' and c.checkup_for = 'Scaling' and c.follow_up = 'Interested'
+    and c.notes = 'called once; Reminder: not on whatsapp; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)'
     and c.ali_recommended and c.pricing_understood = 'yes' and c.wants_treatment and c.treatment_plan = 'Next month' and c.form_submitted_at = '2026-08-20T11:00:00+05:00'::timestamptz,
-    'the old list''s row of that person and month (private.checkup_key): the answers and the reminder; it keeps its follow-up status, branch, doctor, treatment and month');
+    'the old list''s row of that person and month (private.checkup_key): the answers and the reminder; it keeps its follow-up status, branch, doctor, treatment and month, and what the form said about those is in its notes');
   select * into c from public.checkups where patient_name = 'Sample  Import Nophone';
   perform pg_temp.check(c.phone = '0300-5553104' and not c.ali_recommended and c.pricing_understood = 'needs_explanation',
     'no phone on the website''s row: matched by name (spaces and case aside), the oldest of the two; the phone is filled in');
@@ -228,8 +236,13 @@ begin
   perform pg_temp.check(n = 1 and c.source = 'google_form' and c.pricing_understood = 'no' and c.wants_treatment,
     'two answers of one person on one day: one checkup; the later answer fills in only what the first left empty');
   c := pg_temp.one('Sample Import Full');
-  perform pg_temp.check(c.form_submitted_at is null and c.doctors = 'Dr. Other (sample)' and c.pricing_understood = 'no' and not c.wants_treatment and c.treatment_plan = 'Will think',
-    'a checkup holding every answer already: nothing is overwritten and the row is not touched');
+  perform pg_temp.check(c.source = 'website' and c.form_submitted_at is null and c.doctors = 'Dr. Other (sample)' and c.pricing_understood = 'no' and not c.wants_treatment
+    and c.treatment_plan = 'Will think' and c.notes is null,
+    'a checkup holding other answers already: nothing is overwritten, and the same answers again (row 17, "will think" in lower case) change nothing');
+  select * into c from public.checkups where patient_name = 'Sample Import Full' and source = 'google_form';
+  perform pg_temp.check(c.checkup_date = '2026-08-25' and c.ali_recommended and c.pricing_understood = 'yes' and c.wants_treatment and c.treatment_plan = 'Next month'
+    and c.doctors = 'Dr. Sample (sample)' and c.checkup_for = 'Braces' and (select count(*) from public.checkups where patient_name = 'Sample Import Full') = 2,
+    '... the answer that says otherwise (row 9) is a checkup of its own that day, with every one of its answers');
   c := pg_temp.one('Sample Import Odd');
   perform pg_temp.check(length(c.phone) = 40 and c.branch_id is null and c.ali_recommended is null and c.pricing_understood is null and c.wants_treatment is null
     and length(c.treatment_plan) = 500 and length(c.notes) = 2000 and length(c.doctors) = 300 and c.follow_up = 'Not Contacted',
@@ -238,7 +251,7 @@ begin
   perform pg_temp.check(c.checkup_date = '2026-08-28' and c.created_at = '2026-08-28T13:00:00+05:00'::timestamptz and c.branch_id = current_setting('test.nn')::smallint,
     'a time in UTC is the Karachi day; a branch code in lower case is the branch');
   perform pg_temp.check((select array_agg(outcome order by submitted_at) from private.checkup_form_imports)
-    = array['filled_month', 'inserted', 'filled_day', 'filled_day', 'filled_day', 'inserted', 'filled_day', 'same', 'inserted', 'inserted'],
+    = array['filled_month', 'inserted', 'filled_day', 'filled_day', 'filled_day', 'inserted', 'filled_day', 'inserted', 'same', 'inserted', 'inserted'],
     'every answer imported is kept once in private.checkup_form_imports with where it went');
   perform pg_temp.check((select form_key from private.checkup_form_imports where submitted_at = '2026-08-21T19:25:03+05:00') = '2026-08-21 19:25:03|03005553101|sample import day',
     'the key: the time in Karachi, the phone as digits, the name in lower case');
@@ -248,7 +261,7 @@ end $$;
 create temp table f31_after as select (select md5(string_agg(to_jsonb(c)::text, '' order by c.id)) from public.checkups c) as sig, (select count(*) from public.audit_log) as n_audit;
 insert into f31_res select 'again', pg_temp.imp(rows) from f31_rows;
 select pg_temp.check((select array[(r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'already')::int, (r->>'same')::int, (r->>'skipped_count')::int]
-                        from f31_res where n = 'again') = array[0, 0, 0, 10, 0, 5]
+                        from f31_res where n = 'again') = array[0, 0, 0, 11, 0, 5]
                      and (select (select md5(string_agg(to_jsonb(c)::text, '' order by c.id)) from public.checkups c) = a.sig and (select count(*) from public.audit_log) = a.n_audit from f31_after a),
   'the same file again: every answer "already imported", not one checkup or audit row changes');
 -- the North Nazimabad desk removes a row from the Google Form at its branch (through the API; the key table is private, the database
@@ -264,7 +277,7 @@ begin
 end $$;
 reset role;
 insert into f31_res select 'after_delete', pg_temp.imp(rows) from f31_rows;
-select pg_temp.check((select (r->>'already')::int = 10 and (r->>'inserted')::int = 0 from f31_res where n = 'after_delete')
+select pg_temp.check((select (r->>'already')::int = 11 and (r->>'inserted')::int = 0 from f31_res where n = 'after_delete')
                      and not exists (select 1 from public.checkups where patient_name = 'Sample Import Utc')
                      and (select checkup_id is null and outcome = 'inserted' from private.checkup_form_imports where form_key like '2026-08-28 13:00:00|%'),
   'a row from the Google Form removed since is not brought back by the next import (its key stays, without the checkup)');
@@ -317,6 +330,50 @@ select pg_temp.check((select bool_and(form_submitted_at is not null) from public
                      and (select checkup_for from public.checkups where sheet_key = 'S-00000000f333') = 'Implant'
                      and (select checkup_for from public.checkups where sheet_key = 'S-00000000f334') = 'Crown / bridge',
   'the same person written another way ("Aisha" for "Ayesha", "Muhammad Usman" for "Usman") is still the same checkup');
+
+-- 3c. A second answer never disappears, and what the checkup keeps its own text for is in its notes (review 5, 15 Oct 2026).
+-- (A) the old list has Sample Repeat Person for August ("Check up"); the file has two answers on one phone: 5 Aug says No, 20 Aug says Yes.
+-- (C) on one day at one branch: 12:00 says No, then a corrected 12:05 says Yes.
+-- (D) the Google Sheet's rows of 10 Sep say "Chek up" (the plain word, as the sync spells it too) and "checkup / pain" (more than the word).
+do $$
+declare v_nn smallint := current_setting('test.nn')::smallint; r jsonb;
+begin
+  perform pg_temp.act_as(current_setting('test.admin'));
+  r := public.import_checkups(jsonb_build_array(jsonb_build_object('row', 6, 'month', '2026-08-01', 'name', 'Sample Repeat Person', 'phone', '0300-5553112', 'branch', 'NN',
+         'checkup_for', 'Check up', 'follow_up', 'Not Contacted', 'source_tab', 'AUGUST 26')));
+  perform pg_temp.check((r->>'inserted')::int = 1, 'setup: the old list''s row of August for Sample Repeat Person');
+  insert into public.checkups (checkup_date, branch_id, patient_name, phone, doctors, checkup_for, day_status, source, sheet_key, created_at) values
+    ('2026-09-10', v_nn, 'Sample Typo One', '03120003141', null, 'Chek up', 'completed', 'google_sheet', 'S-00000000f341', '2026-09-10 10:00+05'),
+    ('2026-09-10', v_nn, 'Sample Typo Two', '03120003142', 'Dr Hina S', 'checkup / pain', 'completed', 'google_sheet', 'S-00000000f342', '2026-09-10 10:01+05');
+end $$;
+insert into f31_res select 'second', pg_temp.imp(jsonb_build_array(
+  pg_temp.ans(60, '2026-08-05T12:00:00+05:00', 'Sample Repeat Person', '0300-5553112', 'NN', '{"wants_treatment": false, "treatment_plan": "Too costly", "checkup_for": "Braces"}'),
+  pg_temp.ans(61, '2026-08-20T12:00:00+05:00', 'Sample Repeat Person', '0300-5553112', 'NN',
+    '{"wants_treatment": true, "treatment_plan": "Start on 1 Sep", "checkup_for": "Root canal", "pricing_understood": "needs_explanation"}'),
+  pg_temp.ans(62, '2026-08-29T12:00:00+05:00', 'Sample Changed Mind', '0300-5553113', 'NN', '{"wants_treatment": false, "treatment_plan": "Too costly"}'),
+  pg_temp.ans(63, '2026-08-29T12:05:00+05:00', 'Sample Changed Mind', '0300-5553113', 'NN', '{"wants_treatment": true, "treatment_plan": "Start next week"}'),
+  pg_temp.ans(64, '2026-09-10T12:00:00+05:00', 'Sample Typo One', '0312-0003141', 'NN', '{"checkup_for": "Root canal"}'),
+  pg_temp.ans(65, '2026-09-10T12:00:00+05:00', 'Sample Typo Two', '0312-0003142', 'NN', '{"checkup_for": "Extraction"}')));
+select pg_temp.check((select array[(r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'same')::int, (r->>'other_answers')::int, (r->>'other_name')::int]
+                        from f31_res where n = 'second') = array[3, 2, 1, 0, 2, 0],
+  'counts: 1 onto the old list''s row and 2 onto the sheet''s rows; 3 new, 2 of them a second answer that says otherwise; none "same"');
+select pg_temp.check((select array_agg(concat_ws('|', source, checkup_date, checkup_for, wants_treatment, treatment_plan, pricing_understood) order by checkup_date)
+                        from public.checkups where phone = '0300-5553112')
+                     = array['archive|2026-08-01|Braces|f|Too costly|yes', 'google_form|2026-08-20|Root canal|t|Start on 1 Sep|needs_explanation'],
+  '(A) the old list''s row takes the 5 Aug answer ("Check up" is no answer and is replaced); the 20 Aug answer is a checkup of its own, every answer kept');
+select pg_temp.check((select array_agg(concat_ws('|', source, wants_treatment, treatment_plan) order by created_at) from public.checkups where phone = '0300-5553113')
+                     = array['google_form|f|Too costly', 'google_form|t|Start next week'],
+  '(C) the same day, 12:00 No then 12:05 Yes: two checkups, the corrected answer is not dropped');
+select pg_temp.check((select checkup_for = 'Root canal' and notes is null from public.checkups where sheet_key = 'S-00000000f341')
+                     and (select checkup_for = 'checkup / pain' and doctors = 'Dr Hina S'
+                             and notes = 'On the Google Form: "Who did your checkup?" Dr. Sample (sample); On the Google Form: "What was your checkup for?" Extraction'
+                            from public.checkups where sheet_key = 'S-00000000f342'),
+  '(D) "Chek up" is replaced by the answer; "checkup / pain" and the sheet''s doctor stay, and what the form said is in the notes');
+insert into f31_res select 'second_again', pg_temp.imp(jsonb_build_array(
+  pg_temp.ans(66, '2026-08-29T12:10:00+05:00', 'Sample Changed Mind', '0300-5553113', 'NN', '{"wants_treatment": true, "treatment_plan": "start next week"}'),
+  pg_temp.ans(67, '2026-09-10T12:30:00+05:00', 'Sample Typo Two', '0312-0003142', 'NN', '{"checkup_for": "Extraction"}')));
+select pg_temp.check((select (r->>'same')::int = 2 and (r->>'inserted')::int = 0 and (r->>'filled_day')::int = 0 from f31_res where n = 'second_again'),
+  '"same" only when the checkup holds every answer already, or has it in its notes: the form sent a third time with the 12:05 answers, and Typo Two again');
 
 -- 4. The Google Sheet sync does not see the import.
 -- Today's North Nazimabad list: a checkup from the website and one from the sheet. The list's hash before an import with an answer of

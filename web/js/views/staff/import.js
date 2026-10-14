@@ -434,12 +434,12 @@ export async function renderImport(root) {
 
       // Every batch through import_checkup_form; the counts added up. onPart(sentSoFar) before each batch.
       const send = async (dryRun, onPart) => {
-        const total = { inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped_count: 0, other_name: 0, skipped: [] };
+        const total = { inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped_count: 0, other_name: 0, other_answers: 0, skipped: [] };
         for (let i = 0; i < read.rows.length; i += FORM_IMPORT_BATCH) {
           onPart?.(i);
           document.dispatchEvent(new Event('app:activity'));   // a long import counts as activity (no idle logout half-way)
           const r = await d.importCheckupForm(read.rows.slice(i, i + FORM_IMPORT_BATCH), { dryRun });
-          for (const k of ['inserted', 'filled_day', 'filled_month', 'already', 'same', 'skipped_count', 'other_name']) total[k] += Number(r?.[k] || 0);
+          for (const k of ['inserted', 'filled_day', 'filled_month', 'already', 'same', 'skipped_count', 'other_name', 'other_answers']) total[k] += Number(r?.[k] || 0);
           if (Array.isArray(r?.skipped)) total.skipped.push(...r.skipped);
         }
         return total;
@@ -481,8 +481,10 @@ export async function renderImport(root) {
           stat(number(skippedCount), 'skipped')),
         planError ? h('div', { class: 'alert alert-stop' }, `The website could not check the file: ${friendlyError(planError)}`) : null,
         plan && (plan.filled_day || plan.filled_month) ? h('p', { class: 'muted' },
-          `${count(plan.filled_day, 'answer goes', 'answers go')} onto a checkup of the same person at the same branch on the same day (from the website or the Google Sheet), ${count(plan.filled_month, 'answer goes', 'answers go')} onto the old list's row of that person and month (its follow-up status stays). Only empty answers are filled in; nothing is overwritten.`) : null,
+          `${count(plan.filled_day, 'answer goes', 'answers go')} onto a checkup of the same person at the same branch on the same day (from the website or the Google Sheet), ${count(plan.filled_month, 'answer goes', 'answers go')} onto the old list's row of that person and month (its follow-up status stays). Only empty answers are filled in; nothing is overwritten. What the form says about the doctor, the checkup or the branch that the checkup already has another text for is added to its notes.`) : null,
         plan && (plan.already || plan.same) ? h('p', { class: 'muted' }, `${count(plan.already, 'answer was', 'answers were')} imported before, and ${count(plan.same, 'checkup already has', 'checkups already have')} the answers: nothing changes for them.`) : null,
+        // a second answer of one person that says otherwise (a second visit, or the form sent again with an answer changed): never dropped
+        plan?.other_answers ? h('p', { class: 'muted' }, `${count(plan.other_answers, 'answer is', 'answers are')} a second answer of someone whose checkup already holds other answers (a second visit, or the form sent again with an answer changed): ${plan.other_answers === 1 ? 'it becomes a checkup of its own' : 'each becomes a checkup of its own'}, so no answer is lost.`) : null,
         // two people on one phone (a parent's phone for two children): each is a checkup of their own, never put on the other's row
         plan?.other_name ? h('p', { class: 'muted' }, `${count(plan.other_name, 'answer has', 'answers have')} the phone of another person on that day's list at that branch, with another name (often a parent's phone for two children): ${plan.other_name === 1 ? 'it becomes a checkup of its own' : 'each becomes a checkup of its own'}, not part of the other person's.`) : null,
         h('div', { class: 'inline', style: { alignItems: 'flex-start', gap: '24px' } },

@@ -24,7 +24,7 @@ const CLINICIANS = [
 test('constants: the source tab, the batch of the database function, the questions named on the import page', () => {
   assert.equal(FORM_SOURCE_TAB, 'Checkup Form 2.0');
   assert.equal(FORM_IMPORT_BATCH, 500, 'import_checkup_form takes at most 500 rows a call');
-  assert.deepEqual(Object.keys(FORM_QUESTIONS), ['branch', 'ali', 'pricing', 'wants']);
+  assert.deepEqual(Object.keys(FORM_QUESTIONS), ['branch', 'ali', 'pricing', 'wants', 'plan']);
 });
 
 test('headings: every column is found by its heading, in any order, with a byte-order mark, extra columns, or the header lower down', () => {
@@ -196,6 +196,36 @@ test('the whole tab: rows for the database, skipped rows with the reason, and th
   assert.deepEqual(s.perReminder, { 'Follow-up Sent': 1, 'No Response': 2, Started: 2, other: 1, Completed: 1 });
   assert.deepEqual(s.doctorsNotListed, { 'Other doctor': 1 });
   assert.equal(s.cut, 1, 'the 520-character plan');
+});
+
+test('a shifted row (a second person typed into the answer columns): "If yes then when?" holding a phone, or after a branch, is a wrong-column value too', () => {
+  const read = readFormResponses([HEADER,
+    // the second person's name, branch and phone where the pricing, start and when answers are
+    ['8/14/2026 11:00:00', 'Sample Sister Aiza', 'RJ Mall - Karachi', '03005550901', 'Dr. Sample Hina (sample)', 'Yes', 'Braces', 'Sample Brother Bilal', 'RJ Mall - Karachi', '03005550902', 'done'],
+    // a phone number alone as the answer to "If yes then when?"
+    ['8/15/2026 12:00:00', 'Sample Phone Plan', 'Lahore - Gulberg', '0300-5550903', '', 'No', 'Implant', 'Yes', 'No', '+92 300 555 0904', ''],
+    // a branch in the start column, whatever the next column says
+    ['8/16/2026 12:00:00', 'Sample Shifted Text', 'Lahore - Gulberg', '0300-5550905', '', 'Yes', 'Braces', 'Sample Other', 'Lahore - Gulberg', 'Sample words', ''],
+    // real answers to "when?" are kept: a day, a date with dashes or slashes, words with a number
+    ['8/17/2026 12:00:00', 'Sample Dated Plan', 'Lahore - Gulberg', '0300-5550906', '', 'Yes', 'Braces', 'Yes', 'Yes', '15-10-2026', ''],
+    ['8/18/2026 12:00:00', 'Sample Slash Plan', 'Lahore - Gulberg', '0300-5550907', '', 'Yes', 'Braces', 'Yes', 'Yes', '1/11/2026', ''],
+    ['8/19/2026 12:00:00', 'Sample Call Plan', 'Lahore - Gulberg', '0300-5550908', '', 'Yes', 'Braces', 'Yes', 'No', 'call on 0300 5550909 after Eid', ''],
+  ], { clinicians: CLINICIANS });
+  const plan = 'Form answer in the wrong place: "If yes then when? If no then why not?" was';
+  assert.deepEqual(read.rows.map((r: any) => [r.name, r.pricing_understood, r.wants_treatment, r.treatment_plan]), [
+    ['Sample Sister Aiza', null, null, null], ['Sample Phone Plan', 'yes', false, null], ['Sample Shifted Text', null, null, null],
+    ['Sample Dated Plan', 'yes', true, '15-10-2026'], ['Sample Slash Plan', 'yes', true, '1/11/2026'], ['Sample Call Plan', 'yes', false, 'call on 0300 5550909 after Eid'],
+  ], 'the phone is never shown as the answer to "When / why not"');
+  assert.equal(read.rows[0].notes, 'Form answer in the wrong place: "Did you understand the pricing details?" was "Sample Brother Bilal"; '
+    + 'Form answer in the wrong place: "Would you like to start the treatment?" was "RJ Mall - Karachi"; ' + plan + ' "03005550902"', 'all three in the notes');
+  assert.equal(read.rows[1].notes, plan + ' "+92 300 555 0904"');
+  assert.equal(read.rows[2].notes.endsWith(plan + ' "Sample words"'), true);
+  assert.deepEqual(read.rows.slice(3).map((r: any) => r.notes), [null, null, null]);
+  assert.deepEqual(read.summary.wrongColumn, [
+    { row: 2, questions: ['Did you understand the pricing details?', 'Would you like to start the treatment?', 'If yes then when? If no then why not?'] },
+    { row: 3, questions: ['If yes then when? If no then why not?'] },
+    { row: 4, questions: ['Did you understand the pricing details?', 'Would you like to start the treatment?', 'If yes then when? If no then why not?'] },
+  ], 'counted with the other wrong-column answers');
 });
 
 test('the tab as Google downloads it (CSV with quotes, commas inside answers, CRLF), and a file that is not the form', () => {

@@ -23,6 +23,7 @@ export const FORM_QUESTIONS = {
   ali: 'Did Dr. Ali recommend your treatment?',
   pricing: 'Did you understand the pricing details?',
   wants: 'Would you like to start the treatment?',
+  plan: 'If yes then when? If no then why not?',
 };
 
 // ------------------------------------------------------------------------------------------------ the header
@@ -208,6 +209,9 @@ export function doctorNamer(clinicians) {
   };
 }
 
+/** A cell that is a phone number and nothing else (0300-1234567, +92 300 1234567): no letters, at least 10 digits, so a date (15-10-2026) is not one. */
+const isPhoneOnly = (t) => /^[+\d\s()-]+$/.test(t) && (checkupPhone(t)?.length ?? 0) >= 10;
+
 /** A phone as written; a 10-digit mobile that lost its leading 0 in the sheet (3001234567) gets it back. */
 function formPhone(raw) {
   const p = cleanText(raw, 40);
@@ -265,7 +269,12 @@ export function readFormResponses(rows2d, { clinicians = [] } = {}) {
     const ali = formYesNo(at('ali'));
     const pricing = formPricing(at('pricing'));
     const wants = formYesNo(at('wants'));
-    const wrong = [['ali', ali], ['pricing', pricing], ['wants', wants]].filter(([, a]) => a.bad).map(([q]) => q);
+    // "If yes then when?" is free text, so it is in the wrong column only when it is clearly something else: a phone number alone, or the
+    // row is shifted (a branch where "Would you like to start the treatment?" is: in the owner's file the next columns then hold a second
+    // person's name, branch and phone)
+    const plan = cleanText(isEmptyCell(at('plan')) ? null : String(at('plan')).replace(/\s+/g, ' '), 500);
+    const planBad = plan.value !== null && (isPhoneOnly(plan.value) || (wants.bad && formBranch(at('wants')) !== null));
+    const wrong = [['ali', ali], ['pricing', pricing], ['wants', wants], ['plan', { bad: planBad }]].filter(([, a]) => a.bad).map(([q]) => q);
     for (const q of wrong) notes.push(`Form answer in the wrong place: "${FORM_QUESTIONS[q]}" was ${quoted(at(q))}`);
     if (wrong.length) summary.wrongColumn.push({ row, questions: wrong.map((q) => FORM_QUESTIONS[q]) });
 
@@ -286,15 +295,14 @@ export function readFormResponses(rows2d, { clinicians = [] } = {}) {
     const doctors = doctorOf(at('doctor'));
     if (doctors.value !== null && !doctors.listed) bump(summary.doctorsNotListed, doctors.other);
     const checkupFor = formCheckupFor(at('checkupFor'));
-    const plan = cleanText(isEmptyCell(at('plan')) ? null : String(at('plan')).replace(/\s+/g, ' '), 500);
     const note = cleanText(notes.length ? notes.join('; ') : null, 2000);
 
     rows.push({ row, submitted_at: ts.iso, name: name.value, phone: phone.value, branch, doctors: doctors.value, checkup_for: checkupFor.value,
-      ali_recommended: ali.value, pricing_understood: pricing.value, wants_treatment: wants.value, treatment_plan: plan.value,
+      ali_recommended: ali.value, pricing_understood: pricing.value, wants_treatment: wants.value, treatment_plan: planBad ? null : plan.value,
       follow_up: reminder.status, notes: note.value });
     summary.total++;
     summary.ready++;
-    summary.cut += [name, phone, doctors, checkupFor, plan, note].filter((c) => c.cut).length;
+    summary.cut += [name, phone, doctors, checkupFor, planBad ? { cut: false } : plan, note].filter((c) => c.cut).length;
     if (summary.from === null || ts.date < summary.from) summary.from = ts.date;
     if (summary.to === null || ts.date > summary.to) summary.to = ts.date;
   }

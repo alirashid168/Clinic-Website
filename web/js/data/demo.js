@@ -797,7 +797,7 @@ export function createDemoAdapter() {
       if (rows.length > 500) fail('TOO_MANY_ROWS: send at most 500 rows at a time.');
       const list = dryRun ? clone(db.checkups) : db.checkups;
       const keys = dryRun ? new Map(formKeys) : formKeys;
-      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, other_name: 0, dry_run: !!dryRun };
+      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, other_name: 0, other_answers: 0, dry_run: !!dryRun };
       const skip = (row, reason) => { out.skipped_count++; if (out.skipped.length < 100) out.skipped.push({ row, reason }); };
       const text = (v, max) => cleanText(typeof v === 'string' ? v : null, max).value;
       const karachi = (ms) => new Date(ms + 5 * 3600000).toISOString();     // Karachi's wall clock (+05:00 all year), as YYYY-MM-DDTHH:MM:SS
@@ -828,29 +828,47 @@ export function createDemoAdapter() {
         const plan = text(w.treatment_plan, 500), doctors = text(w.doctors, 300), checkupFor = text(w.checkup_for, 300), follow = text(w.follow_up, 60), notes = text(w.notes, 2000);
         // the checkup of that person on that day at that branch: the same phone and name (private.aaj_name_fits; another name on the same
         // phone is another person, e.g. two children on a parent's phone), or the same name without a phone; the same name letter for letter
-        // first, then the oldest. Else the old list's row of that person and month.
+        // first, then the oldest; the first whose answers agree (private.checkup_form_agrees). Else, when that person is not on that day's
+        // list, the old list's row of that person and month, when its answers agree. A checkup holding other answers is never filled in.
         let kind = 'filled_day';
+        let second = false;
+        const agrees = (x) => (ali === null || (x.ali_recommended ?? null) === null || x.ali_recommended === ali)
+          && (pricing === null || (x.pricing_understood ?? null) === null || x.pricing_understood === pricing)
+          && (wants === null || (x.wants_treatment ?? null) === null || x.wants_treatment === wants)
+          && (plan === null || (x.treatment_plan ?? null) === null || x.treatment_plan.toLowerCase() === plan.toLowerCase());
         const day = list.filter((x) => x.checkup_date === date && !x.date_is_month && x.source !== 'archive' && (x.branch_id ?? null) === branch);
         const samePhone = pk ? day.filter((x) => checkupPhone(x.phone) === pk) : [];
-        let c = day.filter((x) => (samePhone.includes(x) && (!nameNorm(name) || !nameNorm(x.patient_name) || nameFits(name, x.patient_name)))
+        const person = day.filter((x) => (samePhone.includes(x) && (!nameNorm(name) || !nameNorm(x.patient_name) || nameFits(name, x.patient_name)))
           || ((!pk || !checkupPhone(x.phone)) && nameKey(x.patient_name) === name.toLowerCase()))
           .sort((a, b) => (Number(nameKey(b.patient_name) === name.toLowerCase()) - Number(nameKey(a.patient_name) === name.toLowerCase()))
-            || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1))[0];
-        if (!c && samePhone.length) out.other_name++;
-        if (!c) {
+            || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1));
+        let c = person.find(agrees);
+        if (!c && person.length) second = true;               // that person's checkup of that day holds other answers
+        else if (!c && samePhone.length) out.other_name++;
+        if (!c && !second) {
           kind = 'filled_month';
-          c = list.find((x) => x.source === 'archive' && checkupKey({ phone: x.phone, name: x.patient_name, month: x.checkup_date }) === checkupKey({ phone, name, month: date }));
+          const arch = list.find((x) => x.source === 'archive' && checkupKey({ phone: x.phone, name: x.patient_name, month: x.checkup_date }) === checkupKey({ phone, name, month: date }));
+          if (arch && agrees(arch)) c = arch; else second = !!arch;
         }
         if (c) {
+          // the plain word in the spellings the sync reads as a checkup is no answer; what the checkup keeps its own text for goes into its notes
+          const nextFor = (c.checkup_for ?? null) === null || /^\s*ch[ea]{1,2}c?k?[- ]?ups?\s*$/i.test(c.checkup_for) ? checkupFor ?? c.checkup_for ?? null : c.checkup_for;
+          const nextDoctors = c.doctors ?? doctors;
+          const nextBranch = c.branch_id ?? branch;
+          let nextNotes = c.notes ?? null;
+          for (const part of [notes,
+            doctors !== null && nextDoctors.toLowerCase() !== doctors.toLowerCase() ? `On the Google Form: "Who did your checkup?" ${doctors}` : null,
+            checkupFor !== null && nextFor.toLowerCase() !== checkupFor.toLowerCase() ? `On the Google Form: "What was your checkup for?" ${checkupFor}` : null,
+            branch !== null && nextBranch !== branch ? `On the Google Form: "Which branch did you visit?" ${db.branches.find((b) => b.id === branch)?.name}` : null]) {
+            if (part !== null && !(nextNotes || '').includes(part)) nextNotes = !(nextNotes || '').trim() ? part : (nextNotes + '; ' + part).slice(0, 2000);
+          }
           const next = {
             ali_recommended: c.ali_recommended ?? ali, pricing_understood: c.pricing_understood ?? pricing, wants_treatment: c.wants_treatment ?? wants,
-            treatment_plan: c.treatment_plan ?? plan, doctors: c.doctors ?? doctors,
-            checkup_for: c.checkup_for === null || /^\s*check[\s-]*ups?\s*$/i.test(c.checkup_for) ? checkupFor ?? c.checkup_for : c.checkup_for,
-            phone: c.phone ?? phone, branch_id: c.branch_id ?? branch,
+            treatment_plan: c.treatment_plan ?? plan, doctors: nextDoctors, checkup_for: nextFor, phone: c.phone ?? phone, branch_id: nextBranch,
             follow_up: kind === 'filled_day' && c.follow_up === 'Not Contacted' && follow !== null ? follow : c.follow_up,
-            notes: notes === null || (c.notes || '').includes(notes) ? c.notes : !(c.notes || '').trim() ? notes : (c.notes + '; ' + notes).slice(0, 2000),
+            notes: nextNotes,
           };
-          if (Object.keys(next).some((k) => next[k] !== c[k])) {
+          if (Object.keys(next).some((k) => (next[k] ?? null) !== (c[k] ?? null))) {
             Object.assign(c, next, { form_submitted_at: c.form_submitted_at ?? new Date(ms).toISOString(), updated_at: new Date().toISOString() });
             if (!dryRun) audit('checkups', 'UPDATE', c);
             out[kind]++;
@@ -867,6 +885,7 @@ export function createDemoAdapter() {
         if (!dryRun) audit('checkups', 'INSERT', fresh);
         keys.set(key, fresh.id);
         out.inserted++;
+        if (second) out.other_answers++;
       });
       return out;
     },
