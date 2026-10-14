@@ -1,17 +1,9 @@
-<<<<<<< sheet-view
 // Aaj ki List: the daily sheet, laid out like the clinic's Google Sheet ("Aj ki List"): one line per patient, the
 // sheet's columns in the sheet's order, its coloured chips, a header row that stays put and Mr#/name columns that stay
 // at the left, so about 20 patients are seen at a glance on a laptop. Typed cells (treatment, details, notes and the
 // checkup rows) save by themselves; if the internet drops, those typed changes wait on this device and are sent when it
 // comes back. Status, group, doctor and new-patient changes need the connection, and say so when they fail.
-import { h, mount, toast, friendlyError, isLostAnswer, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy } from '../../ui/dom.js';
-=======
-// Aaj ki List: the daily sheet, Google Sheets style. Typed cells (treatment,
-// details, notes) save by themselves; if the internet drops, those typed
-// changes wait on this device and are sent when it comes back. Status, doctor
-// and new-patient changes need the connection, and say so when they fail.
 import { h, mount, toast, friendlyError, isLostAnswer, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy, capFirst } from '../../ui/dom.js';
->>>>>>> golive
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
@@ -43,15 +35,30 @@ const notSaved = (e, still) => {
   return friendlyError(e);
 };
 
-// Checkup rows among themselves: by branch (all-branches view), then by the token written on the sheet when it is
-// a number, then by when they were added.
+// Checkup rows among themselves (the day's download): by branch (all-branches view), then by the token written on the
+// sheet when it is a number, then by when they were added.
 const tokenNo = (c) => (/^\d+$/.test(String(c.token ?? '').trim()) ? Number(c.token) : Infinity);
 const byNumber = (x, y) => (x === y ? 0 : x < y ? -1 : 1);
 const byToken = (a, b) => (a.branch_id ?? 0) - (b.branch_id ?? 0)
   || byNumber(tokenNo(a), tokenNo(b))
   || String(a.created_at || '').localeCompare(String(b.created_at || ''));
 
-<<<<<<< sheet-view
+// The order of the list, as the clinic's Google Sheet is sorted (owner, 11 Oct 2026): Waiting at the top, then In treatment,
+// then Scheduled and checkups with no status yet, then Completed, then Cancelled and No show. Checkup patients take part by
+// their own day status. Inside one status the patients come first by token (no token last), then the checkup patients by
+// theirs (tokens are numbered per kind of treatment, so the two series are not mixed), then by when they were added.
+// (All branches view: by branch first.) Each item is { row, checkup, rank }: draw() works out the rank (see there).
+const STATUS_RANK = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
+const rankOf = (item) => STATUS_RANK[(item.checkup ? item.row.day_status : item.row.status) || ''] ?? 3;
+const tokenOf = (item) => (item.checkup ? tokenNo(item.row) : item.row.token_no ?? Infinity);
+const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
+  || a.rank - b.rank
+  || Number(a.checkup) - Number(b.checkup)
+  || byNumber(tokenOf(a), tokenOf(b))
+  || String(a.row.created_at || '').localeCompare(String(b.row.created_at || ''));
+// A row of the list as a key, the same for every copy of it the list draws (visits and checkups are told apart).
+const keyOf = (item) => `${item.checkup ? 'c' : 'v'}:${item.row.id}`;
+
 // ---------------------------------------------------------------- the sheet's chip colours
 // The chip colours of the clinic's Google Sheet (app.css .gs-*). A chip always carries its text too, so colour is never the only cue.
 const STATUS_TONE = { completed: 'yellow', in_treatment: 'green', scheduled: 'blue', waiting: 'orange', cancelled: 'grey', no_show: 'red' };
@@ -90,19 +97,6 @@ function medicalText(p) {
   const mh = p?.medical_history || {};
   return [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
 }
-=======
-// The order of the list, as the clinic's Google Sheet is sorted (owner, 11 Oct 2026): Waiting at the top, then In treatment,
-// then Scheduled and checkups with no status yet, then Completed, then Cancelled and No show. Inside one status the patients
-// come first by token, then the checkup patients by their token. (All branches view: by branch first.)
-const STATUS_RANK = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
-const rankOf = (item) => STATUS_RANK[(item.checkup ? item.row.day_status : item.row.status) || ''] ?? 3;
-const tokenOf = (item) => (item.checkup ? tokenNo(item.row) : item.row.token_no ?? Infinity);
-const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
-  || rankOf(a) - rankOf(b)
-  || Number(a.checkup) - Number(b.checkup)
-  || byNumber(tokenOf(a), tokenOf(b))
-  || String(a.row.created_at || '').localeCompare(String(b.row.created_at || ''));
->>>>>>> golive
 
 // ---------------------------------------------------------------- offline queue
 // One queue per signed-in staff member: autosave.js stores their typed edits under a key that
@@ -200,7 +194,6 @@ export async function renderSheet(root, params, signal) {
   const busyDemo = params.get('demo') === 'busy' && d.mode === 'demo' && typeof d.fillBusyDay === 'function';
   let rows = [];
   let checkups = []; // the day's checkup patients (no Mr#); see lib/checkups.js dayListCheckups for which of them are shown
-  let serials = new Map(); // row id -> its serial number in the list as last drawn (draw)
   let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Checkup patient"
   let checkupsWarn = ''; // why the checkups could not be loaded (the visits still show)
   let checkupsKey = ''; // branch and day the `checkups` above belong to
@@ -218,6 +211,35 @@ export async function renderSheet(root, params, signal) {
   tableBody.addEventListener('input', (e) => { if (SAVED_ON_LEAVE.has(e.target.dataset.field)) unsavedCell = e.target; });
   tableBody.addEventListener('change', (e) => { if (e.target === unsavedCell) unsavedCell = null; });
   for (const ev of ['keydown', 'pointerdown', 'input']) tableBody.addEventListener(ev, () => { lastTouch = Date.now(); });
+
+  // Where each row was sorted when the list was last drawn (keyOf -> its status rank, see draw), and the row the add line
+  // last put the cursor in (keyOf; onKey).
+  let placed = new Map();
+  let fromAddLine = null;
+  const rowKey = (el) => {
+    const tr = el && tableBody.contains(el) ? el.closest('tr[data-id]') : null;
+    return tr ? `${tr.dataset.kind === 'checkup' ? 'c' : 'v'}:${tr.dataset.id}` : null;
+  };
+  const itemOf = (key) => {
+    const checkup = key.startsWith('c:');
+    const row = (checkup ? checkups : rows).find((r) => String(r.id) === key.slice(2));
+    return row ? { row, checkup } : null;
+  };
+  // The cursor has left a row (looked at a moment later: a row drawn again by redrawRow puts it back in the new copy).
+  // A row that kept its place for the cursor (its status changed since the list was drawn) now goes where it belongs: a
+  // quiet reload draws the list again once nobody is typing or clicking in it (reloadQuietly waits for that), so a click
+  // on another row is never moved from under the mouse. A row left for another row is no longer the add line's (onKey).
+  tableBody.addEventListener('focusout', (e) => {
+    const key = rowKey(e.target);
+    if (!key) return;
+    setTimeout(() => {
+      const now = rowKey(document.activeElement);
+      if (now === key) return;
+      if (now && key === fromAddLine) fromAddLine = null;
+      const item = placed.has(key) ? itemOf(key) : null;
+      if (item && rankOf(item) !== placed.get(key)) reloadQuietly();
+    });
+  });
 
   // ---- save status, the list of changes that could not be saved, and undo for removals.
   const saveStatus = h('span', { class: 'save-status save-state', tabindex: '-1', dataset: { state: 'saved' } }, 'All changes saved');
@@ -762,11 +784,7 @@ export async function renderSheet(root, params, signal) {
     const groupCtl = commitOnFinish(group, (value) => changeGroup(row, value, groupCtl), (value) => { group.className = chipSelect(groupTone(value)); });
 
     const treatment = h('input', {
-<<<<<<< sheet-view
-      class: 'cell-input center', value: row.treatment_label || '', list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
-=======
-      class: 'cell-input', value: capFirst(row.treatment_label), list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
->>>>>>> golive
+      class: 'cell-input center', value: capFirst(row.treatment_label), list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
       dataset: { focus: 'treatment', field: 'treatment_label' }, onchange: (e) => save(row, 'treatment_label', e.target.value),
     });
     const details = h('input', {
@@ -810,7 +828,6 @@ export async function renderSheet(root, params, signal) {
       row.see_dr_ali ? flag('Ali', 'See Dr. Ali', 'badge-ali', 'Next appointment with Dr. Ali Rashid') : null,
     ].filter(Boolean);
 
-<<<<<<< sheet-view
     return h('tr', { dataset: { id: row.id, n } },
       !branchId ? h('td', { class: 'branch-cell' }, cellText(branchName(row.branch_id))) : null,
       h('td', { class: 'rownum' }, n),
@@ -836,32 +853,6 @@ export async function renderSheet(root, params, signal) {
       h('td', { class: 'pp' }, pp),
       canBill ? h('td', {}, invoiceCell(row)) : null,
       h('td', { class: 'contact' }, cellText(row.patient.phone || '')));
-=======
-    return h('tr', { dataset: { id: row.id } },
-      !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(row.branch_id))) : null,
-      // The patient cell is the row's header (th scope=row); app.css styles .row-head. It starts with the row's serial number.
-      h('th', { scope: 'row', class: 'frozen row-head' }, h('div', { class: 'cell' },
-        serialEl(row),
-        h('button', { type: 'button', class: 'link-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, style: { textDecoration: 'none', textAlign: 'left' }, onclick: () => openRow(row) },
-          h('div', {}, who), h('div', { class: 'muted field-hint', style: { fontWeight: 500 } }, `Mr# ${row.patient.mr_number}`)))),
-      h('td', {}, h('div', { class: 'cell row-flags' }, duesBadge(row.dues), aliBadge(row.see_dr_ali))),
-      h('td', {}, h('div', { class: 'cell' }, month)),
-      h('td', { style: { minWidth: '150px' } }, treatment),
-      h('td', {}, h('div', { class: 'cell token-cell' },
-        h('span', { class: 'token', title: arrived ? `Arrived ${arrived}` : null }, srOnly('Token '), row.token_no ?? '–', arrived ? srOnly(`, arrived ${arrived}`) : null))),
-      h('td', {}, h('div', { class: 'cell' }, status)),
-      h('td', { style: { minWidth: '250px' } }, peopleCell(row)),
-      h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, details, quickTap)),
-      h('td', { class: 'right' }, h('div', { class: ['cell', row.dues > 0 ? 'status-bad' : 'muted'], style: { justifyContent: 'flex-end', fontWeight: 700 } }, can('dues.view') ? (row.dues > 0 ? rupees(row.dues) : '0') : '')),
-      h('td', { style: { minWidth: '160px' } }, notes),
-      h('td', {}, h('div', { class: 'cell muted nowrap' }, row.patient.phone)));
->>>>>>> golive
-  }
-
-  // The row's serial number (1..n down the list as last drawn), at the left of the row header like the sheet's row numbers.
-  function serialEl(row) {
-    const n = serials.get(row.id);
-    return h('span', { class: 'serial' }, n ? [srOnly('Row '), String(n)] : '');
   }
 
   // A checkup patient: the same columns as a visit row (so the arrow keys keep working), but no Mr#, no braces month,
@@ -897,7 +888,6 @@ export async function renderSheet(root, params, signal) {
       class: 'cell-input', value: fieldName === 'checkup_for' ? capFirst(c[fieldName]) : c[fieldName] || '', disabled: !canEdit, 'aria-label': `${label} for ${who}`, autocomplete: 'off',
       dataset: { focus: fieldName, field: fieldName }, oninput: (e) => saveCheckup(c, fieldName, e.target.value), ...props,
     });
-<<<<<<< sheet-view
     return h('tr', { class: 'is-checkup', dataset: { id: c.id, kind: 'checkup', n } },
       !branchId ? h('td', { class: 'branch-cell' }, cellText(branchName(c.branch_id))) : null,
       h('td', { class: 'rownum' }, n),
@@ -919,25 +909,6 @@ export async function renderSheet(root, params, signal) {
       h('td', { class: 'pp' }),
       canBill ? h('td', {}) : null,
       h('td', {}, typedCell(text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null }))));
-=======
-    return h('tr', { class: 'is-checkup', dataset: { id: c.id, kind: 'checkup' } },
-      !branchId ? h('td', {}, h('div', { class: 'cell muted nowrap' }, branchName(c.branch_id))) : null,
-      h('th', { scope: 'row', class: 'frozen row-head' }, h('div', { class: 'cell' },
-        serialEl(c),
-        h('div', { class: 'checkup-name' }, nameIn, h('div', { class: 'muted field-hint' }, hint)))),
-      h('td', {}, h('div', { class: 'cell row-flags' },
-        h('span', { class: 'badge badge-checkup' }, 'Checkup'),
-        h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, dataset: { focus: 'options' }, onclick: () => checkupOptions(c) }, 'Options'))),
-      h('td', {}, h('div', { class: 'cell' }, h('span', { class: 'muted' }, h('span', { 'aria-hidden': 'true' }, '–'), srOnly('Not braces')))),
-      h('td', { style: { minWidth: '150px' } }, text('checkup_for', 'Treatment', { list: 'sheet-treatments' })),
-      h('td', {}, h('div', { class: 'cell token-cell' }, tokenIn)),
-      h('td', {}, h('div', { class: 'cell' }, status)),
-      h('td', { style: { minWidth: '250px' } }, text('doctors', "Doctor's name", { list: 'sheet-doctors' })),
-      h('td', { style: { minWidth: '230px' } }, h('div', { class: 'cell details-cell' }, text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
-      h('td', { class: 'right' }, h('div', { class: 'cell' }, '')),
-      h('td', { style: { minWidth: '160px' } }, text('notes', 'Notes')),
-      h('td', {}, text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null })));
->>>>>>> golive
   }
 
   // Redraws replace rows, so remember the focused control (row id + data-focus key + caret, and typed text the cell has not
@@ -966,7 +937,8 @@ export async function renderSheet(root, params, signal) {
     if (saved.caret && target?.setSelectionRange) { try { target.setSelectionRange(saved.caret[0], saved.caret[1]); } catch { /* not a text field */ } }
   }
 
-  // Replace one row after a save (make = rowEl for a visit, checkupRowEl for a checkup patient); it keeps its row number.
+  // Replace one row after a save (make = rowEl for a visit, checkupRowEl for a checkup patient); it keeps its place and its
+  // row number, whatever its status is now (only draw sorts the list, see there).
   function redrawRow(row, make = rowEl) {
     const old = tableBody.querySelector(`tr[data-id="${row.id}"]`);
     if (old) {
@@ -1037,18 +1009,21 @@ export async function renderSheet(root, params, signal) {
     const inUse = [filter && !checkupsOnly, doctorFilter, groupFilter, duesOnly, bracesOnly].filter(Boolean).length;
     filterBtn.textContent = inUse ? `Filters (${inUse})` : 'Filters';
     const saved = rememberFocus();
-<<<<<<< sheet-view
-    mount(tableBody, shown.length || shownChecks.length ? [...shown.map((r, i) => rowEl(r, i + 1)), ...shownChecks.map((c, i) => checkupRowEl(c, shown.length + i + 1))]
+    // Sorted like the sheet (listOrder) here only. A row never jumps away under the cursor: a save in one row (a status
+    // picked, say) draws that row alone in its place, with its number (redrawRow), and here the row with the cursor in it
+    // (and so any text typed in it and not saved yet) is sorted by the status it was drawn with last time. It moves to its
+    // new place at the first redraw after the cursor has left it: leaving it asks for a quiet reload, which waits until
+    // nobody is typing or clicking in the list (the focusout listener at the top), and the live updates, the 20-second
+    // check and any other redraw move it too. Every row is numbered 1..n in the order shown, like the sheet's row numbers
+    // (owner, 11 Oct 2026); that is not the token, which repeats from one kind of treatment to another.
+    const here = rowKey(document.activeElement);
+    const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].map((item) => {
+      const key = keyOf(item);
+      return { ...item, key, rank: key === here && placed.has(key) ? placed.get(key) : rankOf(item) };
+    }).sort(listOrder);
+    placed = new Map(items.map((item) => [item.key, item.rank]));
+    mount(tableBody, items.length ? items.map((item, i) => (item.checkup ? checkupRowEl(item.row, i + 1) : rowEl(item.row, i + 1)))
       : h('tr', {}, h('td', { class: 'empty-cell', colspan: colgroup.children.length }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" to add them.` : 'No patients or checkups on any list for this day.'))));
-=======
-    // Sorted only here, never when one row is saved (redrawRow): a row whose status was just changed keeps its place and its
-    // number until the list is drawn again (the live reload waits while someone is in the table), so it never jumps away
-    // under the cursor. Every row gets a serial number 1..n in the order shown, whatever its status (owner, 11 Oct 2026).
-    const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].sort(listOrder);
-    serials = new Map(items.map((item, i) => [item.row.id, i + 1]));
-    mount(tableBody, items.length ? items.map((item) => (item.checkup ? checkupRowEl(item.row) : rowEl(item.row)))
-      : h('tr', {}, h('td', { colspan: 12 }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" above to add them.` : 'No patients or checkups on any list for this day.'))));
->>>>>>> golive
     restoreFocus(saved);
     drawCounts();
     markInvalid();
@@ -1056,29 +1031,26 @@ export async function renderSheet(root, params, signal) {
     fit();
   }
 
-  // Arrow keys / Enter move between cells like a spreadsheet (Enter keeps what was typed: leaving the cell saves it).
-  // After the last patient row, Enter goes to the add box, the sheet's next empty row, so the next Mr# is typed there and
-  // not over the first checkup row below (its cells save as they are typed); Arrow Down still goes into the checkup rows.
+  // Arrow keys / Enter move between cells like a spreadsheet (Enter keeps what was typed: leaving the cell saves it), to the
+  // nearest row above or below with a typing cell in this column: rows are sorted by status, so a checkup patient's name or
+  // token (typing cells) can have a patient row (a name button, a token number) next to it; that row is passed over.
+  // In the patient the add line has just put the cursor in (an Mr# and Enter: its Treatment cell), and in the last row,
+  // Enter goes to the add box, the sheet's next empty row, so the next Mr# is typed there and not over the row below (a
+  // checkup row's cells save as they are typed); Arrow Down still goes on down.
   function onKey(e) {
     if (!['ArrowUp', 'ArrowDown', 'Enter'].includes(e.key) || !e.target.classList.contains('cell-input')) return;
     const td = e.target.closest('td, th'); // (the name of a checkup patient sits in the row header)
     const tr = td.parentElement;
     const col = [...tr.children].indexOf(td);
-<<<<<<< sheet-view
-    const target = e.key === 'ArrowUp' ? tr.previousElementSibling : tr.nextElementSibling;
-    if (e.key === 'Enter' && (!target || (target.dataset.kind === 'checkup' && tr.dataset.kind !== 'checkup'))) {
+    const step = (t) => (e.key === 'ArrowUp' ? t.previousElementSibling : t.nextElementSibling);
+    let target = step(tr);
+    while (target && !target.children[col]?.querySelector('.cell-input')) target = step(target);
+    if (e.key === 'Enter' && (!target || rowKey(tr) === fromAddLine)) {
       const box = search?.querySelector('input');
       // (leaving the cell saves it, as a click elsewhere would; without the add line, all branches, the cursor stays)
       if (box && !addPanel.hidden) { e.preventDefault(); box.focus(); }
       return;
     }
-=======
-    // The nearest row above or below with a typing cell in this column: rows are sorted by status, so a checkup patient's
-    // name (a typing cell) can have a patient row (a name button) next to it; that row is passed over.
-    const step = (t) => (e.key === 'ArrowUp' ? t.previousElementSibling : t.nextElementSibling);
-    let target = step(tr);
-    while (target && !target.children[col]?.querySelector('.cell-input')) target = step(target);
->>>>>>> golive
     const next = target?.children[col]?.querySelector('.cell-input');
     if (next) { e.preventDefault(); next.focus(); next.select?.(); }
   }
@@ -1091,9 +1063,11 @@ export async function renderSheet(root, params, signal) {
   // A patient who is on this branch's list for the day already: their row.
   const onList = (p) => (branchId ? rows.find((r) => r.patient_id === p.id && r.branch_id === branchId) : null);
   const onListText = (r) => `${r.patient.full_name} is already on the list${r.token_no ? ` (token ${r.token_no})` : ''}`;
-  // The cursor to a row's cell (the filters are cleared when they hide the row).
+  // The cursor from the add line to a row's cell (the filters are cleared when they hide the row); Enter in that row goes
+  // back to the add box (onKey).
   function goToRow(row, key) {
     if (!tableBody.querySelector(`tr[data-id="${row.id}"]`)) { findBox.value = ''; textFilter = ''; clearFilters(); }
+    fromAddLine = keyOf({ row, checkup: false });
     focusCell(row.id, key);
   }
   // Picked from the matches but already on the list: go to their row, or (a second visit on the same day) add another row.
@@ -1284,7 +1258,6 @@ export async function renderSheet(root, params, signal) {
         colgroup,
         h('thead', {}, h('tr', {},
           branchHead,
-<<<<<<< sheet-view
           heading('#', { class: 'rownum', title: 'Row number' }),
           heading('MR #', { class: 'frozen mr-cell' }),
           heading('Patient Name', { class: 'frozen name-col' }),
@@ -1298,11 +1271,6 @@ export async function renderSheet(root, params, signal) {
           can('dues.view') ? filterHeading('P.P', duesBox, 'Show only patients with dues', { class: 'pp pp-head', title: 'Pending dues' }) : heading('P.P', { class: 'pp pp-head', title: 'Pending dues' }),
           canBill ? heading('Invoice') : null,
           heading('Contact No'))),
-=======
-          h('th', { scope: 'col', class: 'frozen', style: { minWidth: '210px' } }, '# · Patient'), h('th', { scope: 'col' }, 'Flags'), h('th', { scope: 'col' }, 'Month'), h('th', { scope: 'col' }, 'Treatment'),
-          h('th', { scope: 'col', class: 'center' }, 'Token'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, "Doctor's name"), h('th', { scope: 'col' }, 'Treatment details'), h('th', { scope: 'col', class: 'right' }, 'Dues'),
-          h('th', { scope: 'col' }, 'Notes'), h('th', { scope: 'col' }, 'Contact'))),
->>>>>>> golive
         tableBody)));
   // On a laptop or bigger screen the list fills the window to its bottom edge, so the header row stays at the top and the
   // add line at the bottom while the rows scroll; app.css sizes .sheet-page from where it starts (--sheet-top).

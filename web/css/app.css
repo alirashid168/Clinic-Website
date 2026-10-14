@@ -1019,7 +1019,6 @@ select.chip-select option { background: var(--enamel); color: var(--sheet-text);
 .people-on-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .people-on-undo { margin: var(--space-2) 0 0; }
 .token { font-weight: 800; color: var(--text-accent); }
-<<<<<<< sheet-view
 table.sheet .token { font-weight: 500; color: inherit; }
 .month-pill { font-weight: 500; }
 .details-cell { display: flex; align-items: center; }
@@ -1071,18 +1070,6 @@ table.sheet td.pp { text-align: right; }
   .sheet-tools { margin-left: 0; }
   .add-panel-text .muted { white-space: normal; }
 }
-=======
-/* The Aaj ki List's serial number (1..n down the list), grey like a spreadsheet's row numbers; the token has its own column. */
-.serial { flex: 0 0 auto; min-width: 1.75rem; text-align: right; color: var(--text-muted); font-size: var(--fs-sm); font-weight: 700; font-variant-numeric: tabular-nums; }
-.token-cell { justify-content: center; }
-table.sheet th.center { text-align: center; }
-.month-pill { font-weight: 700; }
-.row-flags { display: flex; gap: var(--space-1); flex-wrap: wrap; }
-.add-panel { display: flex; align-items: center; gap: var(--space-3) var(--space-4); flex-wrap: wrap; margin: 0 0 var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-left: 4px solid var(--aubergine); border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow); }
-.add-panel-text { display: grid; gap: 2px; flex: 1 1 260px; min-width: 0; }
-.add-panel-text .muted { font-size: var(--fs-sm); }
-.add-panel .btn-primary { white-space: nowrap; }
->>>>>>> golive
 
 /* ------------------------------------------------------------ checkups (no Mr#): Aaj ki List rows, the Checkups page */
 .badge-checkup { background: var(--checkup-bg); color: var(--checkup-text); border-color: var(--checkup-line); }

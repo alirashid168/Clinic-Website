@@ -180,25 +180,21 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   assert.ok(await seeded.first().locator('.badge-checkup:has-text("Checkup")').count(), 'badge');
   assert.match(await seeded.first().locator('td.mr-cell').innerText(), /no Mr#/);
   assert.equal(await seeded.first().locator('.quick-tap').count(), 0, 'no quick-tap button on a checkup row');
-<<<<<<< sheet-view
-  const kinds = await page.locator('table.sheet tbody tr').evaluateAll((trs) => trs.map((t) => t.classList.contains('is-checkup')));
-  assert.ok(kinds.indexOf(false) >= 0 && kinds.lastIndexOf(false) < kinds.indexOf(true), 'visit rows first, then the checkup rows');
-  assert.match(await page.locator('.sheet-counts').innerText(), /Checkups \d+/);
-=======
   // Owner, 11 Oct 2026: Waiting first, then In treatment, then Scheduled / no status, then Completed, then Cancelled and
-  // No show; inside one status the patients before the checkup patients. Every row is numbered 1..n in that order.
+  // No show; checkup patients by their own day status (not a block at the end), and inside one status the patients before
+  // the checkup patients. Every row is numbered 1..n in that order in the "#" column, like the sheet's row numbers.
   const order = await page.locator('table.sheet tbody tr[data-id]').evaluateAll((trs) => trs.map((t) => ({
     checkup: t.classList.contains('is-checkup'),
     status: t.querySelector('select[aria-label^="Status for"]')?.value ?? '',
-    serial: t.querySelector('.serial')?.textContent.replace(/\D/g, '') ?? '',
+    serial: t.querySelector('td.rownum')?.textContent.replace(/\D/g, '') ?? '',
   })));
   const rank = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
   const keys = order.map((r) => rank[r.status] * 2 + (r.checkup ? 1 : 0));
   assert.ok(keys.every((k, i) => i === 0 || keys[i - 1] <= k), `rows are sorted by status, patients before checkups: ${order.map((r) => r.status + (r.checkup ? '/c' : '')).join(', ')}`);
+  assert.ok(order.findIndex((r) => r.checkup) < order.map((r) => r.checkup).lastIndexOf(false), 'a waiting checkup patient comes before the patients done (not at the end)');
   assert.deepEqual(order.map((r) => r.serial), order.map((_, i) => String(i + 1)), 'every row has its serial number 1..n');
   assert.ok(await page.locator('table.sheet thead th:has-text("Token")').count(), 'the token has its own column');
-  assert.match(await page.locator('.page-head p').innerText(), /\d+ checkups/);
->>>>>>> golive
+  assert.match(await page.locator('.sheet-counts').innerText(), /Checkups \d+/);
   await shot(page, '14-sheet-checkups');
 });
 await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); details and status save; the row can be removed', async () => {
@@ -1631,7 +1627,7 @@ await step('status, group, month and doctor chips carry the sheet\'s colours; In
   assert.ok(seen.length && seen.every((x) => x.pending && x.shown === 'Pending' && /^Invoice pending for /.test(x.label)), 'seen and no invoice: Pending');
   await shot(pb, '22-sheet-chips');
 });
-await step('busy day: an exact Mr# and Enter adds that patient at once (no extra click) and puts the cursor in the Treatment cell; Enter there saves and goes to the add box for the next Mr# (never into the checkup row below)', async () => {
+await step('busy day: an exact Mr# and Enter adds that patient at once (no extra click) and puts the cursor in the Treatment cell; Enter there saves and goes to the add box for the next Mr# (never into the row below)', async () => {
   const before = await pb.locator('table.sheet tbody tr').count();
   const box = pb.locator('.add-panel input[type=search]');
   // (the checkup rows as the data has them: their cells save as they are typed, so the next Mr# must not land in one)
@@ -1650,10 +1646,12 @@ await step('busy day: an exact Mr# and Enter adds that patient at once (no extra
   assert.equal(await pb.locator('.modal').count(), 0, 'no dialog in the way');
   assert.equal(await box.inputValue(), '', 'the add box is empty for the next one');
   assert.equal(await pb.locator('table.sheet tbody tr').count(), before + 1);
-  assert.equal(await row.evaluate((tr) => tr.nextElementSibling?.dataset.kind), 'checkup', 'the new patient is the last patient row, above the checkup rows');
+  // (sorted like the sheet: the new patient is Waiting with the next token, so the last waiting patient, and the waiting
+  //  checkup patient of the day comes next)
+  assert.deepEqual(await row.evaluate((tr) => [tr.querySelector('select[aria-label^="Status for"]').value, tr.nextElementSibling?.dataset.kind]), ['waiting', 'checkup'], 'the new patient is the last waiting patient, above the waiting checkup row');
   await pb.keyboard.type('Monthly PC');
   await pb.keyboard.press('Enter');
-  assert.ok(await box.evaluate((el) => el === document.activeElement), 'Enter after the last patient goes to the add box, the sheet\'s next empty row');
+  assert.ok(await box.evaluate((el) => el === document.activeElement), 'Enter in the patient just added goes to the add box, the sheet\'s next empty row');
   // the rhythm goes on: the next Mr# and Enter adds the next patient
   await pb.keyboard.type('9821');
   await pb.keyboard.press('Enter');
@@ -1663,7 +1661,8 @@ await step('busy day: an exact Mr# and Enter adds that patient at once (no extra
   await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
   assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Monthly PC');
   assert.deepEqual(await checkupsNow(), checkupsBefore, 'the checkup rows are unchanged');
-  // Arrow Down still goes into the checkup rows and ArrowUp comes back to the same column; Enter with a patient below moves down
+  // Arrow Down still goes into the checkup row and ArrowUp comes back to the same column; Enter in a row the add line did not
+  // just put the cursor in moves down
   const label = () => pb.evaluate(() => document.activeElement?.getAttribute('aria-label'));
   await pb.keyboard.press('ArrowDown');
   assert.ok(await pb.evaluate(() => document.activeElement?.closest('tr')?.dataset.kind === 'checkup' && document.activeElement.matches('input[aria-label^="Treatment for"]')), 'Arrow Down into the checkup row: ' + await label());
@@ -1838,10 +1837,13 @@ const checkChips = () => {
 };
 await step('busy day at 1366x768: a chip\'s × shows only over the chip under the mouse or with the keyboard on it (it takes no room), the first name of a row is whole, the others show a few letters at least or are counted in the "+", and the "+" dialog lists who is on the visit with Remove and Undo', async () => {
   await pb.mouse.move(0, 0);
+  // (the list is sorted like the sheet, so the rows with the most chips, Completed, are at the bottom, where the toast of
+  //  the payment taken above sits for a few seconds: it is let go first)
+  await pb.waitForFunction(() => !document.querySelector('#toasts .toast'), null, { timeout: 15000 });
   const c = await pb.evaluate(checkChips);
   assert.ok(c.laptop && c.people >= 140 && c.n >= 120, 'chips, each with a ×: ' + JSON.stringify(c));
   assert.deepEqual(c.shownUnhovered, [], 'a × in sight with no mouse or keyboard on its chip');
-  assert.deepEqual(c.blocked, [], 'a × that does not take the click');
+  assert.deepEqual(c.blocked, [], 'a × that does not take the click: ' + JSON.stringify(c.blocked));
   assert.deepEqual(c.firstCut, [], 'a first name cut short');
   assert.deepEqual(c.unreadable, [], 'a name that cannot be read');
   assert.deepEqual(c.miscounted, [], 'a "+" that does not count the chips out of sight');
@@ -2098,6 +2100,40 @@ await step('busy day: a status or group picked right after typing in the same ro
   let saved = await savedNow();
   for (let i = 0; i < 25 && JSON.stringify(saved) !== JSON.stringify(want); i++) { await pb.waitForTimeout(200); saved = await savedNow(); }
   assert.deepEqual(saved, want);
+});
+await step('busy day: sorted like the sheet and numbered 1..n; a row whose status is changed keeps its place and number while the cursor is in it, even through a reload, and moves to its new status once the cursor has left it', async () => {
+  const rowOf = (name) => pb.locator('table.sheet tbody tr', { hasText: name });
+  const where = (name) => rowOf(name).evaluate((tr) => ({ at: tr.sectionRowIndex, n: tr.querySelector('td.rownum').textContent, cursorIn: tr.contains(document.activeElement) }));
+  const sortedAndNumbered = () => {
+    const rank = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
+    const trs = [...document.querySelectorAll('table.sheet tbody tr[data-id]')];
+    const keys = trs.map((t) => rank[t.querySelector('select[aria-label^="Status for"]').value] * 2 + (t.classList.contains('is-checkup') ? 1 : 0));
+    return keys.every((k, i) => i === 0 || keys[i - 1] <= k) && trs.every((t, i) => t.querySelector('td.rownum').textContent === String(i + 1));
+  };
+  // (a row changed by the step above moves once its quiet reload has run)
+  await pb.evaluate(() => document.activeElement?.blur());
+  await pb.waitForFunction(sortedAndNumbered, null, { timeout: 15000 });
+  const before = await where('Sample Patient 105');
+  const status = rowOf('Sample Patient 105').locator('select[aria-label^="Status for"]');
+  await rowOf('Sample Patient 105').evaluate((tr) => { tr.dataset.before = 'yes'; });
+  await status.focus(); // (as a click on it would)
+  await status.selectOption('completed');
+  await pb.waitForFunction(() => { const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes('Sample Patient 105')); return tr && !tr.dataset.before; });
+  const saved = await where('Sample Patient 105');
+  assert.deepEqual(saved, { ...before, cursorIn: true }, `saved: the row is drawn again in its place, with its number: ${JSON.stringify([before, saved])}`);
+  // a reload in the background (once the 5 seconds after the last key or tap are over) leaves it there while the cursor is in it
+  await pb.waitForTimeout(5300);
+  await pb.evaluate(() => { for (const tr of document.querySelectorAll('table.sheet tbody tr')) tr.dataset.before = 'yes'; document.dispatchEvent(new CustomEvent('sheet-reload')); });
+  await pb.waitForFunction(() => !document.querySelector('table.sheet tbody tr').dataset.before);
+  const reloaded = await where('Sample Patient 105');
+  assert.deepEqual(reloaded, { ...before, cursorIn: true }, `the list was drawn again: the row with the cursor did not move: ${JSON.stringify([before, reloaded])}`);
+  assert.equal(await status.inputValue(), 'completed');
+  // the cursor leaves the row: it goes to the Completed rows, and every row is numbered 1..n again
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  await pb.waitForFunction((at) => [...document.querySelectorAll('table.sheet tbody tr')].findIndex((t) => t.textContent.includes('Sample Patient 105')) > at, before.at, { timeout: 15000 });
+  assert.ok(await pb.evaluate(sortedAndNumbered), 'sorted and numbered 1..n again');
+  assert.notEqual((await where('Sample Patient 105')).n, before.n, 'it has the number of its new place');
+  await pb.evaluate(() => document.activeElement?.blur());
 });
 await step('busy day, slow server: text typed in a Treatment cell (it saves when the cell is left) while the same row\'s status is being saved stays in the cell when the row is drawn again, and is saved', async () => {
   await pb.evaluate(async () => {
