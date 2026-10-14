@@ -220,8 +220,8 @@ revoke all on function private.day_list_live_counts(smallint, date) from public,
 -- ---------------------------------------------------------------------------------------------------------------
 -- 5. End the day
 -- ---------------------------------------------------------------------------------------------------------------
--- Saves the copy of one branch's list for one day (today or earlier, in Pakistan time) and returns its counts, with branch_id,
--- list_date, closed_at, closed_by_name and times_updated. Needs "End the day on the Aaj ki List" and that branch.
+-- Saves the copy of one branch's list for one day (today or earlier, in Pakistan time, and not before 1 Jan 2024) and returns its
+-- counts, with branch_id, list_date, closed_at, closed_by_name and times_updated. Needs "End the day on the Aaj ki List" and that branch.
 create or replace function public.end_day(p_branch smallint, p_date date)
 returns jsonb
 language plpgsql security definer set search_path = public
@@ -244,7 +244,13 @@ begin
     raise exception 'NOT_ALLOWED: you can end the day only at the branches you work at.' using errcode = '42501';
   end if;
   if p_date > v_today then
-    raise exception 'FUTURE_DAY: % has not come yet, so it cannot be ended.', to_char(p_date, 'FMDD Mon YYYY') using errcode = '22023';
+    raise exception 'FUTURE_DAY: % has not come yet, so it cannot be ended.', coalesce(to_char(p_date, 'FMDD Mon YYYY'), 'That day')
+      using errcode = '22023'; -- ('That day' for 'infinity', which has no date to write)
+  end if;
+  -- Nor a day before 2024 (or '-infinity'): a mistyped year (0026 for 2026) would otherwise save a copy of an empty list far back
+  -- in the History. The Aaj ki List's date box starts at the same day (FIRST_DAY in web/js/lib/day-list.js).
+  if p_date < date '2024-01-01' then
+    raise exception 'TOO_FAR_BACK: That date is too far back.' using errcode = '22023';
   end if;
 
   -- One at a time per list: two people ending the same day at the same moment both count, and each audit row has the copy it replaced.

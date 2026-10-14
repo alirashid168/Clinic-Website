@@ -11,6 +11,7 @@ import { newInvoiceModal, paymentModal } from './invoice.js';
 import { dayListCheckups } from '../../lib/checkups.js';
 import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 import { dayEndControls, laterDayHint, bookedFor } from './day-end.js';
+import { FIRST_DAY } from '../../lib/day-list.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = {
@@ -233,7 +234,8 @@ export async function renderSheet(root, params, signal) {
   const branchSel = select([...(allBranches ? [{ value: 0, label: 'All branches' }] : []), ...branches.map((b) => ({ value: b.id, label: b.name }))], branchId, {
     'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); setURL(); draw(); load(); },
   });
-  const dateInput = h('input', { type: 'date', value: date, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
+  // (the date picker starts at FIRST_DAY, the first day that can be ended: day-end.js)
+  const dateInput = h('input', { type: 'date', value: date, min: FIRST_DAY, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
   const filterSel = select([{ value: '', label: 'All statuses' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))], '', {
     'aria-label': 'Filter by status', onchange: (e) => { filter = e.target.value; draw(); },
   });
@@ -784,7 +786,7 @@ export async function renderSheet(root, params, signal) {
   const statusHint = srOnly('Choose a status with the arrow keys, then press Enter or move to the next cell to save it. Escape undoes a status that is not saved yet.');
   statusHint.id = 'sheet-status-hint';
   // "End the day" (owner, 12 Oct 2026): a copy of the whole day's list (whatever the filters show) goes to the History of
-  // Aaj ki List, then the next day's list opens. Nothing on this day's list is changed or locked.
+  // Aaj ki List, then the next day's list opens (today's, when an earlier day was ended). Nothing on this day's list is changed or locked.
   const dayEnd = dayEndControls({
     getList: () => ({ branchId, date, pending: q.pendingCount || 0, failed: failedEdits().length,
       rows: [...rows.map((r) => ({ kind: 'patient', status: r.status })), ...dayListCheckups(checkups, rows).map((c) => ({ kind: 'checkup', status: c.day_status || null }))] }),
@@ -803,7 +805,7 @@ export async function renderSheet(root, params, signal) {
       h('label', { class: 'inline', style: { gap: '4px' } }, duesBox, 'With dues'), h('label', { class: 'inline', style: { gap: '4px' } }, bracesBox, 'Braces only'),
       h('button', { class: 'btn', onclick: () => { date = localISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
       h('a', { class: 'btn', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
-      dayEnd.historyLink, dayEnd.button,
+      dayEnd.historyLink, dayEnd.button, dayEnd.hint,
       can('export.data') || can('finance.view') ? h('button', { class: 'btn', onclick: download }, 'Download') : null),
     addPanel,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),

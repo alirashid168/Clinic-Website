@@ -1,5 +1,5 @@
 -- Aaj ki List "End the day" and the History of Aaj ki List (20261012000100_day_list_history.sql). Made-up people only.
---   1. the permission and its defaults;                    2. who may end a day, at which branch, and never a day still to come;
+--   1. the permission and its defaults;                    2. who may end a day, at which branch, never a day still to come or before 2024;
 --   3. the copy is built on the server, in list order, with the checkup patients, dues, invoice and doctors;
 --   4. ending a day changes nothing on the list (the Google Sheet sync sees the same day);
 --   5. ending it again updates the copy (times_updated, who, the audit log keeps the copy it replaced);
@@ -161,6 +161,18 @@ select pg_temp.expect_state(format('select public.end_day(%s::smallint, date %L)
   'end_day: a desk limited to North Nazimabad cannot end Gulshan''s day');
 select pg_temp.expect_state(format('select public.end_day(%s::smallint, %L::date)', current_setting('test.nn'), (now() at time zone 'Asia/Karachi')::date + 1), '22023', 'FUTURE_DAY',
   'end_day: a day that has not come yet is refused');
+select pg_temp.expect_state(format('select public.end_day(%s::smallint, date %L)', current_setting('test.nn'), '2023-12-31'), '22023', 'TOO_FAR_BACK: That date is too far back.',
+  'end_day: a day before 1 Jan 2024 is refused, in plain words');
+select pg_temp.expect_state(format('select public.end_day(%s::smallint, date %L)', current_setting('test.nn'), '0026-09-14'), '22023', 'That date is too far back.',
+  'end_day: a mistyped year (0026) is refused');
+select pg_temp.expect_state(format('select public.end_day(%s::smallint, %L::date)', current_setting('test.nn'), '-infinity'), '22023', 'That date is too far back.',
+  'end_day: ''-infinity'' is refused');
+select pg_temp.expect_state(format('select public.end_day(%s::smallint, %L::date)', current_setting('test.nn'), 'infinity'), '22023', 'FUTURE_DAY: That day has not come yet',
+  'end_day: ''infinity'' is a day still to come');
+-- 1 Jan 2024 itself may be ended (an empty list, which saves an empty copy); undone at once, so the History below does not list it.
+savepoint t31_first_day;
+select pg_temp.check((public.end_day(current_setting('test.nn')::smallint, date '2024-01-01'))->>'total' = '0', 'end_day: 1 Jan 2024 itself may be ended');
+rollback to savepoint t31_first_day;
 select pg_temp.expect_state('select public.end_day(999::smallint, date ''2026-09-14'')', '22023', 'BAD_REQUEST', 'end_day: an unknown branch is refused');
 select pg_temp.expect_state('select public.end_day(null::smallint, date ''2026-09-14'')', '22023', 'BAD_REQUEST', 'end_day: no branch is refused');
 reset role;

@@ -16,7 +16,7 @@ import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel, dayListCheckups } from '../lib/checkups.js';
-import { orderDayList, countDayList } from '../lib/day-list.js';
+import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -700,6 +700,7 @@ export function createDemoAdapter() {
       if (!db.branches.some((x) => x.id === b) || !/^\d{4}-\d{2}-\d{2}$/.test(date || '')) fail('BAD_REQUEST: choose one branch and a day to end.');
       if (!branchOk(b)) fail('NOT_ALLOWED: you can end the day only at the branches you work at.');
       if (date > todayISO()) fail('FUTURE_DAY: that day has not come yet, so it cannot be ended.');
+      if (date < FIRST_DAY) fail('TOO_FAR_BACK: That date is too far back.');
       const rows = dayRows(b, date);
       const now = new Date().toISOString();
       const fields = { closed_at: now, closed_by: me().id, closed_by_name: me().full_name, snapshot: rows, counts: countDayList(rows) };

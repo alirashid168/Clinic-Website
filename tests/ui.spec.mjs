@@ -2237,8 +2237,14 @@ await step('End the day: the front desk ends today\'s list; the dialog gives the
   const m = pd.locator('.modal');
   await m.waitFor();
   assert.equal(await m.locator('h2').innerText(), `End the day for North Nazimabad, ${today.label}?`);
+  // The parts add up to the total, and "patients" means what the list's header says: its patients, then its checkups.
+  const other = statuses.length - done - busy;
+  const parts = [`${done} completed`, `${busy} still waiting or in treatment`,
+    other ? `${other} other (${statuses.includes('') ? 'scheduled, cancelled, no show or no status yet' : 'scheduled, cancelled or no show'})` : null].filter(Boolean);
   assert.equal(await m.locator('p').first().innerText(),
-    `${statuses.length} patients (${checkups} of them checkup patients): ${done} completed, ${busy} still waiting or in treatment. A copy of the list is saved in History.`);
+    `${statuses.length} patients (incl. ${checkups} checkup patients): ${parts.join(', ')}. A copy of the list is saved in History.`);
+  const [, headPatients, headCheckups] = (await pd.locator('.page-head p').innerText()).match(/^(\d+) patients · .* · (\d+) checkups$/);
+  assert.deepEqual([Number(headPatients) + Number(headCheckups), Number(headCheckups)], [statuses.length, checkups], 'the header and the dialog agree');
   assert.match(await m.innerText(), new RegExp(`The ${busy} patients still waiting or in treatment stay as they are`));
   assert.match(await m.innerText(), new RegExp(`After that the list for ${tomorrow.label} opens`));
   // It starts on Cancel (a second Enter or a held key does not end the day), and the counts are the dialog's description.
@@ -2308,6 +2314,12 @@ await step('End the day: an ended day says when and by whom (with a link to its 
     /^Saved copy from \d{2}:\d{2}, when Front desk \(North Nazimabad\) ended the day\. The day was ended 2 times; this is the latest copy\.$/);
   assert.equal(await pd.locator('.day-copy tbody tr.is-checkup select, .day-copy tbody tr.is-checkup input').count(), 0);
   assert.ok(await pd.locator('.day-copy tbody tr.is-checkup .status-chip:has-text("Completed")').count() >= 2, 'the copy has the change made before it was ended again');
+  // A checkup patient from the website has no token: a dash to see, "No token" for a screen reader.
+  const noToken = pd.locator('.day-copy tbody tr.is-checkup', { hasText: 'Bareera Khalid' }).locator('.token-cell');
+  assert.equal(await noToken.textContent(), '–No token');
+  assert.equal(await noToken.locator('[aria-hidden="true"]').textContent(), '–');
+  assert.equal(await noToken.locator('.sr-only').textContent(), 'No token');
+  assert.equal(await pd.locator('.day-copy tbody tr.is-checkup', { hasText: 'Salma Nadeem' }).locator('.token-cell').textContent(), 'Token 7');
 });
 await step('History of Aaj ki List: next to the Aaj ki List in the menu; one line per day ("Ended 21:05 by ..." or "Not ended"); the front desk sees its own branch only', async () => {
   const ended = await dayInfo(pd, -5);
@@ -2356,7 +2368,9 @@ await step('History of Aaj ki List for Dr. Ali: every branch, newest first; the 
   const ended = await dayInfo(ph, -5);
   await ph.goto(BASE + '#/staff/day-history');
   await ph.waitForSelector('.day-history-list a');
-  const total = Number((await ph.locator('.pager-info').innerText()).match(/of ([\d,]+)/)[1].replace(/,/g, ''));
+  // Every branch: one line per list ("<n> lists"); the pager only when there is more than one page.
+  const total = Number((await ph.locator('.page-head p').innerText()).match(/^([\d,]+) lists$/)[1].replace(/,/g, ''));
+  assert.equal(await ph.locator('.pager').isVisible(), total > 60, `${total} lists: the pager shows only for more than one page`);
   let lines = await historyLines(ph);
   assert.ok(total >= lines.length && lines.length > 5, `${total} lines`);
   assert.ok(new Set(lines.map((t) => t.split(' – ')[1])).size > 1, 'more than one branch');
@@ -2374,6 +2388,8 @@ await step('History of Aaj ki List for Dr. Ali: every branch, newest first; the 
   const [, mon, year] = ended.label.match(/ (\w{3}) (\d{4})$/);
   await ph.waitForFunction(([mo, y]) => { const a = [...document.querySelectorAll('.day-history-list a')]; return a.length > 0 && a.every((x) => x.textContent.includes(` ${mo} ${y} – Gulshan (RJ Mall)`)); }, [mon, year]);
   assert.match(await ph.evaluate(() => location.hash), new RegExp(`branch=1&month=${month}`));
+  assert.match(await ph.locator('.page-head p').innerText(), /^\d+ days? match(es)? these filters$/, 'one branch: days');
+  assert.equal(await ph.locator('.pager').isVisible(), false, 'one month of one branch fits on one page: no pager');
   await shot(ph, '25-history-filters');
   await ph.getByRole('button', { name: 'Clear filters' }).click();
   await ph.waitForFunction(() => new Set([...document.querySelectorAll('.day-history-list a')].map((a) => a.textContent.split(' – ')[1])).size > 1);
@@ -2457,6 +2473,71 @@ await step('phone: a quick double tap on "End the day" does not end the day (the
   await ptap.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
   assert.equal(await ended(), true);
 });
+const pend = await newPage();
+await step('End the day: a list with nobody on it asks first; ending an earlier day opens today (not the day after it); the note is written once the dialog has closed', async () => {
+  await loginAs(pend, 'Front desk \\(North Nazimabad\\)');
+  const today = await dayInfo(pend, 0);
+  const old = await dayInfo(pend, -2);
+  await pend.goto(BASE + `#/staff/sheet?branch=2&date=${old.iso}`);
+  await pend.waitForSelector('table.sheet tbody .empty');
+  assert.equal(await pend.locator('input[aria-label="Date"]').getAttribute('min'), '2024-01-01', 'the date box starts where end_day() does');
+  await pend.getByRole('button', { name: 'End the day' }).click();
+  const m = pend.locator('.modal');
+  await m.waitFor();
+  assert.equal(await m.locator('p').first().innerText(), 'There is nobody on this list. End the day anyway?');
+  assert.match(await m.innerText(), new RegExp(`After that the list for ${today.label} opens`));
+  // Every change of the note's live region, and whether a dialog was open then (the page behind a dialog is hidden from screen readers).
+  await pend.evaluate(() => {
+    const region = document.querySelector('.day-end-live');
+    window.noteWrites = [];
+    new MutationObserver(() => window.noteWrites.push({ text: region.textContent, dialog: !!document.querySelector('.modal') }))
+      .observe(region, { childList: true, subtree: true, characterData: true });
+  });
+  await m.getByRole('button', { name: 'End the day' }).click();
+  await pend.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
+  await pend.waitForFunction((d) => document.querySelector('input[aria-label="Date"]')?.value === d, today.iso);
+  await pend.locator('.day-end-note', { hasText: `${old.label} was ended` }).waitFor();
+  assert.equal((await pend.locator('.day-end-note').innerText()).trim(),
+    `${old.label} was ended and its list saved in History. This is the list for ${today.label}. See the saved copy · Back to ${old.label}`);
+  const writes = await pend.evaluate(() => window.noteWrites);
+  assert.ok(writes.length > 0 && writes.every((w) => !w.dialog), `written after the dialog closed: ${JSON.stringify(writes)}`);
+  assert.equal(await pend.locator('.day-end-live').evaluate((el) => `${el.getAttribute('role')} ${el.getAttribute('aria-live')} ${el.contains(document.querySelector('.day-end-note'))}`),
+    'status polite true', 'into a polite live region that was on the page already');
+  assert.equal(await pend.getByRole('button', { name: 'End the day' }).isVisible(), true, 'today can be ended too');
+  await shot(pend, '29-earlier-day-ended-opens-today');
+});
+await step('End the day with "All branches": a hint where the button would be; the button is back once one branch is chosen', async () => {
+  await tryAnotherRole(pend);
+  await loginAs(pend, 'Dr. Ali Rashid');
+  await pend.goto(BASE + '#/staff/sheet?branch=all');
+  await pend.waitForSelector('table.sheet tbody tr');
+  const hint = pend.locator('.sheet-toolbar').getByText('Choose one branch to end its day.');
+  await hint.waitFor(); // (visible)
+  assert.equal(await pend.getByRole('button', { name: 'End the day' }).count(), 0, 'no button for every branch at once');
+  await pend.locator('select[aria-label="Branch"]').selectOption({ label: 'North Nazimabad' });
+  await pend.getByRole('button', { name: 'End the day' }).waitFor();
+  assert.equal(await hint.isVisible(), false, 'the hint goes away');
+});
+await pend.close();
+const pmid = await newPage();
+await step('End the day after midnight: a page opened before midnight says what day it is now and which day is being ended', async () => {
+  await loginAs(pmid, 'Front desk \\(North Nazimabad\\)');
+  await pmid.goto(BASE + '#/staff/sheet');
+  await pmid.waitForSelector('table.sheet tbody tr.is-checkup');
+  const today = await dayInfo(pmid, 0);
+  const tomorrow = await dayInfo(pmid, 1);
+  // The page stays open until five past midnight, Pakistan time.
+  await pmid.clock.setFixedTime(new Date(`${tomorrow.iso}T00:05:00+05:00`));
+  await pmid.getByRole('button', { name: 'End the day' }).click();
+  const m = pmid.locator('.modal');
+  await m.waitFor();
+  assert.equal(await m.locator('p.alert-warning').innerText(), `It is now ${tomorrow.label}; you are ending ${today.label}.`);
+  assert.match(await m.innerText(), new RegExp(`After that the list for ${tomorrow.label} opens`));
+  await shot(pmid, '30-end-the-day-after-midnight');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.waitFor({ state: 'detached' });
+});
+await pmid.close();
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

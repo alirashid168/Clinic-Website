@@ -28,7 +28,7 @@ registerHooks({
 });
 const { createSupabaseAdapter } = await import('../web/js/data/supabase.js');
 const { createDemoAdapter } = await import('../web/js/data/demo.js');
-const { orderDayList, countDayList, dayLabel, clinicTime, clinicDate, endedAt } = await import('../web/js/lib/day-list.js');
+const { orderDayList, countDayList, dayLabel, clinicTime, clinicDate, endedAt, endDayCounts, listAfterEnding, pastMidnight, FIRST_DAY } = await import('../web/js/lib/day-list.js');
 const { todayISO, addDaysISO } = await import('../web/js/ui/dom.js');
 const { PERMISSIONS, defaultGrid, hasPermission } = await import('../web/js/lib/permissions.js');
 
@@ -66,6 +66,33 @@ test('day and time: a calendar day keeps its date, a moment is shown in Pakistan
   assert.equal(clinicDate('2026-10-12T19:30:00Z'), '2026-10-13', 'half past midnight in Karachi is the next day');
   assert.equal(endedAt({ closed_at: '2026-10-12T16:05:00Z' }, '2026-10-12'), '21:05');
   assert.equal(endedAt({ closed_at: '2026-10-13T04:10:00Z' }, '2026-10-12'), '09:10 on Tue 13 Oct 2026', 'ended the next morning: the day is said too');
+});
+
+test('the "End the day" dialog: its counts add up, a part that is 0 is left out, and the checkup patients are counted as in the list\'s header', () => {
+  const c = (o: any) => ({ total: 0, completed: 0, waiting: 0, in_treatment: 0, scheduled: 0, cancelled: 0, no_show: 0, not_set: 0, checkups: 0, ...o });
+  assert.equal(endDayCounts(c({ total: 9, completed: 3, waiting: 3, in_treatment: 1, scheduled: 1, cancelled: 1, checkups: 2 })),
+    '9 patients (incl. 2 checkup patients): 3 completed, 4 still waiting or in treatment, 2 other (scheduled, cancelled or no show).');
+  assert.equal(endDayCounts(c({ total: 5, completed: 5 })), '5 patients: 5 completed.', 'no other part when it is 0');
+  assert.equal(endDayCounts(c({ total: 1, waiting: 1, checkups: 1 })), '1 patient (incl. 1 checkup patient): 1 still waiting or in treatment.');
+  assert.equal(endDayCounts(c({ total: 3, completed: 1, no_show: 1, not_set: 1, checkups: 1 })),
+    '3 patients (incl. 1 checkup patient): 1 completed, 2 other (scheduled, cancelled, no show or no status yet).', 'a checkup patient with no status yet is counted too');
+  // The parts always add up to the total, for the counts of a real list.
+  const rows = ['completed', 'waiting', 'in_treatment', 'scheduled', 'cancelled', 'no_show', null].map((status, i) => ({ id: String(i), kind: i % 2 ? 'checkup' : 'patient', status }));
+  const text = endDayCounts(countDayList(rows));
+  const [total, ...parts] = [...text.matchAll(/(\d+) (?:patients|completed|still|other)/g)].map((m) => Number(m[1]));
+  assert.equal(parts.reduce((a, b) => a + b, 0), total, text);
+});
+
+test('after "End the day": the next day\'s list, or today\'s when that has gone by too; the warning when midnight has passed since the page was opened', () => {
+  assert.equal(listAfterEnding('2026-10-14', '2026-10-14'), '2026-10-15', 'today ended: tomorrow\'s list');
+  assert.equal(listAfterEnding('2026-10-13', '2026-10-14'), '2026-10-14', 'yesterday ended: today\'s list');
+  assert.equal(listAfterEnding('2026-10-12', '2026-10-14'), '2026-10-14', 'ending 12 Oct on 14 Oct opens 14 Oct, not 13 Oct');
+  assert.equal(listAfterEnding('2026-12-31', '2026-12-31'), '2027-01-01');
+  assert.equal(pastMidnight('2026-10-13', '2026-10-13', '2026-10-14'), 'It is now Wed 14 Oct 2026; you are ending Tue 13 Oct 2026.');
+  assert.equal(pastMidnight('2026-10-13', '2026-10-13', '2026-10-13'), null, 'the same day: no warning');
+  assert.equal(pastMidnight('2026-10-14', '2026-10-13', '2026-10-14'), null, 'past midnight, but ending the new day (Today was pressed): no warning');
+  assert.equal(pastMidnight('2026-10-10', '2026-10-14', '2026-10-14'), null, 'an earlier day opened today: no warning');
+  assert.equal(FIRST_DAY, '2024-01-01', 'the same first day as end_day() in the database');
 });
 
 test('permission grid: "End the day on the Aaj ki List" sits under Daily list, on for the roles that may edit the list (as the database seed)', () => {
@@ -197,6 +224,8 @@ test('demo: endDay follows the database: permission, branch, never a day to come
   const desk = await demoAs('s-fd-nn');
   await assert.rejects(() => desk.endDay({ branchId: 1, date: todayISO() }), /only at the branches you work at/);
   await assert.rejects(() => desk.endDay({ branchId: 2, date: addDaysISO(todayISO(), 1) }), /FUTURE_DAY/);
+  await assert.rejects(() => desk.endDay({ branchId: 2, date: '2023-12-31' }), /TOO_FAR_BACK: That date is too far back\./, 'before 2024: refused');
+  assert.equal((await desk.endDay({ branchId: 2, date: '2024-01-01' })).total, 0, '1 Jan 2024 itself may be ended (an empty list here)');
   const before = JSON.stringify(await desk.listVisits({ branchId: 2, date: todayISO() }));
   const r = await desk.endDay({ branchId: 2, date: todayISO() });
   assert.equal(r.times_updated, 0);

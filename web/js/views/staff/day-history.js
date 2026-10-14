@@ -90,11 +90,13 @@ async function renderList(root, params, signal) {
 
   function draw() {
     const first = f.page * PAGE_SIZE + 1;
-    const days = `${number(total)} day${total === 1 ? '' : 's'}`;
-    summary.textContent = filtered() && branches.length > 1 ? `${days} ${total === 1 ? 'matches' : 'match'} these filters` : `${days} with a list`;
+    // Every branch: one line per list, and a day can have one list per branch. One branch: one line per day.
+    const lines = !f.branch && branches.length > 1 ? `${number(total)} list${total === 1 ? '' : 's'}` : `${number(total)} day${total === 1 ? '' : 's'}`;
+    summary.textContent = filtered() && branches.length > 1 ? `${lines} ${total === 1 ? 'matches' : 'match'} these filters`
+      : f.branch ? `${lines} with a list` : lines;
     mount(list, rows.length ? rows.map(line)
       : h('li', {}, empty(filtered() ? 'No lists match these filters.' : 'No lists yet. A day shows here once it has patients on the Aaj ki List.')));
-    pager.hidden = !rows.length && total === 0;
+    pager.hidden = total <= PAGE_SIZE && f.page === 0; // everything fits on one page
     info.textContent = rows.length ? `Showing ${number(first)}-${number(first + rows.length - 1)} of ${number(total)}` : `Showing 0 of ${number(total)}`;
     prev.setAttribute('aria-disabled', String(f.page === 0));
     next.setAttribute('aria-disabled', String((f.page + 1) * PAGE_SIZE >= total));
@@ -175,6 +177,7 @@ async function renderDay(root, branchId, date, signal) {
     const name = !checkup && r.patient_id && can('patients.view') ? h('a', { href: `#/staff/patient/${r.patient_id}` }, r.name) : h('span', {}, r.name);
     const hint = r.mr ? `Mr# ${r.mr}` : checkup ? 'Checkup · no Mr#' : '';
     const month = r.month ? String(r.month).padStart(2, '0') : null;
+    const hasToken = r.token != null && String(r.token).trim() !== ''; // (a checkup patient from the website has none until someone types one)
     return h('tr', { class: checkup ? 'is-checkup' : null, dataset: { kind: r.kind } },
       h('th', { scope: 'row', class: 'frozen row-head' }, cell(h('span', { class: 'serial' }, srOnly('Row '), String(r.n)),
         h('div', {}, h('div', { class: 'day-copy-name' }, name), hint ? h('div', { class: 'muted field-hint' }, hint) : null))),
@@ -182,7 +185,8 @@ async function renderDay(root, branchId, date, signal) {
         showDues ? duesBadge(r.dues) : null, r.has_invoice ? h('span', { class: 'badge badge-ok' }, 'Invoice') : null)),
       h('td', {}, cell(month ? h('span', { class: 'month-pill' }, month) : h('span', { class: 'muted' }, h('span', { 'aria-hidden': 'true' }, '–'), srOnly('Not braces')))),
       h('td', {}, cell(capFirst(r.treatment || ''))),
-      h('td', {}, h('div', { class: 'cell token-cell' }, h('span', { class: 'token' }, srOnly('Token '), r.token ?? '–'))),
+      h('td', {}, h('div', { class: 'cell token-cell' }, hasToken ? h('span', { class: 'token' }, srOnly('Token '), r.token)
+        : h('span', { class: 'muted' }, h('span', { 'aria-hidden': 'true' }, '–'), srOnly('No token')))),
       h('td', {}, cell(h('span', { class: `status-chip status-${r.status || 'unset'}` }, r.status ? STATUS_LABELS[r.status] || r.status : 'Not set'))),
       h('td', {}, cell(r.doctors || '', r.group ? h('span', { class: 'muted field-hint' }, ` ${r.group}`) : null)),
       h('td', {}, cell(r.details || '')),

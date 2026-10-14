@@ -38,6 +38,42 @@ export function countDayList(rows) {
   return counts;
 }
 
+/**
+ * What the "End the day" dialog says about a list's counts (countDayList): every row, the way the Aaj ki List's header counts
+ * them (its patients, then its checkups), split into parts that add up to that number. A part that is 0 is left out.
+ * '9 patients (incl. 2 checkup patients): 3 completed, 4 still waiting or in treatment, 2 other (scheduled, cancelled or no show).'
+ */
+export function endDayCounts(c) {
+  const of = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const busy = c.waiting + c.in_treatment;
+  const other = c.total - c.completed - busy; // scheduled, cancelled, no show, and a checkup patient with no status yet
+  const parts = [
+    c.completed ? `${c.completed} completed` : null,
+    busy ? `${busy} still waiting or in treatment` : null,
+    other ? `${other} other (${c.not_set ? 'scheduled, cancelled, no show or no status yet' : 'scheduled, cancelled or no show'})` : null,
+  ].filter(Boolean);
+  return `${of(c.total, 'patient')}${c.checkups ? ` (incl. ${of(c.checkups, 'checkup patient')})` : ''}: ${parts.join(', ')}.`;
+}
+
+/** The first day that can be ended (the database refuses an earlier one), and the first day the Aaj ki List's date box offers. */
+export const FIRST_DAY = '2024-01-01';
+
+/** The list that opens after a day is ended: the next day's, or today's when the next day has gone by too (ending 12 Oct on 14 Oct opens 14 Oct). */
+export function listAfterEnding(date, today) {
+  const d = new Date(`${String(date).slice(0, 10)}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  const next = d.toISOString().slice(0, 10);
+  return next < today ? today : next;
+}
+
+/**
+ * The dialog's warning when the page was opened (openedOn) before midnight, Pakistan time, and an earlier day than today is
+ * being ended: 'It is now Wed 14 Oct 2026; you are ending Tue 13 Oct 2026.'. Otherwise null.
+ */
+export function pastMidnight(date, openedOn, today) {
+  return openedOn < today && date < today ? `It is now ${dayLabel(today)}; you are ending ${dayLabel(date)}.` : null;
+}
+
 // Written out here, not by the browser: some browsers shorten September to "Sept".
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
