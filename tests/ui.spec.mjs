@@ -2390,6 +2390,11 @@ await step('History of Aaj ki List for Dr. Ali: every branch, newest first; the 
   assert.match(await ph.evaluate(() => location.hash), new RegExp(`branch=1&month=${month}`));
   assert.match(await ph.locator('.page-head p').innerText(), /^\d+ days? match(es)? these filters$/, 'one branch: days');
   assert.equal(await ph.locator('.pager').isVisible(), false, 'one month of one branch fits on one page: no pager');
+  // ... and a screen reader still hears the new count: it is in a live region that is shown (not inside the hidden pager).
+  const live = ph.locator('[role="status"]').filter({ hasText: /match(es)? these filters$/ });
+  assert.equal(await live.count(), 1, 'one live region holds the count');
+  assert.ok(await live.isVisible(), 'the live region with the count is shown');
+  assert.equal(Number((await live.innerText()).match(/^(\d+) /)[1]), (await historyLines(ph)).length, 'the count read out is the number of lines');
   await shot(ph, '25-history-filters');
   await ph.getByRole('button', { name: 'Clear filters' }).click();
   await ph.waitForFunction(() => new Set([...document.querySelectorAll('.day-history-list a')].map((a) => a.textContent.split(' – ')[1])).size > 1);

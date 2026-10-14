@@ -47,7 +47,9 @@ async function renderList(root, params, signal) {
   };
   const filtered = () => !!(f.branch || f.month);
 
-  const summary = h('p', {});
+  // The count is a live region that is always on the page, so a screen reader reads the result of a filter change also
+  // when the pager (and its own live "Showing ..." line, read when paging) is hidden because everything fits on one page.
+  const summary = h('p', { role: 'status' });
   const list = h('ul', { class: 'day-history-list' });
   const listWrap = h('section', { class: 'panel', 'aria-label': 'Days' }, list);
   const info = h('span', { class: 'pager-info', role: 'status' });
@@ -92,8 +94,9 @@ async function renderList(root, params, signal) {
     const first = f.page * PAGE_SIZE + 1;
     // Every branch: one line per list, and a day can have one list per branch. One branch: one line per day.
     const lines = !f.branch && branches.length > 1 ? `${number(total)} list${total === 1 ? '' : 's'}` : `${number(total)} day${total === 1 ? '' : 's'}`;
-    summary.textContent = filtered() && branches.length > 1 ? `${lines} ${total === 1 ? 'matches' : 'match'} these filters`
+    const count = filtered() && branches.length > 1 ? `${lines} ${total === 1 ? 'matches' : 'match'} these filters`
       : f.branch ? `${lines} with a list` : lines;
+    if (summary.textContent !== count) summary.textContent = count; // (unchanged on Next/Previous: only "Showing ..." is read then)
     mount(list, rows.length ? rows.map(line)
       : h('li', {}, empty(filtered() ? 'No lists match these filters.' : 'No lists yet. A day shows here once it has patients on the Aaj ki List.')));
     pager.hidden = total <= PAGE_SIZE && f.page === 0; // everything fits on one page
