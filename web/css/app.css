@@ -483,6 +483,11 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .site-header nav a:hover { background: var(--on-dark-hover); }
 .wordmark { font-weight: 800; letter-spacing: -.01em; font-size: var(--fs-lg); }
 .wordmark small { display: block; font-weight: 500; font-size: var(--fs-xs); color: var(--on-dark-muted); letter-spacing: .02em; }
+/* The clinic's logo (white, logo-mark.svg) before the name, in every dark header (site, staff top bar, sidebar).
+   The name stays text; the mark is decoration (the link already says the clinic's name). */
+.wordmark { display: inline-grid; grid-template-columns: auto auto; column-gap: .55em; align-items: center; justify-content: start; }
+.wordmark::before { content: ''; grid-row: 1 / span 2; width: 1.15em; height: 2.4em; background: url('../logo-mark.svg') center / contain no-repeat; }
+.wordmark small { grid-column: 2; }
 
 .hero {
   min-height: 100svh; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); color: var(--on-dark-strong);
@@ -528,7 +533,8 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   50% { transform: translateY(46px) rotateX(-8deg) rotateY(22deg); }
 }
 
-.door-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); width: min(720px, 100%); }
+.door-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); width: min(940px, 100%); }
+@media (max-width: 900px) { .door-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .door {
   display: grid; gap: var(--space-1); text-align: left; padding: var(--space-5) var(--space-5) var(--space-4); border-radius: var(--radius-l);
   background: var(--glass); border: 1px solid var(--glass-line); color: var(--on-dark-strong); text-decoration: none;
@@ -541,6 +547,18 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .door-primary span { color: var(--text-muted); }
 .door-primary:hover { background: var(--gold-soft); }
 @media (max-width: 620px) { .door-row { grid-template-columns: 1fr; } }
+/* Our results: square thumbnails three to a row (like Instagram), four on wider screens; a click opens the photo large. */
+.results-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin-top: var(--space-4); }
+@media (min-width: 700px) { .results-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; } }
+.results-tile { aspect-ratio: 1 / 1; padding: 0; border: 0; border-radius: 4px; overflow: hidden; background: var(--aubergine-soft); cursor: zoom-in; }
+.results-tile img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .2s; }
+.results-tile:hover img { transform: scale(1.03); }
+.results-tile:focus-visible { outline: 3px solid var(--aubergine); outline-offset: 2px; }
+.modal:has(.results-view) { width: min(900px, calc(100vw - 32px)); max-width: none; }
+.results-big { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; border-radius: var(--radius-m); }
+.results-caption { text-align: center; margin: var(--space-2) 0 0; color: var(--text-muted); }
+.results-nav { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-3); }
+@media (prefers-reduced-motion: reduce) { .results-tile img { transition: none; } }
 
 .public-main {
   max-width: 1080px; margin: 0 auto;
