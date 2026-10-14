@@ -481,6 +481,9 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   padding: 0 6px; margin: 0 -6px; border-radius: var(--radius-s);
 }
 .site-header nav a:hover { background: var(--on-dark-hover); }
+/* Signed-in staff looking at the website (views/public.js): one line back to their pages, above the name and the links. */
+.staff-return { flex-basis: 100%; margin: 0; font-size: var(--fs-sm); color: var(--on-dark-soft); }
+.site-header .staff-return a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
 .wordmark { font-weight: 800; letter-spacing: -.01em; font-size: var(--fs-lg); }
 .wordmark small { display: block; font-weight: 500; font-size: var(--fs-xs); color: var(--on-dark-muted); letter-spacing: .02em; }
 /* The clinic's logo (white, logo-mark.svg) before the name, in every dark header (site, staff top bar, sidebar).
@@ -612,13 +615,14 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .public-main.public-fallback { margin: clamp(var(--space-6), 8vh, var(--space-8)) auto; width: calc(100% - 2 * var(--space-4)); padding: var(--space-6); }
 
 /* The two homepage buttons ("Join our team", "Complaints & suggestions") and their forms (views/forms.js). Phone first: one
-   column, full-width controls and send button, 44px targets; two columns of buttons from 600px. */
-.forms-band-wrap { padding-top: 0; }
+   column, full-width controls and send button, 44px targets; two columns of buttons from 600px. The band has its own space
+   below the clinics (a different background) and a shorter gap to the footer than a whole public section. */
+.forms-band-wrap { padding-top: var(--space-7); padding-bottom: var(--space-7); }
 .forms-band { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: clamp(var(--space-5), 4vw, var(--space-7)); }
 .forms-band h2 { font-size: var(--fs-section); letter-spacing: -.02em; margin-bottom: var(--space-4); }
 .forms-cards { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); margin-bottom: var(--space-4); }
 .forms-card {
-  --ring: var(--focus-ring); display: grid; gap: var(--space-1); align-content: start; padding: var(--space-5); border-radius: var(--radius-m);
+  --ring: var(--focus-ring); display: grid; grid-template-rows: auto auto 1fr; gap: var(--space-1); padding: var(--space-5); border-radius: var(--radius-m);
   background: var(--aubergine); color: var(--on-dark-strong); text-decoration: none; transition: background-color .15s;
 }
 .forms-card + .forms-card { background: var(--aubergine-deep); }
@@ -626,7 +630,8 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .forms-card:focus-visible { outline-offset: 3px; }
 .forms-card strong { font-size: var(--fs-xl); letter-spacing: -.01em; }
 .forms-card span { font-size: var(--fs-sm); color: var(--on-dark-soft); }
-.forms-card .forms-card-go { margin-top: var(--space-2); font-size: var(--fs-ui); font-weight: 700; color: var(--gold-300); }
+/* Side by side, "Apply" and "Write to us" line up at the bottom. */
+.forms-card .forms-card-go { align-self: end; margin-top: var(--space-2); font-size: var(--fs-ui); font-weight: 700; color: var(--gold-300); }
 .forms-band-note { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); }
 
 .form-page { padding-top: var(--space-5); }
@@ -693,6 +698,7 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 .nav-group { font-size: var(--fs-xs); color: var(--on-dark-subtle); padding: var(--space-3) var(--space-2) var(--space-1); }
 .sidebar-foot { margin-top: auto; padding: var(--space-3) var(--space-2) 0; border-top: 1px solid var(--on-dark-line); font-size: var(--fs-sm); }
 .sidebar-foot .link-btn { color: var(--on-dark-strong); }
+.sidebar-foot a.link-btn { display: inline-flex; align-items: center; margin-top: var(--space-2); } /* "View the website": centred in its touch height like the buttons */
 .main { padding: var(--space-6) max(clamp(14px, 3vw, 32px), env(safe-area-inset-right)) calc(var(--space-8) + var(--space-4)) max(clamp(14px, 3vw, 32px), env(safe-area-inset-left)); min-width: 0; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-4); }
 .page-head h1 { margin: 0; }
@@ -789,7 +795,7 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
     transition: transform .2s ease, visibility 0s linear .2s;
   }
   .sidebar.open, body.drawer-open .sidebar { transform: none; visibility: visible; box-shadow: var(--shadow-lg); transition: transform .2s ease, visibility 0s; }
-  /* Change password and Log out stay on screen at the bottom of the drawer while the links above them scroll (a phone is too short for all of them). */
+  /* View the website, Change password and Log out stay on screen at the bottom of the drawer while the links above them scroll (a phone is too short for all of them). */
   .sidebar-foot { position: sticky; bottom: 0; background: var(--surface-inverse); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
   body.drawer-open .drawer-scrim, .sidebar.open ~ .drawer-scrim { display: block; }
   body.drawer-open { overflow: hidden; }

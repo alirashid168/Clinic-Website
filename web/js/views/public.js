@@ -1,5 +1,5 @@
-// Public website: home (hero smile card + three doors + Meet Dr. Ali + his week
-// and the clinics + the two form buttons) and the visitor page. The parts that need no data render at
+// Public website: home (hero smile card + four doors + Meet Dr. Ali + his week
+// and the clinics + the two form buttons), our results and the visitor page. The parts that need no data render at
 // once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce, modal } from '../ui/dom.js';
 import { state } from '../state.js';
@@ -46,9 +46,24 @@ export function smile3d() {
 }
 
 // ---------------------------------------------------------------- pieces
+/**
+ * Staff who opened the website from their account menu ("View the website", owner 12 Oct 2026) get a line back to
+ * their pages above the top bar. Who is signed in is known once the app has started, so the line appears then.
+ */
+function staffReturn() {
+  const line = h('p', { class: 'staff-return', hidden: true });
+  state.ready.then(() => {
+    if (state.session?.kind !== 'staff') return;
+    mount(line, 'You are signed in to the clinic system. ', h('a', { href: '#/staff/today' }, 'Back to staff pages'));
+    line.hidden = false;
+  });
+  return line;
+}
+
 /** The top bar of the public pages (also used by the two forms, views/forms.js). */
 export function header(sub) {
   return h('header', { class: ['site-header', sub && 'subpage-header'] },
+    staffReturn(),
     h('a', { href: '#/', class: 'wordmark' }, "Dr. Ali Rashid's", h('small', {}, 'Dental Clinic')),
     h('nav', { class: 'inline', 'aria-label': 'Main' },
       h('a', { href: '#/visitor' }, 'Treatments'),

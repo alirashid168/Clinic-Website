@@ -206,6 +206,8 @@ export async function renderStaff(root, path, params, signOut) {
   const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },
     h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
     h('hr', {}),
+    // The public homepage, as visitors see it (owner, 12 Oct 2026); it has a "Back to staff pages" link while signed in (views/public.js).
+    h('a', { href: '#/', onclick: () => closeAll() }, 'View the website'),
     // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
     h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
     h('button', { type: 'button', class: 'menu-btn', onclick: signOut }, 'Log out'));
@@ -226,6 +228,8 @@ export async function renderStaff(root, path, params, signOut) {
       : drawerLink(m, current(m.key)))),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
+      // On its own line: Change password and Log out keep their row, well apart.
+      h('a', { class: 'link-btn', href: '#/', onclick: () => closeDrawer(false) }, 'View the website'),
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); } }, 'Log out'))));

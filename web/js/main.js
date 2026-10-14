@@ -1,4 +1,4 @@
-// Router: #/ (home), #/visitor, #/clinics and #/dr-ali (home, scrolled to that
+// Router: #/ (home, also while signed in), #/visitor, #/results, #/clinics and #/dr-ali (home, scrolled to that
 // section), #/join and #/feedback (the two public forms), #/login/staff, #/login/patient, #/patient (portal), #/patient/demo
 // (sample portal), #/staff/<page>. Hash routing keeps the site a set of static
 // files. Search engines index only "/", so index.html carries the description,

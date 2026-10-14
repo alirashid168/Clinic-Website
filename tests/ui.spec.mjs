@@ -2467,6 +2467,53 @@ await step('access list: a "Job applications (CNIC, phone and CV)" row, ticked f
     assert.equal(await pf.getByLabel(`${role}: Job applications (CNIC, phone and CV)`).isChecked(), false, role);
   }
 });
+// The owner (12 Oct 2026): "there's no way to go back to the homepage from here". The account menu and the phone drawer have
+// "View the website"; the homepage stays the public one while signed in, with a line back to the staff pages (and the Employee door).
+await step('staff: "View the website" in the account menu opens the public homepage; "Back to staff pages" and the Employee door lead back', async () => {
+  await pf.goto(BASE + '#/staff/today');
+  await pf.waitForSelector('.topbar');
+  await pf.locator('.user-menu > button').click();
+  const link = pf.locator('#user-menu-list a', { hasText: 'View the website' });
+  assert.equal(await link.getAttribute('href'), '#/');
+  await link.click();
+  await pf.waitForSelector('.door:has-text("Employee")');
+  assert.equal(new URL(pf.url()).hash, '#/');
+  assert.equal(await pf.locator('.topbar').count(), 0, 'the public homepage, not a staff page');
+  for (const t of ['Patient', 'Visitor', 'Our results', 'Employee']) assert.equal(await pf.locator('.door', { hasText: t }).count(), 1, `door ${t}`);
+  assert.equal(await pf.locator('#work-with-us a.forms-card').count(), 2, 'with the two form buttons');
+  const back = pf.locator('.staff-return');
+  await back.waitFor();
+  assert.match(await back.innerText(), /You are signed in to the clinic system\. Back to staff pages/);
+  await shot(pf, '48-home-signed-in');
+  await back.getByRole('link', { name: 'Back to staff pages' }).click();
+  await pf.waitForSelector('.topbar');
+  assert.match(pf.url(), /#\/staff\/today$/);
+  await pf.evaluate(() => { location.hash = '#/'; });
+  await pf.locator('.door:has-text("Employee")').click();
+  await pf.waitForSelector('.topbar');
+  assert.match(pf.url(), /#\/staff\/today$/, 'the Employee door goes straight to the staff pages while signed in');
+});
+await step('staff on a phone: "View the website" is at the foot of the drawer; a visitor (nobody signed in) sees no "Back to staff pages"', async () => {
+  await pf.setViewportSize({ width: 390, height: 844 });
+  await pf.locator('.menu-toggle').click();
+  await pf.waitForSelector('#staff-drawer.open');
+  const link = pf.locator('#staff-drawer .sidebar-foot a', { hasText: 'View the website' });
+  await link.waitFor();
+  assert.equal(await link.getAttribute('href'), '#/');
+  await pf.waitForTimeout(300); // the drawer slides in
+  await shot(pf, '49-drawer-view-website');
+  await link.click();
+  await pf.waitForSelector('.door:has-text("Employee")');
+  assert.equal(await pf.evaluate(() => document.body.classList.contains('drawer-open')), false, 'the drawer is closed');
+  await pf.locator('.staff-return').waitFor();
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  const visitor = await newPage({ width: 390, height: 844 });
+  await visitor.goto(BASE);
+  await visitor.waitForSelector('.sx-day');
+  assert.equal(await visitor.locator('.staff-return:not([hidden])').count(), 0);
+  await visitor.close();
+  await pf.setViewportSize({ width: 1366, height: 860 });
+});
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }
