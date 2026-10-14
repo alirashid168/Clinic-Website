@@ -62,6 +62,12 @@ update public.staff set restrict_to_branches = true, branch_ids = array[current_
 insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values
   (:nodues, 'dues.view', false), (:nophone, 'patients.view', false), (:noend, 'sheet.end_day', false);
 
+-- These two days hold only this file's people. An earlier file that runs without a transaction can leave visits on days counted
+-- back from today (10_clinic_rules_test: a Gulshan visit every 30 days, token 1), which on some days are 14 or 15 Sep 2026.
+-- They go inside this file's transaction, which is rolled back at the end.
+delete from public.visits where visit_date in (date '2026-09-14', date '2026-09-15');
+delete from public.checkups where checkup_date in (date '2026-09-14', date '2026-09-15');
+
 -- The made-up list of North Nazimabad on Monday 14 Sep 2026 (and a little of Gulshan the same day, and of North Nazimabad the day after).
 insert into public.patients (mr_number, full_name, phone) values
   ('31001', 'Sample Done One', '03005553101'), ('31002', 'Sample Waiting Three', '03005553102'), ('31003', 'Sample Waiting Two', '03005553103'),
