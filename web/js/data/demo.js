@@ -15,7 +15,8 @@ import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
-import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel, dayListCheckups } from '../lib/checkups.js';
+import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -338,6 +339,41 @@ export function createDemoAdapter() {
         || (a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1) || (a.id < b.id ? -1 : 1));
   }
 
+  // One branch's list for one day as the database's private.day_list_rows builds it (20261012000100_day_list_history.sql): every visit,
+  // the checkup patients shown on that list, in the Aaj ki List's order, with the patients' dues at this moment.
+  const STAFF_ROLE_ORDER = { doctor: 0, assistant: 1, checker: 2 };
+  function dayRows(branchId, date) {
+    const visits = db.visits.filter((v) => v.branch_id === branchId && v.visit_date === date);
+    const checkups = dayListCheckups(db.checkups.filter((c) => c.branch_id === branchId && c.checkup_date === date), visits);
+    const doctorsOf = (v) => db.visit_staff.filter((x) => x.visit_id === v.id)
+      .map((x) => ({ ...x, name: clinician(x.clinician_id)?.display_name || '' }))
+      .sort((a, b) => STAFF_ROLE_ORDER[a.role] - STAFF_ROLE_ORDER[b.role] || a.name.localeCompare(b.name))
+      .map((x) => (x.role === 'checker' ? '✓ ' : '') + x.name + (x.role === 'assistant' ? ' (assistant)' : '')).join(', ') || null;
+    return orderDayList([
+      ...visits.map((v) => {
+        const p = patient(v.patient_id);
+        return { kind: 'patient', id: v.id, patient_id: v.patient_id, mr: p.mr_number, name: p.full_name, month: v.braces_month ?? null,
+          treatment: v.treatment_label || null, token: v.token_no == null ? null : String(v.token_no), status: v.status,
+          group: v.doctor_group_id ? `Group ${v.doctor_group_id}` : null, doctors: doctorsOf(v), details: v.details_text || null, notes: v.notes || null,
+          dues: dues(v.patient_id),
+          has_invoice: db.invoices.some((i) => i.status === 'issued' && (i.visit_id === v.id || (i.patient_id === v.patient_id && i.branch_id === v.branch_id && i.issue_date === v.visit_date))),
+          phone: p.phone && p.phone !== '0000000' ? p.phone : null, created_at: v.created_at };
+      }),
+      ...checkups.map((c) => ({ kind: 'checkup', id: c.id, patient_id: c.patient_id, mr: c.patient_id ? patient(c.patient_id)?.mr_number ?? null : null,
+        name: c.patient_name, month: null, treatment: c.checkup_for, token: c.token, status: c.day_status, group: null, doctors: c.doctors,
+        details: c.details, notes: c.notes, dues: null, has_invoice: false, phone: c.phone, created_at: c.created_at })),
+    ]);
+  }
+  const closingOf = (branchId, date) => db.day_closings.find((x) => x.branch_id === Number(branchId) && x.list_date === date) || null;
+  // One day already ended, for the History: North Nazimabad five days ago, ended at 21:05 (Pakistan time) by its front desk.
+  function seedDayClosing() {
+    const day = daysAgo(5);
+    const rows = dayRows(2, day);
+    db.day_closings = [{ id: uid(), branch_id: 2, list_date: day, closed_at: day + 'T16:05:00.000Z', closed_by: 's-fd-nn',
+      closed_by_name: 'Front desk (North Nazimabad)', snapshot: rows, counts: countDayList(rows), times_updated: 0 }];
+  }
+  seedDayClosing(); // (here: it needs patient(), dues() and clinician() above)
+
   function applyVisitRules(v, prev) {
     if (v.braces_month && (!prev || prev.braces_month !== v.braces_month)) {
       const rule = protocolFor(v.braces_month);
@@ -444,7 +480,7 @@ export function createDemoAdapter() {
       if (!s?.active) { session = null; return null; }
       return { kind: 'staff', staff: clone(s), perms: permsFor(s) };
     },
-    async resetDemo() { db = seed(); session = null; ownPasswords.clear(); },
+    async resetDemo() { db = seed(); seedDayClosing(); session = null; ownPasswords.clear(); },
 
     // ------------------------------------------------------------ reference
     async branches() { return clone(db.branches.filter((b) => b.active)); },
@@ -596,10 +632,13 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ visits
+    // By token, then by when the row was added and by its id, as the live adapter asks the database (rows with no token and one
+    // created_at, such as an imported day's, keep the order the History's copy has: lib/day-list.js orderDayList).
     async listVisits({ branchId, date }) {
       need('sheet.view');
       return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && branchOk(v.branch_id))
-        .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999)).map(enrichVisit);
+        .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
+          || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(enrichVisit);
     },
     subscribeVisits() { return () => {}; },
     async addVisit(row) {
@@ -654,6 +693,66 @@ export function createDemoAdapter() {
       return enrichVisit(v);
     },
 
+    // ------------------------------------------------------------ Aaj ki List: "End the day" and its History (as 20261012000100_day_list_history.sql)
+    async endDay({ branchId, date }) {
+      if (!can('sheet.end_day')) fail('NOT_ALLOWED: ending the day needs "End the day on the Aaj ki List" in the access list.');
+      const b = Number(branchId);
+      if (!db.branches.some((x) => x.id === b) || !/^\d{4}-\d{2}-\d{2}$/.test(date || '')) fail('BAD_REQUEST: choose one branch and a day to end.');
+      if (!branchOk(b)) fail('NOT_ALLOWED: you can end the day only at the branches you work at.');
+      if (date > todayISO()) fail('FUTURE_DAY: that day has not come yet, so it cannot be ended.');
+      if (date < FIRST_DAY) fail('TOO_FAR_BACK: That date is too far back.');
+      const rows = dayRows(b, date);
+      const now = new Date().toISOString();
+      const fields = { closed_at: now, closed_by: me().id, closed_by_name: me().full_name, snapshot: rows, counts: countDayList(rows) };
+      let row = closingOf(b, date);
+      if (row) Object.assign(row, fields, { times_updated: row.times_updated + 1 });
+      else { row = { id: uid(), branch_id: b, list_date: date, ...fields, times_updated: 0 }; db.day_closings.push(row); }
+      audit('day_list_closings', 'END_DAY', row);
+      return { ...clone(row.counts), branch_id: b, list_date: date, closed_at: row.closed_at, closed_by_name: row.closed_by_name, times_updated: row.times_updated };
+    },
+    async dayClosing({ branchId, date }) {
+      if (!can('sheet.view') || !branchOk(branchId)) return null;
+      const c = closingOf(branchId, date);
+      return c ? { id: c.id, branch_id: c.branch_id, list_date: c.list_date, closed_at: c.closed_at, closed_by_name: c.closed_by_name, times_updated: c.times_updated, counts: clone(c.counts) } : null;
+    },
+    async dayListHistory({ branchId = null, from = null, to = null, limit = 60, offset = 0 } = {}) {
+      if (!can('sheet.view')) fail('NOT_ALLOWED: the History of Aaj ki List needs "View Aaj ki List / queue" in the access list.');
+      if (branchId && !branchOk(branchId)) fail('NOT_ALLOWED: you can see the lists of the branches you work at only.');
+      const today = todayISO();
+      const top = to && to < today ? to : today;
+      const branches = db.branches.filter((b) => (!branchId || b.id === Number(branchId)) && branchOk(b.id)).map((b) => b.id);
+      const days = new Map();
+      const add = (b, day) => { if (day && (!from || day >= from) && day <= top && branches.includes(b)) days.set(`${day}|${b}`, { b, day }); };
+      for (const v of db.visits) add(v.branch_id, v.visit_date);
+      for (const c of db.checkups) if (!c.date_is_month) add(c.branch_id, c.checkup_date);
+      for (const x of db.day_closings) add(x.branch_id, x.list_date);
+      const all = [...days.values()].sort((x, y) => (x.day === y.day ? x.b - y.b : x.day < y.day ? 1 : -1));
+      const size = Math.min(Math.max(Math.trunc(Number(limit)) || 1, 1), 200);
+      const first = Math.max(Math.trunc(Number(offset)) || 0, 0);
+      const rows = all.slice(first, first + size).map(({ b, day }) => {
+        const c = closingOf(b, day);
+        return { list_date: day, branch_id: b, branch_name: db.branches.find((x) => x.id === b)?.name || '', ended: !!c, closed_at: c?.closed_at ?? null,
+          closed_by_name: c?.closed_by_name ?? null, times_updated: c?.times_updated ?? null, counts: c ? clone(c.counts) : countDayList(dayRows(b, day)), total_count: all.length };
+      });
+      return { rows, total: rows.length ? all.length : 0 };
+    },
+    async dayListCopy({ branchId, date }) {
+      if (!can('sheet.view')) fail('NOT_ALLOWED: the History of Aaj ki List needs "View Aaj ki List / queue" in the access list.');
+      const b = Number(branchId);
+      if (!db.branches.some((x) => x.id === b) || !date) fail('BAD_REQUEST: choose one branch and a day.');
+      if (!branchOk(b)) fail('NOT_ALLOWED: you can see the lists of the branches you work at only.');
+      const c = closingOf(b, date);
+      // Without "See $$ pending dues flag" no dues, without "View patient profiles" no patients' phones (the database leaves them out too).
+      const rows = clone(c ? c.snapshot : dayRows(b, date)).map((r) => {
+        const out = { ...r };
+        if (!can('dues.view')) delete out.dues;
+        if (!can('patients.view') && out.kind === 'patient') delete out.phone;
+        return out;
+      });
+      return { branch_id: b, branch_name: db.branches.find((x) => x.id === b)?.name || '', list_date: date, ended: !!c, closed_at: c?.closed_at ?? null,
+        closed_by_name: c?.closed_by_name ?? null, times_updated: c?.times_updated ?? null, counts: c ? clone(c.counts) : countDayList(rows), rows };
+    },
+
     // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
     // The same rules as the database: read = sheet.view or patients.view; add and change = sheet.edit; all within the person's branches
     // (a row with no branch is open to everyone who may read); delete = admin, or sheet.edit on a row that is not from the old list.
@@ -670,7 +769,7 @@ export function createDemoAdapter() {
     },
     async listDayCheckups({ branchId = null, date }) {
       return db.checkups.filter((c) => c.checkup_date === date && !c.date_is_month && (!branchId || c.branch_id === Number(branchId)) && checkupVisible(c))
-        .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)).map(checkupView);
+        .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(checkupView);
     },
     subscribeCheckups() { return () => {}; },
     async addCheckup(row) {
