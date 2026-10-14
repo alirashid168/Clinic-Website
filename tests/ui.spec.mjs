@@ -1535,7 +1535,7 @@ await step('at phone width the drawer shows "Change password" next to "Log out",
   await pwPhone.locator('.menu-toggle').click();
   await pwPhone.waitForSelector('#staff-drawer.open');
   const items = (await pwPhone.locator('.sidebar-foot button').allTextContents()).map((t) => t.trim());
-  assert.deepEqual(items, ['Arrange my menu', 'Change password', 'Log out']);
+  assert.deepEqual(items, ['Change password', 'Log out']);
   await shot(pwPhone, '16-drawer-change-password');
   await pwPhone.locator('.sidebar-foot button:has-text("Change password")').click();
   await pwPhone.waitForSelector('.modal h2:has-text("Change password")');
@@ -1642,6 +1642,11 @@ const barLabels = (pg) => pg.locator('.topnav > a, .topnav > .menu > button').ev
 const arrangeDialog = (pg) => pg.locator('.modal:has(h2:text-is("Arrange my menu"))');
 const topRows = (pg) => arrangeDialog(pg).locator('ol.arrange-list > li .arrange-name').evaluateAll((els) => els.map((el) => el.firstChild.textContent.trim()));
 const focusedName = (pg) => pg.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent.trim());
+// Every section of "Not on the top bar" is an element: an empty one must leave nothing behind (it once showed the word "null").
+const noStrayText = async (pg) => {
+  assert.ok(!/\bnull\b/.test(await arrangeDialog(pg).innerText()), 'no "null" in the dialog');
+  assert.deepEqual(await arrangeDialog(pg).locator('.arrange-rest').evaluate((el) => [...el.childNodes].filter((n) => n.nodeType !== 1).map((n) => n.textContent)), [], 'no loose text between its sections');
+};
 const openArrange = async (pg) => {
   await pg.locator('.user-menu > button').click();
   await pg.locator('.user-menu .menu-list button:has-text("Arrange my menu")').click();
@@ -1675,10 +1680,13 @@ await step('Arrange my menu: in the name menu above "Change password"; the dialo
   assert.equal(await pn.locator('.user-menu.open').count(), 0, 'the menu closed behind the dialog');
   assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
   const rest = arrangeDialog(pn).locator('.arrange-rest');
-  for (const name of ['Queue board (Aaj ki List)', 'Financial (Reports)', 'Reminders (Coordinator)', 'Stock', 'Audit log', 'Import (Healthwire, Aaj ki List, checkups)']) {
+  for (const name of ['Queue board (Aaj ki List)', 'Financial (Reports)', 'Reminders (Coordinator)', 'Stock', 'Audit log']) {
     assert.equal(await rest.getByRole('button', { name: `Put on the top bar: ${name}`, exact: true }).count(), 1, name);
   }
+  // (By the start of its name only: the Import page's name lists what it imports, and that list grows.)
+  assert.equal(await rest.getByRole('button', { name: /^Put on the top bar: Import \(Healthwire/ }).count(), 1, 'Import');
   assert.match(await arrangeDialog(pn).innerText(), /A long top bar may not fit on a small laptop screen/);
+  await noStrayText(pn);
   assert.equal(await focusedName(pn), 'On the top bar', 'focus starts at the top-bar list');
   await shot(pn, '19-arrange-dialog');
 });
@@ -1739,6 +1747,7 @@ await step('Arrange my menu: another role sees its own default, not Dr. Ali\'s a
   await openArrange(pn);
   const text = await arrangeDialog(pn).innerText();
   for (const word of ['Audit log', 'Stock', 'Staff accounts', 'Financial']) assert.ok(!text.includes(word), `the front desk's dialog has no ${word}`);
+  await noStrayText(pn); // its "Main pages" and "More" sections are both empty
   await pn.keyboard.press('Escape');
   await arrangeDialog(pn).waitFor({ state: 'detached' });
 });
@@ -1761,8 +1770,11 @@ await step('Arrange my menu: when Dr. Ali takes a page away from someone, it lea
   await pn.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-gul', 'reminders.manage', false); });
   await tryAnotherRole(pn);
   await loginAs(pn, 'Front desk \\(Gulshan\\)');
-  // Without "Follow-up reminders" the front desk has no Coordinator pages at all, so that drop-down goes too.
-  assert.deepEqual(await barLabels(pn), ['Patients', ...fdDefault.filter((l) => l !== 'Patients' && l !== 'Coordinator')]);
+  // Reminders leaves the bar; the rest keeps its order. The Coordinator drop-down stays only while it has another page the front
+  // desk may open, so it is left out of the comparison.
+  const bar = await barLabels(pn);
+  assert.ok(!bar.includes('Reminders'));
+  assert.deepEqual(bar.filter((l) => l !== 'Coordinator'), ['Patients', ...fdDefault.filter((l) => l !== 'Patients' && l !== 'Coordinator')]);
   const menus = (await pn.locator('.topnav, #staff-drawer').allTextContents()).join(' ');
   assert.ok(!menus.includes('Reminders') && !menus.includes('Drop-offs'), 'Reminders is gone from every menu');
   await openArrange(pn);
@@ -1797,19 +1809,22 @@ await step('Arrange my menu: a top bar too long for a 1366px laptop moves its la
 });
 // A phone: the drawer shows the same order, and the dialog fits.
 const pnPhone = await newPage({ width: 390, height: 844 });
-await step('Arrange my menu on a phone: the drawer follows the arrangement and has "Arrange my menu"; the dialog fits the screen', async () => {
+await step('Arrange my menu on a phone: the drawer follows the arrangement and has "Arrange my menu" after its links; the dialog fits the screen', async () => {
   await pnPhone.goto(BASE + '#/login/staff');
   await pnPhone.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['patients', 'stock', 'today', 'menu:sheet', 'billing', 'menu:reports', '-menu:coordinator'])));
   await loginAs(pnPhone, 'Dr. Ali Rashid');
   await pnPhone.locator('.menu-toggle').click();
   await pnPhone.waitForSelector('#staff-drawer.open');
-  const first = (await pnPhone.locator('#staff-drawer > a.nav-link').allTextContents()).map((t) => t.trim());
-  assert.deepEqual(first, ['Patients', 'Stock', 'Today', 'Billing']);
+  const first = async () => (await pnPhone.locator('#staff-drawer .drawer-links > a.nav-link').allTextContents()).map((t) => t.trim());
+  assert.deepEqual(await first(), ['Patients', 'Stock', 'Today', 'Billing']);
   const groups = (await pnPhone.locator('#staff-drawer .drawer-group > .nav-group:not(.nav-subgroup)').allTextContents()).map((t) => t.trim());
   assert.deepEqual(groups, ['Aaj ki List', 'Reports', 'More']);
   assert.equal(await pnPhone.locator('#staff-drawer .nav-subgroup:text-is("Coordinator")').count(), 1, 'More names the Coordinator pages');
   await shot(pnPhone, '22-drawer-arranged');
-  await pnPhone.locator('.sidebar-foot button:has-text("Arrange my menu")').click();
+  // Below the last link, not in the foot that stays on screen (that one keeps Change password and Log out).
+  const arrange = pnPhone.locator('#staff-drawer > button:text-is("Arrange my menu")');
+  assert.equal(await pnPhone.locator('.sidebar-foot :text-is("Arrange my menu")').count(), 0);
+  await arrange.click();
   await arrangeDialog(pnPhone).waitFor();
   assert.equal(await pnPhone.locator('#staff-drawer.open').count(), 0, 'the drawer closed behind the dialog');
   const box = await arrangeDialog(pnPhone).boundingBox();
@@ -1819,6 +1834,64 @@ await step('Arrange my menu on a phone: the drawer follows the arrangement and h
   await pnPhone.keyboard.press('Escape');
   await arrangeDialog(pnPhone).waitFor({ state: 'detached' });
   assert.ok(await pnPhone.evaluate(() => document.activeElement?.classList.contains('menu-toggle')), 'focus is back on the menu button');
+  // Saved from the phone: the drawer has the new order at once, and the page under it was not drawn again.
+  await pnPhone.evaluate(() => { document.querySelector('main').dataset.kept = 'yes'; });
+  await pnPhone.locator('.menu-toggle').click();
+  await arrange.click();
+  await arrangeDialog(pnPhone).getByRole('button', { name: 'Put in More: Stock', exact: true }).click();
+  await saveArrange(pnPhone);
+  await pnPhone.locator('.menu-toggle').click();
+  await pnPhone.waitForSelector('#staff-drawer.open');
+  assert.deepEqual(await first(), ['Patients', 'Today', 'Billing']);
+  assert.equal(await pnPhone.locator('main').getAttribute('data-kept'), 'yes', 'the page itself was not drawn again');
+  await pnPhone.keyboard.press('Escape');
+});
+// Save draws only the menus again: an expense typed but not saved yet on the page under the dialog is still there.
+const pnForm = await newPage();
+await step('Arrange my menu: Save leaves the page alone (a half-typed expense keeps what was typed and where it was scrolled to)', async () => {
+  await loginAs(pnForm, 'Dr. Ali Rashid');
+  await pnForm.goto(BASE + '#/staff/accounts?tab=expenses');
+  const typed = [['Amount', '4500'], ['Paid to', 'Sample supplier'], ['Notes', 'half-typed expense']];
+  await pnForm.getByLabel('Paid to').waitFor();
+  for (const [label, value] of typed) await pnForm.getByLabel(label).fill(value);
+  await pnForm.evaluate(() => { document.querySelector('main').dataset.kept = 'yes'; window.scrollTo(0, 140); });
+  const scrolled = await pnForm.evaluate(() => window.scrollY);
+  await openArrange(pnForm);
+  await arrangeDialog(pnForm).getByRole('button', { name: 'Put on the top bar: Stock', exact: true }).click();
+  await saveArrange(pnForm, [...ADMIN_BAR.slice(0, -1), 'Stock', 'More']);
+  for (const [label, value] of typed) assert.equal(await pnForm.getByLabel(label).inputValue(), value, label);
+  assert.equal(await pnForm.locator('main').getAttribute('data-kept'), 'yes', 'the page was not drawn again');
+  assert.equal(await pnForm.evaluate(() => window.scrollY), scrolled, 'nor moved back to the top');
+  assert.match(await pnForm.locator('.topnav .menu > button:has-text("Reports")').getAttribute('class'), /current/, 'the new top bar still marks the section on screen');
+  await shot(pnForm, '24-expense-kept-after-save');
+});
+// A drop-down taller than the window (a whole menu put under More) scrolls inside the window: a 1366 x 768 laptop screen, after
+// the taskbar and the browser's own bars.
+const pnShort = await newPage({ width: 1366, height: 625 });
+await step('Arrange my menu: with the Reports drop-down under More, the long More list scrolls inside the window and its last link can be used', async () => {
+  await pnShort.goto(BASE + '#/login/staff');
+  await pnShort.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['-menu:reports'])));
+  await loginAs(pnShort, 'Dr. Ali Rashid');
+  assert.deepEqual(await barLabels(pnShort), ADMIN_BAR.filter((l) => l !== 'Reports'));
+  await pnShort.locator('.topnav .menu:has(> button:has-text("More")) > button').click();
+  const list = pnShort.locator('.topnav .menu.open .menu-list');
+  const size = await list.evaluate((el) => ({ bottom: el.getBoundingClientRect().bottom, scrolls: el.scrollHeight > el.clientHeight }));
+  assert.ok(size.scrolls && size.bottom <= 625, `the list ends inside the window (at ${Math.round(size.bottom)} of 625) and scrolls`);
+  await shot(pnShort, '25-long-more-scrolls');
+  // The mouse wheel scrolls the list, and the page behind it stays where it is.
+  const box = await list.boundingBox();
+  await pnShort.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await pnShort.mouse.wheel(0, 3000);
+  await pnShort.waitForFunction(() => document.querySelector('.topnav .menu.open .menu-list').scrollTop > 0);
+  assert.equal(await pnShort.evaluate(() => window.scrollY), 0, 'the page did not scroll');
+  // With the keyboard, the last link is on screen when it has focus.
+  await list.evaluate((el) => { el.scrollTop = 0; });
+  const last = list.locator('a:text-is("Audit log")');
+  await last.focus();
+  const at = await last.boundingBox();
+  assert.ok(at.y >= 0 && at.y + at.height <= 625, `"Audit log" is on screen with focus (at ${Math.round(at.y)})`);
+  await last.click();
+  await pnShort.waitForFunction(() => location.hash === '#/staff/admin?tab=audit');
 });
 
 // ------------------------------------------------------------- the Checkups page (admin), Download Excel, the checkup list import

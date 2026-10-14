@@ -10,13 +10,13 @@
 
 import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '../lib/protocol.js';
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
+import { MAX_KEYS, KEY_PATTERN } from '../lib/menu-arrange.js';
 import { todayISO, localISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
-import { MAX_KEYS, KEY_PATTERN } from '../lib/menu-arrange.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));

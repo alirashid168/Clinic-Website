@@ -8,7 +8,7 @@ import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from 
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
-import { arrangedMenu, loadArrangement, fitTopBar, openArrangeMenu } from './nav-arrange.js';
+import { arrangeNav, loadArrangement, openArrangeMenu } from './nav-arrange.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
 const passwordDialogModule = () => import('../../ui/password-dialog.js');
@@ -135,8 +135,7 @@ export async function renderStaff(root, path, params, signOut) {
   const page = PAGES[section];
   const s = state.session.staff;
   const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet');
-  // The menu as this person arranged it ("Arrange my menu", nav-arrange.js): only reorders what menu() allows them.
-  const items = arrangedMenu(menu());
+  const items = menu();
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
   // Click or Enter opens them (touch and keyboard); desktop CSS also opens them on hover.
@@ -178,7 +177,7 @@ export async function renderStaff(root, path, params, signOut) {
   };
   const navEntry = (m) => (m.items ? dropdown(m)
     : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label));
-  const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }, items.map(navEntry));
+  const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }); // its entries: arrangeNav, below the drawer
 
   // ---- patient search from any screen: name, Mr# or phone (an ARIA combobox).
   const searchBox = can('patients.view') ? (() => {
@@ -221,18 +220,23 @@ export async function renderStaff(root, path, params, signOut) {
   // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
   const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
+  const drawerEntry = (m) => (m.items
+    ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => (i.heading ? h('div', { class: 'nav-group nav-subgroup' }, i.heading) : drawerLink(i))))
+    : drawerLink(m, current(m.key)));
+  const drawerLinks = h('div', { class: 'drawer-links' }); // its entries: arrangeNav, below
   const drawer = h('nav', { class: 'sidebar', id: 'staff-drawer', 'aria-label': 'Staff navigation' },
     h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' }, onclick: () => closeDrawer(location.hash === '#/staff/today') }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
-    items.map((m) => (m.items
-      ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => (i.heading ? h('div', { class: 'nav-group nav-subgroup' }, i.heading) : drawerLink(i))))
-      : drawerLink(m, current(m.key)))),
+    drawerLinks,
+    // Right after the menu it arranges, so the foot that stays on a phone's screen keeps its size.
+    h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
-      h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); } }, 'Log out'))));
+  // The top bar and the drawer as this person arranged them ("Arrange my menu", nav-arrange.js): only what menu() allows them.
+  arrangeNav(items, { topnav, navEntry, drawerLinks, drawerEntry, signal });
   drawer.querySelectorAll('.drawer-group').forEach(markCurrent);
   drawer.inert = true;
   const scrim = h('div', { class: 'drawer-scrim', hidden: true, 'aria-hidden': 'true', onclick: () => closeDrawer(true) });
@@ -288,7 +292,6 @@ export async function renderStaff(root, path, params, signOut) {
     topbar,
     h('div', { class: 'app topnav-layout' }, drawer, content),
     scrim);
-  fitTopBar(topnav, (spill) => arrangedMenu(menu(), { spill }).map(navEntry), signal);
 
   try {
     if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);

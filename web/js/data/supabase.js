@@ -57,6 +57,9 @@ function capped(rows, cap) {
   return rows;
 }
 
+// The table of "Arrange my menu" is not there yet (20261012000300 not run): the codes PostgREST and Postgres answer with.
+const MENU_PREFS_MISSING_CODES = new Set(['PGRST205', '42P01']);
+
 // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
 // They live in public.checkups and are read through the view checkup_list (migrations 20261009000250 and ...260). While those are
 // not applied, PostgREST answers PGRST205 / PGRST202 (or 42P01 / 42883, or a 404): the list then says "not switched on yet".
@@ -125,9 +128,6 @@ async function checkupListRow(sb, row) {
   }
   return { ...row, phone_key: checkupPhone(row.phone), mr_number: mr };
 }
-
-// The table of "Arrange my menu" is not there yet (20261012000300 not run): the codes PostgREST and Postgres answer with.
-const MENU_PREFS_MISSING_CODES = new Set(['PGRST205', '42P01']);
 
 // ------------------------------------------------------------ loading the SDK
 function withTimeout(promise, ms) {

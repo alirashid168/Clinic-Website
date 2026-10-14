@@ -317,8 +317,9 @@ test('live: Save calls save_my_menu with the list', async () => {
 });
 
 // ======================================================================================= the hook in shell.js
-// shell.js draws its menus from arrangedMenu(menu()) (web/js/views/staff/nav-arrange.js): the signed-in person's saved list
-// applied to whatever menu() has at that moment. Other branches add pages to menu() (History of Aaj ki List, Job applications),
+// shell.js hands menu() to arrangeNav() (web/js/views/staff/nav-arrange.js), which draws the top bar and the drawer from
+// arrangedMenu(): the signed-in person's saved list applied to whatever menu() has at that moment. Other branches add pages to
+// menu() (History of Aaj ki List, Job applications),
 // so a page key nobody here has heard of must still turn up in its default place for someone who saved before it existed.
 // state.js is a stand-in with one signed-in staff member; the saved list is the copy on this computer that the hook reads.
 registerHooks({

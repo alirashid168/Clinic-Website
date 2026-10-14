@@ -53,21 +53,35 @@ export function loadArrangement({ wait = 2500 } = {}) {
 /** shell.js's menu() as this person arranged it. { spill: n } moves the last n top-bar entries into More. */
 export const arrangedMenu = (menu, { spill = 0 } = {}) => arrangeMenu(menu, myArrangement(), { spill, here: location.hash });
 
+let redraw = null; // draws the menus of the page on screen again (set by arrangeNav; Save calls it)
+
+/**
+ * shell.js's one hook. Fills the top bar (`topnav`, navEntry(m) for each entry) and the phone drawer's list (`drawerLinks`,
+ * drawerEntry(m) for each entry) with `menu` (shell.js's menu()) as this person arranged it, keeps the top bar on one line,
+ * and draws both again after a Save in the dialog. Only the menus: the page is left alone, so nothing typed on it is lost.
+ */
+export function arrangeNav(menu, { topnav, navEntry, drawerLinks, drawerEntry, signal }) {
+  const fitted = fitTopBar(topnav, (spill) => arrangedMenu(menu, { spill }).map(navEntry), signal);
+  const draw = () => { drawerLinks.replaceChildren(...arrangedMenu(menu).map(drawerEntry)); fitted(); };
+  draw();
+  redraw = draw;
+  signal?.addEventListener('abort', () => { if (redraw === draw) redraw = null; });
+}
+
 /**
  * Keeps the top bar on one line: when the menus, the search box (which first shrinks to its smallest) and the name menu do
  * not fit (a long arrangement on a 1366px laptop), the last entries of the top bar go into More, one at a time, until they do.
  * Looked at again when the window size changes and when the web fonts arrive. build(n) returns the bar's entries with n moved.
  * Not while the person is in the menu (keyboard focus in it, or a drop-down opened with a click): that would pull it from under
- * them, so it waits until focus leaves the bar.
+ * them, so it waits until focus leaves the bar. Returns the function that draws the bar afresh (with nothing moved) and fits it.
  */
-export function fitTopBar(nav, build, signal) {
+function fitTopBar(nav, build, signal) {
   let spill = 0;
   let waiting = false;
-  const bar = nav.closest('.topbar') || nav.parentElement;
-  const tooWide = () => bar.scrollWidth > bar.clientWidth + 1;
+  const tooWide = () => { const bar = nav.closest('.topbar') || nav.parentElement; return bar.scrollWidth > bar.clientWidth + 1; };
   const draw = (n) => { spill = n; nav.replaceChildren(...build(n)); };
   const fit = () => {
-    if (signal?.aborted || !nav.isConnected || !nav.getClientRects().length) return; // the phone drawer is in use at this width
+    if (signal?.aborted || !nav.isConnected || !nav.getClientRects().length) return; // not on the page yet, or the phone drawer is in use at this width
     if (nav.contains(document.activeElement) || nav.querySelector('.menu.open')) { waiting = true; return; }
     waiting = false;
     if (spill) draw(0);
@@ -80,7 +94,8 @@ export function fitTopBar(nav, build, signal) {
   nav.addEventListener('focusout', () => { if (waiting) later(); }, { signal });
   document.fonts?.addEventListener?.('loadingdone', later, { signal });
   document.fonts?.ready?.then(later, () => {});
-  fit();
+  // Built before shell.js puts the bar on the page: then it is fitted just before the first paint.
+  return () => { draw(0); if (nav.isConnected) fit(); else later(); };
 }
 
 /** Saves the arrangement for the signed-in person. Resolves { here: true } when it could only be kept on this computer. */
@@ -101,7 +116,7 @@ async function saveArrangement(list) {
 /**
  * The dialog. `menu` is shell.js's menu() (only what the person may open). Two lists: what is on the top bar, in order, with
  * Move up / Move down / Put in More on every row; and everything else, grouped like More, with Put on the top bar. Saving
- * draws the page again with the new menu (the same as opening it from the menu).
+ * draws the top bar and the phone drawer again with the new arrangement (arrangeNav), not the page under the dialog.
  */
 export function openArrangeMenu(menu) {
   const entries = menuEntries(menu);
@@ -170,12 +185,14 @@ export function openArrangeMenu(menu) {
       h('h4', {}, title, note ? h('span', { class: 'muted' }, ` · ${note}`) : null), h('ul', { class: 'arrange-list' }, list.map(row))) : null);
     const off = (e) => !top.includes(e.key);
     const groups = entries.filter((e) => e.kind === 'group');
-    rest.replaceChildren(
+    // (An empty section is null, and replaceChildren would show a null as the word "null": h() skips them, this does not.)
+    rest.replaceChildren(...[
       section('Main pages', 'under More', entries.filter((e) => e.kind === 'page' && e.top && off(e))),
       ...groups.map((g) => (off(g)
         ? section(g.label, 'under More', [g, ...entries.filter((p) => p.kind === 'page' && p.group === g.menu.key && off(p))])
         : section(g.label, `in its drop-down on the top bar`, entries.filter((p) => p.kind === 'page' && p.group === g.menu.key && off(p))))),
-      section('More', null, entries.filter((e) => e.kind === 'page' && e.group === 'more' && off(e))));
+      section('More', null, entries.filter((e) => e.kind === 'page' && e.group === 'more' && off(e))),
+    ].filter(Boolean));
     if (!rest.childElementCount) rest.append(h('p', { class: 'muted' }, 'Every page is on the top bar.'));
 
     count.textContent = `${top.length} on the top bar.`;
@@ -212,8 +229,8 @@ export function openArrangeMenu(menu) {
       if (top.length === start.length && top.every((k, i) => k === start[i])) { toast('Nothing changed.'); return false; }
       const { here } = await saveArrangement(arrangementFor(entries, top));
       toast(here ? 'Menu saved on this computer. It will follow you to other computers once the database update for it is run.' : 'Menu saved. It follows you to any computer you log in on.', 'ok');
-      // Draw the page again with the new menu (the same as choosing it from the menu).
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
+      // Only the menus are drawn again: the page stays as it is, with anything typed on it and where it was scrolled to.
+      redraw?.();
     } },
   ], { initialFocus: topHeading });
 }
