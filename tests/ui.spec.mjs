@@ -63,9 +63,26 @@ await step('home shows the smile, three doors and calendar', async () => {
   // counts 0 days (this first step failed now and then on a slow first load, and its messages did not say which count was wrong).
   await page.locator('.sx-day').first().waitFor();
   assert.equal(await page.locator('.tooth').count(), 24, 'tooth count');
-  for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count(), `door ${t}`);
+  for (const t of ['Patient', 'Visitor', 'Our results', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count(), `door ${t}`);
   assert.equal(await page.locator('.sx-day').count(), 7, 'sx-day count');
   await shot(page, '01-home');
+});
+await step('Our results: a grid of square photos; a click opens the photo large, Close goes back', async () => {
+  await page.click('.door:has-text("Our results")');
+  await page.waitForSelector('h1:has-text("Our results")');
+  const tiles = page.locator('.results-grid .results-tile');
+  await tiles.first().waitFor();
+  const box = await tiles.first().boundingBox();
+  assert.ok(box && Math.abs(box.width - box.height) < 2, `square thumbnails: ${box && box.width}x${box && box.height}`);
+  await tiles.first().click();
+  const dlg = page.getByRole('dialog', { name: 'Our results' });
+  await dlg.waitFor();
+  assert.ok(await dlg.locator('img.results-big').getAttribute('src'), 'the large photo is shown');
+  assert.match(await dlg.locator('.results-caption').innerText(), /1 of \d+/);
+  await dlg.getByRole('button', { name: 'Close' }).click();
+  await dlg.waitFor({ state: 'detached' });
+  await page.goto(BASE);
+  await page.waitForSelector('.door:has-text("Visitor")');
 });
 await step('visitor page lists benefits, braces options and WhatsApp button', async () => {
   await page.click('.door:has-text("Visitor")');
@@ -155,7 +172,7 @@ await step('flag patient for Dr. Ali from the sheet', async () => {
 // ------------------------------------------------------------- checkup patients on the Aaj ki List (front desk, North Nazimabad)
 // (Checkup patients have no Mr#. Made-up names only; the demo keeps its data in memory, so the browser is never reloaded here.)
 const checkupRow = (pg, name) => pg.locator(`table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient ${name}"])`);
-await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, after the patients', async () => {
+await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, sorted like the sheet with a serial number on every row', async () => {
   await page.goto(BASE + '#/staff/sheet');
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
   const seeded = page.locator('table.sheet tbody tr.is-checkup');
@@ -163,9 +180,25 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   assert.ok(await seeded.first().locator('.badge-checkup:has-text("Checkup")').count(), 'badge');
   assert.match(await seeded.first().locator('td.mr-cell').innerText(), /no Mr#/);
   assert.equal(await seeded.first().locator('.quick-tap').count(), 0, 'no quick-tap button on a checkup row');
+<<<<<<< sheet-view
   const kinds = await page.locator('table.sheet tbody tr').evaluateAll((trs) => trs.map((t) => t.classList.contains('is-checkup')));
   assert.ok(kinds.indexOf(false) >= 0 && kinds.lastIndexOf(false) < kinds.indexOf(true), 'visit rows first, then the checkup rows');
   assert.match(await page.locator('.sheet-counts').innerText(), /Checkups \d+/);
+=======
+  // Owner, 11 Oct 2026: Waiting first, then In treatment, then Scheduled / no status, then Completed, then Cancelled and
+  // No show; inside one status the patients before the checkup patients. Every row is numbered 1..n in that order.
+  const order = await page.locator('table.sheet tbody tr[data-id]').evaluateAll((trs) => trs.map((t) => ({
+    checkup: t.classList.contains('is-checkup'),
+    status: t.querySelector('select[aria-label^="Status for"]')?.value ?? '',
+    serial: t.querySelector('.serial')?.textContent.replace(/\D/g, '') ?? '',
+  })));
+  const rank = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
+  const keys = order.map((r) => rank[r.status] * 2 + (r.checkup ? 1 : 0));
+  assert.ok(keys.every((k, i) => i === 0 || keys[i - 1] <= k), `rows are sorted by status, patients before checkups: ${order.map((r) => r.status + (r.checkup ? '/c' : '')).join(', ')}`);
+  assert.deepEqual(order.map((r) => r.serial), order.map((_, i) => String(i + 1)), 'every row has its serial number 1..n');
+  assert.ok(await page.locator('table.sheet thead th:has-text("Token")').count(), 'the token has its own column');
+  assert.match(await page.locator('.page-head p').innerText(), /\d+ checkups/);
+>>>>>>> golive
   await shot(page, '14-sheet-checkups');
 });
 await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); details and status save; the row can be removed', async () => {
@@ -1315,6 +1348,22 @@ await step('stock: receive and use items, low-stock warning', async () => {
   assert.equal(await p7.locator('.reorder-list tr:has-text("014 NiTi wire")').count(), 0, 'restocked item leaves the reorder list');
   assert.ok(await p7.locator('h2:has-text("Recent moves")').count());
   await shot(p7, '16-stock');
+});
+
+await step('stock: one tab per branch in the clinic\'s order, then a Total tab that adds up all branches', async () => {
+  const tabNames = await p7.locator('[role="tablist"][aria-label="Branch"] [role="tab"]').allInnerTexts();
+  assert.equal(tabNames[tabNames.length - 1], 'Total', `the last tab is Total: ${tabNames.join(', ')}`);
+  assert.ok(tabNames.length >= 3, 'the branches, then Total');
+  await p7.getByRole('tab', { name: 'Total' }).click();
+  await p7.waitForSelector('h2:has-text("Total stock · all branches")');
+  const row = p7.locator('tr', { hasText: '014 NiTi wire' });
+  const cells = await row.locator('td.right').allInnerTexts();
+  const nums = cells.map((c) => Number.parseInt(c, 10));
+  assert.equal(nums[nums.length - 1], nums.slice(0, -1).reduce((a, b) => a + b, 0), `the Total column is the sum of the branches: ${cells.join(' | ')}`);
+  assert.equal(await p7.getByRole('button', { name: '+ Received' }).count(), 0, 'the Total tab is read only');
+  assert.match(p7.url(), /branch=all/);
+  await p7.getByRole('tab', { name: tabNames[0] }).click();
+  await p7.waitForSelector(`h2:has-text("Stock · ${tabNames[0]}")`);
 });
 
 await step('edited photo upload is marked for the patient and the website', async () => {

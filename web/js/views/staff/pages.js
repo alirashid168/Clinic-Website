@@ -1,6 +1,6 @@
 // Smaller staff screens: today dashboard, queue board, billing desk,
 // Dr. Ali review list, complaints inbox, doctor daily log.
-import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly, showFormErrors } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly, showFormErrors, capFirst } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName, myBranches, defaultBranchId, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, capNote, STATUS_LABELS } from './common.js';
 import { printReceipt } from './invoice.js';
@@ -66,7 +66,7 @@ export async function renderQueue(root, params, signal) {
         items.map((r) => h('div', { class: 'q-card' },
           h('div', { class: 'inline', style: { justifyContent: 'space-between' } }, h('span', { class: 'token' }, r.token_no ?? '–'), h('span', { class: 'muted' }, r.checked_in_at ? timeOf(r.checked_in_at) : '')),
           h('strong', {}, r.patient.full_name),
-          h('span', { class: 'muted' }, [r.treatment_label, r.braces_month ? `Month ${r.braces_month}` : null].filter(Boolean).join(' · ')),
+          h('span', { class: 'muted' }, [capFirst(r.treatment_label), r.braces_month ? `Month ${r.braces_month}` : null].filter(Boolean).join(' · ')),
           h('div', { class: 'inline' }, duesBadge(r.dues), aliBadge(r.see_dr_ali), r.photo_required && !r.photos_uploaded ? h('span', { class: 'badge badge-photo' }, '📸 Photo month') : null),
           r.staff.length ? h('span', { class: 'muted' }, r.staff.map((s) => s.name).join(', ')) : null)));
     };
@@ -266,7 +266,7 @@ export async function renderDoctorLog(root, params) {
           h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Treatment'), h('th', { scope: 'col' }, 'Role'), h('th', { scope: 'col' }, 'Details'))),
           h('tbody', {}, rows.map((r) => h('tr', {},
             h('td', { class: 'nowrap' }, shortDate(r.visit_date)), h('td', {}, r.patient.full_name, h('div', { class: 'muted' }, `Mr# ${r.patient.mr_number}`)),
-            h('td', {}, branchName(r.branch_id)), h('td', {}, [r.treatment_label, r.braces_month ? `M${r.braces_month}` : null].filter(Boolean).join(' · ')),
+            h('td', {}, branchName(r.branch_id)), h('td', {}, [capFirst(r.treatment_label), r.braces_month ? `M${r.braces_month}` : null].filter(Boolean).join(' · ')),
             h('td', {}, r.role === 'checker' ? 'Checked' : r.role === 'assistant' ? 'Assisted' : 'Treated'), h('td', {}, r.details_text || ''))))))) : empty('No completed visits in this period.'));
     } catch (e) { if (seq === newest) mount(out, empty(friendlyError(e))); }
   }

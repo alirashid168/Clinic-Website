@@ -146,7 +146,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
   function canon(v) {
     const p = patientByMr(v.mr);
     const c = v.cells || {};
-    const lossy = (f, val, formatted) => (c[f] && String(c[f].v ?? '') === String(val ?? '') ? c[f].t : formatted);
+    const lossy = (f, val, formatted) => (c[f] && (c[f].own || String(c[f].v ?? '') === String(val ?? '')) ? c[f].t : formatted);   // own: the sheet's token (private.aaj_canon_row)
     const ids = v.doctors.slice().sort();
     let doctors;
     if (c.doctors && c.doctors.t != null && JSON.stringify((c.doctors.ids || []).slice().sort()) === JSON.stringify(ids)) doctors = c.doctors.t;
@@ -331,8 +331,10 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
     if (take.token) {
       v.cells.token = { t: set.token.t, v: set.token.v };
       if (set.token.v >= 1 && set.token.v <= 999) {
+        // the sheet numbers tokens per treatment category (owner, 11 Oct 2026): a number another visit holds today is normal, no warning.
+        // The website keeps its own token, the sheet its typed one ("own": the cell is never rewritten, private.aaj_sync_row)
         const other = S.visits.find((x) => x !== v && x.branch === v.branch && x.date === v.date && x.token === set.token.v);
-        if (other) warns.push(`Token ${set.token.v} is already used by ${patientByMr(other.mr).name}. Token not changed on the website.`);
+        if (other) v.cells.token.own = true;
         else v.token = set.token.v;
       } else if (!set.token.t) v.token = null;
     }

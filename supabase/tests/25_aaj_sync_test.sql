@@ -971,9 +971,18 @@ insert into s25_resp select 'tk', pg_temp.s25_sync(pg_temp.s25_one('ISB', jsonb_
   pg_temp.s25_row(pg_temp.s25_k(82), '{"mr":"25005","name":"Hina Baig","token":{"t":"Kit 80k","v":null}}'),
   pg_temp.s25_row(pg_temp.s25_k(83), '{"mr":"25006","name":"Dina Rao"}'))));
 select pg_temp.check((select token_no from pg_temp.s25_vis(pg_temp.s25_k(80))) = 41, 'the first row asking for token 41 gets it');
-select pg_temp.check((select v.token_no is distinct from 41 from pg_temp.s25_vis(pg_temp.s25_k(81)) v) and pg_temp.s25_msg((select resp from s25_resp where n = 'tk'), 1) like 'Token 41 is already used by %. Token not changed on the website.'
-                     and pg_temp.s25_res((select resp from s25_resp where n = 'tk'), 1)->>'level' = 'warn', 'a token another visit already holds today is not given twice: warn, token unchanged on the website');
+-- owner's rule (11 Oct 2026): the sheet numbers tokens per treatment category (checkup, monthly, surgery, Dr. Ali), so a number already
+-- used that day is normal: a plain tick (level ok, no message). The website keeps its own token, the sheet its typed one (own = true).
+select pg_temp.check((select v.token_no is distinct from 41 from pg_temp.s25_vis(pg_temp.s25_k(81)) v)
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'tk'), 1)->>'level' = 'ok'
+                     and pg_temp.s25_msg((select resp from s25_resp where n = 'tk'), 1) is null
+                     and ((pg_temp.s25_vis(pg_temp.s25_k(81))).sheet_cells->'token'->>'own')::boolean
+                     and (pg_temp.s25_vis(pg_temp.s25_k(81))).sheet_cells->'token'->>'t' = '41',
+  'a token another visit already holds today is not given twice on the website, and it is no problem (owner rule, 11 Oct 2026): level ok, no message, the sheet''s token is its own');
 select pg_temp.check(private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(81))).id)->>'token' = '41', 'and the sheet''s typed "1" is never overwritten by the website''s number');
+select pg_temp.check((select bool_and(x->>'level' = 'ok' and x->>'message' is null) from jsonb_array_elements((select resp from s25_resp where n = 'tk')->'tabs'->0->'results') with ordinality t(x, o) where o <= 2)
+                     and (select count(*) from public.visits where sheet_key in (pg_temp.s25_k(80), pg_temp.s25_k(81))) = 2,
+  'two rows of one branch and day with the same typed token (41) both answer ok with an empty message, and both are on the website');
 select pg_temp.check((select v.token_no is distinct from 80 from pg_temp.s25_vis(pg_temp.s25_k(82)) v) and (pg_temp.s25_vis(pg_temp.s25_k(82))).sheet_cells->'token'->>'t' = 'Kit 80k'
                      and private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(82))).id)->>'token' = 'Kit 80k', '"Kit 80k" in the Token cell is not a token: kept as the sheet''s text, even after the website numbered the visit');
 select pg_temp.check(private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(83))).id)->>'token' = (pg_temp.s25_vis(pg_temp.s25_k(83))).token_no::text and (pg_temp.s25_vis(pg_temp.s25_k(83))).token_no is not null,
@@ -983,6 +992,15 @@ update public.visits set token_no = 77 where sheet_key = pg_temp.s25_k(80);
 update public.visits set token_no = 78 where sheet_key = pg_temp.s25_k(82);
 select pg_temp.check(private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(80))).id)->>'token' = '77' and private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(82))).id)->>'token' = 'Kit 80k',
   'a token the website changes is shown in a number cell, but never over kit text');
+-- a linked row whose Token cell is typed over with a number another visit holds (77, the row above): the same plain tick, the website's token stays
+create temp table s25_tok83 as select token_no, private.aaj_canon(id)->>'token' as shown from public.visits where sheet_key = pg_temp.s25_k(83);
+insert into s25_resp select 'tk2', pg_temp.s25_sync(pg_temp.s25_one('ISB', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(83),
+  '{"token":{"t":"77","v":77}}', false, jsonb_build_object('token', (select shown from s25_tok83)), pg_temp.s25_now_ms()))));
+select pg_temp.check(pg_temp.s25_res((select resp from s25_resp where n = 'tk2'))->>'level' = 'ok' and pg_temp.s25_msg((select resp from s25_resp where n = 'tk2')) is null
+                     and (pg_temp.s25_vis(pg_temp.s25_k(83))).token_no = (select token_no from s25_tok83)
+                     and ((pg_temp.s25_vis(pg_temp.s25_k(83))).sheet_cells->'token'->>'own')::boolean
+                     and private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(83))).id)->>'token' = '77',
+  'a linked row typed over with a token another visit holds: level ok, no message, the website''s token not changed, the sheet''s "77" is its own');
 
 -- =====================================================================
 -- 11. How the website's list reads back (canon)
@@ -1417,9 +1435,12 @@ end $$;
 create trigger aa_race before insert on public.visits for each row execute function pg_temp.s25_race();
 insert into s25_resp select 'race', pg_temp.s25_sync(pg_temp.s25_one('ISB', jsonb_build_array(pg_temp.s25_row(pg_temp.s25_k(300), '{"mr":"26007","name":"Race Runner","token":{"t":"300","v":300}}'))));
 drop trigger aa_race on public.visits;
-select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'race')) = 'created' and pg_temp.s25_msg((select resp from s25_resp where n = 'race')) = 'That token was just taken on the website. Token not changed on the website.'
-                     and (pg_temp.s25_vis(pg_temp.s25_k(300))).token_no is distinct from 300 and (pg_temp.s25_vis(pg_temp.s25_k(300))).token_no is not null and private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(300))).id)->>'token' = '300',
-  'a token lost in a race with the website: the row is saved, the website numbers it, the sheet''s "300" stays');
+select pg_temp.check(pg_temp.s25_out((select resp from s25_resp where n = 'race')) = 'created'
+                     and pg_temp.s25_res((select resp from s25_resp where n = 'race'))->>'level' = 'ok' and pg_temp.s25_msg((select resp from s25_resp where n = 'race')) is null
+                     and (pg_temp.s25_vis(pg_temp.s25_k(300))).token_no is distinct from 300 and (pg_temp.s25_vis(pg_temp.s25_k(300))).token_no is not null
+                     and ((pg_temp.s25_vis(pg_temp.s25_k(300))).sheet_cells->'token'->>'own')::boolean
+                     and private.aaj_canon((pg_temp.s25_vis(pg_temp.s25_k(300))).id)->>'token' = '300',
+  'a token lost in a race with the website: the row is saved with a plain tick (level ok, no message: owner rule, 11 Oct 2026), the website numbers it, the sheet''s "300" stays its own');
 
 -- hold mode and a doctor outside the month's group: not added, the sheet is told, no override
 insert into public.braces_cases (patient_id, start_date, status) values (pg_temp.s25_pid('26008'), pg_temp.s25_today() - 100, 'active');

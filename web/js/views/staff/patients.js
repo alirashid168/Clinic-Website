@@ -1,5 +1,5 @@
 // Patients: search list and full patient profile.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, busy, srOnly, localISO, addMonthsISO, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, busy, srOnly, localISO, addMonthsISO, showFormErrors, clearFieldErrors, capFirst } from '../../ui/dom.js';
 import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
 import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
@@ -375,7 +375,7 @@ export async function renderPatient(root, id) {
       p.visits.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Treatment'), h('th', { scope: 'col' }, 'Month'), h('th', { scope: 'col' }, 'Doctors'), h('th', { scope: 'col' }, 'Details'), h('th', { scope: 'col' }, 'Status'))),
         h('tbody', {}, p.visits.map((v) => h('tr', {},
-          h('td', { class: 'nowrap' }, shortDate(v.visit_date)), h('td', {}, branchName(v.branch_id)), h('td', {}, v.treatment_label || ''),
+          h('td', { class: 'nowrap' }, shortDate(v.visit_date)), h('td', {}, branchName(v.branch_id)), h('td', {}, capFirst(v.treatment_label)),
           h('td', {}, v.braces_month || ''), h('td', {}, v.staff.map((s) => s.role === 'checker' ? `✓ ${s.name}` : s.name).join(', ')),
           h('td', {}, v.details_text || '', v.notes ? h('div', { class: 'muted', style: { fontSize: '12px' } }, v.notes) : null), h('td', {}, STATUS_LABELS[v.status])))))) : empty('No visits yet.')),
     h('section', { class: 'panel' },

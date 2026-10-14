@@ -762,7 +762,7 @@ test('one bad row does not hold up the others: a photo-month Completed is saved 
   assert.match(headerOf(env, GUL), /1 need attention/, 'only the oversized cell: the owner-rule completion is not a problem (RS13-M1)');
 });
 
-test('tokens: the sheet numbers per group (token 1 three times), the website numbers once per day: typed tokens stay, the clash is reported', () => {
+test('tokens: the sheet numbers per treatment category (token 1 three times), the website numbers once per day: typed tokens stay, a repeated number is normal (plain tick)', () => {
   const rows = [
     ['9821', 'Walk A', '', 'Checkup', '1', 'Waiting', 'Group 1', '', '', '', '', '03008880001', ''],
     ['9822', 'Walk B', '', 'Checkup', '1', 'Waiting', 'Group 2', '', '', '', '', '03008880002', ''],
@@ -773,12 +773,64 @@ test('tokens: the sheet numbers per group (token 1 three times), the website num
   const { env, server } = world({ rows: { [GUL]: rows }, patients });
   settle(env, 3);
   assert.deepEqual([2, 3, 4, 5].map((r) => cellOf(env, GUL, r, 'token')), ['1', '1', '1', '2'], 'the typed tokens are untouched');
-  assert.match(statusOf(env, GUL, 3), /Token 1 is already used by Walk A\. Token not changed on the website\./);
-  assert.match(statusOf(env, GUL, 4), /Token 1 is already used/);
-  assert.equal(statusOf(env, GUL, 2), '\u2713 On website');
+  // owner, 11 Oct 2026: checkup, monthly, surgery and Dr. Ali each have their own tokens, so the same number twice is no problem
+  for (const r of [2, 3, 4, 5]) assert.equal(statusOf(env, GUL, r), '\u2713 On website', 'a plain tick, no warning: row ' + r);
+  assert.doesNotMatch(headerOf(env, GUL), /need attention/, 'a repeated token is not counted as a problem');
   const tokens = ['Walk A', 'Walk B', 'Walk C', 'Walk D'].map((n) => webVisit(server, n).token);
   assert.equal(new Set(tokens).size, 4, 'the website kept one token per patient: ' + tokens);
   quiet(env, server);
+});
+
+test('a token warning written before 20261011000100 was run stays until the Website cell is cleared, the row is changed, or the night clears the tab (what the docs tell Dr. Ali)', () => {
+  const rows = [
+    ['9821', 'Walk A', '', 'Checkup', '1', 'Waiting', 'Group 1', '', '', '', '', '03008880001', ''],
+    ['9822', 'Walk B', '', 'Checkup', '1', 'Waiting', 'Group 2', '', '', '', '', '03008880002', ''],
+    ['9823', 'Walk C', '', 'Checkup', '1', 'Waiting', '', '', '', '', '', '03008880003', ''],
+    ['9824', 'Walk D', '', 'Checkup', '2', 'Waiting', 'Group 1', '', '', '', '', '03008880004', ''],
+  ];
+  const patients = rows.map((r) => ({ mr: r[0], name: r[1], phone: r[11] }));
+  const { env, server } = world({ rows: { [GUL]: rows }, patients });
+  settle(env, 3);
+  for (const r of [2, 3, 4, 5]) assert.equal(statusOf(env, GUL, r), '✓ On website');
+  // what the old private.aaj_sync_row (20261009000300) left in the Website cells, written by the script (no on-edit)
+  const OLD = {
+    3: '⚠ Token 1 is already used by Walk A. Token not changed on the website.',
+    4: '⚠ Token 1 is already used by Walk A. Token not changed on the website.',
+    5: '⚠ That token was just taken on the website. Token not changed on the website.',
+  };
+  for (const r of [3, 4, 5]) setCell(env, GUL, r, 'website', OLD[r], { trigger: false });
+  // the new SQL answers a clash with a plain tick, but these rows are in sync: the sheet never sends them again, so no answer replaces the warning
+  const callsBefore = server.state.calls.length;
+  for (let i = 0; i < 6; i++) { env.advance(60000); env.ticks(1); }
+  const sent = server.state.calls.slice(callsBefore).reduce((a, c) => a + (c.payload.tabs || []).reduce((b, t) => b + t.rows.length, 0), 0);
+  assert.ok(server.state.calls.length - callsBefore >= 6, 'the sheet asked the website every minute');
+  assert.equal(sent, 0, 'a row whose cells match its memory is not sent');
+  for (const r of [3, 4, 5]) assert.equal(statusOf(env, GUL, r), OLD[r], 'the old warning stays: row ' + r);
+  assert.match(headerOf(env, GUL), /3 need attention/);
+  // 1. staff select the Website cell and press Delete: the heading stops counting it within five minutes (the next full read) ...
+  setCell(env, GUL, 3, 'website', '');
+  for (let i = 0; i < 6; i++) { env.advance(60000); env.ticks(1); }
+  assert.equal(statusOf(env, GUL, 3), '', 'a cleared Website cell stays empty while nothing changes on the website');
+  assert.match(headerOf(env, GUL), /2 need attention/);
+  // ... and it shows the plain tick the next time anything changes on that branch's list
+  server.editVisit(webVisit(server, 'Walk A').id, { details: 'note' });
+  env.advance(60000); env.ticks(2);
+  assert.equal(statusOf(env, GUL, 3), '✓ On website');
+  // 2. staff change something else in a row (its Status): the row is sent and its new answer is the plain tick
+  setCell(env, GUL, 4, 'waiting', 'Treatment');      // the Status column of this tab is headed "Waiting"
+  settle(env, 2);
+  assert.equal(statusOf(env, GUL, 4), '✓ On website');
+  assert.equal(cellOf(env, GUL, 4, 'token'), '1', 'the typed token stays');
+  // typing the same token again changes nothing, so nothing is sent and the warning stays
+  setCell(env, GUL, 5, 'token', '2');
+  settle(env, 2);
+  assert.equal(statusOf(env, GUL, 5), OLD[5]);
+  assert.match(headerOf(env, GUL), /1 need attention/);
+  // 3. the night clears the tab (rows archived, a new empty list)
+  env.at('2026-10-10', '00:06');
+  env.ticks(4);
+  assert.equal(env.tab(GUL).used().rows, 1, 'only the header row is left');
+  assert.doesNotMatch(headerOf(env, GUL), /need attention/);
 });
 
 test('a website token never overwrites kit text in the Token cell, but does fill a blank one and follow a number', () => {
