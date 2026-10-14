@@ -2396,6 +2396,34 @@ await step('History of Aaj ki List for Dr. Ali: every branch, newest first; the 
   assert.ok(await live.isVisible(), 'the live region with the count is shown');
   assert.equal(Number((await live.innerText()).match(/^(\d+) /)[1]), (await historyLines(ph)).length, 'the count read out is the number of lines');
   await shot(ph, '25-history-filters');
+  // A filter change that gives the same count is read out too (the branches work the same days, so another branch in the
+  // same month often has as many). Every write to a live region is noted, with whether that region is shown.
+  await ph.evaluate(() => {
+    window.liveWrites = [];
+    new MutationObserver((list) => {
+      for (const m of list) {
+        const region = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('[role="status"], [role="alert"], [aria-live]');
+        if (region?.textContent.trim()) window.liveWrites.push({ text: region.textContent.trim(), shown: region.checkVisibility({ visibilityProperty: true }) });
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  const heard = async (branch) => {
+    await ph.evaluate(() => { window.liveWrites = []; });
+    await ph.locator('select[aria-label="Branch"]').selectOption({ label: branch });
+    await ph.waitForSelector('section[aria-label="Days"][aria-busy="false"]');
+    assert.ok((await historyLines(ph)).every((t) => t.includes(` – ${branch} – `)), `${branch}: its lines only`);
+    const count = await ph.locator('.page-head p').innerText();
+    await ph.waitForFunction((c) => window.liveWrites.some((w) => w.shown && w.text === c), count, { timeout: 3000 }).catch(() => {});
+    const writes = await ph.evaluate(() => window.liveWrites);
+    assert.ok(writes.some((w) => w.shown && w.text === count), `${branch}: "${count}" is written to a live region that is shown: ${JSON.stringify(writes)}`);
+    return count;
+  };
+  await heard('North Nazimabad');
+  await heard('Gulshan (RJ Mall)');
+  // The same count for sure: a month before the first day has no lists at any branch.
+  await ph.locator('input[aria-label="Month"]').fill('2020-01');
+  await ph.locator('.page-head p', { hasText: /^0 days match these filters$/ }).waitFor();
+  assert.equal(await heard('North Nazimabad'), '0 days match these filters', 'the same count after a branch change, still read out');
   await ph.getByRole('button', { name: 'Clear filters' }).click();
   await ph.waitForFunction(() => new Set([...document.querySelectorAll('.day-history-list a')].map((a) => a.textContent.split(' – ')[1])).size > 1);
   // The saved day, with Download for a role with export rights.

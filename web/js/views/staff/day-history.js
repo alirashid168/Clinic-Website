@@ -3,7 +3,7 @@
 // with when and by whom. A line opens that day's list read only: the copy saved when the day was ended, or, for a day that
 // was not ended, the list as it is stored now. Both come from the database in the Aaj ki List's columns and order
 // (public.day_list_history and public.day_list_copy in 20261012000100_day_list_history.sql).
-import { h, mount, toast, friendlyError, empty, select, downloadCSV, rupees, srOnly, capFirst, addDaysISO, addMonthsISO } from '../../ui/dom.js';
+import { h, mount, toast, announce, friendlyError, empty, select, downloadCSV, rupees, srOnly, capFirst, addDaysISO, addMonthsISO } from '../../ui/dom.js';
 import { state, can, myBranches, branchName } from '../../state.js';
 import { STATUS_LABELS, duesBadge } from './common.js';
 import { dayLabel, endedAt } from '../../lib/day-list.js';
@@ -72,9 +72,9 @@ async function renderList(root, params, signal) {
   const clearBtn = h('button', { type: 'button', class: 'btn', onclick: () => {
     f.month = ''; monthIn.value = '';
     if (branches.length > 1) { f.branch = ''; branchSel.value = ''; }
-    f.page = 0; setURL(); load(); monthIn.focus();
+    f.page = 0; setURL(); load({ filterChange: true }); monthIn.focus();
   } }, 'Clear filters');
-  const changed = () => { f.page = 0; setURL(); load(); };
+  const changed = () => { f.page = 0; setURL(); load({ filterChange: true }); };
   branchSel.addEventListener('change', () => { f.branch = branchSel.value; changed(); });
   monthIn.addEventListener('change', () => { f.month = MONTH.test(monthIn.value) ? monthIn.value : ''; changed(); });
   const ff = (label, control) => h('label', { class: 'filter-field' }, h('span', { class: 'filter-label' }, label), control);
@@ -90,13 +90,16 @@ async function renderList(root, params, signal) {
       status));
   };
 
-  function draw() {
+  function draw(filterChange) {
     const first = f.page * PAGE_SIZE + 1;
     // Every branch: one line per list, and a day can have one list per branch. One branch: one line per day.
     const lines = !f.branch && branches.length > 1 ? `${number(total)} list${total === 1 ? '' : 's'}` : `${number(total)} day${total === 1 ? '' : 's'}`;
     const count = filtered() && branches.length > 1 ? `${lines} ${total === 1 ? 'matches' : 'match'} these filters`
       : f.branch ? `${lines} with a list` : lines;
-    if (summary.textContent !== count) summary.textContent = count; // (unchanged on Next/Previous: only "Showing ..." is read then)
+    // Written only when it changes, so Next and Previous read just the "Showing ..." line. A filter change that gives the same
+    // count (another branch with as many days that month, which is usual) is said again, or the reader would hear nothing.
+    if (summary.textContent !== count) summary.textContent = count;
+    else if (filterChange) announce(count);
     mount(list, rows.length ? rows.map(line)
       : h('li', {}, empty(filtered() ? 'No lists match these filters.' : 'No lists yet. A day shows here once it has patients on the Aaj ki List.')));
     pager.hidden = total <= PAGE_SIZE && f.page === 0; // everything fits on one page
@@ -107,7 +110,7 @@ async function renderList(root, params, signal) {
     listWrap.setAttribute('aria-busy', 'false');
   }
 
-  async function load() {
+  async function load({ filterChange = false } = {}) {
     const mine = ++seq;
     listWrap.setAttribute('aria-busy', 'true');
     const from = f.month ? `${f.month}-01` : null;
@@ -126,7 +129,7 @@ async function renderList(root, params, signal) {
     rows = res.rows || [];
     total = Number(res.total ?? rows.length);
     if (!rows.length && f.page > 0) { f.page = 0; setURL(); await load(); return; } // past the last page (lines went away meanwhile)
-    draw();
+    draw(filterChange);
   }
 
   const head = () => h('div', { class: 'page-head' },
