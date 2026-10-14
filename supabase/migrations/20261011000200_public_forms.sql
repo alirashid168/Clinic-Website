@@ -19,26 +19,31 @@
 --      access list. Only it shows the applications, their CNIC, phone and CV.
 --   2. Website feedback in public.complaints, so staff handle everything in the one Complaints inbox: patient_id may be
 --      empty for a row with source 'website', and new columns hold the type, topic and contact details. A patient's own
---      complaints keep source 'portal' (the insert policy now says so).
+--      complaints keep source 'portal' (the insert policy now says so). An admin may delete a website form (junk or spam);
+--      a patient's complaint is never deleted.
 --   3. public.job_applications and its history public.job_application_events (status changes and internal notes, with
 --      who and when). Staff read them with jobs.view; nobody writes them directly (only the functions below).
---   4. The bucket job-cvs and its storage policies.
+--   4. The bucket job-cvs, its storage policies, and the trigger that holds the CV upload limits.
 --   5. Form helpers (private.form_line / form_block / pk_mobile / pk_cnic / form_fail), the same rules as
 --      web/js/lib/public-forms.js, and private.public_form_log, the log the rate limits count.
 --   6. public.submit_job_application(jsonb) and public.submit_feedback(jsonb).
 --   7. public.update_job_application(uuid, text, text): staff change the status or add a note.
 --   8. public.job_cv_orphans(): CVs that no application uses (the visitor gave up, a check failed, or the form was
---      dropped over a per-phone or per-CNIC limit). The Job applications page lists those older than a day and removes
---      them (storage delete policy below).
+--      dropped over a per-phone or per-CNIC limit). The staff pages of someone with jobs.view (the Today page and the
+--      Job applications page) remove those older than a day by themselves (storage delete policy below).
 --   9. public.doctor_summary: a website complaint that staff link to a doctor counts on that doctor's dashboard too,
 --      without the visitor's name or phone.
 --
 -- Rate limits. Each function takes an advisory lock first, so two forms sent at the same moment cannot both slip under
 -- a limit:
---   job applications  5 a minute and 200 a day for the whole website (a hiring post can bring many in one day);
+--   job applications  5 a minute and 200 a day for the whole website (a hiring post can bring many in one day; each needs a
+--                     CV uploaded within the day, so the CV limits below are the tighter ones);
 --                     2 a day per phone number and per CNIC.
 --   feedback         10 a minute and 200 a day for the whole website; 5 a day per phone number.
---   CV uploads        5 a minute and 250 a day (the storage policy counts them; abandoned and retried uploads count too).
+--   CV uploads        5 files a minute, 100 files and 200 MB a day, and at most 100 MB of CVs that no application uses
+--                     (abandoned and retried uploads count too). The project's storage (1 GB on the Free plan) also holds the
+--                     photos, X-rays, receipts and documents, so the CVs can never take it over. A trigger on storage.objects
+--                     holds these limits for every write, Storage's own write of a signed upload included (section 4).
 -- Over a whole-website limit the visitor is asked to try again in a few minutes (FORM_BUSY), or tomorrow once the day is
 -- full (FORM_BUSY_DAY); that says nothing about any person. Over a per-phone or per-CNIC limit the form is thanked like
 -- any other and NOT stored, so the answer never tells whether a phone or CNIC has been used before. Such a dropped form
@@ -105,6 +110,11 @@ create index if not exists complaints_contact_phone_idx on public.complaints (co
 -- Patients still file only their own complaints, and only as 'portal'; a website form is only made by submit_feedback().
 alter policy "patients file complaints" on public.complaints
   with check ((patient_id = public.current_patient_id() and source = 'portal') or public.has_perm('complaints.view'));
+-- Anyone can send the website form, so junk can arrive: an admin may delete a website form (its notes go with it). A patient's
+-- complaint is never deleted. (Before this file nobody could delete a complaint.)
+drop policy if exists "admin removes website forms" on public.complaints;
+create policy "admin removes website forms" on public.complaints for delete to authenticated
+  using (source = 'website' and public.is_admin());
 revoke all on public.complaints, public.complaint_messages from anon;
 
 -- ---------------------------------------------------------------------------------------------------------------
@@ -179,18 +189,35 @@ begin
   end if;
 end $$;
 
--- Why a CV upload would be refused now: 'day' (250 today), 'minute' (5 in the last minute), or null (allowed). Storage asks
--- job_cv_upload_allowed() as the visitor, so both are security definer functions: the visitor may not see the files they
--- count. After a refused upload the website asks job_cv_upload_busy(), to say "try again tomorrow" rather than "in a few
--- minutes"; it tells only how busy the whole website is, nothing about any person or file.
-create or replace function public.job_cv_upload_busy()
+-- The CV upload limits, for the whole website: 5 files a minute, 100 files and 200 MB a day, and at most 100 MB of CVs that no
+-- application uses. Why an upload of p_size bytes would be refused now: 'day' (one of the day's limits, or the unused CVs; the
+-- staff pages remove unused ones once a day old), 'minute', or null (allowed). A file has at least one byte, so p_size 0 asks
+-- whether any upload is taken. It reads every file of the bucket, so it is a security definer function (the visitor may not
+-- see the files it counts), and only the functions below call it.
+create or replace function private.job_cv_upload_problem(p_size bigint default 0)
 returns text
 language sql stable security definer set search_path = public
 as $$
-  select case when count(*) >= 250 then 'day' when count(*) filter (where x.at > now() - interval '1 minute') >= 5 then 'minute' end
-    from (select (to_jsonb(o) ->> 'created_at')::timestamptz as at from storage.objects o where o.bucket_id = 'job-cvs') x
-   where x.at > now() - interval '1 day'
+  select case
+           when count(*) filter (where x.at > now() - interval '1 day') >= 100
+             or coalesce(sum(x.size) filter (where x.at > now() - interval '1 day'), 0) + greatest(coalesce(p_size, 0), 1) > 200 * 1048576
+             or coalesce(sum(x.size) filter (where not x.sent), 0) + greatest(coalesce(p_size, 0), 1) > 100 * 1048576 then 'day'
+           when count(*) filter (where x.at > now() - interval '1 minute') >= 5 then 'minute'
+         end
+    from (select (to_jsonb(o) ->> 'created_at')::timestamptz as at,
+                 case when (to_jsonb(o) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(o) -> 'metadata' ->> 'size')::bigint else 0 end as size,
+                 exists (select 1 from public.job_applications a where a.cv_path = o.name) as sent
+            from storage.objects o where o.bucket_id = 'job-cvs') x
 $$;
+revoke all on function private.job_cv_upload_problem(bigint) from public, anon, authenticated;
+
+-- Storage asks job_cv_upload_allowed() as the visitor (the insert policy below), as a first check. After a refused upload the
+-- website asks job_cv_upload_busy(), to say "try again tomorrow" rather than "in a few minutes"; it tells only how busy the
+-- whole website is, nothing about any person or file.
+create or replace function public.job_cv_upload_busy()
+returns text
+language sql stable security definer set search_path = public
+as $$ select private.job_cv_upload_problem(0) $$;
 create or replace function public.job_cv_upload_allowed()
 returns boolean
 language sql stable security definer set search_path = public
@@ -199,6 +226,50 @@ revoke all on function public.job_cv_upload_busy() from public;
 revoke all on function public.job_cv_upload_allowed() from public;
 grant execute on function public.job_cv_upload_busy() to anon, authenticated;
 grant execute on function public.job_cv_upload_allowed() to anon, authenticated;
+
+-- The limits are held by this trigger, not only by the insert policy: Storage checks a policy only as a probe that it rolls back,
+-- and a signed upload (POST /storage/v1/object/upload/sign/..., then PUT ...?token=) writes the row afterwards as a superuser,
+-- which no policy sees but every trigger does (the probe meets the trigger too). One upload at a time (the advisory lock), so
+-- uploads sent at the same moment cannot all slip under a limit. A CV file, once there, is never changed: an overwrite (an
+-- upsert, also with the x-upsert header) or a move is refused, so a file checked by submit_job_application stays that file.
+-- Only these columns count as the file; Storage may still stamp others (owner, last access) as it likes.
+create or replace function private.job_cvs_guard()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_problem text;
+  v_size bigint;
+begin
+  if tg_op = 'UPDATE' then
+    if (old.bucket_id = 'job-cvs' or new.bucket_id = 'job-cvs')
+       and jsonb_build_array(to_jsonb(old) -> 'bucket_id', to_jsonb(old) -> 'name', to_jsonb(old) -> 'metadata', to_jsonb(old) -> 'version', to_jsonb(old) -> 'archived_at')
+           is distinct from
+           jsonb_build_array(to_jsonb(new) -> 'bucket_id', to_jsonb(new) -> 'name', to_jsonb(new) -> 'metadata', to_jsonb(new) -> 'version', to_jsonb(new) -> 'archived_at') then
+      raise exception 'JOB_CV_LOCKED: a CV file is never changed or replaced. Upload a new file instead.' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+  if new.bucket_id is distinct from 'job-cvs' then return new; end if;
+  perform pg_advisory_xact_lock(hashtext('storage job-cvs uploads'));
+  v_size := case when (to_jsonb(new) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(new) -> 'metadata' ->> 'size')::bigint else 0 end;
+  v_problem := private.job_cv_upload_problem(v_size);
+  if v_problem is not null then
+    raise exception 'JOB_CV_LIMIT: no more CV uploads are taken %.', case v_problem when 'day' then 'today' else 'this minute' end using errcode = '42501';
+  end if;
+  return new;
+end $$;
+revoke all on function private.job_cvs_guard() from public, anon, authenticated;
+-- Supabase lets the postgres role add triggers on storage.objects (it has every privilege on it). Should a project ever refuse,
+-- this stops here with a plain reason instead of leaving the uploads without their limits.
+do $$
+begin
+  drop trigger if exists job_cvs_guard on storage.objects;
+  create trigger job_cvs_guard before insert or update on storage.objects
+    for each row execute function private.job_cvs_guard();
+exception when insufficient_privilege then
+  raise exception 'The CV upload limits need a trigger on storage.objects, and this database refused it (%). Ask Supabase support to allow it.', sqlerrm;
+end $$;
 
 -- A CV that no application uses and that is more than a day old (a form still being filled in keeps its file): never sent,
 -- or sent with a form dropped over a per-phone or per-CNIC limit (it is in private.public_form_log, so it cannot be sent
@@ -216,7 +287,7 @@ revoke all on function public.job_cv_unsent(text) from public, anon;
 grant execute on function public.job_cv_unsent(text) to authenticated;
 
 -- Anyone may add a new file under incoming/ with a random name; nobody but staff with jobs.view may read one.
--- There is no update policy, so a file can never be overwritten (an upload to a name that exists is refused).
+-- There is no update policy and the trigger above refuses any change, so a file can never be overwritten.
 drop policy if exists "visitors upload a cv" on storage.objects;
 create policy "visitors upload a cv" on storage.objects for insert to anon, authenticated
   with check (bucket_id = 'job-cvs'
@@ -535,7 +606,7 @@ revoke all on function public.update_job_application(uuid, text, text) from publ
 grant execute on function public.update_job_application(uuid, text, text) to authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 8. CVs no application uses (older than a day; a dropped form's CV too): listed for cleanup on the Job applications page
+-- 8. CVs no application uses (older than a day; a dropped form's CV too): removed by the staff pages of someone with jobs.view
 -- ---------------------------------------------------------------------------------------------------------------
 create or replace function public.job_cv_orphans()
 returns table (path text, uploaded_at timestamptz, size_bytes bigint)

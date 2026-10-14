@@ -2422,7 +2422,9 @@ await step('staff: Dr. Ali opens "Job applications" from the More menu: the new 
   assert.match(await rows.first().innerText(), /Omar Sample[\s\S]*Any branch/);
   await branchSel.selectOption('');
   await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 3);
-  assert.match(await pf.locator('.jobs-cleanup').innerText(), /1 CV file was uploaded but never sent with a form/);
+  // The made-up CV that was never sent (four days old) is removed by itself (Today or this page, whichever came first): no button to press.
+  await pf.waitForFunction(async () => { const { state } = await import('/js/state.js'); return (await state.data.jobCvOrphans()).length === 0; });
+  assert.equal(await pf.getByRole('button', { name: 'Remove them' }).count(), 0);
   await shot(pf, '45-staff-jobs');
 });
 await step('staff: the application dialog shows the CNIC and phone, the message as text, opens the CV through a short link, and saves status and a note with who and when', async () => {
@@ -2462,7 +2464,10 @@ await step('staff: website forms are in the Complaints inbox marked "Website for
   assert.equal(await pf.locator('table.complaints-table tbody tr', { hasText: 'Honeypot sample message' }).count(), 0, 'the honeypot form was not stored');
   await pf.locator('.complaints-from select').selectOption('website');
   const shown = pf.locator('table.complaints-table tbody tr');
+  // the list is asked again for the website forms only (the database filters it)
+  await pf.waitForFunction(() => document.querySelectorAll('table.complaints-table tbody tr').length === 4);
   assert.equal(await shown.count(), 4, 'two made-up website forms and the two just sent');
+  assert.match(pf.url(), /#\/staff\/complaints\?from=website$/, 'the choice is kept in the address');
   assert.equal(await shown.filter({ hasText: 'Website form' }).count(), 4);
   await row.getByRole('button', { name: 'Complaint: Waiting time' }).click();
   const m = pf.locator('.modal');
@@ -2478,6 +2483,37 @@ await step('staff: website forms are in the Complaints inbox marked "Website for
   await m.getByRole('button', { name: 'Save note' }).click();
   await pf.waitForSelector('.toast:has-text("Saved.")');
   await shot(pf, '47-staff-complaints-website');
+});
+await step('staff: Dr. Ali deletes a junk website form after a warning; a patient\'s complaint has no Delete', async () => {
+  await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.submitFeedback({ kind: 'complaint', topic: 'other', branch: 'none', message: 'Junk sample text for the delete step.', contact_me: false, website: '' });
+  });
+  await pf.goto(BASE + '#/staff/today');
+  await pf.goto(BASE + '#/staff/complaints?from=website');
+  const junk = pf.locator('table.complaints-table tbody tr', { hasText: 'Junk sample text' });
+  await junk.waitFor();
+  await junk.getByRole('button', { name: 'Complaint: Other' }).click();
+  const dlg = pf.locator('.modal', { hasText: 'Junk sample text' });
+  await dlg.waitFor();
+  await dlg.getByRole('button', { name: 'Delete', exact: true }).click();
+  const confirm = pf.locator('.modal', { hasText: 'Delete this website form?' });
+  await confirm.waitFor();
+  assert.match(await confirm.innerText(), /removed for good, with its notes\. Use this only for junk or spam/);
+  await shot(pf, '47b-staff-complaint-delete');
+  await confirm.getByRole('button', { name: 'Delete', exact: true }).click();
+  await pf.waitForSelector('.toast:has-text("Deleted.")');
+  await junk.waitFor({ state: 'detached' });
+  assert.equal(await pf.locator('.modal').count(), 0, 'both dialogs are closed');
+  assert.equal(await pf.locator('table.complaints-table tbody tr').count(), 4, 'the other website forms stay');
+  await pf.locator('.complaints-from select').selectOption('portal');
+  await pf.waitForFunction(() => { const rows = [...document.querySelectorAll('table.complaints-table tbody tr')]; return rows.length > 0 && rows.every((r) => !r.textContent.includes('Website form')); });
+  await pf.locator('table.complaints-table tbody tr').first().locator('button.link-btn').click();
+  const portal = pf.locator('.modal');
+  await portal.waitFor();
+  assert.equal(await portal.getByRole('button', { name: 'Delete', exact: true }).count(), 0, "a patient's complaint is never deleted");
+  await pf.keyboard.press('Escape');
+  await portal.waitFor({ state: 'detached' });
 });
 await step('a role without "Job applications" (the clinic coordinator): no menu entry, "Page not available", and the data layer refuses; website forms still reach their inbox', async () => {
   await tryAnotherRole(pf);
@@ -2500,6 +2536,13 @@ await step('a role without "Job applications" (the clinic coordinator): no menu 
   await pf.goto(BASE + '#/staff/complaints');
   await pf.waitForSelector('table.complaints-table');
   assert.ok(await pf.locator('table.complaints-table .badge:has-text("Website form")').count() >= 4, 'the coordinator handles the website forms');
+  await pf.locator('table.complaints-table tbody tr', { hasText: 'Website form' }).first().locator('button.link-btn').click();
+  const m = pf.locator('.modal');
+  await m.waitFor();
+  assert.equal(await m.getByRole('button', { name: 'Save note' }).count(), 1);
+  assert.equal(await m.getByRole('button', { name: 'Delete', exact: true }).count(), 0, '... but only an admin deletes one');
+  await pf.keyboard.press('Escape');
+  await m.waitFor({ state: 'detached' });
 });
 await step('access list: a "Job applications (CNIC, phone and CV)" row, ticked for nobody but admin by default', async () => {
   await tryAnotherRole(pf);

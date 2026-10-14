@@ -49,8 +49,9 @@ export const JOB_STATUS_LABELS = labelOf(JOB_STATUSES);
 export const FEEDBACK_KIND_LABELS = labelOf(FEEDBACK_KINDS);
 export const FEEDBACK_TOPIC_LABELS = labelOf(FEEDBACK_TOPICS);
 
-// The CV: the file types the bucket job-cvs takes, by file name ending. The upload is always sent with the type of its
-// ending, so a phone that calls a .docx "application/octet-stream" still gets through, and nothing else does.
+// The CV: the file types the bucket job-cvs takes, by file name ending. The upload sends a copy of the file that carries the
+// type of its ending (data/supabase.js uploadJobCv: Storage takes the type from the file itself, not from an option), so a
+// phone that calls a .docx "application/octet-stream", or a JPG "image/jpg", still gets through, and nothing else does.
 export const CV_TYPES = {
   pdf: 'application/pdf',
   doc: 'application/msword',
@@ -59,6 +60,11 @@ export const CV_TYPES = {
   png: 'image/png',
 };
 export const CV_MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * The CV upload limits for the whole website (the database's trigger on storage.objects holds them; the demo follows them):
+ * files a minute and a day, bytes a day, and the bytes of CVs no application uses (the staff pages remove those once a day old).
+ */
+export const CV_UPLOAD_LIMITS = { perMinute: 5, perDay: 100, bytesPerDay: 200 * 1024 * 1024, unsentBytes: 100 * 1024 * 1024 };
 /** For the file input's accept attribute. */
 export const CV_ACCEPT = '.pdf,.doc,.docx,.jpg,.jpeg,.png,' + Object.values(CV_TYPES).join(',');
 

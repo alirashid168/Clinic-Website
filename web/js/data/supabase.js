@@ -30,7 +30,9 @@ const SIGNED_URL_TTL = 3600; // seconds
 const PAGE = 1000; // Supabase's default "max rows" per request
 const ID_CHUNK = 100; // ids per ".in()" request, so URLs stay short
 const CACHE_MS = 5 * 60 * 1000; // public schedule and gallery
-const FINISHED_LISTED_DAYS = 90; // coordinator lists: finished lab cases stay listed this long after their last change
+const FINISHED_LISTED_DAYS = 90; // coordinator lists: finished lab cases stay listed this long after their last change (resolved complaints too)
+const COMPLAINTS_OPEN_CAP = 500; // the Complaints inbox: open complaints listed at most
+const COMPLAINTS_RESOLVED_CAP = 200; // ... and resolved ones (of the last 90 days)
 
 const plainError = (message, code) => Object.assign(new Error(message), code ? { code } : {});
 /** The error of save_invoice / save_installment_plan when a retried key carries different details (same wording, for the fallback path). */
@@ -137,13 +139,13 @@ function formAnswerError(error) {
   if (error.details) e.field = error.details;
   return e;
 }
-/** Storage refused a CV: too big or the wrong type (Storage checks the bucket's limits), or the upload limit (the storage policy). */
+/** Storage refused a CV: too big or the wrong type (Storage checks the bucket's limits), or the upload limits (the storage policy, then the trigger: JOB_CV_LIMIT, 403). */
 function cvUploadError(error) {
   const text = String(error?.message || error || '');
   const status = Number(error?.statusCode || error?.status);
   if (status === 413 || /exceed|too large|maximum allowed size|payload/i.test(text)) return Object.assign(new Error('FORM_CV: Your CV is larger than 5 MB. Please choose a smaller file, or a PDF.'), { field: 'cv' });
   if (/mime|content type|not supported/i.test(text)) return Object.assign(new Error('FORM_CV: Your CV must be a PDF, Word (.doc or .docx), JPG or PNG file.'), { field: 'cv' });
-  if (/row-level security|unauthorized|forbidden/i.test(text) || status === 403) return new Error('FORM_BUSY: many CVs are arriving right now. Please try again later.');
+  if (/JOB_CV_LIMIT|row-level security|unauthorized|forbidden/i.test(text) || status === 403) return new Error('FORM_BUSY: many CVs are arriving right now. Please try again later.');
   return error instanceof Error ? error : new Error(text);
 }
 // Before the migration is applied: "not switched on yet" on the staff page (PGRST205 / PGRST202, or 42P01 / 42883, or a 404).
@@ -1491,9 +1493,30 @@ export async function createSupabaseAdapter() {
       const flagId = Object.fromEntries(flags.map((f) => [f.patient_id, f.id]));
       return (await attachPatients(rows)).map((r) => ({ ...r, flag_id: r.source === 'flag' ? flagId[r.patient_id] : null }));
     },
-    async complaints() {
-      const rows = check(await sb.from('complaints').select('*, messages:complaint_messages(*)').order('created_at', { ascending: false }));
+    /**
+     * The Complaints inbox, newest first: every open complaint (new, in progress) and the ones resolved in the last 90 days, each
+     * part capped (.truncated / .cap), so a flood of website forms can never silently push a patient's complaint off the list.
+     * from: 'portal' (patients' accounts) or 'website' (the website form) is filtered by the database, '' is both.
+     */
+    async complaints({ from = '' } = {}) {
+      const since = addDaysISO(todayISO(), -FINISHED_LISTED_DAYS);
+      const part = (cap, narrow) => {
+        let q = narrow(sb.from('complaints').select('*, messages:complaint_messages(*)'));
+        if (from === 'portal' || from === 'website') q = q.eq('source', from);
+        return q.order('created_at', { ascending: false }).order('id', { ascending: true }).limit(cap + 1).then((res) => capped(check(res), cap));
+      };
+      const [open, resolved] = await Promise.all([
+        part(COMPLAINTS_OPEN_CAP, (q) => q.in('status', ['new', 'in_progress'])),
+        part(COMPLAINTS_RESOLVED_CAP, (q) => q.eq('status', 'resolved').or(`resolved_at.gte.${since},created_at.gte.${since}`)),
+      ]);
+      const rows = [...open, ...resolved].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+      if (open.truncated || resolved.truncated) { rows.truncated = true; rows.cap = rows.length; }
       return attachPatients(rows);
+    },
+    /** Deletes a website form for good (junk or spam). Only an admin may, and a patient's complaint never (the database's delete policy). */
+    async deleteComplaint(id) {
+      const rows = check(await sb.from('complaints').delete().eq('id', id).eq('source', 'website').select('id'));
+      if (!rows.length) throw plainError('NOT_REMOVED: only Dr. Ali (admin) can delete a website form, and a patient\'s complaint is never deleted.', 'NOT_REMOVED');
     },
     async fileComplaint({ subject, body }) {
       const s = await this.getSession();
@@ -1518,7 +1541,11 @@ export async function createSupabaseAdapter() {
       const info = cvFileInfo(file);
       if (info.error) throw Object.assign(new Error('FORM_CV: ' + info.error), { field: 'cv' });
       const path = `incoming/${crypto.randomUUID()}.${info.ext}`;
-      const { error } = await sb.storage.from('job-cvs').upload(path, file, { contentType: info.type, upsert: false });
+      // supabase-js sends a File or Blob as form data with the file's own type and drops the contentType option, so a .docx the
+      // browser calls '' or 'application/octet-stream' (or a JPG called 'image/jpg') would be refused by the bucket: the copy
+      // sent carries the type of its ending instead.
+      const body = file.slice(0, file.size, info.type);
+      const { error } = await sb.storage.from('job-cvs').upload(path, body, { contentType: info.type, upsert: false });
       if (error) {
         const problem = cvUploadError(error);
         // Refused by the upload limit: when today's uploads are full, the visitor is told "tomorrow", not "in a few minutes".

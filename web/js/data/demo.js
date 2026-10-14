@@ -16,7 +16,7 @@ import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
-import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS } from '../lib/public-forms.js';
+import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS } from '../lib/public-forms.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -952,10 +952,21 @@ export function createDemoAdapter() {
         .map((b) => ({ source: 'plan', patient: clone(patient(b.patient_id)), reason: `Braces started ${b.start_date}: treatment plan needed (month ${nextMonth(b.id)})`, since: b.start_date }));
       return [...flags, ...overruns, ...plans];
     },
-    async complaints() {
+    // Like the live inbox: open complaints always, resolved ones for 90 days; from 'portal' or 'website' narrows it by where it came from.
+    async complaints({ from = '' } = {}) {
       need('complaints.view');
-      return db.complaints.map((c) => ({ ...clone(c), patient: clone(patient(c.patient_id)), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id)) }))
+      const since = daysAgo(90);
+      return db.complaints
+        .filter((c) => (!from || (c.source || 'portal') === from)
+          && (c.status !== 'resolved' || String(c.resolved_at || '').slice(0, 10) >= since || c.created_at.slice(0, 10) >= since))
+        .map((c) => ({ ...clone(c), patient: clone(patient(c.patient_id)), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id)) }))
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    },
+    async deleteComplaint(id) {
+      const c = db.complaints.find((x) => x.id === id);
+      if (!c || c.source !== 'website' || me()?.role !== 'admin') fail('NOT_REMOVED: only Dr. Ali (admin) can delete a website form, and a patient\'s complaint is never deleted.');
+      db.complaints = db.complaints.filter((x) => x.id !== id);
+      db.complaint_messages = db.complaint_messages.filter((m) => m.complaint_id !== id);
     },
     async fileComplaint({ subject, body }) {
       const s = await this.getSession();
@@ -1002,10 +1013,13 @@ export function createDemoAdapter() {
     async uploadJobCv(file) {
       const info = cvFileInfo(file);
       if (info.error) throw formError('cv', info.error, 'FORM_CV');
-      // the storage policy's limits, in the words the live data layer gives them (it asks job_cv_upload_busy which one)
-      const uploads = (ms) => db.job_cvs.filter((x) => Date.parse(x.created_at) > Date.now() - ms).length;
-      if (uploads(86400000) >= 250) fail('FORM_BUSY_DAY: many CVs have arrived today. Please try again tomorrow.');
-      if (uploads(60000) >= 5) fail('FORM_BUSY: many CVs are arriving right now. Please try again later.');
+      // the database's upload limits (CV_UPLOAD_LIMITS), in the words the live data layer gives them (it asks job_cv_upload_busy which one)
+      const uploads = (ms) => db.job_cvs.filter((x) => Date.parse(x.created_at) > Date.now() - ms);
+      const bytes = (list) => list.reduce((t, x) => t + (x.size || 0), 0);
+      const unsent = db.job_cvs.filter((x) => !db.job_applications.some((a) => a.cv_path === x.path));
+      if (uploads(86400000).length >= CV_UPLOAD_LIMITS.perDay || bytes(uploads(86400000)) + file.size > CV_UPLOAD_LIMITS.bytesPerDay
+        || bytes(unsent) + file.size > CV_UPLOAD_LIMITS.unsentBytes) fail('FORM_BUSY_DAY: many CVs have arrived today. Please try again tomorrow.');
+      if (uploads(60000).length >= CV_UPLOAD_LIMITS.perMinute) fail('FORM_BUSY: many CVs are arriving right now. Please try again later.');
       const path = `incoming/${crypto.randomUUID ? crypto.randomUUID() : uid()}.${info.ext}`;
       db.job_cvs.push({ path, type: info.type, size: file.size, file, created_at: new Date().toISOString() });
       return path;

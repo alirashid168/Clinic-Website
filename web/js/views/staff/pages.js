@@ -10,10 +10,15 @@ import { FEEDBACK_KIND_LABELS, FEEDBACK_TOPIC_LABELS, formatPhone } from '../../
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 
 // ---------------------------------------------------------------- today
+// CVs nobody sent (uploaded more than a day ago, no application uses them) are removed by themselves, once per opening of the
+// staff pages, when someone who sees job applications (Dr. Ali) opens Today: they count toward the CV upload limits and take storage.
+let cvSweep = null;
+
 export async function renderDashboard(root) {
   const d = state.data;
   const s = state.session.staff;
   const day = todayISO();
+  if (can('jobs.view')) cvSweep ??= import('./jobs.js').then((m) => m.removeUnsentCvs()).catch(() => 0);
   const [rows, totalDues, review, complaints] = await Promise.all([
     d.dashboard(day).catch(() => []),
     can('finance.view') ? d.totalDues().catch(() => null) : null,
@@ -184,8 +189,17 @@ function senderCell(c) {
 
 export async function renderComplaints(root, params) {
   const d = state.data;
-  const rows = await d.complaints().catch((e) => { toast(friendlyError(e), 'error'); return []; });
   let from = ['portal', 'website'].includes(params?.get('from')) ? params.get('from') : '';
+  const list = h('div', {});
+  let newest = 0;
+  // The list is asked again for the chosen source (the database filters it, so a flood of website forms cannot push a patient's
+  // complaint off "Patients' accounts"), and after every change.
+  async function load() {
+    const mine = ++newest; // a slow answer for the choice just left must not overwrite the one on screen
+    const rows = await d.complaints({ from }).catch((e) => { toast(friendlyError(e), 'error'); return []; });
+    if (mine !== newest) return;
+    drawTable(rows);
+  }
   const open = (c) => {
     const web = isWebsite(c);
     const reply = h('textarea', { placeholder: web ? 'Write an internal note: what was done, who called back' : 'Reply to the patient, or write an internal note' });
@@ -222,7 +236,7 @@ export async function renderComplaints(root, params) {
           try { await d.setComplaintStatus(c.id, 'resolved'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
           toast('Marked resolved.', 'ok');
           dlg.close();
-          await renderComplaints(root, params); // the list is redrawn before this dialog closes, so focus can return to the page
+          await load(); // the list is redrawn before this dialog closes, so focus can return to the page
         } },
       ]);
       return false;
@@ -231,20 +245,32 @@ export async function renderComplaints(root, params) {
     const reopen = async () => {
       try { await d.setComplaintStatus(c.id, 'in_progress'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       toast('Reopened.', 'ok');
-      await renderComplaints(root, params);
+      await load();
+    };
+    // Anyone can send the website form, so junk can arrive: an admin may delete a website form. A patient's complaint is never deleted.
+    const confirmDelete = () => {
+      modal('Delete this website form?', h('p', {}, 'It is removed for good, with its notes. Use this only for junk or spam; mark a real complaint resolved instead.'), [
+        { label: 'Keep it' },
+        { label: 'Delete', danger: true, onClick: async () => {
+          try { await d.deleteComplaint(c.id); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+          toast('Deleted.', 'ok');
+          dlg.close();
+          await load();
+        } },
+      ], { destructive: true });
+      return false;
     };
     const dlg = modal(c.subject, body, [
+      web && isAdmin() ? { label: 'Delete', danger: true, onClick: confirmDelete } : null,
       c.status === 'resolved' ? { label: 'Reopen', onClick: reopen } : { label: 'Mark resolved', onClick: confirmResolve },
       { label: web ? 'Save note' : 'Send', primary: true, onClick: async () => {
         if (!reply.value.trim()) return showFormErrors(body, [{ input: reply, message: web ? 'Write a note first.' : 'Write a reply first.' }]);
-        try { await d.replyComplaint(c.id, reply.value.trim(), web || internal.checked); toast('Saved.', 'ok'); await renderComplaints(root, params); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { await d.replyComplaint(c.id, reply.value.trim(), web || internal.checked); toast('Saved.', 'ok'); await load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ]);
+    ].filter(Boolean));
   };
-  const table = h('div', {});
-  const drawTable = () => {
-    const shown = rows.filter((c) => !from || (from === 'website' ? isWebsite(c) : !isWebsite(c)));
-    mount(table, shown.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list complaints-table' },
+  const drawTable = (shown) => {
+    mount(list, capNote(shown, 'complaints (newest first)', 'older ones are not listed'), shown.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list complaints-table' },
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Complaint'), h('th', { scope: 'col' }, 'From'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Received'), h('th', { scope: 'col' }, 'Status'))),
       h('tbody', {}, shown.map((c) => h('tr', {},
         h('td', {}, h('button', { class: 'link-btn', onclick: () => open(c) }, c.subject),
@@ -257,14 +283,14 @@ export async function renderComplaints(root, params) {
       : empty(from ? 'Nothing from here yet.' : 'No complaints.'));
   };
   const fromSel = select([{ value: '', label: 'Everything' }, { value: 'portal', label: "Patients' accounts" }, { value: 'website', label: 'Website form' }], from, {
-    onchange: (e) => { from = e.target.value; history.replaceState(null, '', `#/staff/complaints${from ? '?from=' + from : ''}`); drawTable(); },
+    onchange: (e) => { from = e.target.value; history.replaceState(null, '', `#/staff/complaints${from ? '?from=' + from : ''}`); load(); },
   });
-  drawTable();
   mount(root,
     h('div', { class: 'page-head' },
-      h('div', {}, h('h1', {}, 'Complaints'), h('p', {}, 'Sent by patients from their accounts, and by visitors with the "Complaints & suggestions" form on the website. Dr. Ali and the clinic coordinator both see these.')),
+      h('div', {}, h('h1', {}, 'Complaints'), h('p', {}, 'Sent by patients from their accounts, and by visitors with the "Complaints & suggestions" form on the website. Dr. Ali and the clinic coordinator both see these. Resolved ones stay listed for 90 days.')),
       h('label', { class: 'inline complaints-from' }, 'Show ', fromSel)),
-    h('section', { class: 'panel' }, capNote(rows, 'complaints'), table));
+    h('section', { class: 'panel' }, list));
+  await load();
 }
 
 // ---------------------------------------------------------------- doctor log

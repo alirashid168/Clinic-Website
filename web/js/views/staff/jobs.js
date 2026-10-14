@@ -29,6 +29,17 @@ async function openCv(app) {
   }
 }
 
+/**
+ * Removes the CVs nobody sent: uploaded more than a day ago, and no application uses them (the visitor gave up, a check failed, or
+ * the form was dropped). They count toward the CV upload limits (100 MB of them at most) and take storage, so this page and the
+ * Today page do it by themselves. Resolves how many were removed (0 when there were none, or the database is not updated yet).
+ */
+export async function removeUnsentCvs() {
+  let list = [];
+  try { list = await state.data.jobCvOrphans(); } catch { return 0; }
+  return list.length ? state.data.removeJobCvOrphans(list.map((x) => x.path)) : 0;
+}
+
 /** One line of the history: "12 Oct 2026, 14:05 · Dr. Ali Rashid · Status: Interview" or the note itself. */
 function historyLine(e) {
   return h('li', {},
@@ -78,18 +89,15 @@ export async function renderJobs(root, params) {
         : empty(filtered ? 'No applications match these filters.' : 'No applications yet. They arrive here from the "Join our team" form on the website.')));
   }
 
-  // CVs uploaded more than a day ago but never sent with a form (the visitor gave up, or a check failed): listed, and removable.
+  // CVs uploaded more than a day ago but never sent with a form are removed by themselves; the page says so when it removed any.
   async function loadCleanup() {
-    let list = [];
-    try { list = await d.jobCvOrphans(); } catch { list = []; }
-    if (!list.length) { mount(cleanup); return; }
-    const button = h('button', { type: 'button', class: 'btn btn-small', onclick: async () => {
-      button.disabled = true;
-      try { const n = await d.removeJobCvOrphans(list.map((x) => x.path)); toast(`${n} unused file${n === 1 ? '' : 's'} removed.`, 'ok'); } catch (e) { toast(friendlyError(e), 'error'); }
-      await loadCleanup();
-    } }, 'Remove them');
-    mount(cleanup, h('div', { class: 'alert alert-info jobs-cleanup', role: 'status' },
-      `${list.length} CV file${list.length === 1 ? ' was' : 's were'} uploaded but never sent with a form (more than a day ago). They belong to no application. `, button));
+    let n = 0;
+    try { n = await removeUnsentCvs(); } catch (e) {
+      mount(cleanup, h('div', { class: 'alert alert-warning jobs-cleanup', role: 'status' }, 'CV files nobody sent could not be removed: ', friendlyError(e)));
+      return;
+    }
+    mount(cleanup, n ? h('div', { class: 'alert alert-info jobs-cleanup', role: 'status' },
+      `${n} CV file${n === 1 ? ' was' : 's were'} uploaded more than a day ago but never sent with a form, so ${n === 1 ? 'it was' : 'they were'} removed.`) : null);
   }
 
   function open(a) {

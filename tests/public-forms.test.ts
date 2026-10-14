@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  POSITIONS, FEEDBACK_TOPICS, FEEDBACK_KINDS, JOB_STATUSES, CV_TYPES, CV_MAX_BYTES, LIMITS,
+  POSITIONS, FEEDBACK_TOPICS, FEEDBACK_KINDS, JOB_STATUSES, CV_TYPES, CV_MAX_BYTES, CV_UPLOAD_LIMITS, LIMITS,
   cleanLine, cleanBlock, normalizePhone, formatPhone, normalizeCnic, cvFileInfo, checkJobApplication, checkFeedback, feedbackSubject, submitProblem,
 } from '../web/js/lib/public-forms.js';
 
@@ -25,6 +25,8 @@ test('lists: the jobs of the old Google form, ten topics, three types, five stat
   assert.deepEqual(JOB_STATUSES.map((s) => s.label), ['New', 'Contacted', 'Interview', 'Hired', 'Rejected']);
   assert.equal(CV_MAX_BYTES, 5 * 1024 * 1024);
   assert.deepEqual(Object.keys(CV_TYPES), ['pdf', 'doc', 'docx', 'jpg', 'png']);
+  // the numbers of private.job_cv_upload_problem in the migration (the demo follows these)
+  assert.deepEqual(CV_UPLOAD_LIMITS, { perMinute: 5, perDay: 100, bytesPerDay: 200 * 1048576, unsentBytes: 100 * 1048576 });
 });
 
 test('phone: Pakistani mobile numbers however they are written, nothing else', () => {
