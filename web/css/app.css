@@ -1011,13 +1011,15 @@ table.sheet .doctors-box:focus-within .written-people { display: none; }
 @media (min-width: 900px) and (hover: hover) and (pointer: fine) {
   .sheet-page { --w-doctor: clamp(200px, 16.5vw, 380px); }
   table.sheet col.c-doctor { width: var(--w-doctor); }
-  /* Every column but Treatment Details has a set width, so the list is at least those plus 140px for it, and scrolls
-     sideways (under the frozen #, Mr# and name) rather than squeeze it: on a 1366px laptop the sheet's last column,
-     Reminder Status, is just out of sight, as the sheet's last columns are (810px = Month, Token, Status, Group, P.P,
-     Invoice, Contact No, Reminder Status and those 140px; All branches has its 120px Branch column on top; for someone
-     who does not see invoices there is no Invoice column, and Treatment Details has its 74px too). */
-  table.sheet { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 810px); }
-  table.sheet:has(> colgroup > .c-branch) { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 930px); }
+  /* Every column but Treatment Details has a set width, so the list is at least those plus 260px for it, about the width
+     of the sheet's column (an entry like "UL 018 full arch PC refresh" whole; a longer one is whole in its tooltip), and
+     scrolls sideways (under the frozen #, Mr# and name) rather than squeeze it: on a laptop the sheet's last columns are
+     out of sight (Contact No and Reminder Status at 1366px, Reminder Status at 1536px), as on the sheet in such a window
+     (930px = Month, Token, Status, Group, P.P, Invoice, Contact No, Reminder Status and those 260px; All branches has its
+     120px Branch column on top; for someone who does not see invoices there is no Invoice column, and Treatment Details
+     has its 74px too). */
+  table.sheet { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 930px); }
+  table.sheet:has(> colgroup > .c-branch) { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 1050px); }
   .people-chips { flex-wrap: wrap; align-content: flex-start; height: 20px; }
   .person, .person.checker { position: relative; min-width: 0; padding-right: var(--space-2); }
   .person + .person { flex: 1 1 0; min-width: 6.5em; max-width: max-content; }

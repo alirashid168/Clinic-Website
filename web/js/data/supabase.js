@@ -1010,6 +1010,7 @@ export async function createSupabaseAdapter() {
     async branches() { return check(await sb.from('branches').select('*').eq('active', true).order('sort_order')); },
     async cities() { return check(await sb.from('cities').select('*').order('id')); },
     async clinicians() { return check(await sb.from('clinicians').select('*').eq('active', true).order('display_name')); },
+    async doctorGroups() { return check(await sb.from('doctor_groups').select('*').order('id')); },
     async treatments() { return check(await sb.from('treatments').select('*').eq('active', true).order('sort_order')); },
     async expenseCategories() { return check(await sb.from('expense_categories').select('*').eq('active', true).order('sort_order')); },
     async settings() {
@@ -1151,9 +1152,11 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ visits
-    async listVisits({ branchId, date }) {
+    // (patientId: that patient's visits of the day only, a small read: the Aaj ki List asks it before an Mr# adds a row)
+    async listVisits({ branchId, date, patientId }) {
       let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false });
       if (branchId) q = q.eq('branch_id', Number(branchId));
+      if (patientId) q = q.eq('patient_id', patientId);
       return enrichVisits(check(await q));
     },
     // Live updates: calls onChange the moment any visit at this branch (or a

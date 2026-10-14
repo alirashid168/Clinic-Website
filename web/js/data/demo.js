@@ -91,6 +91,7 @@ function seed() {
     doc('1006', 'Assistant Uzma (sample)', null, 'KHI', false), doc('1102', 'Assistant Zara (sample)', null, 'KHI', false),
   ];
   const cl = (name) => db.clinicians.find((c) => c.display_name === name).id;
+  db.doctor_groups = [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
 
   db.treatments = ['Monthly', 'Bonding', 'Upper Bonding', 'Lower Bonding', 'Bracket Fix', 'Braces Checkup', 'Braces Scaling', 'Braces Off',
     'Retainer Impression', 'Retainer Pick', 'Retainer Followup', 'Checkup', 'Followup', 'Scaling', 'Filling', 'RCT', 'Extraction',
@@ -457,6 +458,7 @@ export function createDemoAdapter() {
     async branches() { return clone(db.branches.filter((b) => b.active)); },
     async cities() { return clone(db.cities); },
     async clinicians() { return clone(db.clinicians.filter((c) => c.active)); },
+    async doctorGroups() { return clone(db.doctor_groups); },
     async treatments() { return clone(db.treatments.filter((t) => t.active)); },
     async expenseCategories() { return clone(db.expense_categories); },
     async settings() { return clone(db.settings); },
@@ -603,9 +605,9 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ visits
-    async listVisits({ branchId, date }) {
+    async listVisits({ branchId, date, patientId }) {
       need('sheet.view');
-      return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && branchOk(v.branch_id))
+      return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && (!patientId || v.patient_id === patientId) && branchOk(v.branch_id))
         .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999)).map(enrichVisit);
     },
     subscribeVisits() { return () => {}; },
@@ -1333,7 +1335,6 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ clinic setup (admin)
     async setupLists() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
-      db.doctor_groups ||= [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
       db.doctor_commission_rules ||= [];
       return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories, staff: db.staff.filter((s) => s.active), commission_rules: db.doctor_commission_rules });
     },

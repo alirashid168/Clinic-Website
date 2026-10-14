@@ -49,12 +49,13 @@ const byToken = (a, b) => (a.branch_id ?? 0) - (b.branch_id ?? 0)
 // then Scheduled and checkups with no status yet, then Completed, then Cancelled and No show. Checkup patients take part by
 // their own day status. Inside one status the patients come first by token (no token last), then the checkup patients by
 // theirs (tokens are numbered per kind of treatment, so the two series are not mixed), then by when they were added.
-// (All branches view: by branch first.) Each item is { row, checkup, rank, token }: draw() works out the rank and token
-// (see there).
+// (All branches view: by branch first.) Each item is { row, checkup, rank, token, late }: draw() works out the rank and
+// token, and late (1: a row that came while the mouse is on the list, put after the others; see there).
 const STATUS_RANK = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
 const rankOf = (item) => STATUS_RANK[(item.checkup ? item.row.day_status : item.row.status) || ''] ?? 3;
 const tokenOf = (item) => (item.checkup ? tokenNo(item.row) : item.row.token_no ?? Infinity);
-const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
+const listOrder = (a, b) => a.late - b.late
+  || (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
   || a.rank - b.rank
   || Number(a.checkup) - Number(b.checkup)
   || byNumber(a.token, b.token)
@@ -228,7 +229,15 @@ export async function renderSheet(root, params, signal) {
   const SAVED_ON_LEAVE = new Set(['treatment_label', 'patient_name', 'token', 'phone']);
   let unsavedCell = null;
   let lastTouch = 0;
-  tableBody.addEventListener('input', (e) => { if (SAVED_ON_LEAVE.has(e.target.dataset.field)) unsavedCell = e.target; });
+  // Every change made to the list on this screen (a patient added or removed, a cell typed, a status, group or doctor
+  // saved) counts up listVersion: a reload asked for before it does not have it, so its answer is not drawn (see load).
+  let listVersion = 0;
+  // Treatment Details is often longer than its cell: the whole text is in the cell's tooltip (title), kept up to date here.
+  const LONG_TEXT = new Set(['details_text', 'details']);
+  tableBody.addEventListener('input', (e) => {
+    if (SAVED_ON_LEAVE.has(e.target.dataset.field)) unsavedCell = e.target;
+    if (LONG_TEXT.has(e.target.dataset.field)) e.target.title = e.target.value;
+  });
   tableBody.addEventListener('change', (e) => { if (e.target === unsavedCell) unsavedCell = null; });
   for (const ev of ['keydown', 'pointerdown', 'input']) tableBody.addEventListener(ev, () => { lastTouch = Date.now(); });
 
@@ -247,8 +256,8 @@ export async function renderSheet(root, params, signal) {
   };
   // A row that kept its place for the cursor (its status, or the token that came with it, changed since the list was
   // drawn, or it no longer matches the filters) goes where it belongs once the cursor is out of it: a quiet reload draws
-  // the list again when nobody is typing or clicking in it (reloadQuietly waits for that), so a click on another row is
-  // never moved from under the mouse.
+  // the list again when nobody is typing or clicking in it (reloadQuietly waits for that), and while the mouse is on the
+  // rows every row keeps its place (mouseOn, below), so a click on another row is never moved from under the mouse.
   function settle(key) {
     const item = placed.has(key) && rowKey(document.activeElement) !== key ? itemOf(key) : null;
     if (item && (movedFrom(item, placed.get(key)) || !(item.checkup ? checkupMatches(item.row) : matches(item.row)))) reloadQuietly();
@@ -265,6 +274,32 @@ export async function renderSheet(root, params, signal) {
       settle(key);
     });
   });
+
+  // The mouse on the rows (a busy day: the front desk marks one waiting patient after another with the mouse, or looks at
+  // a row while speaking to the patient): a redraw meanwhile (a live update, a reload in the background) keeps every row
+  // where it was (draw: what is in the rows is drawn new, a row added meanwhile goes at the end), so the patient under the
+  // mouse stays under it and a click lands on the row that was seen. The list is sorted again (orderHeld) once the mouse
+  // leaves the rows, a key is pressed, or the mouse has not moved for 20 seconds (a screen nobody is using keeps showing
+  // the list in order). A finger rests on nothing: the 5 seconds after a tap hold up the reloads instead (userIsBusy).
+  let mouseOn = false;
+  let orderHeld = false;
+  let mouseTimer = null;
+  function mouseMoved(e) {
+    if (e.pointerType === 'touch') return;
+    mouseOn = true;
+    clearTimeout(mouseTimer);
+    mouseTimer = setTimeout(mouseDone, 20000);
+  }
+  function mouseDone() {
+    clearTimeout(mouseTimer);
+    if (!mouseOn) return;
+    mouseOn = false;
+    if (orderHeld) reloadQuietly();
+  }
+  tableBody.addEventListener('pointermove', mouseMoved);
+  tableBody.addEventListener('wheel', mouseMoved, { passive: true });
+  tableBody.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') mouseDone(); });
+  document.addEventListener('keydown', mouseDone, { signal: life.signal });
 
   // ---- save status, the list of changes that could not be saved, and undo for removals.
   const saveStatus = h('span', { class: 'save-status save-state', tabindex: '-1', dataset: { state: 'saved' } }, 'All changes saved');
@@ -355,8 +390,10 @@ export async function renderSheet(root, params, signal) {
     'aria-label': 'Filter by doctor', onchange: (e) => { doctorFilter = e.target.value; draw(); },
   });
   let groupFilter = '';
-  // The braces groups: the protocol's three, and any other group a doctor is in.
-  const groupIds = [...new Set([1, 2, 3, ...state.ref.clinicians.map((c) => c.doctor_group_id).filter(Boolean)])].sort((a, b) => a - b);
+  // The doctor groups of Clinic setup (the sheet's Group 4 is one once it is added there; the protocol's three until they
+  // have loaded), and any other group a doctor is in. The Group cell of a row keeps the row's own group too.
+  const groupIds = [...new Set([...(state.ref.groups?.length ? state.ref.groups.map((g) => Number(g.id)) : [1, 2, 3]),
+    ...state.ref.clinicians.map((c) => c.doctor_group_id).filter(Boolean)])].sort((a, b) => a - b);
   const groupSel = select([{ value: '', label: 'Any group' }, ...groupIds.map((g) => ({ value: String(g), label: `Group ${g}` }))], '', {
     'aria-label': 'Filter by doctor group', onchange: (e) => { groupFilter = e.target.value; draw(); },
   });
@@ -378,8 +415,8 @@ export async function renderSheet(root, params, signal) {
       && !groupFilter && !duesOnly && !bracesOnly
       && (!textFilter || `${c.patient_name} ${c.phone || ''} ${c.checkup_for || ''} checkup`.toLowerCase().includes(textFilter));
   };
-  // (here: the row with the cursor, which stays whatever the filters say; see draw)
-  const shownCheckups = (here) => dayListCheckups(checkups, rows).filter((c) => checkupMatches(c) || `c:${c.id}` === here).sort(byToken);
+  // (keep: the row with the cursor, and the rows held for the mouse, stay whatever the filters say; see draw)
+  const shownCheckups = (keep) => dayListCheckups(checkups, rows).filter((c) => checkupMatches(c) || keep(`c:${c.id}`)).sort(byToken);
   const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}${busyDemo ? '&demo=busy' : ''}`);
 
   // The less-used filters sit behind "Filters", a small panel over the list (the ▾ in a column heading opens it too); the
@@ -444,16 +481,29 @@ export async function renderSheet(root, params, signal) {
   // (how.quiet: a reload in the background, see reloadQuietly. Its answer is not drawn when the person has started typing
   //  or opened a dialog meanwhile: the redrawn rows would wipe what they just typed. It is tried again a little later.
   //  load is also the onDone of dialogs, which pass it whatever they saved: only { quiet: true } is quiet.)
+  // An answer is the list as it was when it was asked for. Only the last one asked for is drawn (the day or branch may have
+  // changed meanwhile), and not one asked for before a change made on this screen (listVersion; for a reload in the
+  // background also a key or tap in the list): it would take that change off the screen again (a patient just added by
+  // Mr#, with the cursor in their row; a cell typed and saved), so the list is asked for again. Typed changes still on their
+  // way to the server are put on the rows that come back.
+  let loadSeq = 0;
   async function load(how) {
     const quiet = how?.quiet === true;
+    const seq = ++loadSeq;
+    const version = listVersion;
+    const asked = Date.now();
     try {
       const [visitRows, checkupRows] = await Promise.all([d.listVisits({ branchId: branchId || null, date }), loadCheckups()]);
-      if (quiet && userIsBusy()) { reloadQuietly(); return; }
+      if (seq !== loadSeq) return;
+      if (quiet && (version !== listVersion || lastTouch > asked || userIsBusy())) { reloadQuietly(); return; }
+      if (version !== listVersion) { await load(how); return; }
+      for (const r of visitRows) Object.assign(r, q.unsentChanges('visits', r.id));
+      for (const c of checkupRows) Object.assign(c, q.unsentChanges('checkups', c.id));
       rows = visitRows;
       checkups = checkupRows;
       if (!branchId) rows.sort((a, b) => a.branch_id - b.branch_id || (a.token_no ?? 999) - (b.token_no ?? 999));
       draw();
-    } catch (e) { toast(friendlyError(e), 'error'); }
+    } catch (e) { if (seq === loadSeq) toast(friendlyError(e), 'error'); }
   }
 
   // The day's list as a spreadsheet file (for the clinic cloud or printing). Checkup patients are added after the
@@ -482,15 +532,17 @@ export async function renderSheet(root, params, signal) {
 
   function save(row, fieldName, value) {
     row[fieldName] = value;
+    listVersion++;
     q.edit('visits', row.id, fieldName, value);
   }
   // A status, group or doctor change answers with the visit as the server has it, which may not have a cell typed just
   // before yet (it waits in the autosave queue): the typed changes go back on top, so the redrawn row keeps them.
-  const merge = (row, updated) => Object.assign(row, updated, q.unsentChanges('visits', row.id));
+  const merge = (row, updated) => { listVersion++; return Object.assign(row, updated, q.unsentChanges('visits', row.id)); };
 
   // ---- checkup patients (rows without an Mr#). Typed cells go through the same queue as the visits.
   function saveCheckup(c, fieldName, value) {
     c[fieldName] = value;
+    listVersion++;
     q.edit('checkups', c.id, fieldName, typeof value === 'string' && value.trim() === '' ? null : value);
   }
 
@@ -529,7 +581,7 @@ export async function renderSheet(root, params, signal) {
         ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
         : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
       h('a', { class: 'btn', href: inCheckupList }, 'Open in the checkup list'),
-      canRemoveCheckup(c) ? h('button', { type: 'button', class: 'btn btn-danger', onclick: () => { dialog?.close(); removeCheckupModal(c, { onDone: () => { checkups = checkups.filter((x) => x.id !== c.id); draw(); } }); } }, 'Remove from the list') : null,
+      canRemoveCheckup(c) ? h('button', { type: 'button', class: 'btn btn-danger', onclick: () => { dialog?.close(); removeCheckupModal(c, { onDone: () => { checkups = checkups.filter((x) => x.id !== c.id); listVersion++; draw(); } }); } }, 'Remove from the list') : null,
     ];
     dialog = modal(`${who} · Checkup patient`, h('div', {},
       h('p', { class: 'muted' }, c.patient_id ? 'Has a patient file now.' : 'No Mr# yet. A checkup patient gets a patient file when they start treatment.'),
@@ -819,7 +871,7 @@ export async function renderSheet(root, params, signal) {
       dataset: { focus: 'treatment', field: 'treatment_label' }, onchange: (e) => save(row, 'treatment_label', e.target.value),
     });
     const details = h('input', {
-      class: 'cell-input', value: row.details_text || '', disabled: !canTreatment, placeholder: 'e.g. U L 018 PC refresh', 'aria-label': `Treatment details for ${who}`,
+      class: 'cell-input', value: row.details_text || '', title: row.details_text || null, disabled: !canTreatment, placeholder: 'e.g. U L 018 PC refresh', 'aria-label': `Treatment details for ${who}`,
       dataset: { focus: 'details', field: 'details_text' }, oninput: (e) => save(row, 'details_text', e.target.value),
     });
     // Quick-tap chips (blueprint 11.2): arch, wire size, power chain, o-rings, rebond, extraction, elastics.
@@ -829,7 +881,7 @@ export async function renderSheet(root, params, signal) {
         ['Wire', ['012', '014', '016', '018', '020', '17x25', '19x25']],
         ['Done', ['PC', 'O-rings', 'Refresh', 'Rebond', 'Ligature', 'Elastics', 'Cross arch', 'Ext', 'IPR', 'Bite blocks']],
       ];
-      const add = (t) => { details.value = (details.value ? details.value.replace(/\s+$/, '') + ' ' : '') + t; save(row, 'details_text', details.value); };
+      const add = (t) => { details.value = (details.value ? details.value.replace(/\s+$/, '') + ' ' : '') + t; details.title = details.value; save(row, 'details_text', details.value); };
       modal(`Treatment details · ${who}`, h('div', {},
         groups.map(([name, items]) => h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'field-label' }, name),
           h('div', { class: 'inline' }, items.map((t) => h('button', { type: 'button', class: 'btn btn-small', onclick: () => add(t) }, t))))),
@@ -946,7 +998,7 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, status),
       h('td', {}),
       h('td', {}, doctorsBox),
-      h('td', {}, typedCell(text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
+      h('td', {}, typedCell(text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised', title: c.details || null }))),
       h('td', { class: 'pp' }),
       canBill ? h('td', {}) : null,
       h('td', {}, typedCell(text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null }))),
@@ -983,6 +1035,7 @@ export async function renderSheet(root, params, signal) {
   // row number, whatever its status is now (only draw sorts the list, see there). A status saved after the cursor has
   // left the row (a slow answer) moves it at the next quiet reload (settle).
   function redrawRow(row, make = rowEl) {
+    listVersion++; // (a change made here: a reload asked for before it would take it off the screen, see load)
     const old = tableBody.querySelector(`tr[data-id="${row.id}"]`);
     if (old) {
       const saved = old.contains(document.activeElement) ? rememberFocus() : null;
@@ -1043,10 +1096,12 @@ export async function renderSheet(root, params, signal) {
 
   function draw() {
     // The row with the cursor stays in the list even when it no longer matches the filters (its status was just changed
-    // under the Waiting filter, say), as it keeps its place below: it goes once the cursor has left it (settle).
+    // under the Waiting filter, say), as it keeps its place below: it goes once the cursor has left it (settle). So do the
+    // rows while the mouse is on them (mouseOn, at the top).
     const here = rowKey(document.activeElement);
-    const shown = rows.filter((r) => matches(r) || `v:${r.id}` === here);
-    const shownChecks = shownCheckups(here);
+    const keep = (key) => key === here || (mouseOn && placed.has(key));
+    const shown = rows.filter((r) => matches(r) || keep(`v:${r.id}`));
+    const shownChecks = shownCheckups(keep);
     branchHead.hidden = !!branchId;
     mount(colgroup, columns());
     addPanel.hidden = !branchId || !search;
@@ -1063,15 +1118,20 @@ export async function renderSheet(root, params, signal) {
     // (and so any text typed in it and not saved yet) is sorted by the status and token it was drawn with last time. It
     // moves to its new place at the first redraw after the cursor has left it: leaving it asks for a quiet reload, which
     // waits until nobody is typing or clicking in the list (settle, at the top), and the live updates, the 20-second check
-    // and any other redraw move it too. Every row is numbered 1..n in the order shown, like the sheet's row numbers
-    // (owner, 11 Oct 2026; COMPLETED_OWN_COUNT, at the top); that is not the token, which repeats from one kind of
-    // treatment to another.
+    // and any other redraw move it too. While the mouse is on the rows, every row is held that way, and a row that came
+    // meanwhile goes at the end (late): the patient under the mouse stays under it; the rows are sorted once the mouse is
+    // done (orderHeld, see mouseOn). Every row is numbered 1..n in the order shown, like the sheet's row numbers (owner,
+    // 11 Oct 2026; COMPLETED_OWN_COUNT, at the top); that is not the token, which repeats from one kind of treatment to
+    // another.
     const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].map((item) => {
       const key = keyOf(item);
-      const held = key === here ? placed.get(key) : null;
-      return { ...item, key, rank: held ? held.rank : rankOf(item), token: held ? held.token : tokenOf(item) };
+      const held = keep(key) ? placed.get(key) : null;
+      return { ...item, key, rank: held ? held.rank : rankOf(item), token: held ? held.token : tokenOf(item), late: mouseOn ? (held ? held.late : 1) : 0 };
     }).sort(listOrder);
-    placed = new Map(items.map((item) => [item.key, { rank: item.rank, token: item.token }]));
+    placed = new Map(items.map((item) => [item.key, { rank: item.rank, token: item.token, late: item.late }]));
+    // (a row drawn where it was, not where it belongs now; the row with the cursor goes once the cursor has left it)
+    orderHeld = mouseOn && items.some((item) => item.key !== here
+      && (item.late || movedFrom(item, item) || !(item.checkup ? checkupMatches(item.row) : matches(item.row))));
     let n = 0;
     let done = 0;
     const serial = (item) => (COMPLETED_OWN_COUNT && item.rank === STATUS_RANK.completed ? ++done : ++n);
@@ -1115,6 +1175,17 @@ export async function renderSheet(root, params, signal) {
 
   // A patient who is on this branch's list for the day already: their row.
   const onList = (p) => (branchId ? rows.find((r) => r.patient_id === p.id && r.branch_id === branchId) : null);
+  // The same, asked of the server too when they are not among the rows on screen: those can be a little behind on a busy
+  // day (a reload waits while someone types in the list), and another computer or the Google Sheet sync may have just put
+  // the patient on the list; the Mr# must not give them a second row. Their row is put on this list then. (One small read:
+  // that patient's visits of the day.)
+  async function onListNow(p) {
+    if (!branchId || onList(p)) return onList(p);
+    const theirs = (await d.listVisits({ branchId, date, patientId: p.id }))
+      .filter((r) => r.patient_id === p.id && r.branch_id === branchId && !rows.some((x) => x.id === r.id));
+    if (theirs.length) { rows.push(...theirs); listVersion++; draw(); }
+    return onList(p);
+  }
   const onListText = (r) => `${r.patient.full_name} is already on the list${r.token_no ? ` (token ${r.token_no})` : ''}`;
   // The cursor from the add line to a row's cell (the filters are cleared when they hide the row); Enter in that row goes
   // back to the add box (onKey).
@@ -1136,12 +1207,13 @@ export async function renderSheet(root, params, signal) {
   // (treatment: what a person who was a checkup patient came for, when they are put on the list as a patient.
   //  fast: added by typing the Mr# and Enter (addByMr has checked the list): no guidance dialog.)
   async function addPatient(p, treatment, { fast = false } = {}) {
-    const there = fast ? null : onList(p);
-    if (there && !(await addAgain(there))) return null;
     try {
+      const there = fast ? null : await onListNow(p);
+      if (there && !(await addAgain(there))) return null;
       const braces = !!p.braces_active;
       const row = await d.addVisit({ patient_id: p.id, branch_id: branchId, visit_date: date, treatment_label: braces ? 'Monthly' : (treatment || 'Checkup'), braces, status: date === localISO() ? 'waiting' : 'scheduled' });
       rows.push(row);
+      listVersion++;
       draw();
       toast(`${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
       if (!fast && row.braces_month) openRow(row);
@@ -1191,7 +1263,8 @@ export async function renderSheet(root, params, signal) {
       let found;
       try { found = (await d.searchPatients(text)).filter((p) => String(p.mr_number) === text); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       if (found.length !== 1) return false;
-      const there = onList(found[0]);
+      let there;
+      try { there = await onListNow(found[0]); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       if (there) { await arrived(there, ticket); return true; }
       const row = await addPatient(found[0], undefined, { fast: true });
       if (!row) return false; // (not added: the Mr# comes back in the box to try again)
@@ -1219,6 +1292,7 @@ export async function renderSheet(root, params, signal) {
     if (!res) return;
     if (res.patient) { addPatient(res.patient); return; } // the person already has a patient file: put that file on the list instead
     checkups = [...checkups, res];
+    listVersion++;
     draw();
     toast(`${res.patient_name} added as a checkup patient.`, 'ok');
   } }, '+ Checkup patient');
@@ -1273,6 +1347,7 @@ export async function renderSheet(root, params, signal) {
     clearTimeout(liveTimer);
     clearTimeout(retryTimer);
     clearTimeout(undoTimer);
+    clearTimeout(mouseTimer);
     stopLive?.();
     stopLive = null;
     stopLiveCheckups?.();
