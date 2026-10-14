@@ -315,3 +315,59 @@ test('live: Save calls save_my_menu with the list', async () => {
   await (data as any).saveMyMenuArrangement(['stock', 'today', '-menu:sheet']);
   assert.deepEqual(f.rpcs, [{ name: 'save_my_menu', args: { p_arrangement: ['stock', 'today', '-menu:sheet'] } }]);
 });
+
+// ======================================================================================= the hook in shell.js
+// shell.js draws its menus from arrangedMenu(menu()) (web/js/views/staff/nav-arrange.js): the signed-in person's saved list
+// applied to whatever menu() has at that moment. Other branches add pages to menu() (History of Aaj ki List, Job applications),
+// so a page key nobody here has heard of must still turn up in its default place for someone who saved before it existed.
+// state.js is a stand-in with one signed-in staff member; the saved list is the copy on this computer that the hook reads.
+registerHooks({
+  resolve(spec, ctx, nextResolve) {
+    if (spec === '../../state.js' && ctx.parentURL?.includes('/web/js/views/staff/nav-arrange.js')) {
+      return { url: 'data:text/javascript,export const state = globalThis.__navState;', shortCircuit: true };
+    }
+    return nextResolve(spec, ctx);
+  },
+});
+(globalThis as any).__navState = { session: { staff: { id: 's-later' } }, data: {} };
+const { arrangedMenu, myArrangement } = await import('../web/js/views/staff/nav-arrange.js');
+
+test('through shell.js\'s hook: a page added to menu() later is in its default place for someone who saved an arrangement before it existed', () => {
+  // Saved with today's menu: Patients first, Stock pinned, Billing and the Coordinator drop-down taken off.
+  const saved = arrangementFor(menuEntries(ADMIN()), ['patients', 'today', 'menu:sheet', 'stock', 'menu:reports']);
+  const copy = JSON.stringify(saved);
+  store.set('staff-menu:s-later', copy);
+  const had = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { hash: '#/staff/patients' }, configurable: true, writable: true });
+  try {
+    assert.deepEqual(bar(arrangedMenu(ADMIN())), ['Patients', 'Today', 'Aaj ki List ▾', 'Stock', 'Reports ▾', 'More ▾'], 'the saved arrangement');
+    // Later menu() gains pages with keys nothing above knows: a top-bar link at the end of the clinic's bar, a page inside the
+    // Aaj ki List drop-down right after the Aaj ki List, a Coordinator tab (that drop-down is under More for this person) and a
+    // More page.
+    const later = ADMIN();
+    later.splice(later.length - 1, 0, link('Fake new page', 'fake-new-page'));
+    later.find((x: Item) => x.key === 'sheet').items.splice(1, 0, link('Fake sheet history', 'fake-sheet-history'));
+    later.find((x: Item) => x.key === 'coordinator').items.push(link('Fake coordinator tab', 'coordinator?tab=fake'));
+    later.find((x: Item) => x.key === 'more').items.splice(2, 0, link('Fake more page', 'fake-more-page'));
+    const out = arrangedMenu(later);
+    assert.deepEqual(bar(out), ['Patients', 'Today', 'Aaj ki List ▾', 'Stock', 'Reports ▾', 'Fake new page', 'More ▾'],
+      'the new top-bar link follows Reports: the entry before it on the clinic\'s bar (Coordinator) is not on this bar, Reports is');
+    const fake = out.find((x: Item) => x.label === 'Fake new page');
+    assert.deepEqual([fake.href, fake.key], ['#/staff/fake-new-page', 'fake-new-page']);
+    assert.deepEqual(out.find((x: Item) => x.key === 'sheet').items.map((i: Item) => i.label), ['Aaj ki List', 'Fake sheet history', 'Queue board', 'Checkups']);
+    assert.deepEqual(more(out), ['Billing', '---', '[Coordinator]', 'Reminders', 'Lab work', 'Fake coordinator tab', '---', 'Complaints', 'Fake more page', '---', 'Staff accounts', 'Audit log']);
+    // The dialog (opened with the same menu()) lists every new page, the top-bar one already in its place on the top bar.
+    const entries = menuEntries(later);
+    assert.deepEqual(topKeys(entries, myArrangement()), ['patients', 'today', 'menu:sheet', 'stock', 'menu:reports', 'fake-new-page']);
+    assert.deepEqual(['fake-sheet-history', 'coordinator?tab=fake', 'fake-more-page'].map((k) => entries.find((e: any) => e.key === k)?.group), ['sheet', 'coordinator', 'more']);
+    // Too long for the screen, the new link goes into More with the other top-bar pages taken off.
+    assert.deepEqual(more(arrangedMenu(later, { spill: 1 })).slice(0, 3), ['Billing', 'Fake new page', '---']);
+    assert.equal(store.get('staff-menu:s-later'), copy, 'drawing the menu never rewrites what the person saved');
+    // Someone who never arranged anything gets menu() itself.
+    store.delete('staff-menu:s-later');
+    assert.equal(arrangedMenu(later), later);
+  } finally {
+    store.delete('staff-menu:s-later');
+    if (had) Object.defineProperty(globalThis, 'location', had); else delete (globalThis as any).location;
+  }
+});
