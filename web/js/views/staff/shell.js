@@ -26,6 +26,7 @@ const renderPortalPreview = lazy(() => import('../portal.js'), 'renderPortalPrev
 const PAGES = {
   today: { render: lazy(pagesModule, 'renderDashboard'), show: () => true },
   sheet: { render: lazy(() => import('./sheet.js'), 'renderSheet'), show: () => can('sheet.view') },
+  'day-history': { render: lazy(() => import('./day-history.js'), 'renderDayHistory'), show: () => can('sheet.view') },
   queue: { render: lazy(pagesModule, 'renderQueue'), show: () => can('sheet.view') },
   checkups: { render: lazy(() => import('./checkups.js'), 'renderCheckups'), show: () => can('sheet.view') },
   patients: { render: lazy(patientsModule, 'renderPatients'), show: () => can('patients.view') },
@@ -46,7 +47,7 @@ function menu() {
   const link = (label, path, key = path.split('?')[0]) => ({ label, href: `#/staff/${path}`, key, show: () => show(key) });
   const M = [
     link('Today', 'today'),
-    { label: 'Aaj ki List', key: 'sheet', show: () => show('sheet'), items: [link('Aaj ki List', 'sheet'), link('Queue board', 'queue'), link('Checkups', 'checkups')] },
+    { label: 'Aaj ki List', key: 'sheet', show: () => show('sheet'), items: [link('Aaj ki List', 'sheet'), link('History of Aaj ki List', 'day-history'), link('Queue board', 'queue'), link('Checkups', 'checkups')] },
     link('Patients', 'patients'),
     link('Billing', 'billing'),
     { label: 'Reports', key: 'reports', show: () => show('reports') || show('accounts'), items: [
@@ -134,7 +135,7 @@ export async function renderStaff(root, path, params, signOut) {
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
-  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet');
+  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || (section === 'day-history' && key === 'sheet');
   const items = menu();
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
