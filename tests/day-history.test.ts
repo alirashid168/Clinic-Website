@@ -160,6 +160,14 @@ test('live: dayListCopy asks the database for one day; dayClosing reads the line
   await assert.rejects(() => data.dayClosing({ branchId: 2, date: '2026-10-12' }), /permission denied/);
 });
 
+test('live: the Aaj ki List asks for its visits by token (none last), then created_at, then id: the order of the History\'s copy, also for an imported day', async () => {
+  const { f, data } = await openPage(() => ({ data: [], error: null, status: 200 }));
+  await data.listVisits({ branchId: '3', date: '2025-03-04' });
+  const { ops } = f.requests.find((r: any) => r.table === 'visits');
+  assert.deepEqual(ops.filter((o: any) => o[0] === 'order'),
+    [['order', 'token_no', { ascending: true, nullsFirst: false }], ['order', 'created_at', { ascending: true }], ['order', 'id', { ascending: true }]]);
+});
+
 // ======================================================================================= the demo adapter
 async function demoAs(id: string) {
   const d: any = createDemoAdapter();
@@ -237,4 +245,23 @@ test('demo: a reader without "See pending dues" gets the copy without dues; with
   assert.ok(copy.rows.filter((r: any) => r.kind === 'patient').every((r: any) => typeof r.dues === 'number' && r.phone));
   assert.equal(copy.ended, false);
   assert.deepEqual(copy.rows.filter((r: any) => r.kind === 'checkup').map((r: any) => r.dues), [null, null], 'checkup patients have no dues');
+});
+
+test('demo: an imported day (every row added at one moment, no tokens) has the same order on the Aaj ki List and in its History copy', async () => {
+  const d = await demoAs('s-admin');
+  const day = addDaysISO(todayISO(), -400);
+  assert.equal((await d.listVisits({ branchId: 2, date: day })).length, 0, 'a day with no other rows');
+  const names = Array.from({ length: 12 }, (_, i) => `Imported Person ${String(i + 1).padStart(2, '0')}`);
+  for (const [i, name] of names.entries()) await d.createPatient({ mr_number: String(77201 + i), full_name: name, phone: `031600${77201 + i}`, first_branch_id: 2 });
+  const out = await d.importAajSheet(names.map((name, i) =>
+    [day, 2, String(77201 + i), name, null, null, null, 'Checkup', null, 'completed', null, [], [], [], null, null, 'North Nazimabad', false, null]), false);
+  assert.equal(out.visits_inserted, 12);
+  const visits = await d.listVisits({ branchId: 2, date: day });
+  assert.equal(new Set(visits.map((v: any) => v.created_at)).size, 1, 'one created_at');
+  assert.ok(visits.every((v: any) => v.token_no == null), 'no tokens');
+  // (all completed, no token, one created_at: the Aaj ki List's own sort keeps the order the rows came in)
+  const list = visits.map((v: any) => v.id);
+  assert.deepEqual((await d.dayListCopy({ branchId: 2, date: day })).rows.map((r: any) => r.id), list, 'the list as stored now');
+  await d.endDay({ branchId: 2, date: day });
+  assert.deepEqual((await d.dayListCopy({ branchId: 2, date: day })).rows.map((r: any) => r.id), list, 'the saved copy');
 });

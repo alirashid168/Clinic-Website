@@ -231,6 +231,42 @@ begin
     'no trigger runs any of this: the sync and the list work as before');
 end $$;
 
+-- 3b. An imported day (the Healthwire import, the old Aaj ki List's import): every row added in one statement at the day's midnight,
+-- with no token. The copy keeps those rows in the order the Aaj ki List asks for them (listVisits: token, then created_at, then id;
+-- listDayCheckups: created_at, then id), so each row has the same number on both pages.
+delete from public.visits where branch_id = current_setting('test.dha')::smallint and visit_date = date '2024-03-04';
+delete from public.checkups where branch_id = current_setting('test.dha')::smallint and checkup_date = date '2024-03-04';
+with p as (
+  insert into public.patients (mr_number, full_name, phone)
+  select '311' || lpad(g::text, 2, '0'), 'Imported Person ' || lpad(g::text, 2, '0'), null from generate_series(1, 12) g
+  returning id, mr_number)
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, legacy_source, completed_at, created_at)
+select p.id, current_setting('test.dha')::smallint, date '2024-03-04', 'completed', 'Checkup', 'healthwire', timestamptz '2024-03-04 20:00+05',
+       timestamptz '2024-03-04 00:00+05'
+  from p order by p.mr_number;
+insert into public.checkups (checkup_date, branch_id, patient_name, checkup_for, day_status, source, created_at)
+select '2024-03-04', current_setting('test.dha')::smallint, 'Imported Checkup ' || g, 'Checkup', 'completed', 'google_sheet', timestamptz '2024-03-04 00:00+05'
+  from generate_series(1, 4) g;
+do $$
+declare
+  v_dha smallint := current_setting('test.dha')::smallint;
+  s jsonb := private.day_list_rows(v_dha, date '2024-03-04');
+begin
+  perform pg_temp.check((select count(*) filter (where token_no is null) = 12 and count(distinct created_at) = 1
+                           from public.visits where branch_id = v_dha and visit_date = '2024-03-04'),
+    'imported day: 12 completed visits with no token, all added at the same moment');
+  perform pg_temp.check(pg_temp.names(s) = (
+      select string_agg(x.name, ' | ' order by x.k, x.o) from (
+        select 0 as k, p.full_name as name, row_number() over (order by v.token_no asc nulls last, v.created_at, v.id) as o
+          from public.visits v join public.patients p on p.id = v.patient_id where v.branch_id = v_dha and v.visit_date = '2024-03-04'
+        union all
+        select 1, c.patient_name, row_number() over (order by c.created_at, c.id)
+          from public.checkups c where c.branch_id = v_dha and c.checkup_date = '2024-03-04' and not c.date_is_month) x),
+    'imported day: the copy has the rows in the order the Aaj ki List asks for them (token, then created_at, then id)');
+  perform pg_temp.check(jsonb_array_length(s) = 16 and (select bool_and((r->>'n')::int = o) from jsonb_array_elements(s) with ordinality x(r, o)),
+    'imported day: 16 rows, numbered 1..16 in that order');
+end $$;
+
 -- 5. The list changes after the day was ended (a waiting patient is finished); the coordinator ends the day again.
 update public.visits set status = 'completed' where patient_id = (select id from public.patients where mr_number = '31003') and visit_date = '2026-09-14';
 set role authenticated;

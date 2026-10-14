@@ -15,7 +15,7 @@ const byValue = (x, y) => (x === y ? 0 : x < y ? -1 : 1);
 /**
  * The rows of one day list ({ kind: 'patient' | 'checkup', status, token, created_at, id, ... }) in list order, each with its
  * serial number n: by status, the patients before the checkup patients, by token (a token that is not a whole number last),
- * then by when the row was added.
+ * then by when the row was added, then by id (a uuid's text in code-unit order is the database's uuid order).
  */
 export function orderDayList(rows) {
   return [...rows].sort((a, b) => (STATUS_RANK[a.status || ''] ?? 3) - (STATUS_RANK[b.status || ''] ?? 3)

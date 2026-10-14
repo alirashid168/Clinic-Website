@@ -1142,8 +1142,11 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ visits
+    // By token, then by when the row was added and by its id: rows with no token and one created_at (an imported day's) keep one order,
+    // the same as the History's copy of that day (private.day_list_rows in 20261012000100_day_list_history.sql).
     async listVisits({ branchId, date }) {
-      let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false });
+      let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false })
+        .order('created_at', { ascending: true }).order('id', { ascending: true });
       if (branchId) q = q.eq('branch_id', Number(branchId));
       return enrichVisits(check(await q));
     },

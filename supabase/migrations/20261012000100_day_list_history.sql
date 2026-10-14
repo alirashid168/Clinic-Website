@@ -120,7 +120,9 @@ $$;
 --   1. by status: Waiting, In treatment, Scheduled, a checkup patient with no status yet, Completed, Cancelled, No show;
 --   2. inside one status the patients (visits) before the checkup patients;
 --   3. then by token: a visit's token number; a checkup's token when it is a whole number ("7"); any other text, or none, last;
---   4. then by when the row was added, and by its id (two rows added at the same moment keep one order).
+--   4. then by when the row was added, and by its id (the uuid itself, not its text): the Aaj ki List asks for the same, so rows
+--      added at the same moment with no token (every row of an imported day: Healthwire, the old Aaj ki List) have the same order
+--      and numbers on both pages (listVisits and listDayCheckups in web/js/data/supabase.js order by created_at, then id).
 -- Every row then gets its serial number n = 1, 2, 3 ... in that order, like the numbers down the side of the sheet.
 -- A row: n, kind ('patient' or 'checkup'), id (of the visit or checkup), patient_id, mr (a checkup patient's only once they
 -- have a patient file), name, month (braces month), treatment, token, status (null for a checkup with none), group ('Group 2'),
@@ -160,7 +162,7 @@ as $$
              'phone', v.patient_phone, 'created_at', v.created_at) as j,
            case v.status when 'waiting' then 0 when 'in_treatment' then 1 when 'scheduled' then 2 when 'completed' then 4
                          when 'cancelled' then 5 when 'no_show' then 6 else 3 end as status_rank,
-           0 as kind_rank, v.token_no::numeric as token_rank, v.created_at, v.id::text as id
+           0 as kind_rank, v.token_no::numeric as token_rank, v.created_at, v.id
       from v
       left join public.treatments t on t.id = v.treatment_id
       left join money m on m.patient_id = v.patient_id
@@ -172,7 +174,7 @@ as $$
              'phone', c.phone, 'created_at', c.created_at),
            case c.day_status when 'waiting' then 0 when 'in_treatment' then 1 when 'completed' then 4
                              when 'cancelled' then 5 when 'no_show' then 6 else 3 end,
-           1, case when c.token ~ '^\s*[0-9]+\s*$' then regexp_replace(c.token, '\s', '', 'g')::numeric end, c.created_at, c.id::text
+           1, case when c.token ~ '^\s*[0-9]+\s*$' then regexp_replace(c.token, '\s', '', 'g')::numeric end, c.created_at, c.id
       from private.day_list_checkups(p_branch, p_date) c
       left join public.patients p on p.id = c.patient_id
   )

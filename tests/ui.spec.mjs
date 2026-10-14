@@ -2251,13 +2251,22 @@ await step('End the day: the front desk ends today\'s list; the dialog gives the
   await pd.waitForFunction((d) => location.hash.includes(`date=${d}`), tomorrow.iso);
   assert.equal(await pd.locator('input[aria-label="Date"]').inputValue(), tomorrow.iso, 'the next day\'s list is open (the "reset")');
   assert.equal((await pd.locator('.day-end-note').innerText()).trim(),
-    `${today.label} was ended and its list saved in History. This is the list for ${tomorrow.label}. See the saved copy`);
+    `${today.label} was ended and its list saved in History. This is the list for ${tomorrow.label}. See the saved copy · Back to ${today.label}`);
   assert.equal(await pd.getByRole('button', { name: 'End the day' }).count(), 0, 'a day still to come cannot be ended');
+  // A patient who arrives after the day was ended: the add panel and the toast say that this list books them for tomorrow.
+  assert.equal(await pd.locator('.add-panel-text .muted').innerText(),
+    `This is the list for ${tomorrow.label}: patients added here are booked for that day. For a patient who is here now, press Today.`);
+  // (Saad Malik has no braces case, so no braces month dialog opens for him)
+  await pd.fill('.add-panel input[type=search]', 'Saad');
+  await pd.click('.suggestions button:has-text("Saad Malik")');
+  await pd.waitForSelector(`.toast:has-text("Saad Malik booked for ${tomorrow.label}.")`);
   await shot(pd, '21-next-day-after-end');
-  // Nothing on the ended day's list was changed.
-  await pd.getByRole('button', { name: 'Today', exact: true }).click();
+  // "Back to" the ended day; nothing on its list was changed.
+  await pd.locator('.day-end-note a', { hasText: `Back to ${today.label}` }).click();
+  await pd.waitForFunction((d) => document.querySelector('input[aria-label="Date"]')?.value === d, today.iso);
   await pd.waitForSelector('table.sheet tbody tr.is-checkup');
   assert.deepEqual(await sheetStatuses(pd), statuses, 'every row is as it was');
+  assert.match(await pd.locator('.add-panel-text .muted').innerText(), /^New and starting treatment\?/, 'today\'s add panel is the usual one');
 });
 await step('End the day: an ended day says when and by whom (with a link to its copy), the rows stay editable, and ending it again updates the copy', async () => {
   const note = pd.locator('.day-end-note');
@@ -2411,6 +2420,42 @@ await step('phone: the History of Aaj ki List and a saved day fit the screen', a
   await phd.waitForSelector('.day-copy table.sheet tbody tr');
   assert.ok(await phd.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'the table scrolls inside its box, not the page');
   await shot(phd, '27-history-saved-day-phone');
+});
+const ptap = await newPage({ width: 375, height: 667 }, { hasTouch: true, isMobile: true });
+await step('phone: a quick double tap on "End the day" does not end the day (the dialog\'s own button is off for half a second)', async () => {
+  await loginAs(ptap, 'Front desk \\(North Nazimabad\\)');
+  await ptap.goto(BASE + '#/staff/sheet');
+  await ptap.waitForSelector('table.sheet tbody tr.is-checkup');
+  const button = ptap.getByRole('button', { name: 'End the day' });
+  const inDialog = ptap.locator('.modal').getByRole('button', { name: 'End the day' });
+  const ended = () => ptap.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    return !!(await state.data.dayClosing({ branchId: 2, date: localISO() }));
+  });
+  // Where the dialog's "End the day" opens (on a phone it can be right where the toolbar's button is, as at this size).
+  await button.scrollIntoViewIfNeeded();
+  await button.tap();
+  await inDialog.waitFor();
+  const target = await inDialog.boundingBox();
+  await ptap.keyboard.press('Escape');
+  await ptap.locator('.modal').waitFor({ state: 'detached' });
+  // The double tap: the first opens the dialog, the second (150 ms later) lands on the dialog's "End the day".
+  const from = await button.boundingBox();
+  const t0 = Date.now();
+  await ptap.touchscreen.tap(from.x + from.width / 2, from.y + from.height / 2);
+  await ptap.waitForTimeout(150);
+  await ptap.touchscreen.tap(target.x + target.width / 2, target.y + target.height / 2);
+  const gap = Date.now() - t0;
+  await ptap.waitForTimeout(400);
+  assert.equal(await ptap.locator('.modal').count(), 1, `the dialog is still open (taps ${gap} ms apart)`);
+  assert.equal(await ptap.locator('.toast:has-text("Day ended")').count(), 0, 'no "Day ended" toast');
+  assert.equal(await ended(), false, 'the day was not ended');
+  await shot(ptap, '28-phone-double-tap-dialog-open');
+  // A tap after that half second ends the day as usual.
+  await inDialog.tap();
+  await ptap.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
+  assert.equal(await ended(), true);
 });
 
 await browser.close();

@@ -15,6 +15,17 @@ export function dayHistoryHref(branchId = null, date = null) {
   return `#/staff/day-history${query ? `?${query}` : ''}`;
 }
 
+// After "End the day" the next day's list stays open until midnight: a patient added there is booked for that day (Scheduled),
+// not for tonight. On any later day's list the add panel and the toast say so.
+/** What the add panel says on a later day's list. */
+export const laterDayHint = (date) => `This is the list for ${dayLabel(date)}: patients added here are booked for that day. For a patient who is here now, press Today.`;
+/** The toast after adding a patient to a later day's list. */
+export const bookedFor = (name, date) => `${name} booked for ${dayLabel(date)}.`;
+
+// How long the dialog's "End the day" stays switched off after the dialog opens: on a phone a quick double tap on the toolbar's
+// "End the day" puts its second tap on the dialog's button whenever the two are in the same place on the screen.
+const ARM_MS = 500;
+
 /**
  * getList() -> { branchId (0 = all branches), date, rows, pending, failed }: rows = the whole day's list as { kind, status }
  * (whatever the filters on screen show); pending / failed = typed changes still being saved / not saved. onEnded(nextDate)
@@ -48,8 +59,10 @@ export function dayEndControls({ getList, onEnded }) {
         `This day was ended at ${endedAt(closing, date)}${closing.closed_by_name ? ` by ${closing.closed_by_name}` : ''}.${mayEnd() ? ' Ending it again updates the copy.' : ''} `,
         h('a', { href: dayHistoryHref(branchId, date) }, 'See the saved copy'));
     } else if (after) {
+      // (Back: for a patient who is still being seen, or arrives late, after the day was ended)
       mount(note, `${dayLabel(after)} was ended and its list saved in History. This is the list for ${dayLabel(date)}. `,
-        h('a', { href: dayHistoryHref(branchId, after) }, 'See the saved copy'));
+        h('a', { href: dayHistoryHref(branchId, after) }, 'See the saved copy'), ' · ',
+        h('a', { href: `#/staff/sheet?branch=${branchId}&date=${after}` }, `Back to ${dayLabel(after)}`));
     } else mount(note);
   }
 
@@ -78,7 +91,7 @@ export function dayEndControls({ getList, onEnded }) {
     const busy = c.waiting + c.in_treatment;
     const next = addDaysISO(list.date, 1);
     const before = shown.key === keyOf(list) ? shown.closing : null;
-    modal(`End the day for ${branchName(list.branchId)}, ${dayLabel(list.date)}?`, h('div', {},
+    const { dialog } = modal(`End the day for ${branchName(list.branchId)}, ${dayLabel(list.date)}?`, h('div', {},
       h('p', {}, `${c.total} patient${c.total === 1 ? '' : 's'}${c.checkups ? ` (${c.checkups === c.total ? 'all' : c.checkups} of them checkup patients)` : ''}: `
         + `${c.completed} completed, ${busy} still waiting or in treatment. A copy of the list is saved in History.`),
       busy ? h('p', {}, `The ${busy === 1 ? 'patient' : `${busy} patients`} still waiting or in treatment stay as they are: ending the day changes nobody's status.`) : null,
@@ -95,6 +108,10 @@ export function dayEndControls({ getList, onEnded }) {
       } },
     // Starts on Cancel, so a second Enter (or a held key) does not end the day; the counts are read out as the description.
     ], { destructive: true });
+    // And a second tap of a quick double tap finds the dialog's "End the day" switched off (see ARM_MS).
+    const endBtn = dialog.querySelector('.modal-actions .btn-primary');
+    endBtn.disabled = true;
+    setTimeout(() => { endBtn.disabled = false; }, ARM_MS);
   }
 
   return { button, historyLink, note, refresh };

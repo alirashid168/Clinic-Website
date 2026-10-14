@@ -632,10 +632,13 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ visits
+    // By token, then by when the row was added and by its id, as the live adapter asks the database (rows with no token and one
+    // created_at, such as an imported day's, keep the order the History's copy has: lib/day-list.js orderDayList).
     async listVisits({ branchId, date }) {
       need('sheet.view');
       return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && branchOk(v.branch_id))
-        .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999)).map(enrichVisit);
+        .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
+          || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(enrichVisit);
     },
     subscribeVisits() { return () => {}; },
     async addVisit(row) {
@@ -765,7 +768,7 @@ export function createDemoAdapter() {
     },
     async listDayCheckups({ branchId = null, date }) {
       return db.checkups.filter((c) => c.checkup_date === date && !c.date_is_month && (!branchId || c.branch_id === Number(branchId)) && checkupVisible(c))
-        .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)).map(checkupView);
+        .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(checkupView);
     },
     subscribeCheckups() { return () => {}; },
     async addCheckup(row) {

@@ -10,7 +10,7 @@ import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, fla
 import { newInvoiceModal, paymentModal } from './invoice.js';
 import { dayListCheckups } from '../../lib/checkups.js';
 import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
-import { dayEndControls } from './day-end.js';
+import { dayEndControls, laterDayHint, bookedFor } from './day-end.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = {
@@ -673,7 +673,8 @@ export async function renderSheet(root, params, signal) {
     addPanel.hidden = !branchId || !search;
     // "+ Checkup patient" only where checkups exist (the database update has been run) and for today or an earlier day.
     checkupBtn.hidden = checkupsMissing || date > localISO() || !can('sheet.edit');
-    addHint.textContent = checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
+    // (a later day, such as the one "End the day" opens: patients added there are booked for that day, day-end.js)
+    addHint.textContent = date > localISO() ? laterDayHint(date) : checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
     warnBox.hidden = !checkupsWarn;
     warnBox.textContent = checkupsWarn ? `Checkup patients could not be loaded: ${checkupsWarn}` : '';
     const saved = rememberFocus();
@@ -711,7 +712,7 @@ export async function renderSheet(root, params, signal) {
       const row = await d.addVisit({ patient_id: p.id, branch_id: branchId, visit_date: date, treatment_label: braces ? 'Monthly' : (treatment || 'Checkup'), braces, status: date === localISO() ? 'waiting' : 'scheduled' });
       rows.push(row);
       draw();
-      toast(`${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
+      toast(row.visit_date > localISO() ? bookedFor(p.full_name, row.visit_date) : `${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
       if (row.braces_month) openRow(row);
     } catch (e) { toast(notSaved(e, `${p.full_name} was not added to the list.`), 'error', 8000); }
   }
