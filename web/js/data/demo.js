@@ -10,7 +10,7 @@
 
 import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '../lib/protocol.js';
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
-import { todayISO } from '../ui/dom.js';
+import { todayISO, localISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
@@ -1418,7 +1418,8 @@ export function createDemoAdapter() {
       const hwTop = db.patients.reduce((m, p) => (p.legacy_source !== 'aaj_sheet_sync' && p.legacy_source !== 'aaj_ki_list' && /^[1-9]\d{0,4}$/.test(String(p.mr_number))
         && Number(p.mr_number) < 50000 ? Math.max(m, Number(p.mr_number)) : m), 0);
       const hwTopAt = (db.patients.find((p) => p.mr_number === String(hwTop)) || {}).created_at;
-      const hwDays = hwTopAt ? Math.max(0, Math.min(180, Math.round((Date.parse(today) - Date.parse(String(hwTopAt).slice(0, 10))) / 86400000))) : 0;
+      // (the day it was registered in Pakistan time, as the SQL does: a UTC date counted one day too many between 00:00 and 05:00)
+      const hwDays = hwTopAt ? Math.max(0, Math.min(180, Math.round((Date.parse(today) - Date.parse(localISO(new Date(hwTopAt)))) / 86400000))) : 0;
       const hwLimit = hwTop + 100 + 10 * hwDays;
       const heldWhy = {};
       for (const r of rows) { if (r[3] && r[2] && r[0] < today && !heldWhy[r[2]]) { const w = refusedWhy(r); if (w) heldWhy[r[2]] = w; } }

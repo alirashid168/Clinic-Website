@@ -1,0 +1,205 @@
+{
+  "note": "Our results page (#/results), shown in this order. Each photo: src = the large image, thumb = a 480 px square, caption. Only photos of patients who agreed (owner confirmed for all 40, 12 Oct 2026).",
+  "photos": [
+    {
+      "src": "results/01.jpg",
+      "thumb": "results/thumbs/01.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/02.jpg",
+      "thumb": "results/thumbs/02.jpg",
+      "caption": "Veneers: before and after"
+    },
+    {
+      "src": "results/03.jpg",
+      "thumb": "results/thumbs/03.jpg",
+      "caption": "Smile makeover by Dr. Verda Jawed: before and after"
+    },
+    {
+      "src": "results/04.jpg",
+      "thumb": "results/thumbs/04.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/05.jpg",
+      "thumb": "results/thumbs/05.jpg",
+      "caption": "Gap closure: before and after"
+    },
+    {
+      "src": "results/06.jpg",
+      "thumb": "results/thumbs/06.jpg",
+      "caption": "Veneers"
+    },
+    {
+      "src": "results/07.jpg",
+      "thumb": "results/thumbs/07.jpg",
+      "caption": "Veneers"
+    },
+    {
+      "src": "results/08.jpg",
+      "thumb": "results/thumbs/08.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/09.jpg",
+      "thumb": "results/thumbs/09.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/10.jpg",
+      "thumb": "results/thumbs/10.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/11.jpg",
+      "thumb": "results/thumbs/11.jpg",
+      "caption": "Full smile makeover: before and after"
+    },
+    {
+      "src": "results/12.jpg",
+      "thumb": "results/thumbs/12.jpg",
+      "caption": "Braces: progress"
+    },
+    {
+      "src": "results/13.jpg",
+      "thumb": "results/thumbs/13.jpg",
+      "caption": "Braces: before and during"
+    },
+    {
+      "src": "results/14.jpg",
+      "thumb": "results/thumbs/14.jpg",
+      "caption": "Scaling and polishing: before and after"
+    },
+    {
+      "src": "results/15.jpg",
+      "thumb": "results/thumbs/15.jpg",
+      "caption": "Braces: progress"
+    },
+    {
+      "src": "results/16.jpg",
+      "thumb": "results/thumbs/16.jpg",
+      "caption": "Smile after treatment"
+    },
+    {
+      "src": "results/17.jpg",
+      "thumb": "results/thumbs/17.jpg",
+      "caption": "Braces: before and after"
+    },
+    {
+      "src": "results/18.jpg",
+      "thumb": "results/thumbs/18.jpg",
+      "caption": "Braces: progress"
+    },
+    {
+      "src": "results/19.jpg",
+      "thumb": "results/thumbs/19.jpg",
+      "caption": "Teeth whitening: before and after"
+    },
+    {
+      "src": "results/20.jpg",
+      "thumb": "results/thumbs/20.jpg",
+      "caption": "Braces: progress"
+    },
+    {
+      "src": "results/21.jpg",
+      "thumb": "results/thumbs/21.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/22.jpg",
+      "thumb": "results/thumbs/22.jpg",
+      "caption": "Braces: progress"
+    },
+    {
+      "src": "results/23.jpg",
+      "thumb": "results/thumbs/23.jpg",
+      "caption": "Smile makeover after braces"
+    },
+    {
+      "src": "results/24.jpg",
+      "thumb": "results/thumbs/24.jpg",
+      "caption": "Braces: before and after"
+    },
+    {
+      "src": "results/25.jpg",
+      "thumb": "results/thumbs/25.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/26.jpg",
+      "thumb": "results/thumbs/26.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/27.jpg",
+      "thumb": "results/thumbs/27.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/28.jpg",
+      "thumb": "results/thumbs/28.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/29.jpg",
+      "thumb": "results/thumbs/29.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/30.jpg",
+      "thumb": "results/thumbs/30.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/31.jpg",
+      "thumb": "results/thumbs/31.jpg",
+      "caption": "Smile makeover: before and after"
+    },
+    {
+      "src": "results/32.jpg",
+      "thumb": "results/thumbs/32.jpg",
+      "caption": "Full smile makeover: before and after"
+    },
+    {
+      "src": "results/33.jpg",
+      "thumb": "results/thumbs/33.jpg",
+      "caption": "Full smile makeover: before and after"
+    },
+    {
+      "src": "results/34.jpg",
+      "thumb": "results/thumbs/34.jpg",
+      "caption": "Smile makeover after braces"
+    },
+    {
+      "src": "results/35.jpg",
+      "thumb": "results/thumbs/35.jpg",
+      "caption": "Veneers: before and after"
+    },
+    {
+      "src": "results/36.jpg",
+      "thumb": "results/thumbs/36.jpg",
+      "caption": "Veneers: before and after"
+    },
+    {
+      "src": "results/37.jpg",
+      "thumb": "results/thumbs/37.jpg",
+      "caption": "Full smile makeover: before and after"
+    },
+    {
+      "src": "results/38.jpg",
+      "thumb": "results/thumbs/38.jpg",
+      "caption": "Full smile makeover: before and after"
+    },
+    {
+      "src": "results/39.jpg",
+      "thumb": "results/thumbs/39.jpg",
+      "caption": "Teeth whitening: before and after"
+    },
+    {
+      "src": "results/40.jpg",
+      "thumb": "results/thumbs/40.jpg",
+      "caption": "Braces: before and during"
+    }
+  ]
+}
