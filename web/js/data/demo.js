@@ -15,13 +15,9 @@ import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
-<<<<<<< public-forms
-import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel } from '../lib/checkups.js';
-import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS } from '../lib/public-forms.js';
-=======
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel, dayListCheckups } from '../lib/checkups.js';
 import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
->>>>>>> golive
+import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS } from '../lib/public-forms.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));

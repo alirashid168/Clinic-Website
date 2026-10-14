@@ -2210,7 +2210,6 @@ await step('Register needs both "Register new patients" and list editing: with l
   assert.match(answer, /NOT_ALLOWED: registering a patient needs "Register new patients" and "Add and edit Aaj ki List entries"/);
 });
 
-<<<<<<< public-forms
 // ------------------------------------------------------------- the homepage forms: "Join our team" and "Complaints & suggestions"
 // (owner, 11 Oct 2026). A visitor on a phone sends both forms; then Dr. Ali finds the application on the Job applications page and the
 // website forms in the Complaints inbox; the clinic coordinator (no jobs.view) sees no application at all.
@@ -2641,7 +2640,7 @@ await step('staff on a phone: "View the website" is at the foot of the drawer; a
   await visitor.close();
   await pf.setViewportSize({ width: 1366, height: 860 });
 });
-=======
+
 // ------------------------------------------------------------- "End the day" and the History of Aaj ki List (owner, 12 Oct 2026)
 // (The demo has one day ended already: North Nazimabad five days ago, at 21:05, by its front desk. Made-up names only.)
 const pd = await newPage();
@@ -3003,7 +3002,6 @@ await step('End the day after midnight: a page opened before midnight says what 
   await m.waitFor({ state: 'detached' });
 });
 await pmid.close();
->>>>>>> golive
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }
