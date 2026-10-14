@@ -1407,10 +1407,7 @@ export function createDemoAdapter() {
       const hwTop = db.patients.reduce((m, p) => (p.legacy_source !== 'aaj_sheet_sync' && p.legacy_source !== 'aaj_ki_list' && /^[1-9]\d{0,4}$/.test(String(p.mr_number))
         && Number(p.mr_number) < 50000 ? Math.max(m, Number(p.mr_number)) : m), 0);
       const hwTopAt = (db.patients.find((p) => p.mr_number === String(hwTop)) || {}).created_at;
-<<<<<<< checkup-form-2
-=======
       // (the day it was registered in Pakistan time, as the SQL does: a UTC date counted one day too many between 00:00 and 05:00)
->>>>>>> golive
       const hwDays = hwTopAt ? Math.max(0, Math.min(180, Math.round((Date.parse(today) - Date.parse(localISO(new Date(hwTopAt)))) / 86400000))) : 0;
       const hwLimit = hwTop + 100 + 10 * hwDays;
       const heldWhy = {};
