@@ -156,7 +156,9 @@ export function commitOnFinish(el, onCommit, onPreview) {
     onCommit(committed, previous);
   };
   el.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') finish();
+    // (Enter saves and nothing else: Chrome on Windows would also open a select's list, which then takes the next Tab and
+    //  turns the letters typed next into a pick from it.)
+    if (e.key === 'Enter') { e.preventDefault(); finish(); }
     else if (e.key === 'Escape' && el.value !== committed) { e.preventDefault(); e.stopPropagation(); el.value = committed; onPreview?.(committed); }
     else if (e.key.length === 1 || /^(Arrow|Page|Home|End|Backspace|Delete)/.test(e.key)) {
       // On Windows these change a closed select at once, firing `change` within this same task.

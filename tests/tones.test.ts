@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PERSON_TONES, personTones, personTone, personKey } from '../web/js/lib/tones.js';
+import { BRACES_PROTOCOL } from '../web/js/lib/protocol.js';
 
 const ABC = 'abcdefghijklmnopqrstuvwxyz';
 // (names are told apart by letters: the colour rules leave digits out of a name)
@@ -47,6 +48,31 @@ test('people of different regions may share a colour, people who can meet share 
   const shared = sharing(people, tones);
   assert.equal(shared.length, 18 - 14, 'only as many pairs share a colour as there are people over fourteen');
   assert.ok(shared.every(([a, b]) => a.region || b.region), 'never two people who work anywhere (they would share it on every list)');
+});
+
+test('past fourteen, a colour is shared only by people the braces protocol never puts on one row', () => {
+  // the clinic's shape in one city: 5 doctors in no group (one of them treats and checks any month, the others are not in a
+  // group yet), 3 in group 1, 4 in group 2, 4 in group 3, and 2 assistants; 18 people, so 4 pairs must share a colour
+  const doctor = (n: number, group: number | null, region: string | null) => ({ ...person(n, region), is_doctor: true, doctor_group_id: group });
+  const people = [
+    ...[0, 1, 2, 3, 4].map((n) => doctor(n, null, null)),
+    doctor(10, 1, 'AAA'), doctor(11, 1, 'AAA'), doctor(12, 1, null),
+    doctor(20, 2, 'AAA'), doctor(21, 2, 'AAA'), doctor(22, 2, null), doctor(23, 2, null),
+    doctor(30, 3, 'AAA'), doctor(31, 3, 'AAA'), doctor(32, 3, 'AAA'), doctor(33, 3, 'AAA'),
+    { ...person(40, 'AAA'), is_doctor: false, doctor_group_id: null }, { ...person(41, 'AAA'), is_doctor: false, doctor_group_id: null },
+  ];
+  // a treater and a checker of one month, by the protocol (lib/protocol.js)
+  const inOneCell = new Set(BRACES_PROTOCOL.flatMap((r) => (r.checkerGroup ? r.treatingGroups.map((g) => [g, r.checkerGroup].sort().join('-')) : [])));
+  const tones = personTones(people);
+  const shared = sharing(people, tones);
+  assert.equal(shared.length, 18 - 14, 'only as many pairs share a colour as there are people over fourteen');
+  for (const [a, b] of shared) {
+    const pair = `${a.display_name} + ${b.display_name}`;
+    assert.ok(a.is_doctor === b.is_doctor, `never a doctor and an assistant: ${pair}`);
+    if (!a.is_doctor) continue;
+    assert.ok(a.doctor_group_id && b.doctor_group_id, `never a doctor in no group (treats and checks any month): ${pair}`);
+    assert.ok(!inOneCell.has([a.doctor_group_id, b.doctor_group_id].sort().join('-')), `never a treater and a checker of one month: ${pair}`);
+  }
 });
 
 test('the same colours whatever the order of the list', () => {

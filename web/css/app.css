@@ -998,6 +998,12 @@ select.chip-select option { background: var(--enamel); color: var(--sheet-text);
 .add-person:hover, .chip-add:hover { border-color: var(--aubergine); color: var(--text-accent); }
 .people-more { flex: none; width: 22px; color: var(--sheet-rownum-text); font: 700 12px/20px var(--sheet-font); text-align: center; }
 .people > .add-person, .people > .people-more { margin-left: auto; }
+/* A checkup row's Doctor Name is typed (sheet.js writtenPeople): the names lie over the cell as chips while it does not have
+   the cursor, and its text is hidden under them; a click goes through them to the cell, which then shows the text. */
+table.sheet .doctors-box { position: relative; }
+.written-people { position: absolute; inset: 0; display: flex; align-items: center; gap: 3px; padding: 0 var(--space-1); overflow: clip; pointer-events: none; }
+table.sheet .doctors-box.has-people:not(:focus-within) .cell-input { color: transparent; }
+table.sheet .doctors-box:focus-within .written-people { display: none; }
 /* A laptop (a mouse, 900px and wider): Doctor Name is wider than Treatment Details and a chip's × shows only on the chip
    under the mouse (or with the keyboard on it). The first chip shows its name whole, as on the sheet; the next ones share
    what is left, each whole when there is room and never cut to less than a few letters: a chip with no room for that
@@ -1084,7 +1090,7 @@ table.sheet td.pp { text-align: right; }
 
 /* ------------------------------------------------------------ checkups (no Mr#): Aaj ki List rows, the Checkups page */
 .badge-checkup { background: var(--checkup-bg); color: var(--checkup-text); border-color: var(--checkup-line); }
-/* A left edge in the name cell: colour only repeats what the "Checkup" badge says. */
+/* A left edge in the name cell: colour only repeats what "no Mr#" in the MR # cell says (and a screen reader hears). */
 table.sheet tbody tr.is-checkup > .name-col { box-shadow: inset 3px 0 0 var(--checkup-line), 2px 0 0 var(--sheet-grid-strong); }
 /* Follow-up status and the day status of a checkup: one colour family per group; the text always names the status. */
 .status-unset, .status-chip.tone-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
@@ -1533,6 +1539,8 @@ table.invoice-lines input { min-width: 0; }
     outline: 2px solid Highlight; outline-offset: -2px;
   }
   .sx-day { border: 1px solid CanvasText; }
+  /* (a checkup row's typed doctors show as typed: the chips have no colours here, and the text could show through them) */
+  .written-people { display: none; }
   .sx-day.is-today, .cx-cal-day.is-today { outline: 3px solid Highlight; outline-offset: -3px; }
   .cx-row.is-today .cx-track { outline: 2px solid Highlight; outline-offset: 2px; }
   .cx-track, .cx-legend i, .legend-swatch { forced-color-adjust: none; background: Canvas; box-shadow: none; border: 1px solid CanvasText; }

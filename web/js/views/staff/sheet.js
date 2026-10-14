@@ -11,6 +11,7 @@ import { STATUS_LABELS, patientSearch, newPatientModal, flagForAliModal, photoUp
 import { newInvoiceModal, paymentModal } from './invoice.js';
 import { dayListCheckups } from '../../lib/checkups.js';
 import { personTones, personTone } from '../../lib/tones.js';
+import { splitPeople, matchClinician } from '../../lib/legacy.js';
 import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
@@ -84,6 +85,18 @@ let tones = { of: null, map: null };
 export function doctorTone(id, name) {
   if (tones.of !== state.ref.clinicians) tones = { of: state.ref.clinicians, map: personTones(state.ref.clinicians) };
   return personTone(tones.map, id, name);
+}
+// The names typed in a checkup row's Doctor Name cell as the chips of the other rows (owner, 11 Oct 2026: a colour per
+// doctor): split as the sheet's cells are, each in the colour of the clinician it names (by name or other spelling, as
+// Clinic setup has them), or grey when it names nobody on the clinic's list. "Dr." is left out, as on the other chips.
+let named = { of: null, list: [] };
+function writtenPeople(text) {
+  if (named.of !== state.ref.clinicians) named = { of: state.ref.clinicians, list: state.ref.clinicians.map((c) => ({ id: c.id, displayName: c.display_name, aliases: c.aliases || [] })) };
+  return splitPeople(String(text || '')).map((name) => {
+    const c = matchClinician(name, named.list);
+    return h('span', { class: ['person', `gs-${c ? doctorTone(c.id, c.displayName) : 'grey'}`] },
+      h('span', { class: 'person-name' }, name.replace(/^dr\b\.?\s*(?=\S)/i, '')));
+  });
 }
 // P.P (pending dues) written the sheet's way: 0, 500, 11.5k, 20k.
 export function shortRupees(n) {
@@ -233,11 +246,12 @@ export async function renderSheet(root, params, signal) {
     return row ? { row, checkup } : null;
   };
   // A row that kept its place for the cursor (its status, or the token that came with it, changed since the list was
-  // drawn) goes where it belongs once the cursor is out of it: a quiet reload draws the list again when nobody is typing
-  // or clicking in it (reloadQuietly waits for that), so a click on another row is never moved from under the mouse.
+  // drawn, or it no longer matches the filters) goes where it belongs once the cursor is out of it: a quiet reload draws
+  // the list again when nobody is typing or clicking in it (reloadQuietly waits for that), so a click on another row is
+  // never moved from under the mouse.
   function settle(key) {
     const item = placed.has(key) && rowKey(document.activeElement) !== key ? itemOf(key) : null;
-    if (item && movedFrom(item, placed.get(key))) reloadQuietly();
+    if (item && (movedFrom(item, placed.get(key)) || !(item.checkup ? checkupMatches(item.row) : matches(item.row)))) reloadQuietly();
   }
   // The cursor has left a row (looked at a moment later: a row drawn again by redrawRow puts it back in the new copy).
   // A row left for another row is no longer the add line's (onKey).
@@ -364,7 +378,8 @@ export async function renderSheet(root, params, signal) {
       && !groupFilter && !duesOnly && !bracesOnly
       && (!textFilter || `${c.patient_name} ${c.phone || ''} ${c.checkup_for || ''} checkup`.toLowerCase().includes(textFilter));
   };
-  const shownCheckups = () => dayListCheckups(checkups, rows).filter(checkupMatches).sort(byToken);
+  // (here: the row with the cursor, which stays whatever the filters say; see draw)
+  const shownCheckups = (here) => dayListCheckups(checkups, rows).filter((c) => checkupMatches(c) || `c:${c.id}` === here).sort(byToken);
   const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}${busyDemo ? '&demo=busy' : ''}`);
 
   // The less-used filters sit behind "Filters", a small panel over the list (the ▾ in a column heading opens it too); the
@@ -900,6 +915,20 @@ export async function renderSheet(root, params, signal) {
       class: 'cell-input', value: fieldName === 'checkup_for' ? capFirst(c[fieldName]) : c[fieldName] || '', disabled: !canEdit, 'aria-label': `${label} for ${who}`, autocomplete: 'off',
       dataset: { focus: fieldName, field: fieldName }, oninput: (e) => saveCheckup(c, fieldName, e.target.value), ...props,
     });
+    // Doctor Name is typed here (a checkup has no visit to put people on), and shown with the chips of the other rows while
+    // the cell does not have the cursor (writtenPeople); a click goes through the chips to the cell (app.css .doctors-box).
+    const doctors = text('doctors', "Doctor's name", { list: 'sheet-doctors' });
+    const doctorChips = h('span', { class: 'written-people', 'aria-hidden': 'true' });
+    const doctorsBox = h('div', { class: 'cell-box doctors-box' }, doctors, doctorChips);
+    const drawDoctors = () => {
+      const chips = writtenPeople(doctors.value);
+      mount(doctorChips, chips);
+      doctorsBox.classList.toggle('has-people', chips.length > 0);
+    };
+    doctors.addEventListener('change', drawDoctors);
+    drawDoctors();
+    // No "Checkup" badge (owner, 11 Oct 2026: no flags on the list): as on the sheet, the row without an Mr# is the checkup
+    // patient ("no Mr#" in the MR # cell), with a thin left edge here; a screen reader hears it with the name.
     return h('tr', { class: 'is-checkup', dataset: { id: c.id, kind: 'checkup', n } },
       !branchId ? h('td', { class: 'branch-cell' }, cellText(branchName(c.branch_id))) : null,
       h('td', { class: 'rownum' }, n),
@@ -908,7 +937,7 @@ export async function renderSheet(root, params, signal) {
         : h('span', { class: 'muted' }, 'no Mr#'))),
       h('th', { scope: 'row', class: 'frozen row-head name-col' }, h('div', { class: 'name-cell' },
         nameIn,
-        h('span', { class: 'badge badge-checkup' }, 'Checkup'),
+        srOnly('Checkup patient'),
         h('button', { type: 'button', class: 'kebab-btn', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, title: 'Options: follow-up, notes, register, remove', dataset: { focus: 'options' }, onclick: () => checkupOptions(c) },
           h('span', { 'aria-hidden': 'true' }, '⋮')))),
       h('td', {}, h('span', { class: 'chip chip-fill gs-grey' }, srOnly('Not braces'))),
@@ -916,7 +945,7 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, typedCell(tokenIn)),
       h('td', {}, status),
       h('td', {}),
-      h('td', {}, typedCell(text('doctors', "Doctor's name", { list: 'sheet-doctors' }))),
+      h('td', {}, doctorsBox),
       h('td', {}, typedCell(text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
       h('td', { class: 'pp' }),
       canBill ? h('td', {}) : null,
@@ -1013,8 +1042,11 @@ export async function renderSheet(root, params, signal) {
     .filter(Boolean).map((k) => h('col', { class: `c-${k}` }));
 
   function draw() {
-    const shown = rows.filter(matches);
-    const shownChecks = shownCheckups();
+    // The row with the cursor stays in the list even when it no longer matches the filters (its status was just changed
+    // under the Waiting filter, say), as it keeps its place below: it goes once the cursor has left it (settle).
+    const here = rowKey(document.activeElement);
+    const shown = rows.filter((r) => matches(r) || `v:${r.id}` === here);
+    const shownChecks = shownCheckups(here);
     branchHead.hidden = !!branchId;
     mount(colgroup, columns());
     addPanel.hidden = !branchId || !search;
@@ -1034,7 +1066,6 @@ export async function renderSheet(root, params, signal) {
     // and any other redraw move it too. Every row is numbered 1..n in the order shown, like the sheet's row numbers
     // (owner, 11 Oct 2026; COMPLETED_OWN_COUNT, at the top); that is not the token, which repeats from one kind of
     // treatment to another.
-    const here = rowKey(document.activeElement);
     const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].map((item) => {
       const key = keyOf(item);
       const held = key === here ? placed.get(key) : null;

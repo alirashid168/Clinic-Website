@@ -172,12 +172,15 @@ await step('flag patient for Dr. Ali from the sheet', async () => {
 // ------------------------------------------------------------- checkup patients on the Aaj ki List (front desk, North Nazimabad)
 // (Checkup patients have no Mr#. Made-up names only; the demo keeps its data in memory, so the browser is never reloaded here.)
 const checkupRow = (pg, name) => pg.locator(`table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient ${name}"])`);
-await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, sorted like the sheet with a serial number on every row', async () => {
+await step('front desk: the Aaj ki List shows the checkup patients of the day with no Mr# and no badge (as on the sheet), sorted like the sheet with a serial number on every row', async () => {
   await page.goto(BASE + '#/staff/sheet');
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
   const seeded = page.locator('table.sheet tbody tr.is-checkup');
   assert.ok((await seeded.count()) >= 2, 'the two seeded checkups of North Nazimabad');
-  assert.ok(await seeded.first().locator('.badge-checkup:has-text("Checkup")').count(), 'badge');
+  // Owner, 11 Oct 2026: no flags on the list. The row without an Mr# is the checkup patient, as on the sheet; a screen
+  // reader hears "Checkup patient" with the name.
+  assert.equal(await page.locator('table.sheet tbody .badge').count(), 0, 'no badge on the list');
+  assert.deepEqual(await seeded.first().locator('th.name-col .sr-only').evaluateAll((els) => els.map((el) => el.textContent)), ['Checkup patient']);
   assert.match(await seeded.first().locator('td.mr-cell').innerText(), /no Mr#/);
   assert.equal(await seeded.first().locator('.quick-tap').count(), 0, 'no quick-tap button on a checkup row');
   // Owner, 11 Oct 2026: Waiting first, then In treatment, then Scheduled / no status, then Completed, then Cancelled and
@@ -196,6 +199,39 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   assert.ok(await page.locator('table.sheet thead th:has-text("Token")').count(), 'the token has its own column');
   assert.match(await page.locator('.sheet-counts').innerText(), /Checkups \d+/);
   await shot(page, '14-sheet-checkups');
+});
+await step('front desk: a checkup row\'s Doctor Name shows the names typed there as chips in each doctor\'s colour (grey for a name not on the clinic\'s list), and the text to type in once the cell is chosen', async () => {
+  // Owner, 11 Oct 2026: "doctor names should have similar colours so they dont look all the same", on every row.
+  const want = await page.evaluate(async () => {
+    const m = await import('/js/views/staff/sheet.js');
+    const { state } = await import('/js/state.js');
+    const c = state.ref.clinicians.find((x) => x.display_name === 'Dr. Rabia (sample)');
+    return `gs-${m.doctorTone(c.id, c.display_name)}`;
+  });
+  const cellOf = () => page.evaluate(() => {
+    const box = [...document.querySelectorAll('table.sheet tbody tr.is-checkup .doctors-box')].find((b) => b.querySelector('input').value.startsWith('Dr. Rabia (sample)'));
+    const chips = box.querySelector('.written-people');
+    return { typed: box.querySelector('input').value, chips: [...chips.querySelectorAll('.person')].map((p) => [p.textContent, (p.className.match(/\bgs-\w+/) || [''])[0]]),
+      chipsShown: getComputedStyle(chips).display !== 'none', textShown: getComputedStyle(box.querySelector('input')).color !== 'rgba(0, 0, 0, 0)' };
+  });
+  assert.notEqual(want, 'gs-grey');
+  assert.deepEqual(await cellOf(), { typed: 'Dr. Rabia (sample)', chips: [['Rabia (sample)', want]], chipsShown: true, textShown: false }, 'the doctor\'s chip, as on the other rows');
+  const box = page.locator('table.sheet tbody tr.is-checkup .doctors-box', { hasText: 'Rabia (sample)' });
+  const input = box.locator('input');
+  await box.click(); // (through the chips, to the cell)
+  assert.ok(await input.evaluate((el) => el === document.activeElement), 'the cell has the cursor');
+  assert.deepEqual(await cellOf(), { typed: 'Dr. Rabia (sample)', chips: [['Rabia (sample)', want]], chipsShown: false, textShown: true }, 'the text to type in');
+  await page.keyboard.press('End');
+  await page.keyboard.type(', Dr. Made Up');
+  await page.keyboard.press('Tab');
+  assert.deepEqual(await cellOf(), { typed: 'Dr. Rabia (sample), Dr. Made Up', chips: [['Rabia (sample)', want], ['Made Up', 'gs-grey']], chipsShown: true, textShown: false });
+  await page.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  // (back as it was, for the steps below)
+  await input.fill('Dr. Rabia (sample)');
+  await input.press('Tab');
+  assert.deepEqual((await cellOf()).chips, [['Rabia (sample)', want]]);
+  await page.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  await page.evaluate(() => document.activeElement?.blur());
 });
 await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); details and status save; the row can be removed', async () => {
   await page.getByRole('button', { name: '+ Checkup patient' }).click();
@@ -1612,7 +1648,7 @@ await step('status, group, month and doctor chips carry the sheet\'s colours; In
       status: rows.map((tr) => { const s = tr.querySelector('select[aria-label^="Status for"]'); return [s.value, s.className, getComputedStyle(s).backgroundColor]; }),
       group: rows.map((tr) => { const s = tr.querySelector('select[aria-label^="Doctor group for"]'); return [s.value, s.className]; }),
       month: rows.map((tr) => tr.querySelector('.month-pill')).filter(Boolean).map((el) => [el.textContent, el.className]),
-      people: [...document.querySelectorAll('table.sheet tbody .person')].map((el) => [el.getAttribute('title').replace(/ \((checked|assistant)\)$/, ''), (el.className.match(/\bgs-\w+/) || [''])[0]]),
+      people: [...document.querySelectorAll('table.sheet tbody .people .person')].map((el) => [el.getAttribute('title').replace(/ \((checked|assistant)\)$/, ''), (el.className.match(/\bgs-\w+/) || [''])[0]]),
     };
   });
   const statusTone = { completed: 'gs-yellow', in_treatment: 'gs-green', scheduled: 'gs-blue', waiting: 'gs-orange', cancelled: 'gs-grey', no_show: 'gs-red' };
@@ -1695,7 +1731,7 @@ await step('round 3: two doctors in one cell have clearly different colours, and
   // down the list: one colour per person, and different people never share one on the busy day
   const byName = await pb.evaluate(() => {
     const m = {};
-    for (const el of document.querySelectorAll('table.sheet tbody .person')) m[el.getAttribute('title').replace(/ \((checked|assistant)\)$/, '')] = (el.className.match(/\bgs-\w+/) || [''])[0];
+    for (const el of document.querySelectorAll('table.sheet tbody .people .person')) m[el.getAttribute('title').replace(/ \((checked|assistant)\)$/, '')] = (el.className.match(/\bgs-\w+/) || [''])[0];
     return m;
   });
   const tones = Object.values(byName);
@@ -2186,7 +2222,11 @@ await step('busy day: a status or group picked right after typing in the same ro
 });
 await step('busy day: sorted like the sheet and numbered 1..n; a row whose status is changed keeps its place and number while the cursor is in it, even through a reload, and moves to its new status once the cursor has left it', async () => {
   const rowOf = (name) => pb.locator('table.sheet tbody tr', { hasText: name });
-  const where = (name) => rowOf(name).evaluate((tr) => ({ at: tr.sectionRowIndex, n: tr.querySelector('td.rownum').textContent, cursorIn: tr.contains(document.activeElement) }));
+  // (looked up and read in one go: a row found first and read after a redraw of the list would be the old, detached copy)
+  const where = (name) => pb.evaluate((who) => {
+    const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes(who));
+    return { at: tr.sectionRowIndex, n: tr.querySelector('td.rownum').textContent, cursorIn: tr.contains(document.activeElement) };
+  }, name);
   const sortedAndNumbered = () => {
     const rank = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
     const trs = [...document.querySelectorAll('table.sheet tbody tr[data-id]')];
@@ -2217,6 +2257,72 @@ await step('busy day: sorted like the sheet and numbered 1..n; a row whose statu
   assert.ok(await pb.evaluate(sortedAndNumbered), 'sorted and numbered 1..n again');
   assert.notEqual((await where('Sample Patient 105')).n, before.n, 'it has the number of its new place');
   await pb.evaluate(() => document.activeElement?.blur());
+});
+// (waiting sample patients without dues that no step below needs as they are)
+const spareWaiting = () => pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')]
+  .filter((t) => t.querySelector('select[aria-label^="Status for"]').value === 'waiting').map((t) => t.querySelector('.name-text').textContent)
+  .filter((name) => { const n = Number(name.replace('Sample Patient ', '')); return n % 7 && n % 11 && n % 13 && ![87, 88, 89, 94, 95, 97, 100].includes(n); }));
+await step('busy day: under the Waiting filter, a row whose status is changed stays shown with the cursor in it, even through a reload, and goes once the cursor has left it (the rows below never move under the mouse meanwhile)', async () => {
+  const waitingChip = pb.locator('.sheet-counts button', { hasText: 'Waiting' });
+  await waitingChip.click();
+  await pb.waitForFunction(() => [...document.querySelectorAll('table.sheet tbody tr[data-id]')].every((t) => t.querySelector('select[aria-label^="Status for"]').value === 'waiting'));
+  const name = (await spareWaiting())[2];
+  const row = pb.locator('table.sheet tbody tr', { hasText: name });
+  const status = row.locator('select[aria-label^="Status for"]');
+  // (looked up and read in one go, as where() above)
+  const at = () => pb.evaluate((who) => {
+    const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.querySelector('.name-text')?.textContent === who);
+    return [tr.sectionRowIndex, tr.contains(document.activeElement)];
+  }, name);
+  const before = await at();
+  await row.evaluate((tr) => { tr.dataset.before = 'yes'; });
+  await status.focus(); // (as a click on it would)
+  await status.selectOption('in_treatment');
+  await pb.waitForFunction((n) => { const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.textContent.includes(n)); return tr && !tr.dataset.before; }, name);
+  // a reload in the background, once the 5 seconds after the last key or tap are over (a live update, the 20-second check)
+  await pb.waitForTimeout(5300);
+  await pb.evaluate(() => { for (const tr of document.querySelectorAll('table.sheet tbody tr')) tr.dataset.before = 'yes'; document.dispatchEvent(new CustomEvent('sheet-reload')); });
+  await pb.waitForFunction(() => !document.querySelector('table.sheet tbody tr').dataset.before);
+  assert.deepEqual(await at(), [before[0], true], `${name}: still shown, in its place, with the cursor`);
+  assert.equal(await status.inputValue(), 'in_treatment');
+  // the cursor leaves the row: it is not Waiting any more, so it goes at the next quiet reload
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  await row.waitFor({ state: 'detached', timeout: 15000 });
+  assert.ok(await pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr[data-id]')].every((t) => t.querySelector('select[aria-label^="Status for"]').value === 'waiting')), 'only Waiting rows');
+  await waitingChip.click(); // (all rows again)
+  await pb.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr[data-id]').length > 120);
+});
+await step('busy day, slow server: Enter on a status chip saves it without opening its list, so Shift+Tab reaches Treatment and what is typed there is saved too (it never becomes a pick from the list)', async () => {
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__updateVisit = d.updateVisit;
+    d.updateVisit = async (...a) => { await new Promise((r) => setTimeout(r, 700)); return window.__updateVisit.apply(d, a); };
+  });
+  const name = (await spareWaiting())[0];
+  const row = pb.locator('table.sheet tbody tr', { hasText: name });
+  const was = await row.locator(`input[aria-label="Treatment for ${name}"]`).inputValue();
+  await row.locator('select[aria-label^="Status for"]').focus();
+  await pb.keyboard.press('ArrowDown');
+  await pb.keyboard.press('Enter');
+  assert.equal(await pb.evaluate(() => document.activeElement.matches(':open')), false, 'the list is not open');
+  await pb.keyboard.press('Shift+Tab');
+  assert.equal(await pb.evaluate(() => document.activeElement.getAttribute('aria-label')), `Treatment for ${name}`);
+  await pb.keyboard.press('End');
+  await pb.keyboard.type(' scaling', { delay: 30 });
+  await pb.waitForTimeout(1000); // (the status answer has come back and the row is drawn again)
+  await pb.keyboard.press('Tab');
+  const savedNow = () => pb.evaluate(async (n) => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const v = (await state.data.listVisits({ branchId: 1, date: localISO() })).find((x) => x.patient.full_name === n);
+    return [v.status, v.treatment_label];
+  }, name);
+  const want = ['in_treatment', `${was} scaling`];
+  let saved = await savedNow();
+  for (let i = 0; i < 30 && JSON.stringify(saved) !== JSON.stringify(want); i++) { await pb.waitForTimeout(200); saved = await savedNow(); }
+  assert.deepEqual(saved, want);
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.updateVisit = window.__updateVisit; document.activeElement?.blur(); });
 });
 await step('busy day, slow server: text typed in a Treatment cell (it saves when the cell is left) while the same row\'s status is being saved stays in the cell when the row is drawn again, and is saved', async () => {
   await pb.evaluate(async () => {
