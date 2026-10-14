@@ -242,7 +242,7 @@ function timedFetch(input, init = {}, hooks = {}) {
 // Database functions that only read. They are sent as POST, which timedFetch leaves alone, so callRpc gives them
 // the same time limit as a GET. Saving functions (save_invoice, close_cash, merge_patients, imports ...) have none.
 const READ_RPCS = new Set(['payments_summary', 'opd_summary', 'total_dues', 'clinic_report', 'doctor_summary', 'dues_for',
-  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins']);
+  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins', 'day_list_history', 'day_list_copy']);
 // How long to wait for the server to confirm a logout before ending it on this computer alone.
 const SIGNOUT_TIMEOUT_MS = 4000;
 
@@ -1159,8 +1159,11 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ visits
+    // By token, then by when the row was added and by its id: rows with no token and one created_at (an imported day's) keep one order,
+    // the same as the History's copy of that day (private.day_list_rows in 20261012000100_day_list_history.sql).
     async listVisits({ branchId, date }) {
-      let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false });
+      let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false })
+        .order('created_at', { ascending: true }).order('id', { ascending: true });
       if (branchId) q = q.eq('branch_id', Number(branchId));
       return enrichVisits(check(await q));
     },
@@ -1202,6 +1205,36 @@ export async function createSupabaseAdapter() {
         if (role === 'checker') check(await sb.from('visits').update({ checked_by: null, checked_at: null }).eq('id', visitId).eq('checked_by', clinicianId));
       }
       return visitById(visitId);
+    },
+
+    // ------------------------------------------------------------ Aaj ki List: "End the day" and its History (20261012000100_day_list_history.sql)
+    // The database builds the saved copy itself from the day's visits and checkup patients; nothing the browser has is stored. Before the
+    // update is run: endDay throws (the button is not shown then, as nobody has the permission), dayClosing says none, and the History
+    // methods answer { missing: true }.
+    /** Ends one branch's day (today or earlier) -> its counts, closed_at, closed_by_name and times_updated. */
+    async endDay({ branchId, date }) {
+      const res = await sb.rpc('end_day', { p_branch: Number(branchId), p_date: date });
+      if (res.error && (res.error.code === 'PGRST202' || res.status === 404)) throw plainError('The History of Aaj ki List is not switched on yet. It appears once the database update has been run.', 'DAY_HISTORY_MISSING');
+      return check(res);
+    },
+    /** The saved copy's line of one branch and day ({ closed_at, closed_by_name, times_updated, counts }), or null when the day was not ended. */
+    async dayClosing({ branchId, date }) {
+      const res = await sb.from('day_list_closings').select('id,branch_id,list_date,closed_at,closed_by_name,times_updated,counts')
+        .eq('branch_id', Number(branchId)).eq('list_date', date).maybeSingle();
+      if (res.error && (CHECKUPS_MISSING_CODES.has(res.error.code) || res.status === 404)) return null; // not switched on yet
+      return check(res);
+    },
+    /** One page of the History, newest first -> { rows, total } (rows as public.day_list_history), or { missing: true }. */
+    async dayListHistory({ branchId = null, from = null, to = null, limit = 60, offset = 0 } = {}) {
+      const r = await rpc('day_list_history', { p_branch: branchId ? Number(branchId) : null, p_from: from || null, p_to: to || null, p_limit: limit, p_offset: offset });
+      if (r.missing) return { rows: [], total: 0, missing: true };
+      const rows = r.data || [];
+      return { rows, total: Number(rows[0]?.total_count ?? 0) };
+    },
+    /** One day's list, read only: the saved copy, or the list as stored now (public.day_list_copy), or { missing: true }. */
+    async dayListCopy({ branchId, date }) {
+      const r = await rpc('day_list_copy', { p_branch: Number(branchId), p_date: date });
+      return r.missing ? { missing: true } : r.data;
     },
 
     // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
