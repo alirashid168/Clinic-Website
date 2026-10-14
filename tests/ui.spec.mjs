@@ -2515,6 +2515,46 @@ await step('staff: Dr. Ali deletes a junk website form after a warning; a patien
   await pf.keyboard.press('Escape');
   await portal.waitFor({ state: 'detached' });
 });
+// A thank-you or a suggestion is not a complaint about a doctor's work: its dialog has no "About which doctor?", and even when linked
+// (as the inbox allowed before) it does not count on that doctor's daily log. Today counts everything new under the inbox's full name.
+await step('staff: a website thank-you about a doctor has no "About which doctor?" and never counts as a complaint about that doctor', async () => {
+  const docId = await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.submitFeedback({ kind: 'appreciation', topic: 'doctor', branch: '1', message: 'Thank you Dr. Bushra for the very gentle treatment (sample UI).', contact_me: false, website: '' });
+    return state.ref.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').id;
+  });
+  await pf.goto(BASE + '#/staff/today');
+  await pf.locator('a.stat', { hasText: 'New complaints & suggestions' }).waitFor();
+  assert.equal(await pf.locator('table.list th', { hasText: 'New complaints & suggestions' }).count(), 1, 'the branch table says the same');
+  await pf.goto(BASE + '#/staff/complaints?from=website');
+  const thanks = pf.locator('table.complaints-table tbody tr', { hasText: 'very gentle treatment' });
+  await thanks.waitFor();
+  await thanks.getByRole('button', { name: 'Appreciation: Doctor' }).click();
+  const dlg = pf.locator('.modal', { hasText: 'very gentle treatment' });
+  await dlg.waitFor();
+  assert.equal(await dlg.locator('select[aria-label="About which doctor"]').count(), 0, 'a thank-you is not linked to a doctor as a complaint');
+  await shot(pf, '47c-staff-thanks-no-doctor');
+  await pf.keyboard.press('Escape');
+  await dlg.waitFor({ state: 'detached' });
+  await pf.locator('table.complaints-table tbody tr', { hasText: 'Complaint: Waiting time' }).getByRole('button', { name: 'Complaint: Waiting time' }).click();
+  const complaint = pf.locator('.modal', { hasText: 'Complaint · Waiting time' });
+  await complaint.waitFor();
+  assert.equal(await complaint.locator('select[aria-label="About which doctor"]').count(), 1, 'a website complaint still is');
+  await pf.keyboard.press('Escape');
+  await complaint.waitFor({ state: 'detached' });
+  const counts = await pf.evaluate(async (doc) => {
+    const { state } = await import('/js/state.js');
+    const count = async () => (await state.data.doctorSummary(doc, '2000-01-01', '2100-12-31')).complaints.length;
+    const before = await count();
+    const thanksRow = (await state.data.complaints({ from: 'website' })).find((c) => c.body.includes('very gentle treatment'));
+    await state.data.linkComplaintDoctor(thanksRow.id, doc);
+    return [before, await count()];
+  }, docId);
+  assert.equal(counts[1], counts[0], 'linked anyway, the thank-you adds nothing to the doctor\'s complaints');
+  await pf.goto(BASE + `#/staff/log?doctor=${docId}`);
+  await pf.locator('.stat', { hasText: 'Complaints about your work' }).waitFor();
+  assert.ok(!(await pf.locator('main').innerText()).includes('Appreciation'), 'the doctor\'s log does not list the thank-you');
+});
 await step('a role without "Job applications" (the clinic coordinator): no menu entry, "Page not available", and the data layer refuses; website forms still reach their inbox', async () => {
   await tryAnotherRole(pf);
   await loginAs(pf, 'Clinic coordinator');

@@ -23,16 +23,17 @@
 --      a patient's complaint is never deleted.
 --   3. public.job_applications and its history public.job_application_events (status changes and internal notes, with
 --      who and when). Staff read them with jobs.view; nobody writes them directly (only the functions below).
---   4. The bucket job-cvs, its storage policies, and the trigger that holds the CV upload limits.
+--   4. private.public_form_log, the log the rate limits count (a CV in it is used), the bucket job-cvs, its storage
+--      policies, and the trigger that holds the CV upload limits.
 --   5. Form helpers (private.form_line / form_block / pk_mobile / pk_cnic / form_fail), the same rules as
---      web/js/lib/public-forms.js, and private.public_form_log, the log the rate limits count.
+--      web/js/lib/public-forms.js.
 --   6. public.submit_job_application(jsonb) and public.submit_feedback(jsonb).
 --   7. public.update_job_application(uuid, text, text): staff change the status or add a note.
 --   8. public.job_cv_orphans(): CVs that no application uses (the visitor gave up, a check failed, or the form was
 --      dropped over a per-phone or per-CNIC limit). The staff pages of someone with jobs.view (the Today page and the
 --      Job applications page) remove those older than a day by themselves (storage delete policy below).
 --   9. public.doctor_summary: a website complaint that staff link to a doctor counts on that doctor's dashboard too,
---      without the visitor's name or phone.
+--      without the visitor's name or phone. Only a complaint counts: a suggestion or a thank-you never does.
 --
 -- Rate limits. Each function takes an advisory lock first, so two forms sent at the same moment cannot both slip under
 -- a limit:
@@ -48,10 +49,11 @@
 -- full (FORM_BUSY_DAY); that says nothing about any person. Over a per-phone or per-CNIC limit the form is thanked like
 -- any other and NOT stored, so the answer never tells whether a phone or CNIC has been used before. Such a dropped form
 -- leaves exactly the traces of a stored one: every form that passes its checks goes into private.public_form_log (with
--- its CV) before it is stored or dropped, the whole-website limits count that log, and a CV in it is used. So the CV of
--- a dropped form cannot be sent again and the form counts toward the limits, as for a stored form. A form whose hidden
--- honeypot field ("website") is filled in (bots fill every box) is thanked and dropped without any check. The answer is
--- always {"ok": true}, never an id.
+-- its CV) before it is stored or dropped, the whole-website limits count that log, and a CV in it is used. So, as for a
+-- stored form, the form counts toward the limits, and its CV cannot be sent again, is not an unused CV for the upload
+-- limits, and its name can never be uploaded to again (also once the staff pages have removed the file). A form whose
+-- hidden honeypot field ("website") is filled in (bots fill every box) is thanked and dropped without any check. The
+-- answer is always {"ok": true}, never an id.
 --
 -- Storage reads go through to_jsonb(o) (created_at, metadata.size, metadata.mimetype), so these functions do not depend
 -- on the exact columns of Supabase's storage tables when they are created; the local test stub has fewer columns.
@@ -173,8 +175,24 @@ revoke all on public.job_applications, public.job_application_events from anon, 
 grant select on public.job_applications, public.job_application_events to authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 4. The CV bucket
+-- 4. The form log and the CV bucket
 -- ---------------------------------------------------------------------------------------------------------------
+-- Every form that passed its checks, stored or dropped over a per-phone or per-CNIC limit, with its CV. The whole-website
+-- limits count this log and a CV in it is used (the upload limits and the upload trigger below look at it too), so a
+-- dropped form leaves the same traces as a stored one. Only the functions in this file use it (no grants, and the schema
+-- is private). A feedback line is removed after two days, as forms arrive (nothing needs it then). A job line stays: its
+-- CV name stays used for good, so an upload to that name is refused alike whether the form was stored or dropped, and
+-- whether or not the staff pages have removed a dropped form's file (at most 200 small lines a day).
+create table if not exists private.public_form_log (
+  id         bigserial primary key,
+  form       text not null check (form in ('job', 'feedback')),
+  cv_path    text unique,                                                -- a job application's CV (job-cvs/<cv_path>)
+  created_at timestamptz not null default now()
+);
+create index if not exists public_form_log_form_idx on private.public_form_log (form, created_at);
+revoke all on private.public_form_log from public, anon, authenticated;
+revoke all on sequence private.public_form_log_id_seq from public, anon, authenticated;
+
 insert into storage.buckets (id, name, public) values ('job-cvs', 'job-cvs', false)
   on conflict (id) do update set public = false;
 -- The size limit and file types are checked by Storage itself as the file arrives (Supabase always has these columns).
@@ -190,10 +208,11 @@ begin
 end $$;
 
 -- The CV upload limits, for the whole website: 5 files a minute, 100 files and 200 MB a day, and at most 100 MB of CVs that no
--- application uses. Why an upload of p_size bytes would be refused now: 'day' (one of the day's limits, or the unused CVs; the
--- staff pages remove unused ones once a day old), 'minute', or null (allowed). A file has at least one byte, so p_size 0 asks
--- whether any upload is taken. It reads every file of the bucket, so it is a security definer function (the visitor may not
--- see the files it counts), and only the functions below call it.
+-- form used. Why an upload of p_size bytes would be refused now: 'day' (one of the day's limits, or the unused CVs; the staff
+-- pages remove unused ones once a day old), 'minute', or null (allowed). A file has at least one byte, so p_size 0 asks whether
+-- any upload is taken. A CV sent with a form is used whether the form was stored or dropped (the log has both), so the answer
+-- after a form never depends on whether its phone or CNIC was used before. It reads every file of the bucket, so it is a
+-- security definer function (the visitor may not see the files it counts), and only the functions below call it.
 create or replace function private.job_cv_upload_problem(p_size bigint default 0)
 returns text
 language sql stable security definer set search_path = public
@@ -206,7 +225,8 @@ as $$
          end
     from (select (to_jsonb(o) ->> 'created_at')::timestamptz as at,
                  case when (to_jsonb(o) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(o) -> 'metadata' ->> 'size')::bigint else 0 end as size,
-                 exists (select 1 from public.job_applications a where a.cv_path = o.name) as sent
+                 exists (select 1 from public.job_applications a where a.cv_path = o.name)
+                   or exists (select 1 from private.public_form_log l where l.cv_path = o.name) as sent
             from storage.objects o where o.bucket_id = 'job-cvs') x
 $$;
 revoke all on function private.job_cv_upload_problem(bigint) from public, anon, authenticated;
@@ -232,7 +252,10 @@ grant execute on function public.job_cv_upload_allowed() to anon, authenticated;
 -- which no policy sees but every trigger does (the probe meets the trigger too). One upload at a time (the advisory lock), so
 -- uploads sent at the same moment cannot all slip under a limit. A CV file, once there, is never changed: an overwrite (an
 -- upsert, also with the x-upsert header) or a move is refused, so a file checked by submit_job_application stays that file.
--- Only these columns count as the file; Storage may still stamp others (owner, last access) as it likes.
+-- Only these columns count as the file; Storage may still stamp others (owner, last access) as it likes. A name once sent
+-- with a form is never uploaded to again, with one answer (JOB_CV_USED) whether the form was stored or dropped and whether
+-- or not the file is still there: this runs before the unique index, which would otherwise tell a file that is there (a
+-- stored form's) from one the staff pages removed (a dropped form's, after a day).
 create or replace function private.job_cvs_guard()
 returns trigger
 language plpgsql security definer set search_path = public
@@ -251,6 +274,10 @@ begin
     return new;
   end if;
   if new.bucket_id is distinct from 'job-cvs' then return new; end if;
+  if exists (select 1 from private.public_form_log l where l.cv_path = new.name)
+     or exists (select 1 from public.job_applications a where a.cv_path = new.name) then
+    raise exception 'JOB_CV_USED: this file was already sent with a form. Upload it again under a new name.' using errcode = '42501';
+  end if;
   perform pg_advisory_xact_lock(hashtext('storage job-cvs uploads'));
   v_size := case when (to_jsonb(new) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(new) -> 'metadata' ->> 'size')::bigint else 0 end;
   v_problem := private.job_cv_upload_problem(v_size);
@@ -273,7 +300,8 @@ end $$;
 
 -- A CV that no application uses and that is more than a day old (a form still being filled in keeps its file): never sent,
 -- or sent with a form dropped over a per-phone or per-CNIC limit (it is in private.public_form_log, so it cannot be sent
--- again). It answers only staff with jobs.view (false for anyone else), so nobody can use it to ask about a file.
+-- again, it is no unused CV for the upload limits, and its name stays used: removing the file changes nothing a visitor can
+-- see). It answers only staff with jobs.view (false for anyone else), so nobody can use it to ask about a file.
 create or replace function public.job_cv_unsent(p_name text)
 returns boolean
 language sql stable security definer set search_path = public
@@ -341,20 +369,6 @@ end $$;
 
 revoke all on function private.form_line(text), private.form_block(text), private.pk_mobile(text), private.pk_cnic(text),
   private.form_fail(text, text) from public, anon, authenticated;
-
--- Every form that passed its checks, stored or dropped over a per-phone or per-CNIC limit, with its CV. The whole-website
--- limits count this log and a CV in it is used, so a dropped form leaves the same traces as a stored one. Only the two
--- functions below use it (no grants, and the schema is private). Each removes its own lines older than two days as forms
--- arrive: nothing needs them then (a CV more than a day old is refused anyway).
-create table if not exists private.public_form_log (
-  id         bigserial primary key,
-  form       text not null check (form in ('job', 'feedback')),
-  cv_path    text unique,                                                -- a job application's CV (job-cvs/<cv_path>)
-  created_at timestamptz not null default now()
-);
-create index if not exists public_form_log_form_idx on private.public_form_log (form, created_at);
-revoke all on private.public_form_log from public, anon, authenticated;
-revoke all on sequence private.public_form_log_id_seq from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- 6a. "Join our team"
@@ -440,8 +454,13 @@ begin
   if (select count(*) from private.public_form_log where form = 'job' and created_at > now() - interval '1 minute') >= 5 then
     raise exception 'FORM_BUSY: many job applications are arriving right now. Please try again later.' using errcode = 'P0001';
   end if;
-  -- The CV: a file this form's visitor uploaded to job-cvs within the day, of an allowed type and size, not used by another form
-  -- (stored or dropped: the log has both).
+  -- The CV: a file this form's visitor uploaded to job-cvs within the day, of an allowed type and size, not used by another form.
+  -- A CV already sent (stored or dropped: the log has both) gets one answer first, whether or not its file is still there (the
+  -- staff pages remove a dropped form's file after a day).
+  if exists (select 1 from private.public_form_log l where l.cv_path = v_cv)
+     or exists (select 1 from public.job_applications a where a.cv_path = v_cv) then
+    raise exception 'FORM_CV: Please choose your CV again.' using errcode = '22023', detail = 'cv';
+  end if;
   select to_jsonb(o) into v_obj from storage.objects o where o.bucket_id = 'job-cvs' and o.name = v_cv;
   if v_obj is null then
     raise exception 'FORM_CV: Your CV did not finish uploading. Please choose it again.' using errcode = '22023', detail = 'cv';
@@ -458,14 +477,11 @@ begin
        when 'jpg' then 'image/jpeg' when 'png' then 'image/png' end) then
     raise exception 'FORM_CV: Your CV must be a PDF, Word (.doc or .docx), JPG or PNG file.' using errcode = '22023', detail = 'cv';
   end if;
-  if v_at is null or v_at < now() - interval '1 day'
-     or exists (select 1 from private.public_form_log l where l.cv_path = v_cv)
-     or exists (select 1 from public.job_applications a where a.cv_path = v_cv) then
+  if v_at is null or v_at < now() - interval '1 day' then
     raise exception 'FORM_CV: Please choose your CV again.' using errcode = '22023', detail = 'cv';
   end if;
 
-  -- Logged before it is stored or dropped below: either way its CV is now used and it counts toward the limits above.
-  delete from private.public_form_log where form = 'job' and created_at < now() - interval '2 days';
+  -- Logged before it is stored or dropped below: either way its CV is now used for good and it counts toward the limits above.
   insert into private.public_form_log (form, cv_path) values ('job', v_cv);
 
   -- The same phone or CNIC twice today already: thanked like any other form and not stored. This comes after every other check
@@ -606,7 +622,8 @@ revoke all on function public.update_job_application(uuid, text, text) from publ
 grant execute on function public.update_job_application(uuid, text, text) to authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 8. CVs no application uses (older than a day; a dropped form's CV too): removed by the staff pages of someone with jobs.view
+-- 8. CVs no application uses (older than a day; a dropped form's CV too, its name stays used in the log): removed by the
+--    staff pages of someone with jobs.view
 -- ---------------------------------------------------------------------------------------------------------------
 create or replace function public.job_cv_orphans()
 returns table (path text, uploaded_at timestamptz, size_bytes bigint)
@@ -630,7 +647,8 @@ grant execute on function public.job_cv_orphans() to authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- 9. Doctor dashboard: website complaints linked to a doctor count too (20261007001700, with a left join; a website
---    form shows as source 'website', never with the visitor's name or phone)
+--    form shows as source 'website', never with the visitor's name or phone). Only complaints: a website suggestion or
+--    thank-you linked to a doctor is not a complaint about their work (a patient's own complaint has no kind).
 -- ---------------------------------------------------------------------------------------------------------------
 create or replace function public.doctor_summary(p_clinician uuid, p_from date, p_to date)
 returns jsonb
@@ -671,7 +689,7 @@ begin
                                                'patient_name', p.full_name, 'mr_number', p.mr_number, 'source', c.source) order by c.created_at desc), '[]')
     into v_complaints
     from public.complaints c left join public.patients p on p.id = c.patient_id
-   where c.clinician_id = p_clinician and c.created_at >= t_from and c.created_at < t_to;
+   where c.clinician_id = p_clinician and c.created_at >= t_from and c.created_at < t_to and coalesce(c.kind, 'complaint') = 'complaint';
 
   select * into v_rule from public.doctor_commission_rules r where r.active and r.clinician_id = p_clinician limit 1;
   if v_rule.id is null then select * into v_rule from public.doctor_commission_rules r where r.active and r.clinician_id is null limit 1; end if;

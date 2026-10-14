@@ -31,8 +31,9 @@ async function openCv(app) {
 
 /**
  * Removes the CVs nobody sent: uploaded more than a day ago, and no application uses them (the visitor gave up, a check failed, or
- * the form was dropped). They count toward the CV upload limits (100 MB of them at most) and take storage, so this page and the
- * Today page do it by themselves. Resolves how many were removed (0 when there were none, or the database is not updated yet).
+ * the form was dropped). They take storage, and the ones never sent count toward the CV upload limits (100 MB of them at most), so
+ * this page and the Today page do it by themselves. Resolves how many were removed (0 when there were none, or the database is not
+ * updated yet).
  */
 export async function removeUnsentCvs() {
   let list = [];

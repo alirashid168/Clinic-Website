@@ -10,8 +10,9 @@ import { FEEDBACK_KIND_LABELS, FEEDBACK_TOPIC_LABELS, formatPhone } from '../../
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 
 // ---------------------------------------------------------------- today
-// CVs nobody sent (uploaded more than a day ago, no application uses them) are removed by themselves, once per opening of the
-// staff pages, when someone who sees job applications (Dr. Ali) opens Today: they count toward the CV upload limits and take storage.
+// CVs no application uses (uploaded more than a day ago: never sent, or sent with a dropped form) are removed by themselves, once per
+// opening of the staff pages, when someone who sees job applications (Dr. Ali) opens Today: they take storage, and unsent ones count
+// toward the CV upload limits.
 let cvSweep = null;
 
 export async function renderDashboard(root) {
@@ -39,13 +40,13 @@ export async function renderDashboard(root) {
       can('finance.view') || can('billing.view') ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum('received'))), h('span', {}, 'Received today')) : null,
       duesTotal !== null ? h('div', { class: 'stat' }, h('strong', {}, duesPartial ? `${rupees(duesTotal)}+` : rupees(duesTotal)), h('span', {}, duesPartial ? 'Total pending dues (incomplete: not every patient was counted)' : 'Total pending dues')) : null,
       review.length ? h('a', { class: 'stat', href: '#/staff/review', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, review.length), h('span', {}, 'On Dr. Ali\'s list')) : null,
-      complaints.filter((c) => c.status === 'new').length ? h('a', { class: 'stat', href: '#/staff/complaints', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, complaints.filter((c) => c.status === 'new').length), h('span', {}, 'New complaints')) : null),
+      complaints.filter((c) => c.status === 'new').length ? h('a', { class: 'stat', href: '#/staff/complaints', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, complaints.filter((c) => c.status === 'new').length), h('span', {}, 'New complaints & suggestions')) : null),
     h('section', { class: 'panel', style: { marginTop: '16px' } },
       h('h2', {}, 'Branches today'),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col', class: 'right' }, 'Patients'), h('th', { scope: 'col', class: 'right' }, 'Waiting'), h('th', { scope: 'col', class: 'right' }, 'Completed'),
           can('billing.view') ? h('th', { scope: 'col', class: 'right' }, 'Received') : null, can('dues.view') ? h('th', { scope: 'col', class: 'right' }, "Dues on today's list") : null,
-          can('complaints.view') ? h('th', { scope: 'col', class: 'right' }, 'New complaints') : null, h('th', { scope: 'col' }, 'Cash closing'), h('th', { scope: 'col' }, srOnly('Actions')))),
+          can('complaints.view') ? h('th', { scope: 'col', class: 'right' }, 'New complaints & suggestions') : null, h('th', { scope: 'col' }, 'Cash closing'), h('th', { scope: 'col' }, srOnly('Actions')))),
         h('tbody', {}, visible.map((r) => h('tr', {},
           h('td', {}, h('strong', {}, r.branch.name)), h('td', { class: 'right' }, r.patients), h('td', { class: 'right' }, r.waiting), h('td', { class: 'right' }, r.completed),
           can('billing.view') ? h('td', { class: 'right' }, rupees(r.received)) : null,
@@ -225,7 +226,8 @@ export async function renderComplaints(root, params) {
       h('div', { style: { marginTop: '12px' } }, web
         ? [field('Internal note', reply, 'This came from the website form: nobody outside the clinic sees what is written here.', { required: true })]
         : [field('Reply', reply, null, { required: true }), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)')]),
-      h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.')));
+      // Only a complaint is linked to a doctor: a website suggestion or thank-you is not a complaint about their work.
+      !web || c.kind === 'complaint' ? h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.')) : null);
     // Closing a complaint tells the patient it is done, so it asks first; the complaint dialog stays open underneath until that is confirmed.
     const confirmResolve = () => {
       modal('Mark this complaint resolved?', h('p', {}, web

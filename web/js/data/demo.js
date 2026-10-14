@@ -256,7 +256,7 @@ function seed() {
       cv_size: db.job_cvs[1].size, message: null, consent_at: daysAgo(5) + 'T09:31:00.000Z', status: 'contacted', updated_by: 's-admin',
       updated_at: daysAgo(4) + 'T10:00:00.000Z', created_at: daysAgo(5) + 'T09:31:00.000Z' },
   ];
-  db.form_log = []; // private.public_form_log: the forms of the last two days (the samples above are older)
+  db.form_log = []; // private.public_form_log: every form sent on this page that passed its checks (the samples above came before)
   db.job_events = [
     { id: uid(), application_id: db.job_applications[1].id, kind: 'status', status: 'contacted', body: null, by_staff: 's-admin', by_name: 'Dr. Ali Rashid', created_at: daysAgo(4) + 'T10:00:00.000Z' },
     { id: uid(), application_id: db.job_applications[1].id, kind: 'note', status: null, body: 'Called, will come on Saturday. (Sample note.)', by_staff: 's-admin', by_name: 'Dr. Ali Rashid', created_at: daysAgo(4) + 'T10:01:00.000Z' },
@@ -1001,7 +1001,8 @@ export function createDemoAdapter() {
       return { treated: treatedVisits.length, checked: vs.filter((x) => x.role === 'checker').length, assisted: vs.filter((x) => x.role === 'assistant').length,
         days: new Set(vs.map((x) => x.visit.visit_date)).size, billed, branches: [...new Set(vs.map((x) => x.visit.branch_id))],
         referred_patients: own.length, referred_paid: paid,
-        complaints: db.complaints.filter((c) => c.clinician_id === clinicianId && inRange(c.created_at.slice(0, 10))).map((c) => ({ id: c.id, subject: c.subject, status: c.status, created_at: c.created_at, branch_id: c.branch_id, patient_name: patient(c.patient_id)?.full_name, mr_number: patient(c.patient_id)?.mr_number, source: c.source || 'portal' })),
+        // only complaints: a website suggestion or thank-you linked to a doctor is not a complaint about their work (a patient's has no kind)
+        complaints: db.complaints.filter((c) => c.clinician_id === clinicianId && (c.kind || 'complaint') === 'complaint' && inRange(c.created_at.slice(0, 10))).map((c) => ({ id: c.id, subject: c.subject, status: c.status, created_at: c.created_at, branch_id: c.branch_id, patient_name: patient(c.patient_id)?.full_name, mr_number: patient(c.patient_id)?.mr_number, source: c.source || 'portal' })),
         rule: rule ? { percent: rule.percent, basis: rule.basis, notes: rule.notes } : null, share: rule ? Math.round(base * rule.percent) / 100 : null };
     },
 
@@ -1016,7 +1017,8 @@ export function createDemoAdapter() {
       // the database's upload limits (CV_UPLOAD_LIMITS), in the words the live data layer gives them (it asks job_cv_upload_busy which one)
       const uploads = (ms) => db.job_cvs.filter((x) => Date.parse(x.created_at) > Date.now() - ms);
       const bytes = (list) => list.reduce((t, x) => t + (x.size || 0), 0);
-      const unsent = db.job_cvs.filter((x) => !db.job_applications.some((a) => a.cv_path === x.path));
+      // a CV sent with a form is used, stored or dropped (the log has both), as job_cv_upload_problem counts it
+      const unsent = db.job_cvs.filter((x) => !db.job_applications.some((a) => a.cv_path === x.path) && !db.form_log.some((l) => l.cv_path === x.path));
       if (uploads(86400000).length >= CV_UPLOAD_LIMITS.perDay || bytes(uploads(86400000)) + file.size > CV_UPLOAD_LIMITS.bytesPerDay
         || bytes(unsent) + file.size > CV_UPLOAD_LIMITS.unsentBytes) fail('FORM_BUSY_DAY: many CVs have arrived today. Please try again tomorrow.');
       if (uploads(60000).length >= CV_UPLOAD_LIMITS.perMinute) fail('FORM_BUSY: many CVs are arriving right now. Please try again later.');
@@ -1034,10 +1036,11 @@ export function createDemoAdapter() {
       const logged = (ms) => db.form_log.filter((x) => x.form === 'job' && Date.parse(x.created_at) > Date.now() - ms).length;
       if (logged(86400000) >= 200) fail('FORM_BUSY_DAY: the clinic has received many job applications today. Please try again tomorrow.');
       if (logged(60000) >= 5) fail('FORM_BUSY: many job applications are arriving right now. Please try again later.');
+      // a CV already sent (stored or dropped) gets one answer first, whether or not its file is still there
+      if (db.form_log.some((x) => x.cv_path === data.cv_path) || db.job_applications.some((a) => a.cv_path === data.cv_path)) throw formError('cv', 'Please choose your CV again.', 'FORM_CV');
       const cv = db.job_cvs.find((x) => x.path === data.cv_path);
       if (!cv) throw formError('cv', 'Your CV did not finish uploading. Please choose it again.', 'FORM_CV');
-      if (db.form_log.some((x) => x.cv_path === cv.path) || db.job_applications.some((a) => a.cv_path === cv.path)
-        || Date.parse(cv.created_at) < Date.now() - 86400000) throw formError('cv', 'Please choose your CV again.', 'FORM_CV');
+      if (Date.parse(cv.created_at) < Date.now() - 86400000) throw formError('cv', 'Please choose your CV again.', 'FORM_CV');
       db.form_log.push({ form: 'job', cv_path: cv.path, created_at: new Date().toISOString() });
       // after every other check and the log, like the database: nothing depends on whether the phone or CNIC was used before
       const since = (ms) => db.job_applications.filter((a) => Date.parse(a.created_at) > Date.now() - ms);
