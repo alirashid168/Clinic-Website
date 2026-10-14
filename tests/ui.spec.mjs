@@ -63,9 +63,26 @@ await step('home shows the smile, three doors and calendar', async () => {
   // counts 0 days (this first step failed now and then on a slow first load, and its messages did not say which count was wrong).
   await page.locator('.sx-day').first().waitFor();
   assert.equal(await page.locator('.tooth').count(), 24, 'tooth count');
-  for (const t of ['Patient', 'Visitor', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count(), `door ${t}`);
+  for (const t of ['Patient', 'Visitor', 'Our results', 'Employee']) assert.ok(await page.locator('.door', { hasText: t }).count(), `door ${t}`);
   assert.equal(await page.locator('.sx-day').count(), 7, 'sx-day count');
   await shot(page, '01-home');
+});
+await step('Our results: a grid of square photos; a click opens the photo large, Close goes back', async () => {
+  await page.click('.door:has-text("Our results")');
+  await page.waitForSelector('h1:has-text("Our results")');
+  const tiles = page.locator('.results-grid .results-tile');
+  await tiles.first().waitFor();
+  const box = await tiles.first().boundingBox();
+  assert.ok(box && Math.abs(box.width - box.height) < 2, `square thumbnails: ${box && box.width}x${box && box.height}`);
+  await tiles.first().click();
+  const dlg = page.getByRole('dialog', { name: 'Our results' });
+  await dlg.waitFor();
+  assert.ok(await dlg.locator('img.results-big').getAttribute('src'), 'the large photo is shown');
+  assert.match(await dlg.locator('.results-caption').innerText(), /1 of \d+/);
+  await dlg.getByRole('button', { name: 'Close' }).click();
+  await dlg.waitFor({ state: 'detached' });
+  await page.goto(BASE);
+  await page.waitForSelector('.door:has-text("Visitor")');
 });
 await step('visitor page lists benefits, braces options and WhatsApp button', async () => {
   await page.click('.door:has-text("Visitor")');

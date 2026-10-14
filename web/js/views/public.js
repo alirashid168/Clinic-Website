@@ -1,7 +1,7 @@
 // Public website: home (hero smile card + three doors + Meet Dr. Ali + his week
 // and the clinics) and the visitor page. The parts that need no data render at
 // once; the schedule, results and clinic cards fill in when the database answers.
-import { h, mount, srOnly, extLink, announce } from '../ui/dom.js';
+import { h, mount, srOnly, extLink, announce, modal } from '../ui/dom.js';
 import { state } from '../state.js';
 import { VISITOR, HOME, CONTACT, BRACES_PRICING } from '../content.js';
 import { aliWeekSection, clinicsSection, clinicFacts } from './schedule.js';
@@ -224,6 +224,7 @@ export async function renderHome(root) {
         h('nav', { class: 'door-row', 'aria-label': 'Choose who you are' },
           h('a', { class: 'door door-primary', href: '#/login/patient' }, h('strong', {}, 'Patient'), h('span', {}, 'See your invoices, X-rays and progress photos')),
           h('a', { class: 'door', href: '#/visitor' }, h('strong', {}, 'Visitor'), h('span', {}, 'Braces options, treatments and how to start')),
+          h('a', { class: 'door', href: '#/results' }, h('strong', {}, 'Our results'), h('span', {}, 'Smile makeovers, veneers, braces and more')),
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))),
         h('p', { class: 'hero-demo' }, 'New here? ', h('a', { href: '#/patient/demo' }, 'See a sample patient account'), ' to find out what you get.'))),
     h('main', { id: 'main' },
@@ -243,6 +244,49 @@ export async function renderHome(root) {
       results.set(section ? h('div', { class: 'public-main' }, section) : null);
     },
   });
+}
+
+// Our results: the clinic's case photos as a grid of square thumbnails (like Instagram); a click opens the photo large,
+// with Previous / Next and the arrow keys. The list is web/results/gallery.json (newest first), edited by hand for now.
+export async function renderResults(root) {
+  const grid = h('div', { class: 'results-grid' });
+  root.classList.add('has-fab');
+  mount(root,
+    header(true),
+    h('main', { id: 'main' },
+      h('div', { class: 'public-main' },
+        h('h1', {}, 'Our results'),
+        h('p', { class: 'muted', style: { maxWidth: '62ch' } }, 'Smile makeovers, veneers, braces, scaling and polishing, and whitening by Dr. Ali Rashid and his team. Tap a photo to see it larger.'),
+        grid)),
+    footer(),
+    waFloat());
+  let photos = [];
+  try {
+    const res = await fetch('results/gallery.json', { cache: 'no-cache' });
+    // only plain image paths on this site (a thumb that is not one falls back to the large image)
+    const okPath = (s) => typeof s === 'string' && /^[\w./-]+\.(jpe?g|png|webp)$/i.test(s) && !s.includes('..');
+    photos = res.ok ? ((await res.json()).photos || []).filter((p) => p && okPath(p.src)).map((p) => ({ ...p, thumb: okPath(p.thumb) ? p.thumb : p.src })) : [];
+  } catch { photos = []; }
+  const label = (p, i) => p.caption || `Result photo ${i + 1}`;
+  const open = (start) => {
+    let i = start;
+    const img = h('img', { class: 'results-big', alt: '' });
+    const caption = h('p', { class: 'results-caption' });
+    const show = () => { img.src = photos[i].src; img.alt = label(photos[i], i); caption.textContent = `${label(photos[i], i)} · ${i + 1} of ${photos.length}`; };
+    const step = (n) => { i = (i + n + photos.length) % photos.length; show(); };
+    const next = photos.length > 1 ? h('button', { type: 'button', class: 'btn', onclick: () => step(1) }, 'Next ›') : null;
+    const body = h('div', { class: 'results-view', onkeydown: (e) => { if (e.key === 'ArrowRight') { e.preventDefault(); step(1); } if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); } } },
+      img, caption,
+      photos.length > 1 ? h('div', { class: 'results-nav' },
+        h('button', { type: 'button', class: 'btn', onclick: () => step(-1) }, '‹ Previous'),
+        next) : null);
+    show();
+    modal('Our results', body, [], next ? { initialFocus: next } : {}); // the dialog's own close button (and Escape) closes it
+  };
+  mount(grid, photos.length
+    ? photos.map((p, i) => h('button', { type: 'button', class: 'results-tile', 'aria-label': `${label(p, i)}: open larger`, onclick: () => open(i) },
+        h('img', { src: p.thumb, alt: '', loading: 'lazy', decoding: 'async', width: 480, height: 480 })))
+    : h('p', { class: 'empty' }, 'Photos coming soon.'));
 }
 
 export async function renderVisitor(root) {
