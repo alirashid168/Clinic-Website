@@ -16,7 +16,7 @@ const QUEUE_KEY = 'checkups-pending-v1';
 const PAGE_SIZE = 50;
 const FIELD_NAMES = { notes: 'Notes' };
 const MISSING_TEXT = 'The checkup list is not switched on yet. It appears here once the database update has been run.';
-const SOURCES = ['website', 'google_sheet', 'archive'];
+const SOURCES = ['website', 'google_sheet', 'google_form', 'archive'];
 
 // Same wording rules as the Aaj ki List: only a browser that reports itself offline is "no internet connection".
 const notSaved = (e, still) => {
@@ -93,7 +93,12 @@ window.addEventListener('offline', () => queue?.setOnline(false));
 window.addEventListener('beforeunload', (e) => { if (queue?.pendingCount && !queue.disposed && queueUser === currentUser()) { e.preventDefault(); e.returnValue = ''; } });
 
 const whenText = (c) => (!c.checkup_date ? 'Not recorded' : c.date_is_month ? monthLabel(c.checkup_date) : shortDate(c.checkup_date));
-const sourceText = (c) => (c.source === 'archive' ? `${SOURCE_LABELS.archive}${c.source_tab ? `: ${c.source_tab}` : ''}` : SOURCE_LABELS[c.source] || c.source || '');
+// An answer imported from the Google Form is a row of its own ("From the Google Form") or went onto a checkup the list already had.
+const sourceText = (c) => {
+  if (c.source === 'google_form') return 'From the Google Form';
+  const base = c.source === 'archive' ? `${SOURCE_LABELS.archive}${c.source_tab ? `: ${c.source_tab}` : ''}` : SOURCE_LABELS[c.source] || c.source || '';
+  return c.form_submitted_at ? `${base}, answers from the Google Form` : base;
+};
 const number = (n) => Number(n || 0).toLocaleString('en-PK');
 // Only digits (a piece of a phone number) and fewer than 4 of them: the search cannot use that for a phone, so the empty list says why.
 const shortPhoneFragment = (q) => { const t = String(q || '').trim(); const n = t.replace(/\D/g, '').length; return n > 0 && n < 4 && !/[^\d\s+()-]/.test(t); };

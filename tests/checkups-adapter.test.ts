@@ -164,6 +164,7 @@ test('live: listDayCheckups reads one exact day; a database without the update g
   let ops = f.requests[0].ops;
   assert.equal(f.requests[0].table, 'checkup_list');
   assert.ok(has(ops, 'eq', 'checkup_date', '2026-10-09') && has(ops, 'eq', 'date_is_month', false) && has(ops, 'eq', 'branch_id', 2));
+  assert.ok(has(ops, 'neq', 'source', 'google_form'), 'an answer imported from the Google Form is not on a day\'s list');
   await data.listDayCheckups({ branchId: null, date: '2026-10-09' });
   assert.ok(!f.requests[1].ops.some((o: Op) => o[1] === 'branch_id'), 'no branch: every branch the reader may see');
   for (const answer of [fail('PGRST205', "Could not find the table 'public.checkup_list' in the schema cache", 404), fail('42P01', 'relation does not exist'), fail('PGRST202'), fail('42883'), fail('', 'not found', 404)]) {
@@ -303,6 +304,25 @@ test('live: without the database update every method but the day list throws CHE
   // ... but another failure is shown as it is.
   const { data } = await openPage(() => fail('42501', 'new row violates row-level security policy for table "checkups"', 403));
   await assert.rejects(() => data.addCheckup({ patient_name: 'Sample' }), (e: any) => e.code === '42501' && /row-level security/.test(e.message));
+});
+
+test('live: the import of the Google Form\'s answers calls import_checkup_form (the preview with p_dry_run); a database without it says so in plain words', async () => {
+  let { f, data } = await openPage(() => ok(null));
+  f.rpcAnswer = (_name: string, args: any) => ({ data: { given: args.p_rows.length, inserted: 1, dry_run: args.p_dry_run }, error: null });
+  assert.deepEqual(await data.importCheckupForm([{ row: 2 }], { dryRun: true }), { given: 1, inserted: 1, dry_run: true });
+  assert.deepEqual(await data.importCheckupForm([{ row: 2 }, { row: 3 }]), { given: 2, inserted: 1, dry_run: false });
+  assert.deepEqual(f.rpcs, [{ name: 'import_checkup_form', args: { p_rows: [{ row: 2 }], p_dry_run: true } }, { name: 'import_checkup_form', args: { p_rows: [{ row: 2 }, { row: 3 }], p_dry_run: false } }]);
+  const MISSING_FORM = "CHECKUP_FORM_MISSING: Importing the checkup form's answers needs a database update (20261011000300_checkup_form_2.sql). Nothing was imported. Run the update, then drop the file again.";
+  for (const answer of [fail('PGRST202', 'Could not find the function public.import_checkup_form(p_dry_run, p_rows) in the schema cache', 404), fail('42883'), fail('', 'Not Found', 404)]) {
+    f.rpcAnswer = () => answer;
+    await assert.rejects(() => data.importCheckupForm([{ row: 2 }]), (e: any) => e.code === 'CHECKUP_FORM_MISSING' && e.message === MISSING_FORM, JSON.stringify(answer.error));
+  }
+  f.rpcAnswer = () => fail('42501', 'NOT_ALLOWED: only Dr. Ali can import the answers of the checkup form.', 403);
+  await assert.rejects(() => data.importCheckupForm([{ row: 2 }]), (e: any) => e.code === '42501' && e.message.startsWith('NOT_ALLOWED'), 'any other error is shown as it is');
+  // the Source filter knows the new source
+  ({ f, data } = await openPage(() => ok([], { count: 0 })));
+  await data.listCheckups({ source: 'google_form' });
+  assert.ok(has(f.requests[0].ops, 'eq', 'source', 'google_form'));
 });
 
 test('live: subscribeCheckups listens to the table (one branch or all) and stops', async () => {
@@ -622,6 +642,92 @@ test('demo: the import follows the database - same key, fill versus overwrite, c
   await d.deleteCheckup(alpha.id);
   r = await d.importCheckups([rows4[0]]);
   assert.equal(r.inserted, 1);
+});
+
+// One answer of the Google Form as readFormResponses() sends it (made up).
+const answer = (row: number, at: string, name: string, phone: string | null, branch: string | null, extra: any = {}) =>
+  ({ row, submitted_at: at, name, phone, branch, doctors: 'Dr. Hina (sample)', checkup_for: 'Braces', ali_recommended: true, pricing_understood: 'yes', wants_treatment: true,
+    treatment_plan: 'Next month', follow_up: null, notes: null, ...extra });
+const karachiDay = (back: number) => new Date(Date.now() + 5 * 3600000 - back * 86400000).toISOString().slice(0, 10);
+
+test('demo: the import of the Google Form\'s answers follows the database - the day\'s checkup, the old list\'s month, a new row; the preview; once only', async () => {
+  const d = await demoAs('s-fd-nn');
+  await assert.rejects(() => d.importCheckupForm([]), /NOT_ALLOWED/, 'admin only');
+  // on the website already: a checkup of 21 Aug at North Nazimabad (no answers), one of 22 Aug typed without a phone, one of 25 Aug with all answers
+  const day = await d.addCheckup({ checkup_date: '2026-08-21', branch_id: 2, patient_name: 'Sample Day Person', phone: '0300 5550601', checkup_for: 'Checkup' });
+  const noPhone = await d.addCheckup({ checkup_date: '2026-08-22', branch_id: 2, patient_name: 'Sample  No Phone' });
+  const full = await d.addCheckup({ checkup_date: '2026-08-25', branch_id: 2, patient_name: 'Sample Full', phone: '0300-5550605', doctors: 'Dr. Rabia (sample)', checkup_for: 'Implant',
+    ali_recommended: false, pricing_understood: 'no', wants_treatment: false, treatment_plan: 'Will think' });
+  await d.signInDemo('s-admin');
+  await assert.rejects(() => d.importCheckupForm({}), /BAD_ROWS/);
+  await assert.rejects(() => d.importCheckupForm(Array.from({ length: 501 }, (_, i) => answer(i, '2026-08-21T10:00:00+05:00', 'Sample Over ' + i, null, 'NN'))), /TOO_MANY_ROWS/);
+  const bad = await d.importCheckupForm(['2026-02-30T10:00:00+05:00', '2026-08-21T24:00:00+05:00', '1999-08-21T10:00:00+05:00', '2026-08-21 10:00:00+05:00', null]
+    .map((at, i) => answer(i + 1, at as any, 'Sample Bad Time ' + i, null, 'NN')), { dryRun: true });
+  assert.deepEqual(bad.skipped.map((s: any) => s.reason), Array(5).fill('The date could not be read'), '30 Feb, 24:00, last century, a space for the T, no time: as the database says');
+  // and an old-list row of August for another person, with its own follow-up status
+  await d.importCheckups([wire(5, '2026-08-01', 'Sample Archive Person', '0300-5550602', 'NN', 'Interested', 'called once')]);
+
+  const rows = [
+    answer(2, '2026-08-21T19:25:03+05:00', 'Sample Day Person', '+92 300 5550601', 'NN', { follow_up: 'Follow-up Sent', notes: 'Reminder: done twice' }),
+    answer(3, '2026-08-20T11:00:00+05:00', 'sample archive person', '03005550602', 'GUL', { follow_up: 'No Response', notes: 'Reminder: not on whatsapp', doctors: null }),
+    answer(4, '2026-08-22T12:00:00+05:00', 'Sample No Phone', '0300-5550603', 'NN', { ali_recommended: false, pricing_understood: 'needs_explanation' }),
+    answer(5, '2026-08-21T13:00:00+05:00', 'Sample Day Person', '0300-5550601', 'GUL'),      // the same phone at another branch: another checkup
+    answer(6, '2026-08-23T09:00:00+05:00', 'Sample Twice', '0300-5550604', 'LHR', { pricing_understood: null }),
+    answer(7, '2026-08-23T09:05:00+05:00', 'Sample Twice', '0300-5550604', 'LHR', { pricing_understood: 'no', wants_treatment: false }),
+    answer(8, '2026-08-25T15:00:00+05:00', 'Sample Full', '0300-5550605', 'NN'),
+    answer(9, '2026-08-26T10:00:00+05:00', '  ', '0300-5550606', 'NN'),
+    answer(10, 'soon', 'Sample Bad Date', null, 'NN'),
+    answer(11, '2026-08-26T10:00:00', 'Sample No Offset', null, 'NN'),
+    answer(12, `${karachiDay(0)}T00:00:01+05:00`, 'Sample Today', '0300-5550607', 'NN'),
+    answer(13, `${karachiDay(-2)}T10:00:00+05:00`, 'Sample Tomorrow', '0300-5550608', 'NN'),
+    answer(14, '2026-08-27T08:00:00+05:00', 'Sample Odd Cells', 'p'.repeat(60), 'XXX', { ali_recommended: 'Yes', pricing_understood: 'Yes', wants_treatment: 1, treatment_plan: 'q'.repeat(600), follow_up: '', notes: 'n'.repeat(2500) }),
+  ];
+  const before = await d.exportCheckups({});
+  const preview = await d.importCheckupForm(rows, { dryRun: true });
+  assert.deepEqual(await d.exportCheckups({}), before, 'the preview changes nothing');
+  const r = await d.importCheckupForm(rows);
+  assert.deepEqual({ ...preview, dry_run: false }, r, 'the preview counts exactly what the import then does');
+  // new: rows 5 (another branch), 6 and 14; onto that day's checkup: rows 2, 4 and 7 (the first answer of row 6, which had no pricing
+  // answer); onto the old list's row: 3; nothing new: 8 (the website's checkup holds every answer already)
+  assert.deepEqual([r.given, r.inserted, r.filled_day, r.filled_month, r.already, r.same, r.skipped_count], [13, 3, 3, 1, 0, 1, 5]);
+  assert.equal(r.given, r.inserted + r.filled_day + r.filled_month + r.already + r.same + r.skipped_count);
+  assert.deepEqual(r.skipped, [
+    { row: 9, reason: 'No patient name' }, { row: 10, reason: 'The date could not be read' }, { row: 11, reason: 'The date could not be read' },
+    { row: 12, reason: "Given today: today's list is still kept in the Google Sheet. Import the file again tomorrow." },
+    { row: 13, reason: 'The date is in the future' },
+  ], 'no name, no readable time (it must carry its +05:00), today (the sheet still keeps that list), the future');
+
+  const one = async (q: string, source = '') => (await d.exportCheckups({ q, source }));
+  const day2 = (await one('Sample Day Person', 'website'))[0];
+  assert.deepEqual([day2.id, day2.phone, day2.source, day2.checkup_for, day2.doctors, day2.ali_recommended, day2.pricing_understood, day2.wants_treatment, day2.treatment_plan,
+    day2.follow_up, day2.notes, day2.form_submitted_at],
+  [day.id, '0300 5550601', 'website', 'Braces', 'Dr. Hina (sample)', true, 'yes', true, 'Next month', 'Follow-up Sent', 'Reminder: done twice', '2026-08-21T14:25:03.000Z'],
+  'the day\'s checkup gets the answers, the doctor, the form\'s "checkup for" in place of the plain "Checkup", the follow-up (it said Not Contacted) and the reminder; its name and phone stay');
+  const arch = (await one('Sample Archive Person'))[0];
+  assert.deepEqual([arch.source, arch.date_is_month, arch.checkup_date, arch.branch_id, arch.doctors, arch.checkup_for, arch.follow_up, arch.notes, arch.ali_recommended, arch.treatment_plan],
+    ['archive', true, '2026-08-01', 2, 'Dr. Sample (sample)', 'Scaling', 'Interested', 'called once; Reminder: not on whatsapp', true, 'Next month'],
+    'the old list\'s row of that month gets the answers and keeps its follow-up status, branch, doctor and treatment');
+  const np = (await one('No Phone'))[0];
+  assert.deepEqual([np.id, np.phone, np.ali_recommended, np.pricing_understood], [noPhone.id, '0300-5550603', false, 'needs_explanation'], 'matched by name (the website\'s row had no phone), and the phone is filled in');
+  const gul = (await one('Sample Day Person', 'google_form'))[0];
+  assert.deepEqual([gul.checkup_date, gul.date_is_month, gul.branch_id, gul.source, gul.source_tab, gul.day_status, gul.follow_up, gul.created_at, gul.form_submitted_at, gul.ali_recommended],
+    ['2026-08-21', false, 1, 'google_form', 'Checkup Form 2.0', 'completed', 'Not Contacted', '2026-08-21T08:00:00.000Z', '2026-08-21T08:00:00.000Z', true],
+    'a new checkup is shown like one added with the form on the website: the day, Completed, the time of the answer');
+  const twice = await one('Sample Twice');
+  assert.deepEqual(twice.map((c: any) => [c.source, c.pricing_understood, c.wants_treatment]), [['google_form', 'no', true]], 'two answers of one person on one day: one checkup, the later answer fills in what the first left empty');
+  assert.equal((await one('Sample Full'))[0].form_submitted_at, null, 'nothing new for that checkup: it is not changed at all');
+  assert.equal((await one('Sample Full'))[0].pricing_understood, 'no', 'an answer given on the website is never overwritten');
+  const odd = (await one('Sample Odd Cells'))[0];
+  assert.deepEqual([odd.phone.length, odd.branch_id, odd.ali_recommended, odd.pricing_understood, odd.wants_treatment, odd.treatment_plan.length, odd.notes.length, odd.follow_up],
+    [40, null, null, null, null, 500, 2000, 'Not Contacted'], 'odd cells are cleaned, never a failed batch');
+  assert.deepEqual((await d.listDayCheckups({ branchId: 1, date: '2026-08-21' })).map((c: any) => c.id), [], 'a checkup from the Google Form is on the Checkups page, not on the day\'s list');
+  assert.deepEqual((await d.listDayCheckups({ branchId: 2, date: '2026-08-21' })).map((c: any) => c.id), [day.id]);
+  assert.equal((await d.listCheckups({ source: 'google_form' })).total, 3, 'the Source filter "Google Form"');
+  // the same file again changes nothing
+  const again = await d.importCheckupForm(rows);
+  assert.deepEqual([again.inserted, again.filled_day, again.filled_month, again.already, again.same, again.skipped_count], [0, 0, 0, 8, 0, 5]);
+  assert.deepEqual(await d.importCheckupForm(rows, { dryRun: true }), { ...again, dry_run: true });
+  assert.equal(full.source, 'website');
 });
 
 test('demo: Admin -> Import of the Aaj ki List history never files a row whose name fits its Mr# only with doubt (it comes back with why), and never files a row without an Mr# on a brother of the same first name (abuse-privacy M1, M2; 11 Oct 2026)', async () => {

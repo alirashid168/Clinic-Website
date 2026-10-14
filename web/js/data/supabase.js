@@ -69,6 +69,8 @@ const checkupsMissing = (e) => !!e && (CHECKUPS_MISSING_CODES.has(e.code) || e.s
 const FORM_COLUMNS = /\b(ali_recommended|pricing_understood|wants_treatment|treatment_plan)\b/;
 const formMissing = (e) => !!e && (e.code === 'PGRST204' || e.code === '42703') && FORM_COLUMNS.test(e.message || '');
 const FORM_MISSING_TEXT = 'CHECKUP_FORM_MISSING: The checkup form needs a database update (20261011000300_checkup_form_2.sql). Nothing was saved. Ask Dr. Ali to run the update, then try again.';
+// The import of the Google Form's old answers is the function import_checkup_form of the same file.
+const FORM_IMPORT_MISSING_TEXT = 'CHECKUP_FORM_MISSING: Importing the checkup form\'s answers needs a database update (20261011000300_checkup_form_2.sql). Nothing was imported. Run the update, then drop the file again.';
 /** Runs a checkups request; "not installed" comes out as one error with the code CHECKUPS_MISSING (or CHECKUP_FORM_MISSING for the form's answers). */
 async function checkupsCall(run) {
   try { return await run(); } catch (e) {
@@ -77,7 +79,7 @@ async function checkupsCall(run) {
   }
 }
 const CHECKUP_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
-const CHECKUP_SOURCES = ['website', 'google_sheet', 'archive'];
+const CHECKUP_SOURCES = ['website', 'google_sheet', 'google_form', 'archive'];
 /** 'YYYY-MM' -> the first day of the month after it. */
 function nextMonthStart(ym) {
   const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
@@ -1227,10 +1229,11 @@ export async function createSupabaseAdapter() {
       return checkupsCall(() => fetchPaged(() => checkupFilters(sb.from('checkup_list').select('*'), filters)
         .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id'), 20000));
     },
-    /** The checkups of one day (exact-day rows only), oldest first. branchId null = every branch the reader may see. */
+    /** The checkups of one day (exact-day rows only), oldest first. branchId null = every branch the reader may see. An answer imported from
+     *  the Google Form is not one of them (it is on the Checkups page; that day's list did not have it). */
     async listDayCheckups({ branchId = null, date }) {
       try {
-        let q = sb.from('checkup_list').select('*').eq('checkup_date', date).eq('date_is_month', false);
+        let q = sb.from('checkup_list').select('*').eq('checkup_date', date).eq('date_is_month', false).neq('source', 'google_form');
         if (branchId) q = q.eq('branch_id', Number(branchId));
         return check(await q.order('created_at', { ascending: true }).order('id'));
       } catch (e) {
@@ -1282,6 +1285,17 @@ export async function createSupabaseAdapter() {
     /** Admin: adds up to 500 rows of the old checkup list (the rows readCheckupList() makes). -> { given, inserted, updated, unchanged, kept, skipped: [{ row, reason }], skipped_count } */
     async importCheckups(rows, { overwrite = false } = {}) {
       return checkupsCall(async () => check(await sb.rpc('import_checkups', { p_rows: rows, p_overwrite: !!overwrite })));
+    },
+    /**
+     * Admin: up to 500 old answers of the Google Form "Checkup Patient Form 2.0" (the rows readFormResponses() makes). dryRun: the preview
+     * (the database does everything and undoes it). -> { given, inserted, filled_day, filled_month, already, same, skipped: [{ row, reason }], skipped_count, dry_run }
+     */
+    async importCheckupForm(rows, { dryRun = false } = {}) {
+      try {
+        return check(await sb.rpc('import_checkup_form', { p_rows: rows, p_dry_run: !!dryRun }));
+      } catch (e) {
+        throw checkupsMissing(e) ? plainError(FORM_IMPORT_MISSING_TEXT, 'CHECKUP_FORM_MISSING') : e;
+      }
     },
 
     // ------------------------------------------------------------ photos

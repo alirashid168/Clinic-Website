@@ -13,7 +13,8 @@ export const FOLLOW_UP_STATUSES = ['Not Contacted', 'Follow-up Sent', 'No Respon
   'Started', 'Completed', 'Did Not Come', 'Not Interested', 'Referred', 'Not Recorded'];
 export const DAY_STATUSES = ['waiting', 'in_treatment', 'completed', 'cancelled', 'no_show'];
 export const DAY_STATUS_LABELS = { waiting: 'Waiting', in_treatment: 'In treatment', completed: 'Completed', cancelled: 'Cancelled', no_show: 'No show' };
-export const SOURCE_LABELS = { website: 'Website', google_sheet: 'Google Sheet', archive: 'Old list' };
+// google_form: an old answer of the Google Form "Checkup Patient Form 2.0", imported on Admin -> Import (web/js/lib/checkup-form.js).
+export const SOURCE_LABELS = { website: 'Website', google_sheet: 'Google Sheet', google_form: 'Google Form', archive: 'Old list' };
 export const IMPORT_BATCH = 250;
 // Clinic text (trimmed, lower case, inner spaces collapsed) -> branch code. Includes the app's own branch names so an
 // export can be imported again.
@@ -250,7 +251,7 @@ export function readCheckupList(rows2d) {
     const at = (field) => (columns[field] === undefined ? undefined : cells[columns[field]]);
     const name = cleanText(isEmptyCell(at('name')) ? null : String(at('name')).replace(/\s+/g, ' '), 200);
     if (name.value === null) { skip(row, 'No patient name'); continue; }
-    if (columns.source !== undefined && /^(website|google sheet)$/i.test(String(at('source') ?? '').trim())) { skip(row, 'Already on the website (exported from it)'); continue; }
+    if (columns.source !== undefined && /^(website|google sheet|google form)$/i.test(String(at('source') ?? '').trim())) { skip(row, 'Already on the website (exported from it)'); continue; }
 
     const month = parseMonth(at('month'));
     const phone = cleanText(at('phone'), 40);

@@ -2236,6 +2236,86 @@ await step('Import: a file without the Patient Name and Phone header is refused 
   await section.locator('.alert-stop:has-text("No checkup list found in this file")').waitFor();
   assert.match(await section.locator('.alert-stop').innerText(), /Patient Name and Phone/);
 });
+// The old answers of the Google Form "Checkup Patient Form 2.0" (owner, 12 Oct 2026: "bring the old 470 entries too, and design the form
+// submitted entries all in similar way too"). A made-up CSV in the layout of the "Form Responses 2" tab.
+await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses CSV is previewed (new, onto a checkup on the list, skipped and why, wrong column, branches, REMINDERS), imported once, and shown like website entries "From the Google Form"', async () => {
+  const k = new Date(Date.now() + 5 * 3600000);   // today in Karachi
+  const today = `${k.getUTCMonth() + 1}/${k.getUTCDate()}/${k.getUTCFullYear()} 00:00:05`;
+  const csv = [
+    'Timestamp,Patient Full Name,Which Branch did you visit?,Mobile Number,Who did your Checkup?,Did Dr. Ali recommend your treatment?,What was your checkup for?,Did you understand the pricing details?,Would you like to start the treatment?,If yes then when? If no then why not?,REMINDERS',
+    '8/21/2026 19:25:03,Form Test Alpha,RJ Mall - Karachi,0300-5550811,Dr. Hina (sample),Yes,General Checkup,Yes,Yes,Next month,done',
+    '9\\1\\2026     14.21.1,Form Test Bravo,DHA Phase 6 - Karachi,3005550812,Someone (sample),No,"Braces, Scaling and Polishing",Needs More Clear Explanation,No,Too far from home,not on whatsapp',
+    '9/2/2026 10:00:00,Form Test Charlie,Lahore - Gulberg,0300-5550813,,Yes,Crown/Bridge,Form Test Someone,Lahore - Gulberg,,',
+    '3/10/2026 11:00:00,Import Test Beta,Lahore - Gulberg,0300-5550202,,Yes,Braces,Yes,Yes,After Eid,treatment started',
+    `${today},Form Test Today,RJ Mall - Karachi,0300-5550815,,Yes,Braces,Yes,Yes,Soon,`,
+    '9/3/2026 11:00:00,,RJ Mall - Karachi,0300-5550816,,Yes,Braces,Yes,Yes,,',
+    'soon,Form Test Bad Date,RJ Mall - Karachi,0300-5550817,,Yes,Braces,Yes,Yes,,', ''].join('\r\n');
+  await pk.goto(BASE + '#/staff/admin?tab=import');
+  await pk.waitForSelector('h2:text("6. Checkup Form 2.0 answers")');
+  const section = pk.locator('section.panel:has(h2:text("6. Checkup Form 2.0 answers"))');
+  assert.ok(await section.getByText('Checkup Form 2.0 answers (CSV downloaded from the Form Responses tab)').count(), 'the field says which file');
+  await section.locator('input[type=file]').setInputFiles({ name: 'Checkup karwaliya - Form Responses 2.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await section.getByRole('button', { name: 'Import 5 answers' }).waitFor();
+  const text = await section.innerText();
+  assert.match(text, /5\s+answers, 10 Mar 2026 to/, 'five answers can go in (three rows are skipped)');
+  assert.match(text, /3\s+new checkups/);
+  assert.match(text, /1\s+put on a checkup already on the list/);
+  assert.match(text, /0\s+already on the website/);
+  assert.match(text, /3\s+skipped/);
+  assert.match(text, /0 answers go onto a checkup of the same person at the same branch on the same day .*, 1 answer goes onto the old list's row of that person and month \(its follow-up status stays\)/);
+  assert.match(text, /DHA Phase 6 - Karachi\s+DHA Karachi\s+1/, 'an old spelling of a branch');
+  assert.match(text, /RJ Mall - Karachi\s+Gulshan \(RJ Mall\)\s+2/);
+  assert.match(text, /Follow-up Sent\s+1/);
+  assert.match(text, /No Response\s+1/);
+  assert.match(text, /Started\s+1/);
+  assert.match(text, /Empty: Not Contacted\s+2/);
+  assert.match(text, /1 row has an answer in the wrong place: row 4 \(Did you understand the pricing details\?; Would you like to start the treatment\?\)\. It is imported with those answers empty; what was written there is kept in the notes\./);
+  assert.match(text, /1 row has a date that could not be read and is skipped/);
+  assert.match(text, /1 name given for "Who did your checkup\?" is not on the website's doctor list and is kept as written: Someone \(sample\) \(1\)/, 'a doctor of the website\'s list is matched; anyone else stays as written');
+  await section.locator('summary:has-text("3 rows are skipped")').click();
+  const skipped = await section.locator('details table tbody tr').allInnerTexts();
+  assert.deepEqual(skipped.map((t) => t.replace(/\s+/g, ' ').trim()), [
+    "6 Given today: today's list is still kept in the Google Sheet. Import the file again tomorrow.", '7 No patient name', '8 The date could not be read']);
+  await shot(pk, '17-import-checkup-form');
+  await section.getByRole('button', { name: 'Import 5 answers' }).click();
+  await section.locator('.alert-info:has-text("Checkup Form 2.0:")').waitFor();
+  assert.match(await section.locator('.alert-info').innerText(),
+    /Checkup Form 2\.0: 3 added, 1 put on a checkup already on the list, 0 already imported, 0 already had these answers, 3 skipped\./);
+  // the same file again: nothing changes
+  await section.locator('input[type=file]').setInputFiles({ name: 'Checkup karwaliya - Form Responses 2.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await section.locator('.stat:has(strong:text-is("4")):has-text("already on the website")').waitFor();
+  assert.match(await section.innerText(), /0\s+new checkups/);
+  await section.getByRole('button', { name: 'Import 5 answers' }).click();
+  await section.locator('.alert-info:has-text("Checkup Form 2.0:")').waitFor();
+  assert.match(await section.locator('.alert-info').innerText(), /0 added, 0 put on a checkup already on the list, 4 already imported/);
+  // on the Checkups page: like website entries, marked "From the Google Form"
+  await section.getByRole('link', { name: 'Open the checkups from the Google Form →' }).click();
+  await pk.waitForFunction(() => document.querySelectorAll('table.checkup-table tbody tr[data-id]').length === 3);
+  const alpha = rowsOf(pk).filter({ hasText: 'Form Test Alpha' });
+  const cells = (await alpha.locator('td, th').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+  assert.equal(cells[0], '21 Aug 2026', 'the day of the answer');
+  assert.match(cells[1], /^Form Test Alpha 0300-5550811/);
+  assert.equal(cells[2], 'Gulshan (RJ Mall)');
+  assert.equal(cells[3], 'General checkup Dr. Hina (sample) Dr. Ali recommended: Yes Understood pricing: Yes', 'the form\'s choice written the website\'s way, the doctor and the answers');
+  assert.deepEqual([cells[4], cells[5]], ['Yes', 'Next month']);
+  assert.equal(await alpha.locator('select[aria-label^="Follow-up status"]').inputValue(), 'Follow-up Sent', 'REMINDERS "done"');
+  assert.equal(cells[8], 'From the Google Form');
+  const charlie = rowsOf(pk).filter({ hasText: 'Form Test Charlie' });
+  assert.match(await charlie.locator('input[aria-label^="Notes for"]').inputValue(), /^Form answer in the wrong place: "Did you understand the pricing details\?" was "Form Test Someone"/);
+  assert.equal((await charlie.locator('td').nth(3).innerText()).trim(), '–', 'the answer in the wrong column is left empty');
+  await shot(pk, '18-checkups-from-google-form');
+  await pk.goto(BASE + '#/staff/checkups?q=Import%20Test%20Beta');
+  await pk.waitForFunction(() => document.querySelectorAll('table.checkup-table tbody tr[data-id]').length === 1);
+  const beta = rowsOf(pk).first();
+  assert.equal(await beta.locator('select[aria-label^="Follow-up status"]').inputValue(), 'Interested', 'the old list\'s row keeps its follow-up status');
+  assert.equal(await beta.locator('input[aria-label^="Notes for"]').inputValue(), 'Wants to think; Reminder: treatment started');
+  assert.match(await beta.innerText(), /Old list: Sample tab B, answers from the Google Form/);
+  assert.match(await beta.innerText(), /After Eid/);
+  // the Source filter
+  await pk.goto(BASE + '#/staff/checkups?source=google_form');
+  await pk.waitForFunction(() => document.querySelectorAll('table.checkup-table tbody tr[data-id]').length === 3);
+  assert.equal(await pk.locator('select').filter({ has: pk.locator('option[value="google_form"]') }).first().inputValue(), 'google_form', 'the Source filter "Google Form"');
+});
 await step('Admin: the Aaj ki List "All branches" shows the checkup rows with their branch, and the day downloads with a type column', async () => {
   await pk.goto(BASE + '#/staff/sheet?branch=all');
   await pk.waitForSelector('th:text("Branch"):not([hidden])');

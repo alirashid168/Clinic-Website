@@ -43,7 +43,7 @@ test('constants: eleven follow-up statuses (no "scheduled" day status), the owne
   assert.equal(FOLLOW_UP_STATUSES[0], 'Not Contacted');
   assert.deepEqual(DAY_STATUSES, ['waiting', 'in_treatment', 'completed', 'cancelled', 'no_show']);
   assert.deepEqual(Object.keys(DAY_STATUS_LABELS), DAY_STATUSES);
-  assert.deepEqual(SOURCE_LABELS, { website: 'Website', google_sheet: 'Google Sheet', archive: 'Old list' });
+  assert.deepEqual(SOURCE_LABELS, { website: 'Website', google_sheet: 'Google Sheet', google_form: 'Google Form', archive: 'Old list' });
   assert.equal(IMPORT_BATCH, 250);
   assert.deepEqual(EXPORT_HEADER.slice(0, 11), HEADER);
   assert.equal(EXPORT_HEADER.length, 21);
@@ -289,11 +289,13 @@ test('a "Source" column: rows exported from the website are not added again', ()
     ['Dec 2024', 'Sample Web', '0300-5550302', '', '', '', '', '', '', '', '', 'Website'],
     ['Dec 2024', 'Sample Sheet', '0300-5550303', '', '', '', '', '', '', '', '', ' google SHEET '],
     ['Dec 2024', 'Sample Blank', '0300-5550304', '', '', '', '', '', '', '', '', ''],
+    ['Aug 2026', 'Sample Form', '0300-5550305', '', '', '', '', '', '', '', '', 'Google Form'],
   ];
   const r = readCheckupList(grid);
   assert.deepEqual(r.rows.map((x) => x.name), ['Sample Old', 'Sample Blank']);
-  assert.deepEqual(r.skipped, [{ row: 3, reason: 'Already on the website (exported from it)' }, { row: 4, reason: 'Already on the website (exported from it)' }]);
-  assert.equal(r.summary.total, 4);
+  assert.deepEqual(r.skipped, [{ row: 3, reason: 'Already on the website (exported from it)' }, { row: 4, reason: 'Already on the website (exported from it)' },
+    { row: 6, reason: 'Already on the website (exported from it)' }], 'an answer imported from the Google Form is not made an old-list row either');
+  assert.equal(r.summary.total, 5);
   assert.equal(r.summary.ready, 2);
   assert.equal(r.columns.source, 11);
   assert.equal(r.columns.sourceTab, 10, '"Source Tab" and "Source" are two different columns');
@@ -374,4 +376,16 @@ test('export and import again: archive rows come back with the same keys, websit
   assert.equal(back.summary.ready, 3);
   assert.deepEqual(checkupsToSheet([], branches), [EXPORT_HEADER]);
   assert.deepEqual(checkupsToSheet(null, null), [EXPORT_HEADER]);
+});
+
+test('the export of an answer imported from the Google Form says "Google Form" with its answers, and that file imported again does not add it', () => {
+  const row = { id: 'g', checkup_date: '2026-08-12', date_is_month: false, branch_id: 1, patient_name: 'Sample Form Golf', phone: '0300-5550107', city: null, doctors: 'Dr. Sample (sample)',
+    checkup_for: 'Braces', details: null, day_status: 'completed', est_fee: null, follow_up: 'Follow-up Sent', notes: null, source: 'google_form', source_tab: 'Checkup Form 2.0',
+    patient_id: null, mr_number: null, created_at: '2026-08-12T14:25:03Z', form_submitted_at: '2026-08-12T14:25:03Z',
+    ali_recommended: true, pricing_understood: 'yes', wants_treatment: true, treatment_plan: 'Next month' };
+  const sheet = checkupsToSheet([row], [{ id: 1, name: 'Gulshan (RJ Mall)' }]);
+  assert.deepEqual(sheet[1], ['Aug 2026', 'Sample Form Golf', '0300-5550107', '', 'Gulshan (RJ Mall)', 'Dr. Sample (sample)', 'Braces', '', 'Follow-up Sent', '', 'Checkup Form 2.0',
+    '2026-08-12', 'Completed', '', 'Google Form', '', '2026-08-12', 'Yes', 'Yes', 'Yes', 'Next month']);
+  const back = readCheckupList(sheet);
+  assert.deepEqual([back.rows.length, back.skipped], [0, [{ row: 2, reason: 'Already on the website (exported from it)' }]]);
 });

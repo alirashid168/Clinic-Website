@@ -12,9 +12,11 @@ import { loadSheetJS } from '../../lib/sheetjs.js';
 let hwLib = null;
 let aajLib = null;
 let checkupsLib = null;
+let formLib = null;
 const healthwire = async () => (hwLib ||= await import('../../lib/healthwire.js'));
 const aaj = async () => (aajLib ||= await import('../../lib/aaj.js'));
 const checkupMapping = async () => (checkupsLib ||= await import('../../lib/checkups.js'));
+const checkupForm = async () => (formLib ||= await import('../../lib/checkup-form.js'));
 
 const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs';
 const PDF_WORKER_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
@@ -410,6 +412,106 @@ export async function renderImport(root) {
     } catch (e) { mount(ckOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
   });
 
+  // ------------------------------------------------------------ 6. the checkup form's old answers
+  // The Google Form "Checkup Patient Form 2.0" (Aug to Oct 2026, before the form was on the website). An answer goes onto the checkup of
+  // that person on that day, or onto the old list's row of that month, when the website has one; otherwise it becomes a checkup "From the
+  // Google Form". The preview asks the database what it would do (it does it and undoes it). The same file again changes nothing.
+  const cfOut = h('div', {});
+  const cfInput = filePicker('.csv,.xlsx,.xls', async (file) => {
+    mount(cfOut, h('p', { class: 'muted' }, `Reading ${file.name}…`));
+    try {
+      const { findFormHeader, readFormResponses, formBranch, FORM_IMPORT_BATCH } = await checkupForm();
+      const tabs = await fileToTabs(file);
+      const tab = tabs.find((t) => /form responses/i.test(t.name) && findFormHeader(t.rows) >= 0) || tabs.find((t) => findFormHeader(t.rows) >= 0);
+      if (!tab) throw new Error('No answers of the checkup form found in this file: it needs a header row with Timestamp and Patient Full Name. Download the "Form Responses 2" tab.');
+      const read = readFormResponses(tab.rows, { clinicians: state.ref.clinicians });
+      if (read.missing?.length) throw new Error(`The checkup form's answers need a column called ${read.missing.map((x) => `"${x}"`).join(' and ')}. Check the header row.`);
+      const s = read.summary;
+      const progress = h('p', { class: 'muted', 'aria-live': 'polite' });
+      const result = h('div', {});
+      const listOf = (obj) => { const e = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]); return e.slice(0, 12).map(([t, n]) => `${t} (${n})`).join(', ') + (e.length > 12 ? ', …' : ''); };
+      const branchNameOf = (text) => state.ref.branches.find((b) => b.code === formBranch(text))?.name || null;
+
+      // Every batch through import_checkup_form; the counts added up. onPart(sentSoFar) before each batch.
+      const send = async (dryRun, onPart) => {
+        const total = { inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped_count: 0, skipped: [] };
+        for (let i = 0; i < read.rows.length; i += FORM_IMPORT_BATCH) {
+          onPart?.(i);
+          document.dispatchEvent(new Event('app:activity'));   // a long import counts as activity (no idle logout half-way)
+          const r = await d.importCheckupForm(read.rows.slice(i, i + FORM_IMPORT_BATCH), { dryRun });
+          for (const k of ['inserted', 'filled_day', 'filled_month', 'already', 'same', 'skipped_count']) total[k] += Number(r?.[k] || 0);
+          if (Array.isArray(r?.skipped)) total.skipped.push(...r.skipped);
+        }
+        return total;
+      };
+      let plan = null;
+      let planError = null;
+      if (read.rows.length) {
+        mount(cfOut, h('p', { class: 'muted' }, `Checking ${number(read.rows.length)} answers against the website…`));
+        try { plan = await send(true); } catch (e) { planError = e; }
+      }
+      const skippedRows = [...read.skipped, ...(plan?.skipped || [])].sort((a, b) => a.row - b.row);
+      const skippedCount = read.skipped.length + Number(plan?.skipped_count || 0);
+
+      const btn = h('button', { class: 'btn btn-primary', disabled: !read.rows.length || !plan }, `Import ${count(read.rows.length, 'answer', 'answers')}`);
+      btn.onclick = async () => {
+        btn.disabled = true;
+        let sent = 0;
+        try {
+          const done = await send(false, (i) => { sent = i; progress.textContent = `Answers: ${number(Math.min(i + FORM_IMPORT_BATCH, read.rows.length))} of ${number(read.rows.length)}…`; });
+          progress.textContent = '';
+          mount(result, h('div', { class: 'alert alert-info' },
+            h('div', {}, `Checkup Form 2.0: ${number(done.inserted)} added, ${number(done.filled_day + done.filled_month)} put on a checkup already on the list, ${number(done.already)} already imported, ${number(done.same)} already had these answers, ${number(read.skipped.length + done.skipped_count)} skipped.`),
+            h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/checkups?source=google_form' }, 'Open the checkups from the Google Form →'))));
+          toast('Checkup form answers imported.', 'ok');
+        } catch (e) {
+          btn.disabled = false; progress.textContent = '';
+          if (sent) mount(result, h('div', { class: 'alert alert-warning' }, `${number(sent)} of ${number(read.rows.length)} answers were sent before the error. Import the same file again: answers already imported are not added twice.`));
+          toast(friendlyError(e), 'error', 8000);
+        }
+      };
+
+      const reminderLabel = { empty: 'Empty: Not Contacted', other: 'No status (the text is kept in the notes)' };
+      mount(cfOut,
+        h('div', { class: 'stat-row', style: { margin: '12px 0' } },
+          stat(number(s.ready), s.from ? `answers, ${shortDate(s.from)} to ${shortDate(s.to)}` : 'answers'),
+          plan ? stat(number(plan.inserted), 'new checkups') : null,
+          plan ? stat(number(plan.filled_day + plan.filled_month), 'put on a checkup already on the list') : null,
+          plan ? stat(number(plan.already + plan.same), 'already on the website') : null,
+          stat(number(skippedCount), 'skipped')),
+        planError ? h('div', { class: 'alert alert-stop' }, `The website could not check the file: ${friendlyError(planError)}`) : null,
+        plan && (plan.filled_day || plan.filled_month) ? h('p', { class: 'muted' },
+          `${count(plan.filled_day, 'answer goes', 'answers go')} onto a checkup of the same person at the same branch on the same day (from the website or the Google Sheet), ${count(plan.filled_month, 'answer goes', 'answers go')} onto the old list's row of that person and month (its follow-up status stays). Only empty answers are filled in; nothing is overwritten.`) : null,
+        plan && (plan.already || plan.same) ? h('p', { class: 'muted' }, `${count(plan.already, 'answer was', 'answers were')} imported before, and ${count(plan.same, 'checkup already has', 'checkups already have')} the answers: nothing changes for them.`) : null,
+        h('div', { class: 'inline', style: { alignItems: 'flex-start', gap: '24px' } },
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '520px' } },
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Branch on the form'), h('th', { scope: 'col' }, 'Branch on the website'), h('th', { scope: 'col', class: 'right' }, 'Answers'))),
+            h('tbody', {}, Object.entries(s.perBranchText || {}).sort((a, b) => b[1] - a[1]).map(([text, n]) => {
+              const b = text === '(empty)' ? null : branchNameOf(text);
+              return h('tr', {}, h('td', {}, text), h('td', {}, b || h('span', { class: 'muted' }, 'No branch')), h('td', { class: 'right' }, number(n)));
+            })))),
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '420px' } },
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Follow-up status from REMINDERS'), h('th', { scope: 'col', class: 'right' }, 'Answers'))),
+            h('tbody', {}, Object.entries(s.perReminder || {}).sort((a, b) => b[1] - a[1]).map(([kind, n]) => h('tr', {}, h('td', {}, reminderLabel[kind] || kind), h('td', { class: 'right' }, number(n)))))))),
+        h('p', { class: 'muted' }, 'What REMINDERS says stays in the notes ("Reminder: ..."), except a plain "done" or a status written as it is. A checkup already on the list takes the status only while it still says Not Contacted; the old list\'s row keeps its own.'),
+        s.wrongColumn.length ? h('div', { class: 'alert alert-warning' },
+          `${count(s.wrongColumn.length, 'row has', 'rows have')} an answer in the wrong place: ${s.wrongColumn.slice(0, 10).map((w) => `row ${w.row} (${w.questions.join('; ')})`).join(', ')}${s.wrongColumn.length > 10 ? ', …' : ''}. ${s.wrongColumn.length === 1 ? 'It is' : 'They are'} imported with those answers empty; what was written there is kept in the notes.`) : null,
+        Object.keys(s.unknownBranches).length ? h('div', { class: 'alert alert-warning' },
+          `${count(Object.keys(s.unknownBranches).length, 'branch name is', 'branch names are')} not one of ours: ${listOf(s.unknownBranches)}. Those answers are imported without a branch; the name is kept in the notes.`) : null,
+        s.noBranch ? h('p', { class: 'muted' }, `${count(s.noBranch, 'answer has', 'answers have')} no branch and ${s.noBranch === 1 ? 'is' : 'are'} imported without one.`) : null,
+        s.badDate ? h('div', { class: 'alert alert-warning' }, `${count(s.badDate, 'row has a date', 'rows have a date')} that could not be read and ${s.badDate === 1 ? 'is' : 'are'} skipped (see below).`) : null,
+        Object.keys(s.doctorsNotListed).length ? h('p', { class: 'muted' },
+          `${count(Object.keys(s.doctorsNotListed).length, 'name', 'names')} given for "Who did your checkup?" ${Object.keys(s.doctorsNotListed).length === 1 ? 'is' : 'are'} not on the website's doctor list and ${Object.keys(s.doctorsNotListed).length === 1 ? 'is' : 'are'} kept as written: ${listOf(s.doctorsNotListed)}.`) : null,
+        s.cut ? h('div', { class: 'alert alert-warning' }, `${count(s.cut, 'cell is', 'cells are')} longer than the website allows and ${s.cut === 1 ? 'is' : 'are'} cut short.`) : null,
+        skippedRows.length ? h('details', { style: { margin: '8px 0' } }, h('summary', {}, `${count(skippedCount, 'row is', 'rows are')} skipped`),
+          h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '640px' } },
+            h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Row in the file'), h('th', { scope: 'col' }, 'Why'))),
+            h('tbody', {}, skippedRows.slice(0, 20).map((x) => h('tr', {}, h('td', {}, x.row), h('td', {}, x.reason))))),
+          skippedCount > 20 ? h('p', { class: 'muted' }, `…and ${number(skippedCount - 20)} more.`) : null)) : null,
+        h('div', { style: { marginTop: '8px' } }, btn), progress, result);
+    } catch (e) { mount(cfOut, h('div', { class: 'alert alert-stop' }, friendlyError(e))); }
+  });
+
   // ------------------------------------------------------------ check a month
   const monthInput = h('input', { type: 'month', value: todayISO().slice(0, 7) });
   const checkOut = h('div', {});
@@ -431,13 +533,17 @@ export async function renderImport(root) {
         h('li', {}, h('strong', {}, 'Expenses: '), 'Expenses → set the dates → Print. Save the "Expenses Report.pdf".'),
         h('li', {}, h('strong', {}, 'Patients (optional): '), 'Patients → Excel → emailed to you. Adds gender, date of birth and address; names, phones and branches already come with the payments file.'),
         h('li', {}, h('strong', {}, 'Aaj ki List: '), 'open the Google Sheet → File → Download → Microsoft Excel (.xlsx). Every branch tab comes in the one file.'),
-        h('li', {}, h('strong', {}, 'Checkup list: '), 'the Excel file with the columns Month, Patient Name, Phone, City, Clinic, Doctor, Treatment / Checkup For, Est. Fee (Rs), Status, Notes, Source Tab.')),
+        h('li', {}, h('strong', {}, 'Checkup list: '), 'the Excel file with the columns Month, Patient Name, Phone, City, Clinic, Doctor, Treatment / Checkup For, Est. Fee (Rs), Status, Notes, Source Tab.'),
+        h('li', {}, h('strong', {}, 'Checkup Form 2.0 answers: '), 'open "Checkup karwaliya", go to the "Form Responses 2" tab → File → Download → Comma-separated values (.csv). Only that tab is downloaded.')),
       h('p', { class: 'muted', style: { marginTop: '8px' } }, 'Any date range works — a month to test, or the whole history in one file. Dropping a file twice changes nothing.')),
     h('section', { class: 'panel' }, h('h2', {}, '1. Payments and invoices'), field('Transactions Report (.xlsx)', txInput, 'The Excel attachment from the "Email excel" message in your Gmail — not a PDF.'), txOut),
     h('section', { class: 'panel' }, h('h2', {}, '2. Expenses'), field('Expenses Report (.pdf)', exInput), exOut),
     h('section', { class: 'panel' }, h('h2', {}, '3. Patient details (optional)'), field('Patients list (.xlsx)', ptInput), ptOut),
     h('section', { class: 'panel' }, h('h2', {}, '4. Aaj ki List history'), field('Aaj ki List (.xlsx, all tabs)', aajInput, 'Doctors, assistants, wires and details, tokens and braces months for every day on the sheet. Payments come from Healthwire, so nothing here changes the money.'), aajOut),
     h('section', { class: 'panel' }, h('h2', {}, '5. Checkup list'), field('Checkup list (.xlsx or .csv)', ckInput, 'Rows already on the website are not added again.'), ckOut),
+    h('section', { class: 'panel' }, h('h2', {}, '6. Checkup Form 2.0 answers'),
+      field('Checkup Form 2.0 answers (CSV downloaded from the Form Responses tab)', cfInput,
+        'The answers given on the Google Form "Checkup Patient Form 2.0" before the form was on the website. You see what will happen before anything is imported; answers already on the website are not added again.'), cfOut),
     h('section', { class: 'panel' }, h('h2', {}, 'Check a month'), field('Month', monthInput), checkOut));
   await check();
 }
