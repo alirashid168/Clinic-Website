@@ -238,12 +238,19 @@ export const feedbackSubject = (kind, topic) => `${FEEDBACK_KIND_LABELS[kind] ||
 
 /**
  * What a failed submission says to the visitor. The database answers with a code first ("FORM_BUSY: ...");
- * { field, message } when one field is at fault, otherwise { message }.
+ * { field, message } when one field is at fault, otherwise { message }. The whole-website limits add `busy`:
+ * 'minute' (FORM_BUSY) or 'day' (FORM_BUSY_DAY, the day is full: try again tomorrow), and the form shows a WhatsApp
+ * link with them. `form` ('job' or 'feedback') chooses the words: an applicant can send the CV on WhatsApp instead.
  */
-export function submitProblem(err) {
+export function submitProblem(err, { form = 'feedback' } = {}) {
   const text = String(err?.message || '');
   const field = err?.field || null;
-  if (/FORM_BUSY/.test(text)) return { message: 'Many forms are being sent right now. Please try again in a few minutes, or message the clinic on WhatsApp.' };
+  const whatsapp = form === 'job' ? 'or send your CV on WhatsApp.' : 'or message the clinic on WhatsApp.';
+  if (/FORM_BUSY_DAY/.test(text)) {
+    const what = form === 'job' ? 'applications' : 'messages';
+    return { busy: 'day', message: `The clinic has received a lot of ${what} today. Please try again tomorrow, ${whatsapp}` };
+  }
+  if (/FORM_BUSY/.test(text)) return { busy: 'minute', message: `Many forms are being sent right now. Please try again in a few minutes, ${whatsapp}` };
   if (/FORM_CV/.test(text)) return { field: 'cv', message: text.replace(/^.*FORM_CV[A-Z_]*:\s*/, '') || 'Please choose your CV again.' };
   if (/FORM_INVALID/.test(text)) return { field, message: text.replace(/^.*FORM_INVALID:\s*/, '') };
   return null;

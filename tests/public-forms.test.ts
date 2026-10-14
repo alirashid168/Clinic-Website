@@ -121,7 +121,16 @@ test('"Complaints & suggestions": anonymous is fine; contact details are checked
 });
 
 test('what a refusal from the database says to the visitor', () => {
-  assert.match(submitProblem(new Error('FORM_BUSY: many forms are arriving right now.'))!.message, /try again in a few minutes/);
+  const minute = submitProblem(new Error('FORM_BUSY: many forms are arriving right now.'))!;
+  assert.equal(minute.busy, 'minute');
+  assert.equal(minute.message, 'Many forms are being sent right now. Please try again in a few minutes, or message the clinic on WhatsApp.');
+  assert.match(submitProblem(new Error('FORM_BUSY: many CVs are arriving right now.'), { form: 'job' })!.message, /in a few minutes, or send your CV on WhatsApp\.$/);
+  // A full day has its own words: "tomorrow", not "in a few minutes" (a hiring post can bring more applications than a day takes).
+  assert.deepEqual(submitProblem(new Error('FORM_BUSY_DAY: the clinic has received many job applications today.'), { form: 'job' }),
+    { busy: 'day', message: 'The clinic has received a lot of applications today. Please try again tomorrow, or send your CV on WhatsApp.' });
+  assert.deepEqual(submitProblem(new Error('FORM_BUSY_DAY: the clinic has received many messages today.')),
+    { busy: 'day', message: 'The clinic has received a lot of messages today. Please try again tomorrow, or message the clinic on WhatsApp.' });
+  assert.equal(submitProblem(new Error('FORM_BUSY_DAY: many CVs have arrived today.'), { form: 'job' })!.busy, 'day', 'a refused upload on a full day too');
   assert.deepEqual(submitProblem(Object.assign(new Error('FORM_INVALID: Please enter your full name.'), { field: 'full_name' })),
     { field: 'full_name', message: 'Please enter your full name.' });
   assert.deepEqual(submitProblem(new Error('FORM_CV: Please choose your CV again.')), { field: 'cv', message: 'Please choose your CV again.' });

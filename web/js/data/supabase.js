@@ -1519,7 +1519,14 @@ export async function createSupabaseAdapter() {
       if (info.error) throw Object.assign(new Error('FORM_CV: ' + info.error), { field: 'cv' });
       const path = `incoming/${crypto.randomUUID()}.${info.ext}`;
       const { error } = await sb.storage.from('job-cvs').upload(path, file, { contentType: info.type, upsert: false });
-      if (error) throw cvUploadError(error);
+      if (error) {
+        const problem = cvUploadError(error);
+        // Refused by the upload limit: when today's uploads are full, the visitor is told "tomorrow", not "in a few minutes".
+        if (/^FORM_BUSY:/.test(problem.message) && await sb.rpc('job_cv_upload_busy').then((r) => r.data, () => null) === 'day') {
+          throw new Error('FORM_BUSY_DAY: many CVs have arrived today. Please try again tomorrow.');
+        }
+        throw problem;
+      }
       return path;
     },
     /** The checked form (lib/public-forms.js) to public.submit_job_application. Resolves { ok: true }; a refusal says which field. */

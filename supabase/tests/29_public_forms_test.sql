@@ -1,7 +1,8 @@
 -- The public forms on the homepage (20261011000200_public_forms.sql): "Join our team" and "Complaints & suggestions".
 -- A visitor (role anon) may only upload a new CV under incoming/<uuid>.<ext> and call the two submit functions. This locks in:
 -- every field is checked on the server, the honeypot drops a form without saying so, the rate limits hold and never tell
--- whether a phone or CNIC was used before, anon can read, change or delete nothing (tables and files), only jobs.view shows
+-- whether a phone or CNIC was used before (a dropped form uses up its CV and counts toward the whole-website limits, like a
+-- stored one; a full day has its own answer), anon can read, change or delete nothing (tables and files), only jobs.view shows
 -- applications (CNIC, phone, CV), the CV checks (wrong bucket, wrong path, reused file, wrong type or size, stale), the
 -- staff status/notes history, cleanup of CVs never sent, and website feedback in the Complaints inbox.
 -- Every name, phone, CNIC and file here is made up.
@@ -71,7 +72,8 @@ end $$;
 create or replace function pg_temp.later(m int) returns void language sql as $$
   update storage.objects set created_at = created_at - make_interval(mins => m) where bucket_id = 'job-cvs';
   update public.job_applications set created_at = created_at - make_interval(mins => m);
-  update public.complaints set created_at = created_at - make_interval(mins => m) where source = 'website' $$;
+  update public.complaints set created_at = created_at - make_interval(mins => m) where source = 'website';
+  update private.public_form_log set created_at = created_at - make_interval(mins => m) $$;
 grant execute on all functions in schema pg_temp to authenticated, anon;
 
 begin;
@@ -254,6 +256,8 @@ begin
   perform pg_temp.expect_error($q$insert into public.complaints (subject, body, source, kind, topic) values ('x', 'y', 'website', 'complaint', 'other')$q$, 'permission denied', 'anon: cannot add a complaint around the function');
   perform pg_temp.expect_error($q$select public.update_job_application(gen_random_uuid(), 'hired')$q$, 'permission denied', 'anon: cannot call the staff status function');
   perform pg_temp.expect_error('select * from public.job_cv_orphans()', 'permission denied', 'anon: cannot list unsent CVs');
+  perform pg_temp.expect_error('select count(*) from private.public_form_log', 'permission denied', 'anon: cannot read the log the rate limits count');
+  perform pg_temp.expect_error($q$insert into private.public_form_log (form, cv_path) values ('job', 'incoming/x.pdf')$q$, 'permission denied', 'anon: cannot write to it either');
 end $$;
 reset role;
 
@@ -276,9 +280,17 @@ begin
     'per phone: over the limit, a form with a CV that was never uploaded still gets the CV answer (nothing about the phone)');
   perform pg_temp.check(pg_temp.try_job(pg_temp.job(26, jsonb_build_object('phone', '03005558888', 'cv_path', pg_temp.cv(999)))) like 'cv | FORM_CV: %',
     'per phone: the same answer for a phone never seen before');
+  -- A dropped form leaves the traces of a stored one: its CV is used up. Sending that CV again gets the same answer as sending
+  -- the CV of a stored form, so re-using a CV cannot tell whether the phone was over its limit.
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(27, jsonb_build_object('cv_path', pg_temp.cv(22)))) like 'cv | FORM_CV: Please choose your CV again.%',
+    'per phone: the CV of the dropped third form cannot be sent again with another phone and CNIC');
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(27, jsonb_build_object('cv_path', pg_temp.cv(21)))) like 'cv | FORM_CV: Please choose your CV again.%',
+    'per phone: ... the very same answer as for the CV of a stored form');
 end $$;
 reset role;
 select pg_temp.check((select count(*) from public.job_applications where phone = '03005559999') = 2, 'per phone: ... but only two are stored');
+select pg_temp.check((select count(*) from private.public_form_log where form = 'job' and cv_path in (pg_temp.cv(20), pg_temp.cv(21), pg_temp.cv(22))) = 3,
+  'per phone: all three are in the log the limits count, the dropped one with its CV');
 select pg_temp.later(2);
 set role anon;
 select pg_temp.act_as('');
@@ -288,53 +300,70 @@ begin
   perform pg_temp.check(pg_temp.try_job(pg_temp.job(23, '{"cnic": "54321-0000000-9"}')) = 'ok', 'per CNIC: the first application of the day is taken');
   perform pg_temp.check(pg_temp.try_job(pg_temp.job(24, '{"cnic": "5432100000009"}')) = 'ok', 'per CNIC: the second is taken (written without dashes it is the same CNIC)');
   perform pg_temp.check(public.submit_job_application(pg_temp.job(25, '{"cnic": "54321-0000000-9"}')) = '{"ok": true}'::jsonb, 'per CNIC: the third gets the same answer');
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(28, jsonb_build_object('cv_path', pg_temp.cv(25)))) like 'cv | FORM_CV: Please choose your CV again.%',
+    'per CNIC: the CV of the dropped third form cannot be sent again, as for a stored one');
 end $$;
 reset role;
 select pg_temp.check((select count(*) from public.job_applications where cnic = '54321-0000000-9') = 2, 'per CNIC: ... but only two are stored');
 
--- Whole website: 5 a minute. (Inside one transaction every row has the same time, so the rows made above are moved back first.)
+-- Whole website: 5 a minute, counted from the log, so a form dropped over its phone limit counts like a stored one.
+-- (Inside one transaction every row has the same time, so the rows made above are moved back first.)
 select pg_temp.later(2);
 set role anon;
 select pg_temp.act_as('');
 do $$
 declare i int;
 begin
+  perform pg_temp.check(public.job_cv_upload_busy() is null, 'CV uploads: the website may ask whether uploads are refused now (no: null)');
   for i in 30..34 loop perform pg_temp.put_cv(i); end loop;
+  perform pg_temp.check(public.job_cv_upload_busy() = 'minute', 'CV uploads: after five this minute it answers "minute" (how busy the website is, nothing about a file)');
   perform pg_temp.expect_error(format('select pg_temp.put_cv(%s)', 35), 'row-level security', 'CV uploads: the sixth upload within a minute is refused by the storage policy');
-  for i in 30..34 loop perform pg_temp.check(pg_temp.try_job(pg_temp.job(i)) = 'ok', 'whole website: application ' || (i - 29) || ' of 5 this minute is taken'); end loop;
+  for i in 30..32 loop perform pg_temp.check(pg_temp.try_job(pg_temp.job(i)) = 'ok', 'whole website: application ' || (i - 29) || ' of 5 this minute is taken'); end loop;
+  -- 03005559999 already has two applications today: these two are thanked and dropped, and count all the same.
+  for i in 33..34 loop
+    perform pg_temp.check(pg_temp.try_job(pg_temp.job(i, '{"phone": "03005559999"}')) = 'ok', 'whole website: application ' || (i - 29) || ' of 5 this minute is thanked (dropped: its phone is over the limit)');
+  end loop;
 end $$;
 reset role;
+select pg_temp.check((select count(*) from public.job_applications where cv_path in (pg_temp.cv(33), pg_temp.cv(34))) = 0, 'the two over the phone limit were not stored');
 insert into storage.objects (bucket_id, name, metadata) values ('job-cvs', pg_temp.cv(35), '{"size": 1000, "mimetype": "application/pdf"}');
 set role anon;
 select pg_temp.act_as('');
-select pg_temp.check(pg_temp.try_job(pg_temp.job(35)) like '- | FORM_BUSY:%', 'whole website: the sixth application within a minute is told to try again later');
+select pg_temp.check(pg_temp.try_job(pg_temp.job(35)) like '- | FORM_BUSY:%', 'whole website: the sixth application within a minute is told to try again later (the two dropped ones counted)');
 reset role;
--- 50 a day: fill the day up to 50 (made directly), a minute later the next is still refused; the next day it is taken.
+-- 200 a day (a hiring post can bring many): fill the day's log up to 199 (made directly), one more form dropped over its phone
+-- limit makes 200, and the next is told to try again tomorrow (FORM_BUSY_DAY, its own words); the next day it is taken.
 select pg_temp.later(2);
-insert into public.job_applications (full_name, phone, position, qualification, cnic, cv_path, cv_type, cv_size, created_at)
-select 'Sample Filler ' || g, '0311' || lpad(g::text, 7, '0'), 'other', 'BDS', '99999-' || lpad(g::text, 7, '0') || '-1', 'filler/' || g, 'application/pdf', 1, now() - interval '3 hours'
-  from generate_series(1, 50 - (select count(*)::int from public.job_applications where created_at > now() - interval '1 day')) g;
+insert into private.public_form_log (form, created_at)
+select 'job', now() - interval '3 hours'
+  from generate_series(1, 199 - (select count(*)::int from private.public_form_log where form = 'job' and created_at > now() - interval '1 day')) g;
+insert into storage.objects (bucket_id, name, metadata) values ('job-cvs', pg_temp.cv(37), '{"size": 1000, "mimetype": "application/pdf"}');
 set role anon;
 select pg_temp.act_as('');
-select pg_temp.check(pg_temp.try_job(pg_temp.job(35)) like '- | FORM_BUSY:%', 'whole website: over 50 applications in a day the next one is told to try again later');
+select pg_temp.check(pg_temp.try_job(pg_temp.job(37, '{"phone": "03005559999"}')) = 'ok', 'whole website: the 200th application of the day is thanked (dropped: its phone is over the limit)');
+select pg_temp.check(pg_temp.try_job(pg_temp.job(35)) like '- | FORM_BUSY_DAY:%try again tomorrow%', 'whole website: after 200 applications in a day the next one is told to try again tomorrow (the dropped one counted)');
 reset role;
-select pg_temp.check((select count(*) from public.job_applications where cv_path = pg_temp.cv(35)) = 0, 'the refused application was not stored');
+select pg_temp.check((select count(*) from public.job_applications where cv_path in (pg_temp.cv(35), pg_temp.cv(37))) = 0, 'neither was stored');
 select pg_temp.later(24 * 60 + 5);
 update storage.objects set created_at = now() - interval '10 minutes' where bucket_id = 'job-cvs' and name = pg_temp.cv(35);
+insert into private.public_form_log (form, cv_path, created_at) values ('job', 'incoming/old-sample.pdf', now() - interval '3 days');
 set role anon;
 select pg_temp.act_as('');
 select pg_temp.check(pg_temp.try_job(pg_temp.job(35)) = 'ok', 'whole website: a day later applications are taken again');
 reset role;
--- 60 CV uploads a day.
+select pg_temp.check(not exists (select 1 from private.public_form_log where form = 'job' and created_at < now() - interval '2 days'),
+  'a job line of the log older than two days is removed by the next form (nothing needs it then)');
+-- 250 CV uploads a day.
 select pg_temp.later(2);
 insert into storage.objects (bucket_id, name, metadata, created_at)
-select 'job-cvs', pg_temp.cv(1000 + g), '{"size": 1000, "mimetype": "application/pdf"}', now() - interval '2 hours'
-  from generate_series(1, 60 - (select count(*)::int from storage.objects where bucket_id = 'job-cvs' and created_at > now() - interval '1 day')) g;
+select 'job-cvs', pg_temp.cv(100000 + g), '{"size": 1000, "mimetype": "application/pdf"}', now() - interval '2 hours'
+  from generate_series(1, 250 - (select count(*)::int from storage.objects where bucket_id = 'job-cvs' and created_at > now() - interval '1 day')) g;
 set role anon;
 select pg_temp.act_as('');
-select pg_temp.expect_error('select pg_temp.put_cv(36)', 'row-level security', 'CV uploads: over 60 in a day the next upload is refused');
+select pg_temp.check(public.job_cv_upload_busy() = 'day', 'CV uploads: with 250 today it answers "day", so the website says to try again tomorrow');
+select pg_temp.expect_error('select pg_temp.put_cv(36)', 'row-level security', 'CV uploads: after 250 in a day the next upload is refused');
 reset role;
-delete from storage.objects where bucket_id = 'job-cvs' and name like 'incoming/00000000-0000-4000-8000-0000000010%';
+delete from storage.objects where bucket_id = 'job-cvs' and name between pg_temp.cv(100001) and pg_temp.cv(100250);
 
 -- 8. Staff: only jobs.view shows applications, their CNIC, phone and CV
 select pg_temp.later(24 * 60 + 5);
@@ -354,6 +383,7 @@ begin
   perform pg_temp.check(n = 0, 'without jobs.view: no CV can be removed');
   perform pg_temp.expect_error($q$update public.job_applications set status = 'hired'$q$, 'permission denied', 'staff cannot change an application around the function');
   perform pg_temp.expect_error($q$insert into public.job_application_events (application_id, kind, body) values (gen_random_uuid(), 'note', 'x')$q$, 'permission denied', 'staff cannot write the history themselves');
+  perform pg_temp.expect_error('select count(*) from private.public_form_log', 'permission denied', 'staff cannot read the log the rate limits count');
 
   -- A personal tick gives it, and taking it away takes it away again.
   perform pg_temp.act_as(current_setting('test.admin'));
@@ -395,6 +425,7 @@ begin
   -- Cleanup of CVs never sent: listed after a day, removable; a CV in use or a fresh upload is not.
   perform pg_temp.check(exists (select 1 from public.job_cv_orphans() where path = pg_temp.cv(2)), 'a CV uploaded but never sent, older than a day, is listed for cleanup');
   perform pg_temp.check(not exists (select 1 from public.job_cv_orphans() where path = pg_temp.cv(1)), 'a CV that belongs to an application is not listed');
+  perform pg_temp.check(exists (select 1 from public.job_cv_orphans() where path = pg_temp.cv(22)), 'the CV of a form dropped over its phone limit is listed too (no application uses it)');
   perform pg_temp.check((select count(*) from storage.objects where bucket_id = 'job-cvs') > 0, 'the admin sees the CVs (a short-lived link can be signed)');
   delete from storage.objects where bucket_id = 'job-cvs' and name = pg_temp.cv(1);
   get diagnostics n = row_count;
@@ -402,6 +433,9 @@ begin
   delete from storage.objects where bucket_id = 'job-cvs' and name = pg_temp.cv(2);
   get diagnostics n = row_count;
   perform pg_temp.check(n = 1, 'a CV never sent can be removed');
+  delete from storage.objects where bucket_id = 'job-cvs' and name = pg_temp.cv(22);
+  get diagnostics n = row_count;
+  perform pg_temp.check(n = 1, 'and so can the CV of a dropped form');
 end $$;
 reset role;
 insert into storage.objects (bucket_id, name, metadata) values ('job-cvs', pg_temp.cv(40), '{"size": 10, "mimetype": "application/pdf"}');
@@ -454,7 +488,8 @@ begin
                         and c.contact_mr = '50012' and c.contact_me, 'the complaint: "Not about one branch", name trimmed, phone in one form, Mr# without "Mr#", contact me');
   perform pg_temp.check(c.body = E'Waited two hours <img src=x onerror=alert(1)>\nPlease fix.', 'the message is stored as plain text, exactly as typed (line end cleaned)');
 end $$;
--- Per phone: five a day, then thanked and not stored; whole website: 10 a minute, 200 a day.
+-- Per phone: five a day, then thanked and not stored; whole website: 10 a minute, 200 a day, counted from the log, so a form
+-- dropped over its phone limit counts like a stored one.
 select pg_temp.later(2);
 set role anon;
 select pg_temp.act_as('');
@@ -472,19 +507,22 @@ select pg_temp.act_as('');
 do $$
 declare i int;
 begin
-  for i in 1..10 loop perform pg_temp.check(pg_temp.try_fb(pg_temp.fb()) = 'ok', 'whole website: feedback ' || i || ' of 10 this minute is taken'); end loop;
-  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb()) like '- | FORM_BUSY:%', 'whole website: the eleventh form within a minute is told to try again later');
+  for i in 1..9 loop perform pg_temp.check(pg_temp.try_fb(pg_temp.fb()) = 'ok', 'whole website: feedback ' || i || ' of 10 this minute is taken'); end loop;
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"phone": "03015550123"}')) = 'ok', 'whole website: feedback 10 of 10 this minute is thanked (dropped: its phone is over the limit)');
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb()) like '- | FORM_BUSY:%', 'whole website: the eleventh form within a minute is told to try again later (the dropped one counted)');
 end $$;
 reset role;
+select pg_temp.check((select count(*) from public.complaints where contact_phone = '03015550123') = 5, 'the dropped one was not stored');
+-- 200 a day: fill the day's log up to 200 (made directly); the next is told to try again tomorrow (FORM_BUSY_DAY).
 select pg_temp.later(2);
-insert into public.complaints (subject, body, source, kind, topic, created_at)
-select 'Suggestion: Other', 'Sample filler', 'website', 'suggestion', 'other', now() - interval '3 hours'
-  from generate_series(1, 200 - (select count(*)::int from public.complaints where source = 'website' and created_at > now() - interval '1 day')) g;
+insert into private.public_form_log (form, created_at)
+select 'feedback', now() - interval '3 hours'
+  from generate_series(1, 200 - (select count(*)::int from private.public_form_log where form = 'feedback' and created_at > now() - interval '1 day')) g;
 set role anon;
 select pg_temp.act_as('');
-select pg_temp.check(pg_temp.try_fb(pg_temp.fb()) like '- | FORM_BUSY:%', 'whole website: over 200 forms in a day the next one is told to try again later');
+select pg_temp.check(pg_temp.try_fb(pg_temp.fb()) like '- | FORM_BUSY_DAY:%try again tomorrow%', 'whole website: after 200 forms in a day the next one is told to try again tomorrow');
 reset role;
-delete from public.complaints where body = 'Sample filler';
+select pg_temp.check((select count(*) from public.complaints where source = 'website') = 15, 'only the forms that were taken are stored (2 + 4 + 9), none refused or dropped');
 
 -- 10. Website feedback in the Complaints inbox; a patient's own complaints are unchanged
 set role authenticated;

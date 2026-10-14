@@ -256,6 +256,7 @@ function seed() {
       cv_size: db.job_cvs[1].size, message: null, consent_at: daysAgo(5) + 'T09:31:00.000Z', status: 'contacted', updated_by: 's-admin',
       updated_at: daysAgo(4) + 'T10:00:00.000Z', created_at: daysAgo(5) + 'T09:31:00.000Z' },
   ];
+  db.form_log = []; // private.public_form_log: the forms of the last two days (the samples above are older)
   db.job_events = [
     { id: uid(), application_id: db.job_applications[1].id, kind: 'status', status: 'contacted', body: null, by_staff: 's-admin', by_name: 'Dr. Ali Rashid', created_at: daysAgo(4) + 'T10:00:00.000Z' },
     { id: uid(), application_id: db.job_applications[1].id, kind: 'note', status: null, body: 'Called, will come on Saturday. (Sample note.)', by_staff: 's-admin', by_name: 'Dr. Ali Rashid', created_at: daysAgo(4) + 'T10:01:00.000Z' },
@@ -995,11 +996,16 @@ export function createDemoAdapter() {
 
     // ------------------------------------------------------------ the homepage forms (visitors, no login)
     // The same rules as the database functions (submit_job_application, submit_feedback): every field checked again, the honeypot
-    // and the per-phone / per-CNIC limits answer { ok: true } without storing, the whole-website limits ask to try again later.
+    // and the per-phone / per-CNIC limits answer { ok: true } without storing, the whole-website limits ask to try again later
+    // (or tomorrow, once the day is full). db.form_log stands in for private.public_form_log: every form that passed its checks,
+    // stored or dropped; the whole-website limits count it and a CV in it is used, so a dropped form leaves the same traces.
     async uploadJobCv(file) {
       const info = cvFileInfo(file);
       if (info.error) throw formError('cv', info.error, 'FORM_CV');
-      if (db.job_cvs.filter((x) => Date.parse(x.created_at) > Date.now() - 60000).length >= 5) fail('new row violates row-level security policy for table "objects"');
+      // the storage policy's limits, in the words the live data layer gives them (it asks job_cv_upload_busy which one)
+      const uploads = (ms) => db.job_cvs.filter((x) => Date.parse(x.created_at) > Date.now() - ms).length;
+      if (uploads(86400000) >= 250) fail('FORM_BUSY_DAY: many CVs have arrived today. Please try again tomorrow.');
+      if (uploads(60000) >= 5) fail('FORM_BUSY: many CVs are arriving right now. Please try again later.');
       const path = `incoming/${crypto.randomUUID ? crypto.randomUUID() : uid()}.${info.ext}`;
       db.job_cvs.push({ path, type: info.type, size: file.size, file, created_at: new Date().toISOString() });
       return path;
@@ -1011,12 +1017,16 @@ export function createDemoAdapter() {
       if (errors.length) throw formError(errors[0].field, errors[0].message);
       if (data.branch !== 'any' && !db.branches.some((b) => b.active && b.id === data.branch)) throw formError('branch', 'Please choose a branch, or "Any branch".');
       if (!/^incoming\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|doc|docx|jpg|png)$/.test(String(data.cv_path || ''))) throw formError('cv', 'Please attach your CV again.', 'FORM_CV');
-      const since = (ms) => db.job_applications.filter((a) => Date.parse(a.created_at) > Date.now() - ms);
-      if (since(60000).length >= 5 || since(86400000).length >= 50) fail('FORM_BUSY: many job applications are arriving right now. Please try again later.');
+      const logged = (ms) => db.form_log.filter((x) => x.form === 'job' && Date.parse(x.created_at) > Date.now() - ms).length;
+      if (logged(86400000) >= 200) fail('FORM_BUSY_DAY: the clinic has received many job applications today. Please try again tomorrow.');
+      if (logged(60000) >= 5) fail('FORM_BUSY: many job applications are arriving right now. Please try again later.');
       const cv = db.job_cvs.find((x) => x.path === data.cv_path);
       if (!cv) throw formError('cv', 'Your CV did not finish uploading. Please choose it again.', 'FORM_CV');
-      if (db.job_applications.some((a) => a.cv_path === cv.path) || Date.parse(cv.created_at) < Date.now() - 86400000) throw formError('cv', 'Please choose your CV again.', 'FORM_CV');
-      // after every other check, like the database: no answer depends on whether the phone or CNIC was used before
+      if (db.form_log.some((x) => x.cv_path === cv.path) || db.job_applications.some((a) => a.cv_path === cv.path)
+        || Date.parse(cv.created_at) < Date.now() - 86400000) throw formError('cv', 'Please choose your CV again.', 'FORM_CV');
+      db.form_log.push({ form: 'job', cv_path: cv.path, created_at: new Date().toISOString() });
+      // after every other check and the log, like the database: nothing depends on whether the phone or CNIC was used before
+      const since = (ms) => db.job_applications.filter((a) => Date.parse(a.created_at) > Date.now() - ms);
       if (since(86400000).filter((a) => a.phone === data.phone).length >= 2 || since(86400000).filter((a) => a.cnic === data.cnic).length >= 2) return ok;
       const now = new Date().toISOString();
       db.job_applications.unshift({ id: uid(), full_name: data.full_name, phone: data.phone, email: data.email, position: data.position, qualification: data.qualification,
@@ -1030,8 +1040,11 @@ export function createDemoAdapter() {
       const { errors, data } = checkFeedback(form);
       if (errors.length) throw formError(errors[0].field, errors[0].message);
       if (data.branch !== 'none' && !db.branches.some((b) => b.active && b.id === data.branch)) throw formError('branch', 'Please choose a branch, or "Not about one branch".');
+      const logged = (ms) => db.form_log.filter((x) => x.form === 'feedback' && Date.parse(x.created_at) > Date.now() - ms).length;
+      if (logged(86400000) >= 200) fail('FORM_BUSY_DAY: the clinic has received many messages today. Please try again tomorrow.');
+      if (logged(60000) >= 10) fail('FORM_BUSY: many forms are arriving right now. Please try again later.');
+      db.form_log.push({ form: 'feedback', cv_path: null, created_at: new Date().toISOString() });
       const web = (ms) => db.complaints.filter((c) => c.source === 'website' && Date.parse(c.created_at) > Date.now() - ms);
-      if (web(60000).length >= 10 || web(86400000).length >= 200) fail('FORM_BUSY: many forms are arriving right now. Please try again later.');
       if (data.phone && web(86400000).filter((c) => c.contact_phone === data.phone).length >= 5) return ok;
       db.complaints.push({ id: uid(), patient_id: null, branch_id: data.branch === 'none' ? null : data.branch, clinician_id: null, subject: feedbackSubject(data.kind, data.topic),
         body: data.message, status: 'new', created_at: new Date().toISOString(), source: 'website', kind: data.kind, topic: data.topic,

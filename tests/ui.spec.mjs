@@ -2215,8 +2215,17 @@ await step('Register needs both "Register new patients" and list editing: with l
 // website forms in the Complaints inbox; the clinic coordinator (no jobs.view) sees no application at all.
 const pf = await newPage({ width: 390, height: 844 });
 const docWidth = (pg) => pg.evaluate(() => document.documentElement.scrollWidth);
-await step('homepage: a section with two buttons, "Join our team" and "Complaints & suggestions", each opening its own page; the footer links to both', async () => {
+await step('homepage: a line under the four doors and a section with two buttons, "Join our team" and "Complaints & suggestions", each opening its own page; the footer links to both', async () => {
   await pf.goto(BASE);
+  // Right under the doors (owner, 12 Oct: he looked for the new buttons): found without scrolling past Dr. Ali, the week and the clinics.
+  const line = pf.locator('.hero .hero-forms');
+  assert.equal(await line.getByRole('link', { name: 'Join our team' }).getAttribute('href'), '#/join');
+  assert.equal(await line.getByRole('link', { name: 'Complaints & suggestions' }).getAttribute('href'), '#/feedback');
+  const lineEnd = await line.evaluate((el) => el.getBoundingClientRect().bottom + window.scrollY);
+  const doorsEnd = await pf.locator('.door-row').evaluate((el) => el.getBoundingClientRect().bottom + window.scrollY);
+  assert.ok(lineEnd < 1100 && lineEnd - doorsEnd < 150, `the line sits just under the doors at 390 px (doors end at y=${Math.round(doorsEnd)}, the line at y=${Math.round(lineEnd)})`);
+  await line.scrollIntoViewIfNeeded();
+  await shot(pf, '39-home-hero-forms-390');
   const section = pf.locator('#work-with-us');
   await section.scrollIntoViewIfNeeded();
   assert.equal(await section.locator('a.forms-card').count(), 2);
@@ -2325,9 +2334,11 @@ await step('feedback form: sent with contact details; the thank-you says the cli
   assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
   await shot(pf, '44-feedback-thanks-390');
 });
-await step('feedback form: "Send another message" gives an empty form, and an anonymous suggestion about no single branch goes through', async () => {
-  await pf.getByRole('button', { name: 'Send another message' }).click();
+await step('feedback form: "Send another message" gives an empty form with focus on its heading, and an anonymous suggestion about no single branch goes through', async () => {
+  await pf.getByRole('button', { name: 'Send another message' }).press('Enter');
   await pf.waitForSelector('main form.public-form');
+  assert.deepEqual(await pf.evaluate(() => [document.activeElement?.tagName, document.activeElement?.textContent]), ['H1', 'Complaints & suggestions'],
+    'focus moves to the heading of the new form (not lost to the page)');
   const form = pf.locator('form.public-form');
   assert.equal(await form.getByLabel(/^Message/).inputValue(), '');
   await form.getByRole('radio', { name: /Suggestion/ }).check();
@@ -2354,6 +2365,38 @@ await step('the hidden honeypot box: out of the tab order and hidden from screen
   await trap.evaluate((el) => { el.value = 'http://spam.example'; });
   await form.getByRole('button', { name: 'Send', exact: true }).click();
   await pf.waitForSelector('.form-thanks h1');
+});
+await step('a full day of applications: the form says "try again tomorrow" in plain words, with a WhatsApp link to send the CV instead', async () => {
+  await pf.goto(BASE + '#/join');
+  await pf.waitForSelector('main form.public-form');
+  // The database's answer once the day's 200 applications are in (FORM_BUSY_DAY), given by the data layer for this one step.
+  await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    window.__submitJob = state.data.submitJobApplication;
+    state.data.submitJobApplication = async () => { throw new Error('FORM_BUSY_DAY: the clinic has received many job applications today. Please try again tomorrow.'); };
+  });
+  try {
+    const form = pf.locator('form.public-form');
+    await form.getByLabel(/^Full name/).fill('Sample Applicant Busy');
+    await form.getByLabel(/^Mobile number/).fill('0300 5557799');
+    await form.getByLabel(/^CNIC number/).fill('12345-0007799-1');
+    await form.getByLabel(/^Job you are applying for/).selectOption({ label: 'Dental assistant' });
+    await form.getByLabel(/^Degree or qualification/).fill('Diploma');
+    await form.getByLabel(/^Preferred branch/).selectOption({ label: 'Any branch' });
+    await form.getByLabel(/^CV file/).setInputFiles({ name: 'busy-cv.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made-up CV for the test') });
+    await form.getByLabel(/may keep these details/).check();
+    await form.getByRole('button', { name: 'Send my application' }).click();
+    const alert = form.locator('.form-alert');
+    await alert.waitFor();
+    assert.match(await alert.innerText(), /^The clinic has received a lot of applications today\. Please try again tomorrow, or send your CV on WhatsApp\./);
+    assert.match(await alert.getByRole('link', { name: /Send your CV on WhatsApp/ }).getAttribute('href'), /^https:\/\/wa\.me\/92\d{10}\?text=/, "the clinic's WhatsApp chat");
+    assert.equal(await pf.evaluate(() => document.activeElement?.classList.contains('form-alert')), true, 'focus moves to the message');
+    assert.equal(await form.locator('.field-error').count(), 0, 'no field is marked wrong');
+    assert.equal(await form.getByRole('button', { name: 'Send my application' }).isEnabled(), true, 'the form stays, to send again tomorrow');
+    await shot(pf, '44b-join-day-full-390');
+  } finally {
+    await pf.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.submitJobApplication = window.__submitJob; });
+  }
 });
 await step('staff: Dr. Ali opens "Job applications" from the More menu: the new application is on top; status, job and branch filters work', async () => {
   await pf.setViewportSize({ width: 1366, height: 860 });

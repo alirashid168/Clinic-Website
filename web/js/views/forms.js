@@ -7,7 +7,7 @@
 // bots (people never see it, screen readers skip it).
 import { h, mount, field, select, showFormErrors, clearFieldErrors, setFieldError, announce, friendlyError } from '../ui/dom.js';
 import { state } from '../state.js';
-import { header, footer } from './public.js';
+import { header, footer, waLink } from './public.js';
 import {
   POSITIONS, QUALIFICATIONS, FEEDBACK_KINDS, FEEDBACK_TOPICS, CV_ACCEPT, LIMITS, FIRST_GRADUATION_YEAR, lastGraduationYear,
   checkJobApplication, checkFeedback, cvFileInfo, normalizePhone, normalizeCnic, formatPhone, submitProblem,
@@ -15,6 +15,11 @@ import {
 
 const JOIN_PRIVACY = 'Only Dr. Ali Rashid and the people he chooses for hiring see your details and CV. The clinic keeps them to contact you about jobs and never shares them.';
 const FEEDBACK_PRIVACY = 'Dr. Ali Rashid and the clinic coordinator read every message. It is used only to improve the clinic and, if you ask, to contact you. Your name and number are optional.';
+// When the website is too busy for the form (FORM_BUSY, FORM_BUSY_DAY): the message the WhatsApp chat starts with, and the link's words.
+const WHATSAPP_INSTEAD = {
+  job: ['Hi, I would like to apply for a job at the clinic. I am sending my CV here.', 'Send your CV on WhatsApp'],
+  feedback: ['Hi, I would like to share a complaint or suggestion about the clinic.', 'Message the clinic on WhatsApp'],
+};
 
 // ---------------------------------------------------------------- pieces
 let seq = 0;
@@ -23,7 +28,7 @@ const newId = (name) => `pf-${name}-${++seq}`;
 function page(root, title, intro, privacy, body) {
   const wrap = h('div', { class: 'form-wrap' },
     h('p', { class: 'form-back' }, h('a', { href: '#/' }, '← Back to the homepage')),
-    h('h1', {}, title),
+    h('h1', { tabindex: '-1' }, title), // focusable: "Send another message" moves focus here (no route change to do it)
     h('p', { class: 'form-intro' }, intro),
     h('p', { class: 'form-privacy' }, privacy),
     body);
@@ -50,12 +55,12 @@ function checkLine(input, text, { required = false } = {}) {
   return h('div', { class: 'field' }, h('label', { class: 'check-line' }, input, h('span', {}, text, required ? h('span', { class: 'req' }, ' (required)') : null)));
 }
 
-/** The message above the form for a problem that is not about one field (no connection, too many forms right now). */
+/** The message above the form for a problem that is not about one field (no connection, too many forms right now), with a link below it if given. */
 function alertBox() {
   const el = h('div', { class: 'alert alert-stop form-alert', role: 'alert', tabindex: '-1', hidden: true });
   return {
     el,
-    show(text) { el.textContent = text; el.hidden = false; el.focus(); },
+    show(text, link = null) { mount(el, text, link ? h('span', { class: 'form-alert-action' }, link) : null); el.hidden = false; el.focus(); },
     hide() { el.hidden = true; el.textContent = ''; },
   };
 }
@@ -65,11 +70,14 @@ function showErrors(form, inputs, errors) {
   return showFormErrors(form, errors.map((e) => ({ input: inputs[e.field] || null, message: e.message })));
 }
 
-/** A refusal from the database (or the upload): under its field when it names one, otherwise above the form. */
-function showProblem(form, inputs, alert, err) {
-  const problem = submitProblem(err);
+/**
+ * A refusal from the database (or the upload): under its field when it names one, otherwise above the form. `kind` is
+ * 'job' or 'feedback'; when the website is too busy (today or this minute), a WhatsApp button follows the message.
+ */
+function showProblem(form, inputs, alert, err, kind) {
+  const problem = submitProblem(err, { form: kind });
   if (problem?.field && inputs[problem.field]) return showFormErrors(form, [{ input: inputs[problem.field], message: problem.message }]);
-  alert.show(problem?.message || friendlyError(err, { audience: 'public' }));
+  alert.show(problem?.message || friendlyError(err, { audience: 'public' }), problem?.busy ? waLink(...WHATSAPP_INSTEAD[kind], 'btn') : null);
   return false;
 }
 
@@ -181,7 +189,7 @@ export async function renderJoin(root) {
     } catch (err) {
       if (!submitProblem(err)) console.error(err); // a refusal of the form itself is not a fault
       if (submitProblem(err)?.field === 'cv') uploaded = null; // that file is not usable: choose or upload it again
-      showProblem(form, inputs, alert, err);
+      showProblem(form, inputs, alert, err, 'job');
     } finally {
       busyNow = false;
       if (button.isConnected) sending(button, false, 'Sending…', 'Send my application');
@@ -261,7 +269,7 @@ export async function renderFeedback(root) {
       ]);
     } catch (err) {
       if (!submitProblem(err)) console.error(err); // a refusal of the form itself is not a fault
-      showProblem(form, inputs, alert, err);
+      showProblem(form, inputs, alert, err, 'feedback');
     } finally {
       busyNow = false;
       if (button.isConnected) sending(button, false, 'Sending…', 'Send');

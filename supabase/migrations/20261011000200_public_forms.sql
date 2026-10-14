@@ -24,23 +24,29 @@
 --      who and when). Staff read them with jobs.view; nobody writes them directly (only the functions below).
 --   4. The bucket job-cvs and its storage policies.
 --   5. Form helpers (private.form_line / form_block / pk_mobile / pk_cnic / form_fail), the same rules as
---      web/js/lib/public-forms.js.
+--      web/js/lib/public-forms.js, and private.public_form_log, the log the rate limits count.
 --   6. public.submit_job_application(jsonb) and public.submit_feedback(jsonb).
 --   7. public.update_job_application(uuid, text, text): staff change the status or add a note.
---   8. public.job_cv_orphans(): CVs that were uploaded but never sent with a form (the visitor gave up, or a check
---      failed). The Job applications page lists those older than a day and removes them (storage delete policy below).
+--   8. public.job_cv_orphans(): CVs that no application uses (the visitor gave up, a check failed, or the form was
+--      dropped over a per-phone or per-CNIC limit). The Job applications page lists those older than a day and removes
+--      them (storage delete policy below).
 --   9. public.doctor_summary: a website complaint that staff link to a doctor counts on that doctor's dashboard too,
 --      without the visitor's name or phone.
 --
 -- Rate limits. Each function takes an advisory lock first, so two forms sent at the same moment cannot both slip under
 -- a limit:
---   job applications  5 a minute and 50 a day for the whole website; 2 a day per phone number and per CNIC.
+--   job applications  5 a minute and 200 a day for the whole website (a hiring post can bring many in one day);
+--                     2 a day per phone number and per CNIC.
 --   feedback         10 a minute and 200 a day for the whole website; 5 a day per phone number.
---   CV uploads        5 a minute and 60 a day (the storage policy counts them).
--- Over a whole-website limit the visitor is asked to try again later; that says nothing about any person. Over a
--- per-phone or per-CNIC limit the form is thanked like any other and NOT stored, so the answer never tells whether a
--- phone or CNIC has been used before. A form whose hidden honeypot field ("website") is filled in (bots fill every box)
--- is thanked and dropped the same way. The answer is always {"ok": true}, never an id.
+--   CV uploads        5 a minute and 250 a day (the storage policy counts them; abandoned and retried uploads count too).
+-- Over a whole-website limit the visitor is asked to try again in a few minutes (FORM_BUSY), or tomorrow once the day is
+-- full (FORM_BUSY_DAY); that says nothing about any person. Over a per-phone or per-CNIC limit the form is thanked like
+-- any other and NOT stored, so the answer never tells whether a phone or CNIC has been used before. Such a dropped form
+-- leaves exactly the traces of a stored one: every form that passes its checks goes into private.public_form_log (with
+-- its CV) before it is stored or dropped, the whole-website limits count that log, and a CV in it is used. So the CV of
+-- a dropped form cannot be sent again and the form counts toward the limits, as for a stored form. A form whose hidden
+-- honeypot field ("website") is filled in (bots fill every box) is thanked and dropped without any check. The answer is
+-- always {"ok": true}, never an id.
 --
 -- Storage reads go through to_jsonb(o) (created_at, metadata.size, metadata.mimetype), so these functions do not depend
 -- on the exact columns of Supabase's storage tables when they are created; the local test stub has fewer columns.
@@ -173,20 +179,30 @@ begin
   end if;
 end $$;
 
--- Storage asks this as the visitor, so it is a security definer function: the visitor may not see the files it counts.
-create or replace function public.job_cv_upload_allowed()
-returns boolean
+-- Why a CV upload would be refused now: 'day' (250 today), 'minute' (5 in the last minute), or null (allowed). Storage asks
+-- job_cv_upload_allowed() as the visitor, so both are security definer functions: the visitor may not see the files they
+-- count. After a refused upload the website asks job_cv_upload_busy(), to say "try again tomorrow" rather than "in a few
+-- minutes"; it tells only how busy the whole website is, nothing about any person or file.
+create or replace function public.job_cv_upload_busy()
+returns text
 language sql stable security definer set search_path = public
 as $$
-  select count(*) filter (where x.at > now() - interval '1 minute') < 5 and count(*) < 60
+  select case when count(*) >= 250 then 'day' when count(*) filter (where x.at > now() - interval '1 minute') >= 5 then 'minute' end
     from (select (to_jsonb(o) ->> 'created_at')::timestamptz as at from storage.objects o where o.bucket_id = 'job-cvs') x
    where x.at > now() - interval '1 day'
 $$;
+create or replace function public.job_cv_upload_allowed()
+returns boolean
+language sql stable security definer set search_path = public
+as $$ select public.job_cv_upload_busy() is null $$;
+revoke all on function public.job_cv_upload_busy() from public;
 revoke all on function public.job_cv_upload_allowed() from public;
+grant execute on function public.job_cv_upload_busy() to anon, authenticated;
 grant execute on function public.job_cv_upload_allowed() to anon, authenticated;
 
--- A CV that no application uses and that is more than a day old (a form still being filled in keeps its file).
--- It answers only staff with jobs.view (false for anyone else), so nobody can use it to ask about a file.
+-- A CV that no application uses and that is more than a day old (a form still being filled in keeps its file): never sent,
+-- or sent with a form dropped over a per-phone or per-CNIC limit (it is in private.public_form_log, so it cannot be sent
+-- again). It answers only staff with jobs.view (false for anyone else), so nobody can use it to ask about a file.
 create or replace function public.job_cv_unsent(p_name text)
 returns boolean
 language sql stable security definer set search_path = public
@@ -254,6 +270,20 @@ end $$;
 
 revoke all on function private.form_line(text), private.form_block(text), private.pk_mobile(text), private.pk_cnic(text),
   private.form_fail(text, text) from public, anon, authenticated;
+
+-- Every form that passed its checks, stored or dropped over a per-phone or per-CNIC limit, with its CV. The whole-website
+-- limits count this log and a CV in it is used, so a dropped form leaves the same traces as a stored one. Only the two
+-- functions below use it (no grants, and the schema is private). Each removes its own lines older than two days as forms
+-- arrive: nothing needs them then (a CV more than a day old is refused anyway).
+create table if not exists private.public_form_log (
+  id         bigserial primary key,
+  form       text not null check (form in ('job', 'feedback')),
+  cv_path    text unique,                                                -- a job application's CV (job-cvs/<cv_path>)
+  created_at timestamptz not null default now()
+);
+create index if not exists public_form_log_form_idx on private.public_form_log (form, created_at);
+revoke all on private.public_form_log from public, anon, authenticated;
+revoke all on sequence private.public_form_log_id_seq from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- 6a. "Join our team"
@@ -331,13 +361,16 @@ begin
     raise exception 'FORM_CV: Please attach your CV again.' using errcode = '22023', detail = 'cv';
   end if;
 
-  -- One form at a time from here, so the counts below hold.
+  -- One form at a time from here, so the counts below hold. They count the log: stored and dropped forms alike.
   perform pg_advisory_xact_lock(hashtext('public.submit_job_application'));
-  if (select count(*) from public.job_applications where created_at > now() - interval '1 minute') >= 5
-     or (select count(*) from public.job_applications where created_at > now() - interval '1 day') >= 50 then
+  if (select count(*) from private.public_form_log where form = 'job' and created_at > now() - interval '1 day') >= 200 then
+    raise exception 'FORM_BUSY_DAY: the clinic has received many job applications today. Please try again tomorrow.' using errcode = 'P0001';
+  end if;
+  if (select count(*) from private.public_form_log where form = 'job' and created_at > now() - interval '1 minute') >= 5 then
     raise exception 'FORM_BUSY: many job applications are arriving right now. Please try again later.' using errcode = 'P0001';
   end if;
-  -- The CV: a file this form's visitor uploaded to job-cvs within the day, of an allowed type and size, not used by another application.
+  -- The CV: a file this form's visitor uploaded to job-cvs within the day, of an allowed type and size, not used by another form
+  -- (stored or dropped: the log has both).
   select to_jsonb(o) into v_obj from storage.objects o where o.bucket_id = 'job-cvs' and o.name = v_cv;
   if v_obj is null then
     raise exception 'FORM_CV: Your CV did not finish uploading. Please choose it again.' using errcode = '22023', detail = 'cv';
@@ -355,12 +388,18 @@ begin
     raise exception 'FORM_CV: Your CV must be a PDF, Word (.doc or .docx), JPG or PNG file.' using errcode = '22023', detail = 'cv';
   end if;
   if v_at is null or v_at < now() - interval '1 day'
+     or exists (select 1 from private.public_form_log l where l.cv_path = v_cv)
      or exists (select 1 from public.job_applications a where a.cv_path = v_cv) then
     raise exception 'FORM_CV: Please choose your CV again.' using errcode = '22023', detail = 'cv';
   end if;
 
+  -- Logged before it is stored or dropped below: either way its CV is now used and it counts toward the limits above.
+  delete from private.public_form_log where form = 'job' and created_at < now() - interval '2 days';
+  insert into private.public_form_log (form, cv_path) values ('job', v_cv);
+
   -- The same phone or CNIC twice today already: thanked like any other form and not stored. This comes after every other check
-  -- (the CV ones included), so no answer depends on whether the phone or CNIC was used before.
+  -- (the CV ones included) and after the log, so neither an answer nor anything a later form meets depends on whether the
+  -- phone or CNIC was used before.
   if (select count(*) from public.job_applications where phone = v_phone and created_at > now() - interval '1 day') >= 2
      or (select count(*) from public.job_applications where cnic = v_cnic and created_at > now() - interval '1 day') >= 2 then
     return v_ok;
@@ -430,11 +469,17 @@ begin
     perform private.form_fail('mr', 'Please check your Mr# (letters and numbers only), or leave it empty.');
   end if;
 
+  -- One form at a time from here; the counts are of the log (stored and dropped forms alike), like the job form's.
   perform pg_advisory_xact_lock(hashtext('public.submit_feedback'));
-  if (select count(*) from public.complaints where source = 'website' and created_at > now() - interval '1 minute') >= 10
-     or (select count(*) from public.complaints where source = 'website' and created_at > now() - interval '1 day') >= 200 then
+  if (select count(*) from private.public_form_log where form = 'feedback' and created_at > now() - interval '1 day') >= 200 then
+    raise exception 'FORM_BUSY_DAY: the clinic has received many messages today. Please try again tomorrow.' using errcode = 'P0001';
+  end if;
+  if (select count(*) from private.public_form_log where form = 'feedback' and created_at > now() - interval '1 minute') >= 10 then
     raise exception 'FORM_BUSY: many forms are arriving right now. Please try again later.' using errcode = 'P0001';
   end if;
+  delete from private.public_form_log where form = 'feedback' and created_at < now() - interval '2 days';
+  insert into private.public_form_log (form) values ('feedback');
+  -- Five today from this phone already: thanked and not stored (logged above, so it counts toward the limits all the same).
   if v_phone is not null and (select count(*) from public.complaints
                                where source = 'website' and contact_phone = v_phone and created_at > now() - interval '1 day') >= 5 then
     return v_ok;
@@ -490,7 +535,7 @@ revoke all on function public.update_job_application(uuid, text, text) from publ
 grant execute on function public.update_job_application(uuid, text, text) to authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 8. CVs never sent with a form (older than a day): listed for cleanup on the Job applications page
+-- 8. CVs no application uses (older than a day; a dropped form's CV too): listed for cleanup on the Job applications page
 -- ---------------------------------------------------------------------------------------------------------------
 create or replace function public.job_cv_orphans()
 returns table (path text, uploaded_at timestamptz, size_bytes bigint)

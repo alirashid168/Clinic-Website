@@ -1,4 +1,4 @@
-// Public website: home (hero smile card + four doors + Meet Dr. Ali + his week
+// Public website: home (hero smile card + four doors with a line to the two forms under them + Meet Dr. Ali + his week
 // and the clinics + the two form buttons), our results and the visitor page. The parts that need no data render at
 // once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce, modal } from '../ui/dom.js';
@@ -77,7 +77,8 @@ function whatsappLink(text) {
   return `https://wa.me/${number}?text=${encodeURIComponent(text)}`;
 }
 
-function waLink(text, label, cls) {
+/** A link that opens a WhatsApp chat with the clinic, its first message filled in (also used by the two forms, views/forms.js). */
+export function waLink(text, label, cls) {
   return h('a', { class: cls, href: whatsappLink(text), target: '_blank', rel: 'noopener' }, label, srOnly(' (opens WhatsApp)'));
 }
 
@@ -260,6 +261,10 @@ export async function renderHome(root) {
           h('a', { class: 'door', href: '#/visitor' }, h('strong', {}, 'Visitor'), h('span', {}, 'Braces options, treatments and how to start')),
           h('a', { class: 'door', href: '#/results' }, h('strong', {}, 'Our results'), h('span', {}, 'Smile makeovers, veneers, braces and more')),
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))),
+        // The two forms, right under the doors (their big buttons are further down, after the clinics).
+        h('p', { class: 'hero-forms' },
+          h('span', {}, 'Looking for a job? ', h('a', { href: '#/join' }, 'Join our team')),
+          h('span', {}, 'Something to tell us? ', h('a', { href: '#/feedback' }, 'Complaints & suggestions'))),
         h('p', { class: 'hero-demo' }, 'New here? ', h('a', { href: '#/patient/demo' }, 'See a sample patient account'), ' to find out what you get.'))),
     h('main', { id: 'main' },
       meet.el,
