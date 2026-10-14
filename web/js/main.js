@@ -11,7 +11,7 @@ import { state } from './state.js';
 import { authChangeHandler, endedNotice, startRecheck, RECHECK_EVENT } from './auth-watch.js';
 import { CONFIG } from './config.js';
 import * as content from './content.js';
-import { renderHome, renderVisitor } from './views/public.js';
+import { renderHome, renderVisitor, renderResults } from './views/public.js';
 
 const SITE = CONFIG.CLINIC_NAME;
 const descMeta = document.querySelector('meta[name="description"]');
@@ -102,6 +102,10 @@ async function route() {
     if (parts[0] === 'visitor') {
       setMeta(`Braces and treatments | ${SITE}`, "Braces options, what happens at each visit and other dental treatments at Dr. Ali Rashid's Dental Clinic in Karachi, Lahore and Islamabad.");
       return await show(gen, view, first, () => renderVisitor(view));
+    }
+    if (parts[0] === 'results') {
+      setMeta(`Our results | ${SITE}`, "Smile makeovers, veneers, braces, scaling and polishing, and whitening results at Dr. Ali Rashid's Dental Clinic.");
+      return await show(gen, view, first, () => renderResults(view));
     }
     if (parts[0] === 'clinics') {
       setMeta(`Our clinics | ${SITE}`, CLINICS_DESC);
