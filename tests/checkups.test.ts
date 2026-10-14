@@ -214,6 +214,9 @@ test('dayListCheckups: month-only rows and people who became patients with a vis
   assert.deepEqual(dayListCheckups(checkups, []).map((c) => c.id), [1, 3, 4]);
   assert.deepEqual(dayListCheckups(checkups, [{ patient_id: null }]).map((c) => c.id), [1, 3, 4], 'a visit without a patient hides nothing');
   assert.deepEqual(dayListCheckups(null, null), []);
+  // an answer imported from the Google Form: on the Checkups page, never on a day's list (as private.day_list_checkups)
+  assert.deepEqual(dayListCheckups([...checkups, { id: 5, date_is_month: false, patient_id: null, source: 'google_form' }, { id: 6, date_is_month: false, patient_id: null, source: 'google_sheet' }], [])
+    .map((c) => c.id), [1, 3, 4, 6]);
 });
 
 test('header: found among the first 15 rows, never assumed to be row 4', () => {

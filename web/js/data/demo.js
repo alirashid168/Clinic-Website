@@ -733,7 +733,7 @@ export function createDemoAdapter() {
       const days = new Map();
       const add = (b, day) => { if (day && (!from || day >= from) && day <= top && branches.includes(b)) days.set(`${day}|${b}`, { b, day }); };
       for (const v of db.visits) add(v.branch_id, v.visit_date);
-      for (const c of db.checkups) if (!c.date_is_month) add(c.branch_id, c.checkup_date);
+      for (const c of db.checkups) if (!c.date_is_month && c.source !== 'google_form') add(c.branch_id, c.checkup_date); // (as dayListCheckups)
       for (const x of db.day_closings) add(x.branch_id, x.list_date);
       const all = [...days.values()].sort((x, y) => (x.day === y.day ? x.b - y.b : x.day < y.day ? 1 : -1));
       const size = Math.min(Math.max(Math.trunc(Number(limit)) || 1, 1), 200);

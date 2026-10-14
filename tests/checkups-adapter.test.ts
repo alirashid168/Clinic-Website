@@ -738,6 +738,30 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   assert.equal(full.source, 'website');
 });
 
+test('demo: an answer imported from the Google Form is never on a day\'s list, also not in the History of Aaj ki List or in "End the day" (as 20261012000300)', async () => {
+  const d = await demoAs('s-fd-nn');
+  const web = await d.addCheckup({ checkup_date: '2026-09-21', branch_id: 2, patient_name: 'Sample Website Person', phone: '0300-5553201', checkup_for: 'Checkup', day_status: 'waiting' });
+  await d.signInDemo('s-admin');
+  const r = await d.importCheckupForm([
+    answer(1, '2026-09-21T11:00:00+05:00', 'Sample Form Person', '0312-5553202', 'NN'),
+    answer(2, '2026-09-22T12:00:00+05:00', 'Sample Form Only', '0312-5553204', 'NN'),       // a day with no list at all
+  ]);
+  assert.equal(r.inserted, 2);
+  const visits = await d.listVisits({ branchId: 2, date: '2026-09-21' });
+  assert.deepEqual((await d.listDayCheckups({ branchId: 2, date: '2026-09-21' })).map((c: any) => c.id), [web.id], 'the Aaj ki List of 21 Sep');
+  const copy = await d.dayListCopy({ branchId: 2, date: '2026-09-21' });
+  assert.deepEqual(copy.rows.filter((x: any) => x.kind === 'checkup').map((x: any) => x.name), ['Sample Website Person'], 'the History\'s copy: the same checkup patients');
+  assert.deepEqual([copy.counts.total, copy.counts.checkups], [visits.length + 1, 1], 'and the page\'s counts');
+  const empty = await d.dayListCopy({ branchId: 2, date: '2026-09-22' });
+  assert.equal(empty.rows.filter((x: any) => x.kind === 'checkup').length, 0);
+  if (!(await d.listVisits({ branchId: 2, date: '2026-09-22' })).length) {
+    assert.deepEqual((await d.dayListHistory({ branchId: 2, from: '2026-09-22', to: '2026-09-22' })).rows, [], 'no History line for a day that has only an imported answer');
+  }
+  assert.equal((await d.dayListHistory({ branchId: 2, from: '2026-09-21', to: '2026-09-21' })).rows[0].counts.checkups, 1, 'the History counts the page\'s checkup patients');
+  const ended = await d.endDay({ branchId: 2, date: '2026-09-21' });
+  assert.deepEqual([ended.total, ended.checkups], [visits.length + 1, 1], '"End the day" saves the page\'s list');
+});
+
 test('demo: two people on one phone on one day (a parent\'s phone for two children) are two checkups in the import, as in the database', async () => {
   const d = await demoAs('s-fd-nn');
   // both already on the list of 3 Sep at North Nazimabad (the sister first); a mother and her son on another phone (the son first)

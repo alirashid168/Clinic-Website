@@ -226,10 +226,14 @@ export function canonicalStatus(v) {
 }
 
 // ------------------------------------------------------------------------------------------------ the Aaj ki List
-/** Checkups to show on a day's list: only exact-day rows, and not a person who has become a patient with a visit on that list (D7). */
+/**
+ * Checkups to show on a day's list: only exact-day rows, never an answer imported from the Google Form (that day's list did not have
+ * it), and not a person who has become a patient with a visit on that list (D7). The same rule as private.day_list_checkups
+ * (20261012000300_checkup_form_day_lists.sql), which builds the copy that "End the day" saves and the History counts.
+ */
 export function dayListCheckups(checkups, visits) {
   const patients = new Set((visits || []).map((v) => v.patient_id).filter(Boolean));
-  return (checkups || []).filter((c) => !c.date_is_month && !(c.patient_id && patients.has(c.patient_id)));
+  return (checkups || []).filter((c) => !c.date_is_month && c.source !== 'google_form' && !(c.patient_id && patients.has(c.patient_id)));
 }
 
 // ------------------------------------------------------------------------------------------------ reading the old list
