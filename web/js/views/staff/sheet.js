@@ -47,17 +47,20 @@ const byToken = (a, b) => (a.branch_id ?? 0) - (b.branch_id ?? 0)
 // then Scheduled and checkups with no status yet, then Completed, then Cancelled and No show. Checkup patients take part by
 // their own day status. Inside one status the patients come first by token (no token last), then the checkup patients by
 // theirs (tokens are numbered per kind of treatment, so the two series are not mixed), then by when they were added.
-// (All branches view: by branch first.) Each item is { row, checkup, rank }: draw() works out the rank (see there).
+// (All branches view: by branch first.) Each item is { row, checkup, rank, token }: draw() works out the rank and token
+// (see there).
 const STATUS_RANK = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
 const rankOf = (item) => STATUS_RANK[(item.checkup ? item.row.day_status : item.row.status) || ''] ?? 3;
 const tokenOf = (item) => (item.checkup ? tokenNo(item.row) : item.row.token_no ?? Infinity);
 const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
   || a.rank - b.rank
   || Number(a.checkup) - Number(b.checkup)
-  || byNumber(tokenOf(a), tokenOf(b))
+  || byNumber(a.token, b.token)
   || String(a.row.created_at || '').localeCompare(String(b.row.created_at || ''));
 // A row of the list as a key, the same for every copy of it the list draws (visits and checkups are told apart).
 const keyOf = (item) => `${item.checkup ? 'c' : 'v'}:${item.row.id}`;
+// Whether a row is no longer where it was sorted (held: its { rank, token } when the list was last drawn).
+const movedFrom = (item, held) => rankOf(item) !== held.rank || tokenOf(item) !== held.token;
 
 // ---------------------------------------------------------------- the sheet's chip colours
 // The chip colours of the clinic's Google Sheet (app.css .gs-*). A chip always carries its text too, so colour is never the only cue.
@@ -212,7 +215,7 @@ export async function renderSheet(root, params, signal) {
   tableBody.addEventListener('change', (e) => { if (e.target === unsavedCell) unsavedCell = null; });
   for (const ev of ['keydown', 'pointerdown', 'input']) tableBody.addEventListener(ev, () => { lastTouch = Date.now(); });
 
-  // Where each row was sorted when the list was last drawn (keyOf -> its status rank, see draw), and the row the add line
+  // Where each row was sorted when the list was last drawn (keyOf -> { rank, token }, see draw), and the row the add line
   // last put the cursor in (keyOf; onKey).
   let placed = new Map();
   let fromAddLine = null;
@@ -225,10 +228,15 @@ export async function renderSheet(root, params, signal) {
     const row = (checkup ? checkups : rows).find((r) => String(r.id) === key.slice(2));
     return row ? { row, checkup } : null;
   };
+  // A row that kept its place for the cursor (its status, or the token that came with it, changed since the list was
+  // drawn) goes where it belongs once the cursor is out of it: a quiet reload draws the list again when nobody is typing
+  // or clicking in it (reloadQuietly waits for that), so a click on another row is never moved from under the mouse.
+  function settle(key) {
+    const item = placed.has(key) && rowKey(document.activeElement) !== key ? itemOf(key) : null;
+    if (item && movedFrom(item, placed.get(key))) reloadQuietly();
+  }
   // The cursor has left a row (looked at a moment later: a row drawn again by redrawRow puts it back in the new copy).
-  // A row that kept its place for the cursor (its status changed since the list was drawn) now goes where it belongs: a
-  // quiet reload draws the list again once nobody is typing or clicking in it (reloadQuietly waits for that), so a click
-  // on another row is never moved from under the mouse. A row left for another row is no longer the add line's (onKey).
+  // A row left for another row is no longer the add line's (onKey).
   tableBody.addEventListener('focusout', (e) => {
     const key = rowKey(e.target);
     if (!key) return;
@@ -236,8 +244,7 @@ export async function renderSheet(root, params, signal) {
       const now = rowKey(document.activeElement);
       if (now === key) return;
       if (now && key === fromAddLine) fromAddLine = null;
-      const item = placed.has(key) ? itemOf(key) : null;
-      if (item && rankOf(item) !== placed.get(key)) reloadQuietly();
+      settle(key);
     });
   });
 
@@ -938,7 +945,8 @@ export async function renderSheet(root, params, signal) {
   }
 
   // Replace one row after a save (make = rowEl for a visit, checkupRowEl for a checkup patient); it keeps its place and its
-  // row number, whatever its status is now (only draw sorts the list, see there).
+  // row number, whatever its status is now (only draw sorts the list, see there). A status saved after the cursor has
+  // left the row (a slow answer) moves it at the next quiet reload (settle).
   function redrawRow(row, make = rowEl) {
     const old = tableBody.querySelector(`tr[data-id="${row.id}"]`);
     if (old) {
@@ -947,6 +955,7 @@ export async function renderSheet(root, params, signal) {
       old.replaceWith(tr);
       restoreFocus(saved);
       countHiddenPeople(tr);
+      settle(keyOf({ row, checkup: make === checkupRowEl }));
     }
     drawCounts();
     markInvalid();
@@ -1011,17 +1020,18 @@ export async function renderSheet(root, params, signal) {
     const saved = rememberFocus();
     // Sorted like the sheet (listOrder) here only. A row never jumps away under the cursor: a save in one row (a status
     // picked, say) draws that row alone in its place, with its number (redrawRow), and here the row with the cursor in it
-    // (and so any text typed in it and not saved yet) is sorted by the status it was drawn with last time. It moves to its
-    // new place at the first redraw after the cursor has left it: leaving it asks for a quiet reload, which waits until
-    // nobody is typing or clicking in the list (the focusout listener at the top), and the live updates, the 20-second
-    // check and any other redraw move it too. Every row is numbered 1..n in the order shown, like the sheet's row numbers
+    // (and so any text typed in it and not saved yet) is sorted by the status and token it was drawn with last time. It
+    // moves to its new place at the first redraw after the cursor has left it: leaving it asks for a quiet reload, which
+    // waits until nobody is typing or clicking in the list (settle, at the top), and the live updates, the 20-second check
+    // and any other redraw move it too. Every row is numbered 1..n in the order shown, like the sheet's row numbers
     // (owner, 11 Oct 2026); that is not the token, which repeats from one kind of treatment to another.
     const here = rowKey(document.activeElement);
     const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].map((item) => {
       const key = keyOf(item);
-      return { ...item, key, rank: key === here && placed.has(key) ? placed.get(key) : rankOf(item) };
+      const held = key === here ? placed.get(key) : null;
+      return { ...item, key, rank: held ? held.rank : rankOf(item), token: held ? held.token : tokenOf(item) };
     }).sort(listOrder);
-    placed = new Map(items.map((item) => [item.key, item.rank]));
+    placed = new Map(items.map((item) => [item.key, { rank: item.rank, token: item.token }]));
     mount(tableBody, items.length ? items.map((item, i) => (item.checkup ? checkupRowEl(item.row, i + 1) : rowEl(item.row, i + 1)))
       : h('tr', {}, h('td', { class: 'empty-cell', colspan: colgroup.children.length }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" to add them.` : 'No patients or checkups on any list for this day.'))));
     restoreFocus(saved);

@@ -293,6 +293,8 @@ await step('front desk: the arrow keys move between the name cells of checkup ro
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
   const names = page.locator('table.sheet tbody tr.is-checkup input[data-field="patient_name"]');
   assert.ok((await names.count()) >= 2);
+  // (sorted by status, so patient rows, whose name is a button and not a typing cell, lie between them: they are passed over)
+  assert.equal(await names.nth(0).evaluate((el) => el.closest('tr').nextElementSibling?.classList.contains('is-checkup')), false, 'a patient row below the first checkup row');
   await names.nth(0).focus();
   await page.keyboard.press('ArrowDown');
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), await names.nth(1).getAttribute('aria-label'));
