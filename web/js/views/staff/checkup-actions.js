@@ -71,8 +71,9 @@ function choiceQuestion(question, choices, current, { required = false } = {}) {
 // way, the ticked choices joined with ", " and then the Other text, so an answer given here and one imported from the form look the same.
 // Stored text opens as ticks (match finds the choice a part is; split says what separates the parts), and a part that is not a choice goes
 // into Other. value() is the text to store, or null; a group left as it opened gives back the text it opened with, letter for letter.
-// first: the box setFieldError() marks and listens on (a tick anywhere in the group tells it the error is fixed).
-function choiceChecks(question, choices, current, { otherLabel, required = false, match = null, split = /,/ }) {
+// firstShown(): the first box in sight, the one an error marks (setFieldError); a tick anywhere in the group tells a marked box the error is
+// fixed. labels (one per choice) and row let the doctors' question put some choices first and hide others; after: shown under the boxes.
+function choiceChecks(question, choices, current, { otherLabel, required = false, match = null, split = /,/, after = null }) {
   const name = `cq-${++formSeq}`;
   const opened = String(current ?? '').trim();
   const start = splitChoices(opened, choices, { match, split });
@@ -80,11 +81,14 @@ function choiceChecks(question, choices, current, { otherLabel, required = false
   const otherBox = h('input', { type: 'checkbox', name, value: OTHER, checked: !!start.other });
   const other = h('input', { maxlength: 300, autocomplete: 'off', value: start.other });
   const otherField = field(otherLabel, other, 'Several are fine: separate them with commas.', { required: true });
-  const first = boxes[0] || otherBox;
+  const labels = [...boxes, otherBox].map((b, i) => h('label', { class: 'choice' }, b, h('span', {}, i < choices.length ? choices[i] : 'Other')));
+  const row = h('div', { class: 'choice-row' }, labels);
   const set = h('fieldset', { class: 'fieldset-plain choice-group choice-many' },
-    h('legend', {}, question, required ? h('span', { class: 'req' }, ' (required)') : null),
-    h('div', { class: 'choice-row' }, [...boxes, otherBox].map((b, i) => h('label', { class: 'choice' }, b, h('span', {}, i < choices.length ? choices[i] : 'Other')))));
-  set.addEventListener('change', (e) => { if (e.target !== first) first.dispatchEvent(new Event('change')); });
+    h('legend', {}, question, required ? h('span', { class: 'req' }, ' (required)') : null), row, after);
+  set.addEventListener('change', (e) => {
+    for (const b of [...boxes, otherBox]) if (b !== e.target && b.getAttribute('aria-invalid') === 'true') b.dispatchEvent(new Event('change'));
+  });
+  const firstShown = () => [...row.querySelectorAll('input')].find((b) => !b.closest('label').hidden) || otherBox;
   const sync = () => { otherField.hidden = !otherBox.checked; };
   otherBox.addEventListener('change', sync);
   sync();
@@ -95,8 +99,13 @@ function choiceChecks(question, choices, current, { otherLabel, required = false
     return joinChoices(picked, rest);
   };
   // (a whole line of the form's grid, the boxes in columns; the text box opens right under them)
-  return { first, otherBox, other, el: h('div', { class: 'checkup-form-wide' }, h('div', { class: 'field' }, set), otherField), ticked: () => boxes.some((b) => b.checked) || otherBox.checked, value };
+  return { firstShown, boxes, labels: labels.slice(0, choices.length), row, otherBox, other, value,
+    el: h('div', { class: 'checkup-form-wide' }, h('div', { class: 'field' }, set), otherField), ticked: () => boxes.some((b) => b.checked) || otherBox.checked };
 }
+
+// The doctors' city: the branch's city as clinicians.region writes it (Setup -> Clinicians: Karachi KHI, Lahore LHR, Islamabad ISB).
+const REGION_OF_CITY = { karachi: 'KHI', lahore: 'LHR', islamabad: 'ISB' };
+const regionOf = (branchId) => REGION_OF_CITY[cityName(state.ref.branches.find((b) => b.id === Number(branchId))?.city_id).toLowerCase()] || null;
 
 /**
  * The nine questions of the form, in its order, as fields. "+ Add checkup patient" (row = null: a new checkup), "Fill in the checkup form"
@@ -106,7 +115,7 @@ function choiceChecks(question, choices, current, { otherLabel, required = false
  * was filled in for that checkup (all four answered when the dialog opened).
  * branchId: the branch to start with, else the person's home branch, else "Choose…" (a guessed branch would look answered);
  * branchFixed: shown, not asked (the branch's own Aaj ki List).
- * -> { el, name, phone, branch, values(), errors() }
+ * -> { el, name, phone, branch, values(), errors({ arrival }) }
  */
 export function checkupQuestions({ row = null, branchId = null, branchFixed = false, fill = false } = {}) {
   const editing = !!row && !fill;
@@ -133,11 +142,30 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
   }
 
   // The doctors: the website's list. A name in a stored answer is ticked when it is one of them as the sheet writes people ("Dr Hina",
-  // "Hina", several joined with , / or &).
-  const doctorList = state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => ({ displayName: c.display_name, aliases: c.aliases || [] }));
+  // "Hina", several joined with , / or &). The doctors of the branch's city come first, with those of no city (they work everywhere); the
+  // others wait behind "Show doctors of other cities", so a Lahore assistant does not scroll past every Karachi doctor on a phone (the
+  // clinic has 22 doctors). A ticked one stays in sight; the order follows the branch when it is changed.
+  const doctorList = state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => ({ displayName: c.display_name, aliases: c.aliases || [], region: c.region || null }));
   const doctors = doctorList.map((c) => c.displayName);
   const asDoctor = (part) => matchClinician(part, doctorList)?.displayName ?? null;
-  const doctor = choiceChecks('Who did your checkup?', doctors, row?.doctors, { otherLabel: 'Other: who did the checkup?', required: !editing, match: asDoctor, split: /,|\/|&/ });
+  let allDoctors = false;
+  const moreDoctors = h('button', { type: 'button', class: 'btn btn-small choice-more', 'aria-expanded': 'false', hidden: true,
+    onclick: () => { allDoctors = !allDoctors; arrangeDoctors(); } });
+  const doctor = choiceChecks('Who did your checkup?', doctors, row?.doctors, { otherLabel: 'Other: who did the checkup?', required: !editing, match: asDoctor, split: /,|\/|&/, after: moreDoctors });
+  function arrangeDoctors() {
+    const region = regionOf(branchValue());
+    const near = (i) => !region || !doctorList[i].region || doctorList[i].region === region;
+    const order = doctorList.map((_, i) => i).sort((a, b) => Number(near(b)) - Number(near(a)) || a - b);
+    const away = order.filter((i) => !near(i) && !doctor.boxes[i].checked);
+    doctor.row.prepend(...order.map((i) => doctor.labels[i])); // ("Other" stays last)
+    for (const i of away) doctor.labels[i].hidden = !allDoctors;
+    for (const i of order) if (!away.includes(i)) doctor.labels[i].hidden = false;
+    moreDoctors.hidden = !away.length;
+    moreDoctors.textContent = allDoctors ? 'Hide doctors of other cities' : `Show doctors of other cities (${away.length})`;
+    moreDoctors.setAttribute('aria-expanded', String(allDoctors));
+  }
+  arrangeDoctors();
+  branch.addEventListener('change', arrangeDoctors);
   const ali = choiceQuestion('Did Dr. Ali recommend your treatment?', YES_NO, asYesNo(row?.ali_recommended), { required: needAnswers });
   // (the plain word "Checkup" that marks a checkup row in the sheet is no answer: filling in the form asks it)
   const forNow = fill && /^checkup$/i.test(String(row.checkup_for ?? '').trim()) ? null : row?.checkup_for;
@@ -168,19 +196,22 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
     wants_treatment: wants.value() === null ? null : wants.value() === 'yes',
     treatment_plan: plan.value.trim() || null,
   });
-  const errors = () => {
+  // arrival: the patient is put on today's list as they come in (checkupFormModal); only the name and the phone are needed then, the
+  // other questions are asked after the checkup ("Fill in the checkup form").
+  const errors = ({ arrival = false } = {}) => {
     const out = [];
+    const ask = needAnswers && !arrival;
     if (editing ? !name.value.trim() : name.value.trim().length < 2) out.push({ input: name, message: 'Write the patient name.' });
     if (!editing && !branchValue()) out.push({ input: branch, message: 'Choose the branch.' });
     if (!editing && digitsOf(phone.value).length < 10) out.push({ input: phone, message: PHONE_HINT });
-    if (!editing && !doctor.ticked()) out.push({ input: doctor.first, message: 'Choose who did the checkup.' });
+    if (!editing && !arrival && !doctor.ticked()) out.push({ input: doctor.firstShown(), message: 'Choose who did the checkup.' });
     if (doctor.otherBox.checked && !doctor.other.value.trim()) out.push({ input: doctor.other, message: 'Write who did the checkup.' });
-    if (needAnswers && ali.value() === null) out.push({ input: ali.first, message: 'Choose whether Dr. Ali recommended the treatment.' });
-    if (!editing && !checkupFor.ticked()) out.push({ input: checkupFor.first, message: 'Choose what the checkup was for.' });
+    if (ask && ali.value() === null) out.push({ input: ali.first, message: 'Choose whether Dr. Ali recommended the treatment.' });
+    if (!editing && !arrival && !checkupFor.ticked()) out.push({ input: checkupFor.firstShown(), message: 'Choose what the checkup was for.' });
     if (checkupFor.otherBox.checked && !checkupFor.other.value.trim()) out.push({ input: checkupFor.other, message: 'Write what the checkup was for.' });
-    if (needAnswers && !pricing.value()) out.push({ input: pricing.first, message: 'Choose whether the pricing was understood.' });
-    if (needAnswers && wants.value() === null) out.push({ input: wants.first, message: 'Choose whether they want to start the treatment.' });
-    if (needAnswers && !plan.value.trim()) out.push({ input: plan, message: 'Write when they want to start, or why not.' });
+    if (ask && !pricing.value()) out.push({ input: pricing.first, message: 'Choose whether the pricing was understood.' });
+    if (ask && wants.value() === null) out.push({ input: wants.first, message: 'Choose whether they want to start the treatment.' });
+    if (ask && !plan.value.trim()) out.push({ input: plan, message: 'Write when they want to start, or why not.' });
     else if (Array.from(plan.value.trim()).length > 500) out.push({ input: plan, message: 'Write at most 500 characters.' });
     return out;
   };
@@ -222,10 +253,14 @@ function addedText(had, typed) {
  * branch; another day (and the follow-up status) can be chosen under "More (optional)".
  * The answers are given after the checkup, so the checkup is saved as Completed (also on the Aaj ki List and the Google Sheet, where a
  * deleted row then does not take the checkup and its answers with it).
+ * On today's Aaj ki List a patient can also be put on the list as they arrive, before the checkup: "Add as Waiting (form later)" needs only
+ * the name and the phone and saves them as Waiting, as "+ Checkup patient" did before the form; "Fill in the checkup form" (Options on their
+ * row) then asks the questions after the checkup.
  */
 export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } = {}) {
   return new Promise((resolve) => {
     const today = localISO();
+    const arrival = fixedDay && date === today;   // today's list: the patient may be added on arrival (only name and phone)
     const q = checkupQuestions({ branchId, branchFixed: fixedDay });
     const { name, phone, branch } = q;
     const dateIn = fixedDay ? null : h('input', { type: 'date', value: date || today, max: today });
@@ -271,24 +306,25 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     // -> 'back', 'add' (a different person with the same phone) or the checkup to save the answers on. Saving on that checkup is the
     // highlighted choice (it has focus) only when the names fit and it has no answers yet; otherwise both people are named, and "Add as a
     // different person" is: Enter must never write one person's answers over another's.
-    const sameDayChoice = (matches, day) => new Promise((answer) => {
+    // onArrival ("Add as Waiting"): nothing is saved on that checkup; the same person is simply on the list already, so nothing is highlighted.
+    const sameDayChoice = (matches, day, { onArrival = false } = {}) => new Promise((answer) => {
       const typed = name.value.trim().replace(/\s+/g, ' ');
       const fitting = matches.filter((c) => sameName(typed, c));
       const one = matches.length === 1 ? matches[0] : fitting.length === 1 ? fitting[0] : null;     // the checkup the answers could go on
-      const safe = !!one && sameName(typed, one) && !hasFormAnswers(one);
+      const safe = !!one && sameName(typed, one) && (onArrival || !hasFormAnswers(one));
       const listed = matches.map((c) => `${c.patient_name} (${c.phone})`).join(', ');
       let choice = 'back';
       modal(`Already on the list for ${shortDate(day)}`, h('div', {},
         safe
           ? [h('p', {}, `${listed} ${matches.length === 1 ? 'is' : 'are'} already on the list for ${shortDate(day)} with this phone number.`),
-            h('p', {}, `Same person${matches.length > 1 ? ` as ${one.patient_name}` : ''}? Save the answers on that checkup, so they are not on the list twice.`)]
+            h('p', {}, `Same person${matches.length > 1 ? ` as ${one.patient_name}` : ''}? ${onArrival ? 'They are on the list already: go back and press Cancel.' : 'Save the answers on that checkup, so they are not on the list twice.'}`)]
           : [h('p', {}, `You typed ${typed}; the list for ${shortDate(day)} has ${listed} on this phone number.`),
             !one || !sameName(typed, one) ? h('p', {}, 'Another person on the same phone (often a family member) is added as a checkup of their own.') : null,
-            one && hasFormAnswers(one) ? h('p', {}, `${one.patient_name}: ${answeredText(one)}`) : null,
-            !one ? h('p', {}, 'The same person? Go back and save the answers on their checkup.') : null]), [
+            !onArrival && one && hasFormAnswers(one) ? h('p', {}, `${one.patient_name}: ${answeredText(one)}`) : null,
+            !one ? h('p', {}, onArrival ? 'The same person? They are on the list already: go back and press Cancel.' : 'The same person? Go back and save the answers on their checkup.') : null]), [
         { label: 'Go back' },
         { label: 'Add as a different person', primary: !safe, onClick: () => { choice = 'add'; } },
-        ...(one ? [{ label: hasFormAnswers(one) ? 'Replace the answers on that checkup' : 'Save the answers on that checkup', primary: safe, onClick: () => { choice = one; } }] : []),
+        ...(one && !onArrival ? [{ label: hasFormAnswers(one) ? 'Replace the answers on that checkup' : 'Save the answers on that checkup', primary: safe, onClick: () => { choice = one; } }] : []),
       ], { onClose: () => answer(choice) });
     });
 
@@ -340,13 +376,39 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       h('p', { class: 'muted' }, 'Ask the patient these questions after the checkup. ', fixedDay
         ? `Goes on the list for ${branchName(branchId)} on ${shortDate(date)} and on the Checkups page. A checkup patient has no Mr#; they get one when they start treatment.`
         : "Goes on the Checkups page, and on that branch's Aaj ki List for today (another day can be chosen under More). A checkup patient has no Mr#; they get one when they start treatment."),
+      arrival ? h('p', { class: 'alert alert-info' }, h('strong', {}, 'Just arrived? '),
+        'Write the name and mobile number, then press "Add as Waiting (form later)". After the checkup, press Options on their row, then "Fill in the checkup form".') : null,
       warn,
       q.el,
       more);
 
+    // "Add as Waiting (form later)": on the list as they come in, as Waiting, with what is typed so far (the name and phone at least; the
+    // treatment is "Checkup" until the form says what it was for). The questions are asked after the checkup ("Fill in the checkup form").
+    const addOnArrival = async () => {
+      const errors = q.errors({ arrival: true });
+      if (errors.length) {
+        if (errors.some((e) => more.contains(e.input))) more.open = true;
+        return showFormErrors(body, errors);
+      }
+      clearFieldErrors(body);
+      if (sameDayNow.length && (await sameDayChoice(sameDayNow, date, { onArrival: true })) !== 'add') { name.focus(); return false; }
+      const answers = q.values();
+      const b = state.ref.branches.find((x) => x.id === answers.branch_id);
+      try {
+        const row = await state.data.addCheckup({
+          ...answers, checkup_for: answers.checkup_for || 'Checkup', checkup_date: date, city: (b && cityName(b.city_id)) || null,
+          details: details.value.trim() || null, day_status: 'waiting', follow_up: 'Not Contacted', notes: notes.value.trim() || null,
+        });
+        done = true;
+        onSaved?.(row);
+        resolve(row);
+      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+    };
+
     const snapshot = () => JSON.stringify([q.values(), dateIn?.value, followUp?.value, details.value, notes.value]);
     dialog = modal('Add a checkup patient', body, [
       { label: 'Cancel' },
+      ...(arrival ? [{ label: 'Add as Waiting (form later)', onClick: addOnArrival }] : []),
       { label: 'Add checkup patient', primary: true, onClick: async () => {
         const errors = q.errors();
         if (!fixedDay && !dateIn.value) errors.push({ input: dateIn, message: 'Choose the day of the checkup.' });

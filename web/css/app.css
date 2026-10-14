@@ -841,8 +841,11 @@ table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--ch
 fieldset.choice-group { margin: 0; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 0 var(--space-4); }
 .choice { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--target); cursor: pointer; }
-/* a question with tick boxes (several answers: the doctors, "What was your checkup for?") takes a whole line, its boxes in columns */
-.choice-many .choice-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(12rem, 100%), 1fr)); }
+.choice > input { flex: none; } /* a name that wraps onto two lines never squeezes its box */
+/* a question with tick boxes (several answers: the doctors, "What was your checkup for?") takes a whole line, its boxes in columns
+   (two on a phone: 9rem fits "Dr. Xxxxx" in a 358px dialog; a longer name wraps inside its box) */
+.choice-many .choice-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(9rem, 100%), 1fr)); column-gap: var(--space-3); }
+.choice-more { margin-top: var(--space-1); } /* "Show doctors of other cities" */
 input.input-readonly { background: var(--surface-sunken); color: var(--text-muted); }
 .form-more { margin-top: var(--space-1); }
 .form-more > summary { display: inline-block; min-height: var(--target); padding: var(--space-2) 0; font-weight: 600; font-size: var(--fs-ui); color: var(--text-accent); cursor: pointer; }

@@ -396,9 +396,20 @@ await step('Today page (the first page after login): "+ Add checkup patient" ope
   assert.deepEqual(questions, ['Patient full name', 'Which branch did you visit?', 'Mobile number', 'Who did your checkup?', 'Did Dr. Ali recommend your treatment?',
     'What was your checkup for?', 'Did you understand the pricing details?', 'Would you like to start the treatment?', 'If yes, then when? If no, then why not?']);
   assert.equal(await m.getByLabel(/^Which branch did you visit/).inputValue(), 'North Nazimabad', 'a front desk limited to one branch: that branch, not asked');
-  // tick boxes, several at once, as on the Google Form (a checkup for braces and an extraction; two doctors)
-  const expected = await page.evaluate(async () => { const { state } = await import('/js/state.js'); return state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => c.display_name); });
-  assert.deepEqual(await tickLabels(doctorGroup(m)), [...expected, 'Other'], "the website's doctors, then Other");
+  // tick boxes, several at once, as on the Google Form (a checkup for braces and an extraction; two doctors). The website's doctors of the
+  // branch's city (North Nazimabad: Karachi) and those of no city, then Other; the doctors of other cities behind a button.
+  const docs = await page.evaluate(async () => { const { state } = await import('/js/state.js'); return state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => ({ name: c.display_name, region: c.region || null })); });
+  const karachi = docs.filter((c) => !c.region || c.region === 'KHI').map((c) => c.name);
+  const elsewhere = docs.filter((c) => c.region && c.region !== 'KHI').map((c) => c.name);
+  assert.ok(elsewhere.length, 'the demo has doctors of other cities');
+  assert.deepEqual(await tickLabels(doctorGroup(m)), [...karachi, 'Other'], "the website's doctors of Karachi and of no city, then Other");
+  const more = doctorGroup(m).getByRole('button', { name: /doctors of other cities/ });
+  assert.deepEqual([await more.innerText(), await more.getAttribute('aria-expanded')], [`Show doctors of other cities (${elsewhere.length})`, 'false']);
+  await more.click();
+  assert.deepEqual(await tickLabels(doctorGroup(m)), [...karachi, ...elsewhere, 'Other'], 'every doctor after the button, the other cities after Karachi');
+  assert.deepEqual([await more.innerText(), await more.getAttribute('aria-expanded')], ['Hide doctors of other cities', 'true']);
+  await more.click();
+  assert.deepEqual(await tickLabels(doctorGroup(m)), [...karachi, 'Other']);
   assert.deepEqual(await tickLabels(forGroup(m)), ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant', 'Other']);
   assert.deepEqual([await ticked(doctorGroup(m)), await ticked(forGroup(m))], [[], []], 'nothing ticked for a new checkup');
   assert.match(await forGroup(m).locator('legend').innerText(), /required/);
@@ -645,6 +656,82 @@ await step('Aaj ki List: a checkup typed in on arrival gets its answers with "Fi
     await page.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
     await row.waitFor({ state: 'detached' });
   }
+});
+// Before the form was on the website, "+ Checkup patient" put a patient on today's list as they came in (name and phone, Waiting). The form's
+// answers are only known after the checkup, so the list keeps that: "Add as Waiting (form later)", then "Fill in the checkup form".
+await step('Aaj ki List: a checkup patient who has just come in is put on today\'s list with the name and phone only ("Add as Waiting (form later)"): Waiting, no answers; the form after the checkup makes them Completed', async () => {
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = page.locator('.modal').first();
+  await m.waitFor();
+  assert.match(await m.locator('.alert-info').innerText(), /^Just arrived\? Write the name and mobile number, then press "Add as Waiting \(form later\)"\. After the checkup, press Options on their row, then "Fill in the checkup form"\.$/);
+  assert.deepEqual(await m.locator('.modal-actions button').allInnerTexts(), ['Cancel', 'Add as Waiting (form later)', 'Add checkup patient'], 'the whole form stays the highlighted action');
+  await m.getByRole('button', { name: 'Add as Waiting (form later)' }).click();
+  await m.locator('.field-error').first().waitFor();
+  assert.deepEqual(await m.locator('.field-error').allInnerTexts(), ['Write the patient name.', 'Write a full phone number with at least 10 digits, e.g. 0300 1234567.'],
+    'only the name and the phone are asked on arrival');
+  await m.getByLabel(/^Patient full name/).fill('Arrival Walk In Person');
+  await m.getByLabel(/^Mobile number/).fill('0300 5550964');
+  await shot(page, 'r30-aaj-arrival-form');
+  await m.getByRole('button', { name: 'Add as Waiting (form later)' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+  assert.match(await page.locator('.toast', { hasText: 'Arrival Walk In Person added as Waiting.' }).innerText(), /After the checkup: Options, then "Fill in the checkup form"\./);
+  const row = checkupRow(page, 'Arrival Walk In Person');
+  await row.waitFor();
+  assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'waiting', 'Waiting, so the doctor sees them as waiting');
+  assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Checkup', 'the treatment is "Checkup" until the form says what it was for');
+  assert.equal(await row.locator('input[aria-label^="Doctor\'s name for"]').inputValue(), '', 'no doctor yet');
+  const stored = () => page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const c = (await state.data.listDayCheckups({ branchId: 2, date: localISO() })).find((x) => x.patient_name === 'Arrival Walk In Person');
+    return [c.day_status, c.doctors, c.ali_recommended, c.pricing_understood, c.wants_treatment, c.treatment_plan, c.source];
+  });
+  assert.deepEqual(await stored(), ['waiting', null, null, null, null, null, 'website'], 'no made-up answers go into the checkup list');
+  await shot(page, 'r30-aaj-arrival-waiting');
+  // the same phone again on arrival: asked first; "Go back" adds nothing
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Arrival Walk In Person');
+  await m.getByLabel(/^Mobile number/).fill('0300-555 0964');
+  await m.getByLabel(/^Mobile number/).press('Tab');
+  await m.locator('.alert-warning', { hasText: 'Already on the list for' }).waitFor();
+  await m.getByRole('button', { name: 'Add as Waiting (form later)' }).click();
+  const ask = page.locator('.modal', { hasText: 'with this phone number' });
+  await ask.waitFor();
+  assert.match(await ask.innerText(), /Same person\? They are on the list already: go back and press Cancel\./);
+  assert.deepEqual(await ask.locator('.modal-actions button').allInnerTexts(), ['Go back', 'Add as a different person'], 'nothing is saved on that checkup from here');
+  await ask.getByRole('button', { name: 'Go back' }).click();
+  await ask.waitFor({ state: 'detached' });
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+  assert.equal(await checkupRow(page, 'Arrival Walk In Person').count(), 1, 'still one row');
+  // after the checkup: Options -> "Fill in the checkup form" asks every question and makes the row Completed
+  await row.getByRole('button', { name: /Checkup options/ }).click();
+  await page.locator('.modal').getByRole('button', { name: 'Fill in the checkup form' }).click();
+  const f = page.locator('.modal', { hasText: 'Checkup form: Arrival Walk In Person' });
+  await f.waitFor();
+  await fillCheckupForm(f, { name: 'Arrival Walk In Person', checkupFor: 'Braces', ali: 'Yes', pricing: 'Yes', wants: 'Yes', plan: 'Next week' });
+  await f.getByRole('button', { name: 'Save the answers' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+  await page.waitForSelector(".toast:has-text(\"Answers saved on Arrival Walk In Person's checkup.\")");
+  assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'completed');
+  assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Braces');
+  const [status, doctors, ali, pricing, wants, plan] = await stored();
+  assert.deepEqual([status, !!doctors, ali, pricing, wants, plan], ['completed', true, true, 'yes', true, 'Next week'], 'the answers of the form');
+  // an earlier day's list: nobody arrives there, so only the whole form
+  await page.goto(BASE + `#/staff/sheet?date=${await page.evaluate(async () => { const { addDaysISO, localISO } = await import('/js/ui/dom.js'); return addDaysISO(localISO(), -1); })}`);
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.waitFor();
+  assert.deepEqual(await m.locator('.modal-actions button').allInnerTexts(), ['Cancel', 'Add checkup patient']);
+  assert.equal(await m.locator('.alert-info').count(), 0);
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+  // leave today's list as it was
+  await page.goto(BASE + '#/staff/sheet');
+  await row.waitFor();
+  await row.getByRole('button', { name: /Checkup options/ }).click();
+  await page.locator('.modal').getByRole('button', { name: 'Remove from the list' }).click();
+  await page.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
+  await row.waitFor({ state: 'detached' });
 });
 
 // ------------------------------------------------------------- assistant + braces rules
@@ -2169,6 +2256,45 @@ await step('Checkups page: "+ Add checkup patient" adds an earlier day to the li
   await em.getByRole('button', { name: 'Cancel' }).click();
   await pk.waitForSelector('.modal', { state: 'detached' });
   await pk.getByRole('button', { name: 'Clear filters' }).click();
+});
+// The clinic has 22 doctors in three cities: "Who did your checkup?" lists the branch's city first, so a Lahore assistant on a phone does not
+// scroll past every Karachi doctor (no doctor's name is written into the test: they come from the website's list).
+await step('the checkup form: the doctors of the branch\'s city (and of no city) first, the others behind "Show doctors of other cities"; the order follows the branch; a ticked one stays in sight; two columns on a phone', async () => {
+  const docs = await pk.evaluate(async () => { const { state } = await import('/js/state.js'); return state.ref.clinicians.filter((c) => c.is_doctor && c.active !== false).map((c) => ({ name: c.display_name, region: c.region || null })); });
+  const near = (city) => docs.filter((c) => !c.region || c.region === city).map((c) => c.name);
+  const away = (city) => docs.filter((c) => c.region && c.region !== city).map((c) => c.name);
+  await pk.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = pk.locator('.modal');
+  const g = doctorGroup(m);
+  const more = g.getByRole('button', { name: /doctors of other cities/ });
+  assert.deepEqual(await tickLabels(g), [...docs.map((c) => c.name), 'Other'], 'no branch chosen yet: every doctor, in the website\'s order');
+  assert.equal(await more.isVisible(), false);
+  await m.getByLabel(/^Which branch did you visit/).selectOption({ label: 'Gulberg Lahore' });
+  assert.deepEqual(await tickLabels(g), [...near('LHR'), 'Other'], 'Lahore: its doctors and those of no city');
+  assert.equal(await more.innerText(), `Show doctors of other cities (${away('LHR').length})`);
+  // the error of the question marks a box in sight (the first Lahore one), and a tick clears it
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await m.locator('.field-error:has-text("Choose who did the checkup.")').waitFor();
+  assert.deepEqual(await g.locator('input[aria-invalid="true"]').evaluateAll((els) => els.map((e) => e.labels[0].textContent.trim())), [near('LHR')[0]]);
+  await more.click();
+  const fromKarachi = docs.find((c) => c.region === 'KHI').name;
+  await g.getByLabel(fromKarachi, { exact: true }).check();
+  assert.equal(await m.locator('.field-error:has-text("Choose who did the checkup.")').count(), 0, 'a tick on a box further down clears the error too');
+  await more.click();
+  assert.deepEqual(await tickLabels(g), [...near('LHR'), fromKarachi, 'Other'], 'a ticked doctor of another city stays in sight');
+  assert.equal(await more.innerText(), `Show doctors of other cities (${away('LHR').length - 1})`);
+  await m.getByLabel(/^Which branch did you visit/).selectOption({ label: 'North Nazimabad' });
+  assert.deepEqual(await tickLabels(g), [...near('KHI'), 'Other'], 'the order follows the branch: Karachi now');
+  assert.deepEqual(await ticked(g), [fromKarachi]);
+  // a phone: two columns of tick boxes, so the next question is close
+  await pk.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await g.locator('.choice-row').evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(' ').length), 2, 'two columns at 390 px');
+  assert.ok(await pk.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'no sideways scrolling');
+  await g.scrollIntoViewIfNeeded();
+  await shot(pk, 'r31-form-390-doctors');
+  await pk.setViewportSize({ width: 1366, height: 860 });
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await pk.waitForSelector('.modal', { state: 'detached' });
 });
 await step('the form never guesses the branch: someone who works at every branch without a home branch chooses it (Today page); the Checkups page starts at the branch it is filtered on', async () => {
   await pk.locator('.topnav a:has-text("Today")').click();

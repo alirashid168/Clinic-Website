@@ -758,7 +758,8 @@ export async function renderSheet(root, params, signal) {
     }
     checkups = [...checkups, res];
     draw();
-    toast(`${res.patient_name} added as a checkup patient.`, 'ok');
+    // (added on arrival, "Add as Waiting": the form is filled in after the checkup, from Options on the row)
+    toast(res.day_status === 'waiting' ? `${res.patient_name} added as Waiting. After the checkup: Options, then "Fill in the checkup form".` : `${res.patient_name} added as a checkup patient.`, 'ok');
   } }, '+ Add checkup patient');
   const addPanel = search ? h('div', { class: 'add-panel' },
     h('div', { class: 'add-panel-text' },
