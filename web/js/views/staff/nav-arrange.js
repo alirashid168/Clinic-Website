@@ -133,54 +133,72 @@ export function openArrangeMenu(menu) {
   const count = h('p', { class: 'arrange-count' });
   let buttons = new Map(); // `${key} ${action}` -> the button, to keep focus on the same row after a change
 
-  const button = (key, action, text, label, onclick, disabled = false) => {
-    // The name says which page ("Move up: Patients"), starting with the words on the button.
-    const b = h('button', { type: 'button', class: 'btn btn-small', disabled, onclick, 'aria-label': `${text}: ${label}` }, text);
+  const button = (key, action, text, label, onclick, stuck = null) => {
+    // The name says which page ("Move up: Patients"), starting with the words on the button. One that cannot act (Move up on the
+    // first row) only looks disabled: it keeps focus, so one Enter too many says why instead of moving the page back down.
+    const b = h('button', {
+      type: 'button', class: 'btn btn-small', 'aria-disabled': stuck ? 'true' : null,
+      onclick: stuck ? () => announce(stuck) : onclick, 'aria-label': `${text}: ${label}`,
+    }, text);
     buttons.set(`${key} ${action}`, b);
     return b;
   };
   // The pages of a drop-down that are still in it.
   const pagesOf = (e) => entries.filter((p) => p.kind === 'page' && p.group === e.menu.key && !top.includes(p.key));
+  // A mouse click on "Put on the top bar" or "Put in More" sends the page to the other list, far up or down the dialog: focus
+  // following it would scroll away from the next page the person wants. So focus goes to the next button of the same kind (the
+  // one that takes the clicked one's place), kept where the pointer is. With the keyboard (no clicks counted) focus follows the page.
+  const inPlace = (ev, id) => {
+    if (!ev?.detail) return null;
+    const action = id.slice(id.lastIndexOf(' '));
+    const ids = [...buttons.keys()].filter((k) => k.endsWith(action));
+    const i = ids.indexOf(id);
+    return { next: [...ids.slice(i + 1), ...ids.slice(0, i).reverse()], y: buttons.get(id).getBoundingClientRect().top };
+  };
   const move = (key, by) => {
     const i = top.indexOf(key);
     const j = i + by;
     if (i < 0 || j < 0 || j >= top.length) return;
     [top[i], top[j]] = [top[j], top[i]];
-    draw([`${key} ${by < 0 ? 'up' : 'down'}`, `${key} ${by < 0 ? 'down' : 'up'}`]);
+    draw({ focus: [`${key} ${by < 0 ? 'up' : 'down'}`], moved: key });
     announce(`${name(byKey.get(key))}: number ${j + 1} of ${top.length} on the top bar.`);
   };
-  const toMore = (key) => {
+  const toMore = (key, ev) => {
+    const place = inPlace(ev, `${key} more`);
     top = top.filter((k) => k !== key);
-    draw([`${key} pin`]);
+    draw({ focus: [`${key} pin`], moved: key, place });
     announce(`${name(byKey.get(key))} is no longer on the top bar.`);
   };
-  const pin = (key) => {
+  const pin = (key, ev) => {
+    const place = inPlace(ev, `${key} pin`);
     top = [...top, key];
-    draw([`${key} up`, `${key} more`]);
+    draw({ focus: [`${key} up`, `${key} more`], moved: key, place });
     announce(`${name(byKey.get(key))} is now last on the top bar, number ${top.length}.`);
   };
 
-  function draw(focus = []) {
+  // `moved`: the page just moved, whose row stands out until the next change, so the eye can follow it after a click.
+  function draw({ focus = [], moved = null, place = null } = {}) {
     buttons = new Map();
+    const rowClass = (key) => ['arrange-row', key === moved && 'arrange-moved'];
     topList.replaceChildren(...top.map((key, i) => {
       const e = byKey.get(key);
       const inside = e.kind === 'group' ? pagesOf(e).map((p) => p.label) : [];
-      return h('li', { class: 'arrange-row' },
+      return h('li', { class: rowClass(key) },
         h('span', { class: 'arrange-num', 'aria-hidden': 'true' }, `${i + 1}.`),
         h('span', { class: 'arrange-name' }, name(e),
           e.kind === 'group' ? h('small', {}, inside.length ? inside.join(', ') : 'Empty: all its pages are on the top bar themselves') : null),
         h('span', { class: 'arrange-actions' },
-          button(key, 'up', 'Move up', name(e), () => move(key, -1), i === 0),
-          button(key, 'down', 'Move down', name(e), () => move(key, 1), i === top.length - 1),
-          button(key, 'more', 'Put in More', name(e), () => toMore(key))));
+          button(key, 'up', 'Move up', name(e), () => move(key, -1), i === 0 ? `${name(e)} is already first on the top bar.` : null),
+          button(key, 'down', 'Move down', name(e), () => move(key, 1), i === top.length - 1 ? `${name(e)} is already last on the top bar.` : null),
+          button(key, 'more', 'Put in More', name(e), (ev) => toMore(key, ev))));
     }));
     if (!top.length) topList.append(h('li', { class: 'arrange-row muted' }, 'Nothing on the top bar: everything is under More.'));
 
     // Everything else, in the order More shows it: the clinic's top-bar pages, each drop-down under its own name, More's own pages.
-    const row = (e) => h('li', { class: 'arrange-row' },
+    const row = (e) => h('li', { class: rowClass(e.key) },
       h('span', { class: 'arrange-name' }, e.kind === 'group' ? `The whole ${e.label} drop-down` : e.label,
         e.kind === 'group' ? h('small', {}, pagesOf(e).map((p) => p.label).join(', ')) : null),
-      h('span', { class: 'arrange-actions' }, button(e.key, 'pin', 'Put on the top bar', name(e), () => pin(e.key))));
+      h('span', { class: 'arrange-actions' }, button(e.key, 'pin', 'Put on the top bar', name(e), (ev) => pin(e.key, ev))));
     const section = (title, note, list) => (list.length ? h('section', { class: 'arrange-section' },
       h('h4', {}, title, note ? h('span', { class: 'muted' }, ` · ${note}`) : null), h('ul', { class: 'arrange-list' }, list.map(row))) : null);
     const off = (e) => !top.includes(e.key);
@@ -200,10 +218,15 @@ export function openArrangeMenu(menu) {
     count.classList.toggle('alert-warning', top.length > LONG_BAR);
     if (top.length > LONG_BAR) count.textContent += ' That is a long top bar: on a small laptop screen the last ones will be under More.';
 
-    // Focus stays with the row that was changed (its first button that can be pressed now), or the list heading.
-    if (focus.length) {
-      const target = focus.map((k) => buttons.get(k)).find((b) => b && !b.disabled) || topHeading;
-      target?.focus();
+    // After a mouse click that sent a page to the other list: the next button of the same kind, moved under the pointer.
+    const stay = place?.next.map((k) => buttons.get(k)).find(Boolean);
+    if (stay) {
+      stay.focus({ preventScroll: true });
+      const scroller = stay.closest('.modal-body');
+      if (scroller) scroller.scrollTop += stay.getBoundingClientRect().top - place.y;
+    } else if (focus.length) {
+      // Focus stays with the row that was changed (the same button, or its first one for a page that changed lists), or the list heading.
+      (focus.map((k) => buttons.get(k)).find(Boolean) || topHeading).focus();
     }
   }
 
@@ -219,7 +242,7 @@ export function openArrangeMenu(menu) {
   modal('Arrange my menu', body, [
     { label: 'Reset to default', onClick: () => {
       top = [...defaults];
-      draw([]);
+      draw();
       topHeading.focus();
       announce('Back to the clinic\'s menu. Press Save to keep it.');
       return false;

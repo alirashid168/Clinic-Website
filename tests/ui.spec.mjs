@@ -1690,24 +1690,48 @@ await step('Arrange my menu: in the name menu above "Change password"; the dialo
   assert.equal(await focusedName(pn), 'On the top bar', 'focus starts at the top-bar list');
   await shot(pn, '19-arrange-dialog');
 });
-await step('Arrange my menu: "Move up" moves a page up and focus stays on it, also with the keyboard; the first row cannot move up', async () => {
+const movedRows = (pg) => arrangeDialog(pg).locator('.arrange-moved .arrange-name').evaluateAll((els) => els.map((el) => el.firstChild.textContent.trim()));
+const saidInDialog = (pg, text) => pg.waitForFunction((want) => [...document.querySelectorAll('.modal [role="status"]')].some((r) => r.textContent === want), text);
+await step('Arrange my menu: "Move up" moves a page up, its row stands out and focus stays on it, also with the keyboard; one Enter too many does not move it back', async () => {
   const d = arrangeDialog(pn);
   await d.getByRole('button', { name: 'Move up: Patients', exact: true }).click();
   assert.deepEqual((await topRows(pn)).slice(0, 3), ['Today', 'Patients', 'Aaj ki List drop-down']);
   assert.equal(await focusedName(pn), 'Move up: Patients');
+  // After a click the button under the pointer belongs to the next page: the moved row shows where Patients went.
+  assert.deepEqual(await movedRows(pn), ['Patients']);
+  assert.notEqual(await d.locator('.arrange-moved').evaluate((el) => getComputedStyle(el).backgroundColor),
+    await d.locator('ol.arrange-list > li:not(.arrange-moved)').first().evaluate((el) => getComputedStyle(el).backgroundColor), 'the moved row looks different');
   await pn.keyboard.press('Enter');
   assert.deepEqual((await topRows(pn)).slice(0, 3), ['Patients', 'Today', 'Aaj ki List drop-down']);
-  assert.ok(await d.getByRole('button', { name: 'Move up: Patients', exact: true }).isDisabled(), 'the first row cannot move up');
-  assert.equal(await focusedName(pn), 'Move down: Patients', 'focus went to the button of that row that still works');
+  const up = d.getByRole('button', { name: 'Move up: Patients', exact: true });
+  assert.equal(await up.getAttribute('aria-disabled'), 'true', 'the first row cannot move up');
+  assert.equal(await focusedName(pn), 'Move up: Patients', 'focus stays on the button that was pressed');
+  await pn.keyboard.press('Enter');
+  await pn.keyboard.press('Enter');
+  assert.deepEqual((await topRows(pn)).slice(0, 3), ['Patients', 'Today', 'Aaj ki List drop-down'], 'more presses leave it first');
+  assert.equal(await focusedName(pn), 'Move up: Patients');
+  await saidInDialog(pn, 'Patients is already first on the top bar.');
 });
-await step('Arrange my menu: a page from More goes on the top bar (last), a whole drop-down goes under More', async () => {
+await step('Arrange my menu: a page from More goes on the top bar (last), a whole drop-down goes under More; a click keeps the place in the list, the keyboard follows the page', async () => {
   const d = arrangeDialog(pn);
-  await d.getByRole('button', { name: 'Put on the top bar: Stock', exact: true }).click();
+  const body = d.locator('.modal-body');
+  const stock = d.getByRole('button', { name: 'Put on the top bar: Stock', exact: true });
+  await stock.scrollIntoViewIfNeeded();
+  const was = (await stock.boundingBox()).y;
+  const scrolled = await body.evaluate((el) => el.scrollTop);
+  await stock.click();
   assert.equal((await topRows(pn)).at(-1), 'Stock');
-  assert.equal(await focusedName(pn), 'Move up: Stock', 'focus follows the page to the top-bar list');
-  await d.getByRole('button', { name: 'Put in More: Coordinator drop-down', exact: true }).click();
+  assert.deepEqual(await movedRows(pn), ['Stock']);
+  // The dialog does not scroll up to the top-bar list: the next page of More is where the pointer is, ready for the next click.
+  assert.equal(await focusedName(pn), 'Put on the top bar: Complaints');
+  assert.ok(Math.abs((await pn.evaluate(() => document.activeElement.getBoundingClientRect().top)) - was) <= 2, 'Complaints took the place of Stock');
+  assert.ok((await body.evaluate((el) => el.scrollTop)) >= scrolled, 'the dialog did not jump up');
+  await saidInDialog(pn, 'Stock is now last on the top bar, number 7.');
+  const coordinator = d.getByRole('button', { name: 'Put in More: Coordinator drop-down', exact: true });
+  await coordinator.focus();
+  await pn.keyboard.press('Enter');
   assert.deepEqual(await topRows(pn), ['Patients', 'Today', 'Aaj ki List drop-down', 'Billing', 'Reports drop-down', 'Stock']);
-  assert.equal(await focusedName(pn), 'Put on the top bar: Coordinator drop-down');
+  assert.equal(await focusedName(pn), 'Put on the top bar: Coordinator drop-down', 'with the keyboard focus follows the page');
   assert.match(await d.locator('.arrange-rest').innerText(), /Coordinator · under More/);
 });
 const ARRANGED = ['Patients', 'Today', 'Aaj ki List', 'Billing', 'Reports', 'Stock', 'More'];

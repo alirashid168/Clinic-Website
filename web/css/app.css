@@ -735,10 +735,14 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .arrange h4 { margin: var(--space-3) 0 var(--space-1); font-size: var(--fs-sm); }
 .arrange-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-1); }
 .arrange-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); }
+/* The page just moved: after a click the button under the pointer belongs to the next page, so the moved row shows where it went. */
+.arrange-row.arrange-moved { border-color: var(--aubergine); background: var(--aubergine-soft); box-shadow: inset 3px 0 0 var(--aubergine); }
 .arrange-num { flex: none; min-width: 1.75em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .arrange-name { flex: 1 1 12rem; min-width: 0; font-weight: 600; }
 .arrange-name small { display: block; font-weight: 400; color: var(--text-muted); }
 .arrange-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+/* Move up on the first row (Move down on the last) keeps focus, so it is greyed out by colour: fading it would fade its focus ring too. */
+.arrange-actions .btn[aria-disabled="true"] { opacity: 1; color: var(--text-subtle); border-color: var(--border); background: var(--surface-sunken); }
 .arrange-count { margin: 0 0 var(--space-2); }
 .drawer-close { align-self: flex-end; color: inherit; flex: none; }
 /* Tap-to-close layer behind the phone drawer (a real element, so taps never reach the page). */
