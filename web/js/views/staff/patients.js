@@ -281,6 +281,8 @@ export async function renderPatient(root, id) {
 
   const mh = p.medical_history || {};
   const medicalLine = [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
+  // The note of the latest visit that has one (the visits come newest first), as the Aaj ki List's row dialog writes it.
+  const lastNote = p.visits.find((v) => String(v.notes || '').trim());
 
   // The "Portal login" line: the username for a login made at the clinic, "own email (invited)" for an invitation, "none yet", or
   // "could not check" with a retry. "Reset portal password" appears once the login is known to be one made at the clinic (a patient who
@@ -314,10 +316,15 @@ export async function renderPatient(root, id) {
           p.referred_by_clinician ? ` · brought in by ${clinicianName(p.referred_by_clinician) || 'a doctor'}` : ''),
         (() => { const seen = [...new Set(p.visits.filter((v) => v.status === 'completed').map((v) => v.branch_id))].map(branchName).filter(Boolean); return seen.length > 1 ? h('p', { class: 'muted' }, `Visited: ${seen.join(', ')}`) : null; })(),
         loginLine,
-        h('div', { class: 'inline', style: { marginTop: '6px' } }, duesBadge(p.dues), aliBadge(!!p.flag),
+        // The patient's flags, which the Aaj ki List does not show (owner, 11 Oct 2026: "it should be marked like this on the
+        // patient's profile where his details and bills are"): medical history, see Dr. Ali, dues and the latest visit note.
+        h('div', { class: 'inline profile-flags', style: { marginTop: '6px' } },
+          medicalLine ? h('span', { class: 'badge badge-warn', title: medicalLine }, '⚕ Medical history') : null,
+          aliBadge(!!p.flag), duesBadge(p.dues),
+          lastNote ? h('span', { class: 'badge badge-note', title: `Visit note, ${shortDate(lastNote.visit_date)}: ${lastNote.notes}` },
+            h('span', { class: 'badge-note-text' }, `Note (${shortDate(lastNote.visit_date)}): ${lastNote.notes}`)) : null,
           p.photo_consent_public ? h('span', { class: 'badge badge-ok' }, 'Photo consent') : h('span', { class: 'badge badge-muted' }, 'No public photo consent'),
-          p.treatment_consent_at ? h('span', { class: 'badge badge-ok' }, 'Consent signed') : h('span', { class: 'badge badge-muted' }, 'No treatment consent on file'),
-          medicalLine ? h('span', { class: 'badge badge-warn', title: medicalLine }, '⚕ Medical history') : null),
+          p.treatment_consent_at ? h('span', { class: 'badge badge-ok' }, 'Consent signed') : h('span', { class: 'badge badge-muted' }, 'No treatment consent on file')),
         medicalLine ? h('p', { class: 'status-bad', style: { marginTop: '6px' } }, h('strong', {}, 'Medical: '), medicalLine) : null),
       h('div', { class: 'inline' },
         can('patients.edit') ? h('button', { class: 'btn', onclick: editPatient }, 'Edit') : null,

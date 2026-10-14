@@ -10,6 +10,7 @@ import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '.
 import { STATUS_LABELS, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
 import { dayListCheckups } from '../../lib/checkups.js';
+import { personTones, personTone } from '../../lib/tones.js';
 import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
@@ -57,6 +58,15 @@ const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
   || Number(a.checkup) - Number(b.checkup)
   || byNumber(a.token, b.token)
   || String(a.row.created_at || '').localeCompare(String(b.row.created_at || ''));
+// The "#" column numbers the rows 1..n down the list as shown, like the sheet's row numbers (owner, 11 Oct 2026: "a serial
+// number by the left side, so we can see how many patients we have actually done"); the Completed count above the list
+// says how many are done. true: the Completed rows count 1..N on their own instead, so their last number is the patients
+// done, and the other rows keep one running number (an open question to the owner).
+const COMPLETED_OWN_COUNT = false;
+// No flags on the list (owner, 11 Oct 2026): See Dr. Ali, medical history, dues and the visit note are on the patient's
+// profile (patients.js), and in the row's dialog; dues are in the P.P column. true puts the "Med" marker back beside the
+// name of a patient with a medical history, for the doctors at the chair.
+const SHOW_MEDICAL_ON_LIST = false;
 // A row of the list as a key, the same for every copy of it the list draws (visits and checkups are told apart).
 const keyOf = (item) => `${item.checkup ? 'c' : 'v'}:${item.row.id}`;
 // Whether a row is no longer where it was sorted (held: its { rank, token } when the list was last drawn).
@@ -68,18 +78,12 @@ const STATUS_TONE = { completed: 'yellow', in_treatment: 'green', scheduled: 'bl
 const GROUP_TONE = { 1: 'blue', 2: 'green', 3: 'purple', 4: 'darkred' };
 export const statusTone = (status) => STATUS_TONE[status] || 'grey';
 export const groupTone = (group) => GROUP_TONE[group] || 'grey';
-// One colour per doctor, as the clinic's sheet has them (matched on the name without "Dr."). Anyone else gets a colour
-// picked from their id, so it is the same on every row and every day.
-const DOCTOR_TONES = [['hameeda', 'green'], ['komal rubab', 'red'], ['mirha', 'orange'], ['haniya', 'brown'], ['ali ahmed', 'darkred'],
-  ['mehwish saleem', 'blue'], ['aimon aslam', 'purple'], ['anousha khan', 'teal']];
-const OTHER_TONES = ['green', 'red', 'orange', 'blue', 'purple', 'teal', 'yellow'];
+// One colour per doctor, as the clinic's sheet has them: worked out once for the clinic's whole list of clinicians
+// (lib/tones.js), so the people who can be on one list get different colours, and each keeps theirs on every row and day.
+let tones = { of: null, map: null };
 export function doctorTone(id, name) {
-  const key = String(name || '').toLowerCase().replace(/^dr\b\.?/, '').replace(/[^a-z]+/g, ' ').trim();
-  const known = DOCTOR_TONES.find(([k]) => key === k || key.startsWith(`${k} `));
-  if (known) return known[1];
-  let hash = 0;
-  for (const ch of String(id || name || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return OTHER_TONES[hash % OTHER_TONES.length];
+  if (tones.of !== state.ref.clinicians) tones = { of: state.ref.clinicians, map: personTones(state.ref.clinicians) };
+  return personTone(tones.map, id, name);
 }
 // P.P (pending dues) written the sheet's way: 0, 500, 11.5k, 20k.
 export function shortRupees(n) {
@@ -95,7 +99,7 @@ const cellText = (...content) => h('span', { class: 'cell-text' }, content);
 // A typed cell's field sits in a box that is walled off from the rest of the table while it is typed in (app.css
 // .cell-box), so a key lays out that box alone: laying out the whole 120-row table on every key made typing lag.
 const typedCell = (input) => h('div', { class: 'cell-box' }, input);
-// What a patient's medical history says, on one line (the flag beside the name, and the row's dialog).
+// What a patient's medical history says, on one line (the row's dialog, and the flag beside the name if SHOW_MEDICAL_ON_LIST).
 function medicalText(p) {
   const mh = p?.medical_history || {};
   return [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
@@ -638,8 +642,9 @@ export async function renderSheet(root, params, signal) {
   }
 
   // After a dialog opened from a row, modal() puts focus back on the button that opened it, or on its twin (the same name)
-  // when the list was drawn again meanwhile. There is no twin when the row's flags, note or invoice changed with that
-  // redraw, and focus would go to the page heading: it goes back to that control of the row (key), or to the name.
+  // when the list was drawn again meanwhile. There is no twin when that control changed with the redraw (a Pending chip
+  // that turned Done is no button), and focus would go to the page heading: it goes back to that control of the row
+  // (key), or to the name.
   function backToRow(id, key) {
     const el = document.activeElement;
     if (document.querySelector('.modal') || (el && el !== document.body && !el.matches('h1'))) return;
@@ -728,8 +733,8 @@ export async function renderSheet(root, params, signal) {
       h('button', { type: 'button', class: 'btn', onclick: () => { dialog?.close(); location.hash = `#/staff/patient/${row.patient_id}`; } }, 'Open profile'),
     ];
     const medical = medicalText(row.patient);
-    // Notes save by themselves through the same queue as the cells (the sheet has no Notes column, so they live here);
-    // the row shows a "Note" flag once there is one.
+    // Notes save by themselves through the same queue as the cells (the sheet has no Notes column, so they live here; the
+    // latest one is shown on the patient's profile too).
     const notesBefore = row.notes || '';
     const notes = h('input', { value: notesBefore, disabled: !canEdit, autocomplete: 'off', oninput: (e) => save(row, 'notes', e.target.value) });
     const from = tableBody.contains(document.activeElement) ? document.activeElement.dataset.focus : null; // (the name or the month chip)
@@ -742,7 +747,7 @@ export async function renderSheet(root, params, signal) {
       h('div', { style: { marginTop: '14px' } }, field('Notes', notes, 'Saved by itself, like the cells of the list.'))), [], {
       // The buttons above reload the list when they are done (a payment, an invoice, Dr. Ali, photos), which puts new rows
       // in it: the row is redrawn from the one in the list now, with the note typed here, not from this dialog's old copy.
-      // Focus then goes back to the control of the row that opened this (a flag or note just added changes the name's words).
+      // Focus then goes back to the control of the row that opened this.
       onClose: () => {
         const now = (row.notes || '') !== notesBefore && rows.find((r) => r.id === row.id);
         if (now) { now.notes = row.notes; redrawRow(now); }
@@ -774,6 +779,10 @@ export async function renderSheet(root, params, signal) {
       }, words)
       : h('span', { class: cls }, words);
   }
+
+  // Reminder Status: the empty chip of the sheet's last column (see columns, below), on every row as on the sheet. It says
+  // nothing to a screen reader: the cell is empty.
+  const reminderCell = () => h('span', { class: 'chip chip-fill gs-grey', 'aria-hidden': 'true' });
 
   function rowEl(row, n) {
     const who = row.patient.full_name;
@@ -822,33 +831,28 @@ export async function renderSheet(root, params, signal) {
       }, monthNo, photo ? ` Photo${row.photos_uploaded ? ' ✓' : ''}` : '')
       : h('span', { class: 'chip chip-fill gs-grey' }, srOnly('Not braces'));
     const arrived = row.checked_in_at ? timeOf(row.checked_in_at) : '';
-    const medical = medicalText(row.patient);
     const pp = !can('dues.view') ? null : row.dues > 0
       ? h('span', { class: 'pp-due', title: `Pending dues ${rupees(row.dues)}` }, shortRupees(row.dues), srOnly(` pending dues, ${rupees(row.dues)}`))
       : h('span', { class: 'pp-zero', title: 'No pending dues' }, '0', srOnly(' pending dues'));
-    // The flags beside the name, short so the name keeps most of the cell (the full words are read out, and are in the
-    // tooltip and the row's dialog). Medical history first: it is the one that matters at the chair. Both are always whole
-    // (the name gives way); a note is the sheet's note mark, a small triangle in the cell's corner that takes no room.
-    const flag = (short, words, cls, title) => h('span', { class: ['badge', cls], title }, [h('span', { 'aria-hidden': 'true' }, short), srOnly(words)]);
-    const flags = [
-      medical ? flag('Med', 'Medical', 'badge-warn', `Medical history: ${medical}`) : null,
-      row.see_dr_ali ? flag('Ali', 'See Dr. Ali', 'badge-ali', 'Next appointment with Dr. Ali Rashid') : null,
-    ].filter(Boolean);
+    // No flags beside the name (SHOW_MEDICAL_ON_LIST, at the top): only the medical one can be switched back on. It is short
+    // so the name keeps most of the cell, always whole (the name gives way); the full words are read out and in its tooltip.
+    const medical = SHOW_MEDICAL_ON_LIST ? medicalText(row.patient) : '';
+    const medicalFlag = medical ? h('span', { class: 'name-flags' }, h('span', { class: 'badge badge-warn', title: `Medical history: ${medical}` },
+      h('span', { 'aria-hidden': 'true' }, 'Med'), srOnly('Medical'))) : null;
 
     return h('tr', { dataset: { id: row.id, n } },
       !branchId ? h('td', { class: 'branch-cell' }, cellText(branchName(row.branch_id))) : null,
       h('td', { class: 'rownum' }, n),
       h('td', { class: 'mr-cell frozen' }, cellText(srOnly('Mr# '), row.patient.mr_number)),
-      // The patient cell is the row's header (th scope=row). A click on the name opens the row's actions; the flags beside it
-      // (medical history, see Dr. Ali, a note) are shown in full there.
+      // The patient cell is the row's header (th scope=row). A click on the name opens the row's actions, with the patient's
+      // flags (medical history, see Dr. Ali, dues) and the note.
       h('th', { scope: 'row', class: 'frozen row-head name-col' },
         h('button', {
           type: 'button', class: 'link-btn name-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, onclick: () => openRow(row),
-          title: `${who}: actions, braces guidance and notes${row.notes ? `. Note: ${row.notes}` : ''}`,
+          title: `${who}: actions, braces guidance and notes`,
         },
         h('span', { class: 'name-text' }, who),
-        flags.length ? h('span', { class: 'name-flags' }, flags) : null,
-        row.notes ? h('span', { class: 'note-mark', title: `Note: ${row.notes}` }, srOnly('Note')) : null,
+        medicalFlag,
         h('span', { class: 'kebab', 'aria-hidden': 'true' }, '⋮'))),
       h('td', {}, month),
       h('td', {}, typedCell(treatment)),
@@ -859,7 +863,8 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, h('div', { class: 'details-cell' }, details, quickTap)),
       h('td', { class: 'pp' }, pp),
       canBill ? h('td', {}, invoiceCell(row)) : null,
-      h('td', { class: 'contact' }, cellText(row.patient.phone || '')));
+      h('td', { class: 'contact' }, cellText(row.patient.phone || '')),
+      h('td', {}, reminderCell()));
   }
 
   // A checkup patient: the same columns as a visit row (so the arrow keys keep working), but no Mr#, no braces month,
@@ -915,7 +920,8 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, typedCell(text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised' }))),
       h('td', { class: 'pp' }),
       canBill ? h('td', {}) : null,
-      h('td', {}, typedCell(text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null }))));
+      h('td', {}, typedCell(text('phone', 'Phone', { type: 'tel', onchange: (e) => saveCheckup(c, 'phone', e.target.value), oninput: null }))),
+      h('td', {}, reminderCell()));
   }
 
   // Redraws replace rows, so remember the focused control (row id + data-focus key + caret, and typed text the cell has not
@@ -998,10 +1004,12 @@ export async function renderSheet(root, params, signal) {
     if (focused !== null) [...countsBox.children].find((b) => b.dataset.key === focused)?.focus();
   }
 
-  // The sheet's columns in the sheet's order. "Reminder Status", the sheet's last column, is left out while it is empty on
-  // every tab; when the clinic starts using it, it goes after Contact No (a <col>, a heading and a cell in both row kinds).
+  // The sheet's columns in the sheet's order (owner, 11 Oct 2026: "the columns of google sheet should be same here too").
+  // "Reminder Status", the sheet's last column, is empty on every tab of the sheet, so it is an empty chip on every row
+  // here too (reminderCell). What it is to hold waits for the clinic to start using it: the Google Sheet sync already keeps
+  // the sheet's reminder text (private.aaj_visit_text.reminder), and the coordinator has the patients' reminders.
   const colgroup = h('colgroup', {});
-  const columns = () => [!branchId && 'branch', 'num', 'mr', 'name', 'month', 'treatment', 'token', 'status', 'group', 'doctor', 'details', 'pp', canBill && 'invoice', 'contact']
+  const columns = () => [!branchId && 'branch', 'num', 'mr', 'name', 'month', 'treatment', 'token', 'status', 'group', 'doctor', 'details', 'pp', canBill && 'invoice', 'contact', 'reminder']
     .filter(Boolean).map((k) => h('col', { class: `c-${k}` }));
 
   function draw() {
@@ -1024,7 +1032,8 @@ export async function renderSheet(root, params, signal) {
     // moves to its new place at the first redraw after the cursor has left it: leaving it asks for a quiet reload, which
     // waits until nobody is typing or clicking in the list (settle, at the top), and the live updates, the 20-second check
     // and any other redraw move it too. Every row is numbered 1..n in the order shown, like the sheet's row numbers
-    // (owner, 11 Oct 2026); that is not the token, which repeats from one kind of treatment to another.
+    // (owner, 11 Oct 2026; COMPLETED_OWN_COUNT, at the top); that is not the token, which repeats from one kind of
+    // treatment to another.
     const here = rowKey(document.activeElement);
     const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].map((item) => {
       const key = keyOf(item);
@@ -1032,7 +1041,10 @@ export async function renderSheet(root, params, signal) {
       return { ...item, key, rank: held ? held.rank : rankOf(item), token: held ? held.token : tokenOf(item) };
     }).sort(listOrder);
     placed = new Map(items.map((item) => [item.key, { rank: item.rank, token: item.token }]));
-    mount(tableBody, items.length ? items.map((item, i) => (item.checkup ? checkupRowEl(item.row, i + 1) : rowEl(item.row, i + 1)))
+    let n = 0;
+    let done = 0;
+    const serial = (item) => (COMPLETED_OWN_COUNT && item.rank === STATUS_RANK.completed ? ++done : ++n);
+    mount(tableBody, items.length ? items.map((item) => (item.checkup ? checkupRowEl(item.row, serial(item)) : rowEl(item.row, serial(item))))
       : h('tr', {}, h('td', { class: 'empty-cell', colspan: colgroup.children.length }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" to add them.` : 'No patients or checkups on any list for this day.'))));
     restoreFocus(saved);
     drawCounts();
@@ -1280,7 +1292,8 @@ export async function renderSheet(root, params, signal) {
           heading('Treatment Details'),
           can('dues.view') ? filterHeading('P.P', duesBox, 'Show only patients with dues', { class: 'pp pp-head', title: 'Pending dues' }) : heading('P.P', { class: 'pp pp-head', title: 'Pending dues' }),
           canBill ? heading('Invoice') : null,
-          heading('Contact No'))),
+          heading('Contact No'),
+          heading('Reminder Status', { title: 'Reminder Status: empty on the sheet too, until the clinic starts using it' }))),
         tableBody)));
   // On a laptop or bigger screen the list fills the window to its bottom edge, so the header row stays at the top and the
   // add line at the bottom while the rows scroll; app.css sizes .sheet-page from where it starts (--sheet-top).

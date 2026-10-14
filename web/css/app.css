@@ -350,6 +350,9 @@ fieldset.fieldset-plain > legend { padding: 0; margin-bottom: .375rem; font-size
 .badge-warn { background: var(--status-warn-bg); color: var(--status-warn-text); }
 .badge-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
 .badge-inactive { background: var(--status-neutral-bg); color: var(--status-neutral-text); border-color: var(--border-strong); }
+/* The latest visit note on a patient's profile: one line, cut with an ellipsis (whole in its tooltip and under Visits). */
+.badge-note { max-width: min(100%, 36rem); background: var(--status-info-bg); color: var(--status-info-text); }
+.badge-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* Switched-off records: readable muted text (>=4.5:1) plus a badge, no opacity dimming. */
 .is-inactive, .is-inactive td { color: var(--text-muted); }
@@ -823,10 +826,10 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   scroll-padding: calc(var(--sheet-row) + 4px) 0 0 calc(var(--w-num) + var(--w-mr) + var(--w-name));
 }
 .sheet-wrap :focus-visible { outline-offset: -2px; }
-table.sheet { table-layout: fixed; width: 100%; min-width: 1280px; border-collapse: separate; border-spacing: 0; font: 400 13px/1.25 var(--sheet-font); color: var(--sheet-text); }
+table.sheet { table-layout: fixed; width: 100%; min-width: 1404px; border-collapse: separate; border-spacing: 0; font: 400 13px/1.25 var(--sheet-font); color: var(--sheet-text); }
 /* All branches has a Branch column on top: the list is wider by that much and scrolls sideways sooner (under the frozen
    #, Mr# and name), rather than take it from Treatment Details. (On a laptop: below; a touch screen: TOUCH.) */
-table.sheet:has(> colgroup > .c-branch) { min-width: 1400px; }
+table.sheet:has(> colgroup > .c-branch) { min-width: 1524px; }
 table.sheet col.c-branch { width: 120px; }
 table.sheet col.c-num { width: var(--w-num); }
 table.sheet col.c-mr { width: var(--w-mr); }
@@ -839,6 +842,7 @@ table.sheet col.c-group { width: 86px; }
 table.sheet col.c-pp { width: 56px; }
 table.sheet col.c-invoice { width: 74px; }
 table.sheet col.c-contact { width: 100px; }
+table.sheet col.c-reminder { width: 124px; }
 /* (Doctor Name and Treatment Details share the rest of the width; on a laptop Doctor Name gets more, see below.) */
 table.sheet thead th {
   position: sticky; top: 0; z-index: 2; height: 28px; padding: 0 var(--space-2); background: var(--sheet-head); color: var(--text-on-accent);
@@ -879,19 +883,17 @@ table.sheet .name-col { position: sticky; left: calc(var(--w-num) + var(--w-mr))
 table.sheet thead .rownum, table.sheet thead .mr-cell, table.sheet thead .name-col { z-index: 3; }
 table.sheet td.empty-cell { height: auto; white-space: normal; }
 
-/* The name: a click opens the row's actions (⋮); the flags beside it are shown in full there. */
+/* The name: a click opens the row's actions (⋮), with the patient's flags (the list shows none, sheet.js SHOW_MEDICAL_ON_LIST). */
 .name-btn {
   position: relative; display: flex; align-items: center; gap: 3px; width: 100%; height: calc(var(--sheet-row) - 1px); padding: 0 var(--space-1) 0 var(--space-2);
   border: 0; background: none; color: var(--sheet-text); font: inherit; text-align: left; text-decoration: none; cursor: pointer;
 }
 .name-btn:hover .name-text { text-decoration: underline; }
-/* The short flags (Med, Ali) sit at the right and are always whole; the name takes the rest, cut with an ellipsis when
-   it must (it is whole in the tooltip and the row's dialog). With both flags it still keeps over half of a laptop's cell. */
+/* The name takes the cell, cut with an ellipsis when it must (whole in the tooltip and the row's dialog). The "Med" flag, when
+   SHOW_MEDICAL_ON_LIST puts it back, sits at the right and is always whole; the name keeps over half of a laptop's cell. */
 .name-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name-flags { flex: none; display: flex; gap: 2px; }
 .name-flags .badge { flex: none; padding: 0 3px; font-size: 10.5px; line-height: 14px; }
-/* A note: the sheet's note mark, a small dark triangle in the cell's top right corner (it takes no room). */
-.note-mark { position: absolute; top: 0; right: 0; width: 7px; height: 7px; background: var(--sheet-text); clip-path: polygon(0 0, 100% 0, 100% 100%); }
 .name-cell .badge { flex: none; padding: 0 5px; font-size: 10.5px; line-height: 16px; }
 .kebab { flex: none; margin-left: auto; padding: 0 2px; color: var(--sheet-rownum-text); font-weight: 700; }
 .name-btn:hover .kebab, .name-btn:focus-visible .kebab { color: var(--text-accent); }
@@ -945,7 +947,7 @@ select.chip-select {
   -webkit-appearance: none; appearance: none; background-image: var(--caret-dark); background-repeat: no-repeat; background-position: right 6px center; background-size: 8px 5px;
   font: 500 12px/20px var(--sheet-font); text-overflow: ellipsis; cursor: pointer;
 }
-select.chip-select.gs-darkred, select.chip-select.gs-brown { background-image: var(--caret-light); }
+select.chip-select:is(.gs-darkred, .gs-brown, .gs-darkgreen, .gs-darkblue, .gs-darkpurple, .gs-darkteal, .gs-darkgrey) { background-image: var(--caret-light); }
 select.chip-select:disabled { opacity: 1; cursor: default; background-image: none; }
 select.chip-select option { background: var(--enamel); color: var(--sheet-text); }
 /* The chip palette of Google Sheets. Text is >=4.6:1 on every fill. */
@@ -959,6 +961,12 @@ select.chip-select option { background: var(--enamel); color: var(--sheet-text);
 .gs-grey { background-color: #e8eaed; color: #3c4043; }
 .gs-darkred { background-color: #b10202; color: #fff; }
 .gs-brown { background-color: #753800; color: #fff; }
+/* The dark chips the Doctor Name column also uses (lib/tones.js), so more people get a colour of their own. White text is >=5.8:1 on each. */
+.gs-darkgreen { background-color: #11734b; color: #fff; }
+.gs-darkblue { background-color: #0a53a8; color: #fff; }
+.gs-darkpurple { background-color: #5a3286; color: #fff; }
+.gs-darkteal { background-color: #215a6c; color: #fff; }
+.gs-darkgrey { background-color: #3d3d3d; color: #fff; }
 
 /* Doctor Name: one chip per person in that person's colour, then "+" (add, and remove, in a dialog). On a touch screen,
    short of room, the braces rule gives way first, then the names are cut; a chip never gets narrower than its ✓ and ×, so
@@ -997,10 +1005,13 @@ select.chip-select option { background: var(--enamel); color: var(--sheet-text);
 @media (min-width: 900px) and (hover: hover) and (pointer: fine) {
   .sheet-page { --w-doctor: clamp(200px, 16.5vw, 380px); }
   table.sheet col.c-doctor { width: var(--w-doctor); }
-  /* All branches: every column but Treatment Details has a set width, so the list is at least those plus 140px for it
-     (806px = Branch, Month, Token, Status, Group, P.P, Invoice, Contact No and those 140px; for someone who does not see
-     invoices there is no Invoice column, and Treatment Details has its 74px too). */
-  table.sheet:has(> colgroup > .c-branch) { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 806px); }
+  /* Every column but Treatment Details has a set width, so the list is at least those plus 140px for it, and scrolls
+     sideways (under the frozen #, Mr# and name) rather than squeeze it: on a 1366px laptop the sheet's last column,
+     Reminder Status, is just out of sight, as the sheet's last columns are (810px = Month, Token, Status, Group, P.P,
+     Invoice, Contact No, Reminder Status and those 140px; All branches has its 120px Branch column on top; for someone
+     who does not see invoices there is no Invoice column, and Treatment Details has its 74px too). */
+  table.sheet { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 810px); }
+  table.sheet:has(> colgroup > .c-branch) { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 930px); }
   .people-chips { flex-wrap: wrap; align-content: flex-start; height: 20px; }
   .person, .person.checker { position: relative; min-width: 0; padding-right: var(--space-2); }
   .person + .person { flex: 1 1 0; min-width: 6.5em; max-width: max-content; }
@@ -1482,8 +1493,8 @@ table.invoice-lines input { min-width: 0; }
   .sheet-page { --sheet-row: 44px; }
   /* (the list scrolls sideways here anyway: wider, so the bigger chips of three people and their × fit the Doctor Name cell,
      and Status and Group are wide enough for "In treatment" and "No group" in 16px, see below) */
-  table.sheet { min-width: 1490px; }
-  table.sheet:has(> colgroup > .c-branch) { min-width: 1610px; } /* (All branches: its Branch column on top) */
+  table.sheet { min-width: 1614px; }
+  table.sheet:has(> colgroup > .c-branch) { min-width: 1734px; } /* (All branches: its Branch column on top) */
   table.sheet col.c-status { width: 128px; }
   table.sheet col.c-group { width: 108px; }
   .sheet-toolbar select, .sheet-toolbar input:not([type=checkbox]), .add-panel input[type=search] { min-height: var(--target); font-size: var(--fs-control); }
@@ -1522,7 +1533,6 @@ table.invoice-lines input { min-width: 0; }
     outline: 2px solid Highlight; outline-offset: -2px;
   }
   .sx-day { border: 1px solid CanvasText; }
-  .note-mark { forced-color-adjust: none; background: CanvasText; }
   .sx-day.is-today, .cx-cal-day.is-today { outline: 3px solid Highlight; outline-offset: -3px; }
   .cx-row.is-today .cx-track { outline: 2px solid Highlight; outline-offset: 2px; }
   .cx-track, .cx-legend i, .legend-swatch { forced-color-adjust: none; background: Canvas; box-shadow: none; border: 1px solid CanvasText; }
