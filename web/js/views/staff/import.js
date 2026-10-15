@@ -434,12 +434,12 @@ export async function renderImport(root) {
 
       // Every batch through import_checkup_form; the counts added up. onPart(sentSoFar) before each batch.
       const send = async (dryRun, onPart) => {
-        const total = { inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped_count: 0, other_name: 0, other_answers: 0, skipped: [] };
+        const total = { inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped_count: 0, other_name: 0, other_answers: 0, follow_up_noted: 0, skipped: [] };
         for (let i = 0; i < read.rows.length; i += FORM_IMPORT_BATCH) {
           onPart?.(i);
           document.dispatchEvent(new Event('app:activity'));   // a long import counts as activity (no idle logout half-way)
           const r = await d.importCheckupForm(read.rows.slice(i, i + FORM_IMPORT_BATCH), { dryRun });
-          for (const k of ['inserted', 'filled_day', 'filled_month', 'already', 'same', 'skipped_count', 'other_name', 'other_answers']) total[k] += Number(r?.[k] || 0);
+          for (const k of ['inserted', 'filled_day', 'filled_month', 'already', 'same', 'skipped_count', 'other_name', 'other_answers', 'follow_up_noted']) total[k] += Number(r?.[k] || 0);
           if (Array.isArray(r?.skipped)) total.skipped.push(...r.skipped);
         }
         return total;
@@ -461,7 +461,8 @@ export async function renderImport(root) {
           const done = await send(false, (i) => { sent = i; progress.textContent = `Answers: ${number(Math.min(i + FORM_IMPORT_BATCH, read.rows.length))} of ${number(read.rows.length)}…`; });
           progress.textContent = '';
           mount(result, h('div', { class: 'alert alert-info' },
-            h('div', {}, `Checkup Form 2.0: ${number(done.inserted)} added, ${number(done.filled_day + done.filled_month)} put on a checkup already on the list, ${number(done.already)} already imported, ${number(done.same)} already had these answers, ${number(read.skipped.length + done.skipped_count)} skipped.`),
+            h('div', {}, `Checkup Form 2.0: ${number(done.inserted)} added, ${number(done.filled_day + done.filled_month)} put on a checkup already on the list, ${number(done.already)} already imported, ${number(done.same)} already had these answers, ${number(read.skipped.length + done.skipped_count)} skipped.`,
+              done.follow_up_noted ? ` ${count(done.follow_up_noted, 'follow-up status from REMINDERS was', 'follow-up statuses from REMINDERS were')} added to the notes instead.` : ''),
             h('div', { style: { marginTop: '6px' } }, h('a', { href: '#/staff/checkups?source=google_form' }, 'Open the checkups from the Google Form →'))));
           toast('Checkup form answers imported.', 'ok');
         } catch (e) {
@@ -485,6 +486,8 @@ export async function renderImport(root) {
         plan && (plan.already || plan.same) ? h('p', { class: 'muted' }, `${count(plan.already, 'answer was', 'answers were')} imported before, and ${count(plan.same, 'checkup already has', 'checkups already have')} the answers: nothing changes for them.`) : null,
         // a second answer of one person that says otherwise (a second visit, or the form sent again with an answer changed): never dropped
         plan?.other_answers ? h('p', { class: 'muted' }, `${count(plan.other_answers, 'answer is', 'answers are')} a second answer of someone whose checkup already holds other answers (a second visit, or the form sent again with an answer changed): ${plan.other_answers === 1 ? 'it becomes a checkup of its own' : 'each becomes a checkup of its own'}, so no answer is lost.`) : null,
+        // a follow-up status from REMINDERS that the checkup does not take: in its notes, never lost
+        plan?.follow_up_noted ? h('p', { class: 'muted' }, `${count(plan.follow_up_noted, 'answer has', 'answers have')} a follow-up status from REMINDERS that the checkup does not take (it has another status, or it is the old list's row): ${plan.follow_up_noted === 1 ? 'it is' : 'they are'} added to its notes, e.g. "Reminder (Google Form): Follow-up Sent".`) : null,
         // two people on one phone (a parent's phone for two children): each is a checkup of their own, never put on the other's row
         plan?.other_name ? h('p', { class: 'muted' }, `${count(plan.other_name, 'answer has', 'answers have')} the phone of another person on that day's list at that branch, with another name (often a parent's phone for two children): ${plan.other_name === 1 ? 'it becomes a checkup of its own' : 'each becomes a checkup of its own'}, not part of the other person's.`) : null,
         h('div', { class: 'inline', style: { alignItems: 'flex-start', gap: '24px' } },
@@ -497,7 +500,7 @@ export async function renderImport(root) {
           h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { maxWidth: '420px' } },
             h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Follow-up status from REMINDERS'), h('th', { scope: 'col', class: 'right' }, 'Answers'))),
             h('tbody', {}, Object.entries(s.perReminder || {}).sort((a, b) => b[1] - a[1]).map(([kind, n]) => h('tr', {}, h('td', {}, reminderLabel[kind] || kind), h('td', { class: 'right' }, number(n)))))))),
-        h('p', { class: 'muted' }, 'What REMINDERS says stays in the notes ("Reminder: ..."), except a plain "done" or a status written as it is. A checkup already on the list takes the status only while it still says Not Contacted; the old list\'s row keeps its own.'),
+        h('p', { class: 'muted' }, 'What REMINDERS says stays in the notes ("Reminder: ..."), except a plain "done" or a status written as it is. A checkup already on the list takes the status only while it still says Not Contacted; the old list\'s row keeps its own. A status it does not take is added to its notes ("Reminder (Google Form): Follow-up Sent").'),
         s.wrongColumn.length ? h('div', { class: 'alert alert-warning' },
           `${count(s.wrongColumn.length, 'row has', 'rows have')} an answer in the wrong place: ${s.wrongColumn.slice(0, 10).map((w) => `row ${w.row} (${w.questions.join('; ')})`).join(', ')}${s.wrongColumn.length > 10 ? ', …' : ''}. ${s.wrongColumn.length === 1 ? 'It is' : 'They are'} imported with those answers empty; what was written there is kept in the notes.`) : null,
         Object.keys(s.unknownBranches).length ? h('div', { class: 'alert alert-warning' },

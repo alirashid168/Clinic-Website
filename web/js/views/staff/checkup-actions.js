@@ -39,8 +39,18 @@ export function followUpSelect(row, onCommit, { disabled = false, label } = {}) 
   return sel;
 }
 
-/** Only people who keep the list may remove a checkup; a row from the old list can be removed by Dr. Ali only. */
-export const canRemoveCheckup = (row) => can('sheet.edit') && (isAdmin() || row.source !== 'archive');
+// A row of the old list and an answer imported from the Google Form are removed by Dr. Ali only (the database's "remove checkups"
+// policy): importing the Google Form's file again skips every answer it imported before, so a removed answer never comes back.
+const ADMIN_REMOVES = ['archive', 'google_form'];
+/** Only people who keep the list may remove a checkup; a row from the old list or the Google Form can be removed by Dr. Ali only. */
+export const canRemoveCheckup = (row) => can('sheet.edit') && (isAdmin() || !ADMIN_REMOVES.includes(row.source));
+/** Why someone who keeps the list is not offered Remove for this row (null: it is offered, or they do not keep the list). */
+export function whyNoRemove(row) {
+  if (!can('sheet.edit') || canRemoveCheckup(row)) return null;
+  return row.source === 'google_form'
+    ? 'Only Dr. Ali can remove an answer imported from the Google Form: importing the file again does not bring a removed answer back.'
+    : 'Only Dr. Ali can remove a row from the old list.';
+}
 
 /** Registering links the checkup to the new patient file and moves its follow-up status, so (as in the database) it needs both rights. */
 export const canRegisterCheckup = () => can('patients.create') && can('sheet.edit');
@@ -244,6 +254,11 @@ export function discardGuard(snapshot, saved = () => false) {
 // given for two children (in the owner's Google Form file 11 days have two names on one phone). The names must fit as the import compares
 // them (nameFits, the rule of private.aaj_name_fits); a name nobody can read (Urdu script) on either side, or none typed yet, goes by the phone.
 const sameName = (typed, c) => !nameNorm(typed) || !nameNorm(c.patient_name) || nameFits(typed, c.patient_name);
+// Is checkup c, found by its name alone, the person typed? Someone typed into the Google Sheet on arrival often has no phone there, and the
+// phone may not be typed in the form yet: then the names must fit (nameFits), and both must be readable.
+const nameMatch = (typed, c) => !!nameNorm(typed) && !!nameNorm(c.patient_name) && nameFits(typed, c.patient_name);
+// A checkup as the warning names it: the name, and the phone or that it has none.
+const listedAs = (c) => `${c.patient_name} (${c.phone || 'no phone'})`;
 // What saving the answers on c would do to answers it already has.
 const answeredText = (c) => `${formComplete(c) ? 'Its checkup form is already filled in' : 'It already has answers from the checkup form'}: saving these answers on it would replace them.`;
 
@@ -256,8 +271,8 @@ function addedText(had, typed) {
 
 /**
  * "+ Add checkup patient": the form for one checkup patient. Resolves the saved row; { updated } (the row) when the same person was already
- * on that day's list and the answers went on that checkup; { patient } when staff chose the existing patient file of the same person
- * instead (Aaj ki List only); or null when it was cancelled.
+ * on that day's list (found by the phone, or by the name when that checkup has no phone or none is typed yet) and the answers went on that
+ * checkup; { patient } when staff chose the existing patient file of the same person instead (Aaj ki List only); or null when it was cancelled.
  * fixedDay: the date and branch come from the list on screen and are not asked. Otherwise the checkup is for today at the person's
  * branch; another day (and the follow-up status) can be chosen under "More (optional)".
  * The answers are given after the checkup, so the checkup is saved as Completed (also on the Aaj ki List and the Google Sheet, where a
@@ -288,24 +303,32 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     let dupSeq = 0;
     let dialog = null;
     let body = null;
-    let sameDayNow = []; // the checkups the warning names: the same phone on that day's list at that branch
+    // the checkups the warning names, on that day's list at that branch: the same phone, or the same name when the checkup has no phone or
+    // none is typed yet (someone typed into the Google Sheet on arrival without a phone)
+    let sameDayNow = [];
     let sameDayKey = null; // what sameDayNow was looked up for (dupKey()), once that check has come back
     let dupRun = null; // the latest check: { key, run }
-    const dupKey = () => JSON.stringify([checkupPhone(phone.value), q.values().branch_id, fixedDay ? date : dateIn.value]);
+    const dupKey = () => JSON.stringify([checkupPhone(phone.value), nameNorm(name.value), q.values().branch_id, fixedDay ? date : dateIn.value]);
+    // c was found by the phone typed now (else by the name alone)
+    const byPhone = (c) => { const k = checkupPhone(phone.value); return !!k && checkupPhone(c.phone) === k; };
 
     // The same person already on that day's list (typed into the Google Sheet on arrival, or added at the desk): the answers go on that
-    // checkup instead of a second one. Its name and phone stay as they are. -> true once saved (the dialog is then closed).
+    // checkup instead of a second one. Its name and phone stay as they are; a checkup typed in without a phone gets the one typed here.
+    // -> true once saved (the dialog is then closed).
     const saveAnswersOn = async (c) => {
       const errors = q.errors();
       if (errors.length) return showFormErrors(body, errors);
       clearFieldErrors(body);
       const a = q.values();
-      if (checkupPhone(a.phone) !== checkupPhone(c.phone) || a.branch_id !== c.branch_id || (fixedDay ? date : dateIn.value) !== c.checkup_date) { checkDupes(); return false; }
+      // still that person: the same phone, or (no phone on that checkup) a name that fits; at that branch on that day
+      const samePerson = checkupPhone(a.phone) === checkupPhone(c.phone) || (!checkupPhone(c.phone) && nameMatch(a.patient_name, c));
+      if (!samePerson || a.branch_id !== c.branch_id || (fixedDay ? date : dateIn.value) !== c.checkup_date) { checkDupes(); return false; }
       const row = await state.data.updateCheckup(c.id, {
         doctors: a.doctors, checkup_for: a.checkup_for, ali_recommended: a.ali_recommended, pricing_understood: a.pricing_understood,
         wants_treatment: a.wants_treatment, treatment_plan: a.treatment_plan, day_status: 'completed',
         details: addedText(c.details, details.value), notes: addedText(c.notes, notes.value),
         follow_up: !fixedDay && followUp.value !== 'Not Contacted' ? followUp.value : undefined,
+        phone: c.phone ? undefined : a.phone,
       });
       if (!row) { toast(`${c.patient_name} is no longer on the list.`, 'error'); checkDupes(); return false; }
       done = true;
@@ -315,28 +338,35 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       return true;
     };
     // "Add checkup patient" pressed while the warning is there (above the questions, so out of sight on a phone by then): asked once more.
-    // -> 'back', 'add' (a different person with the same phone) or the checkup to save the answers on. Saving on that checkup is the
-    // highlighted choice (it has focus) only when the names fit and it has no answers yet; otherwise both people are named, and "Add as a
-    // different person" is: Enter must never write one person's answers over another's.
+    // -> 'back', 'add' (a different person with the same phone or name) or the checkup to save the answers on. Saving on that checkup is the
+    // highlighted choice (it has focus) only when the names fit and it has no answers yet, and, for a checkup found by its name alone, when
+    // the name is the same letter for letter (two people can share a first name); otherwise both people are named, and "Add as a different
+    // person" is: Enter must never write one person's answers over another's.
     // onArrival ("Add as Waiting"): nothing is saved on that checkup; the same person is simply on the list already, so nothing is highlighted.
     const sameDayChoice = (matches, day, { onArrival = false } = {}) => new Promise((answer) => {
       const typed = name.value.trim().replace(/\s+/g, ' ');
       const fitting = matches.filter((c) => sameName(typed, c));
       const one = matches.length === 1 ? matches[0] : fitting.length === 1 ? fitting[0] : null;     // the checkup the answers could go on
-      const safe = !!one && sameName(typed, one) && (onArrival || !hasFormAnswers(one));
-      const listed = matches.map((c) => `${c.patient_name} (${c.phone})`).join(', ');
+      const byName = !!one && !byPhone(one);
+      const safe = !!one && sameName(typed, one) && (onArrival || !hasFormAnswers(one)) && (!byName || nameNorm(typed) === nameNorm(one.patient_name));
+      const phoneOnly = matches.every(byPhone);
+      const listed = matches.map(listedAs).join(', ');
+      const fill = byName ? `Fill in the answers for ${one.patient_name} on the list` : 'Save the answers on that checkup';
+      const twoNamed = byName ? h('p', {}, 'Two people with the same name? Press "Add as a different person".') : null;
       let choice = 'back';
       modal(`Already on the list for ${shortDate(day)}`, h('div', {},
         safe
-          ? [h('p', {}, `${listed} ${matches.length === 1 ? 'is' : 'are'} already on the list for ${shortDate(day)} with this phone number.`),
-            h('p', {}, `Same person${matches.length > 1 ? ` as ${one.patient_name}` : ''}? ${onArrival ? 'They are on the list already: go back and press Cancel.' : 'Save the answers on that checkup, so they are not on the list twice.'}`)]
-          : [h('p', {}, `You typed ${typed}; the list for ${shortDate(day)} has ${listed} on this phone number.`),
-            !one || !sameName(typed, one) ? h('p', {}, 'Another person on the same phone (often a family member) is added as a checkup of their own.') : null,
+          ? [h('p', {}, `${listed} ${matches.length === 1 ? 'is' : 'are'} already on the list for ${shortDate(day)}${phoneOnly ? ' with this phone number' : ''}.`),
+            h('p', {}, `Same person${matches.length > 1 ? ` as ${one.patient_name}` : ''}? ${onArrival ? 'They are on the list already: go back and press Cancel.' : `${fill}, so they are not on the list twice.`}`),
+            twoNamed]
+          : [h('p', {}, `You typed ${typed}; the list for ${shortDate(day)} has ${listed}${phoneOnly ? ' on this phone number' : ''}.`),
+            (!one || !sameName(typed, one)) && matches.some(byPhone) ? h('p', {}, 'Another person on the same phone (often a family member) is added as a checkup of their own.') : null,
+            byName && !(!onArrival && hasFormAnswers(one)) ? [h('p', {}, `Same person? ${onArrival ? 'They are on the list already: go back and press Cancel.' : `${fill}.`}`), twoNamed] : null,
             !onArrival && one && hasFormAnswers(one) ? h('p', {}, `${one.patient_name}: ${answeredText(one)}`) : null,
             !one ? h('p', {}, onArrival ? 'The same person? They are on the list already: go back and press Cancel.' : 'The same person? Go back and save the answers on their checkup.') : null]), [
         { label: 'Go back' },
         { label: 'Add as a different person', primary: !safe, onClick: () => { choice = 'add'; } },
-        ...(one && !onArrival ? [{ label: hasFormAnswers(one) ? 'Replace the answers on that checkup' : 'Save the answers on that checkup', primary: safe, onClick: () => { choice = one; } }] : []),
+        ...(one && !onArrival ? [{ label: hasFormAnswers(one) ? 'Replace the answers on that checkup' : fill, primary: safe, onClick: () => { choice = one; } }] : []),
       ], { onClose: () => answer(choice) });
     });
 
@@ -350,29 +380,37 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       const day = fixedDay ? date : dateIn.value;
       const bId = q.values().branch_id;
       const phoneKey = checkupPhone(phone.value);
+      const typedName = name.value.trim().replace(/\s+/g, ' ');
+      const byNameToo = !!bId && !!nameNorm(typedName);   // (the name is looked for at a chosen branch only)
       const [rows, sameDay] = await Promise.all([
         state.data.findDuplicates(name.value, phone.value).catch(() => []),
-        // The same phone number on the same day's list at the same branch: almost always one person typed twice.
-        phoneKey && day && state.data.listDayCheckups
-          ? state.data.listDayCheckups({ branchId: bId, date: day }).then((list) => list.filter((c) => checkupPhone(c.phone) === phoneKey)).catch(() => [])
+        // The same phone number on the same day's list at the same branch: almost always one person typed twice. And the same name there
+        // when that checkup has no phone or none is typed yet: someone typed into the Google Sheet on arrival without a phone.
+        (phoneKey || byNameToo) && day && state.data.listDayCheckups
+          ? state.data.listDayCheckups({ branchId: bId, date: day }).then((list) => list.filter((c) => (phoneKey && checkupPhone(c.phone) === phoneKey)
+            || (byNameToo && Number(c.branch_id) === bId && (!phoneKey || !checkupPhone(c.phone)) && nameMatch(typedName, c)))).catch(() => [])
           : [],
       ]);
       if (mine !== dupSeq || done) return;
-      // the checkups whose name fits the typed one first; another name, or answers already given, are said (and the button says "Replace")
-      const typed = name.value.trim().replace(/\s+/g, ' ');
-      sameDayNow = [...sameDay].sort((a, b) => Number(sameName(typed, b)) - Number(sameName(typed, a)));
+      // the checkups whose name fits the typed one first, then those of the same phone; another name, or answers already given, are said
+      // (and the button says "Replace"), all for the name the list was searched for
+      const typed = typedName;
+      sameDayNow = [...sameDay].sort((a, b) => Number(sameName(typed, b)) - Number(sameName(typed, a)) || Number(byPhone(b)) - Number(byPhone(a)));
       sameDayKey = key;
       const phoneDigits = digitsOf(phone.value);
       const sorted = [...rows].sort((a, b) => Number(digitsOf(b.phone) === phoneDigits && phoneDigits.length >= 7) - Number(digitsOf(a.phone) === phoneDigits && phoneDigits.length >= 7)).slice(0, 3);
       mount(warn,
         sameDayNow.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sameDayNow.slice(0, 3).map((c) => {
-          const fits = sameName(typed, c);
-          const action = hasFormAnswers(c) ? 'Replace the answers on this checkup' : 'Save the answers on this checkup';
+          const fits = sameName(typed, c);       // (always, for a checkup found by its name)
+          const viaPhone = byPhone(c);
+          const action = hasFormAnswers(c) ? 'Replace the answers on this checkup' : viaPhone ? 'Save the answers on this checkup' : `Fill in the answers for ${c.patient_name} on the list`;
           return h('div', { class: 'dup-line' },
-            h('span', {}, h('strong', {}, `Already on the list for ${shortDate(day)}: `), `${c.patient_name} (${c.phone}). `,
+            h('span', {}, h('strong', {}, `Already on the list for ${shortDate(day)}: `), `${listedAs(c)}. `,
               fits ? '' : `You typed ${typed}: another person on the same phone (often a family member) is added as a checkup of their own. `,
-              hasFormAnswers(c) ? answeredText(c) : fits ? 'Same person? Save the answers on this checkup, so they are not on the list twice.' : ''),
-            h('button', { type: 'button', class: 'btn btn-small', 'aria-label': `${action}: ${c.patient_name}`, onclick: busy(() => saveAnswersOn(c)) }, action));
+              hasFormAnswers(c) ? answeredText(c) : !fits ? ''
+                : viaPhone ? 'Same person? Save the answers on this checkup, so they are not on the list twice.'
+                  : 'Same person? Fill in the answers on the list, so they are not on the list twice. Two people with the same name? Press "Add checkup patient", then "Add as a different person".'),
+            h('button', { type: 'button', class: 'btn btn-small', 'aria-label': viaPhone || hasFormAnswers(c) ? `${action}: ${c.patient_name}` : action, onclick: busy(() => saveAnswersOn(c)) }, action));
         })) : null,
         sorted.length ? h('div', { class: 'alert alert-warning', role: 'status' }, sorted.map((p) => {
           const samePhone = phoneDigits.length >= 7 && digitsOf(p.phone) === phoneDigits;
@@ -397,7 +435,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     branch.addEventListener('change', checkDupes);
     // A save pressed before the check of what is typed now has come back (on arrival the phone is the last thing typed, and the check waits
     // for a pause in the typing and then for the server) waits for it: the one under way, or a new one. So someone already on the list is
-    // never added a second time on a slow line. Nothing waits when the last check was for this phone, branch and day.
+    // never added a second time on a slow line. Nothing waits when the last check was for this phone, name, branch and day.
     const sameDayChecked = async () => {
       clearTimeout(typing);
       for (let i = 0; i < 3 && sameDayKey !== dupKey(); i++) await (dupRun?.key === dupKey() ? dupRun.run : checkDupes());
@@ -563,7 +601,9 @@ export function registerCheckupModal(row, { onDone, list } = {}) {
 /** Asks first, then removes the checkup (a real delete). onDone(row) runs after it is gone. */
 export function removeCheckupModal(row, { onDone } = {}) {
   return modal(`Remove ${row.patient_name}?`,
-    h('p', {}, `Remove ${row.patient_name} from the list? Use this for a wrong entry or someone who did not come. It is removed from the checkup list too.`), [
+    h('p', {}, row.source === 'google_form'
+      ? `Remove ${row.patient_name}'s answers imported from the Google Form? Importing the file again does not bring them back.`
+      : `Remove ${row.patient_name} from the list? Use this for a wrong entry or someone who did not come. It is removed from the checkup list too.`), [
       { label: 'Keep it' },
       { label: 'Remove', danger: true, onClick: async () => {
         await state.data.deleteCheckup(row.id);

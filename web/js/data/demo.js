@@ -833,8 +833,8 @@ export function createDemoAdapter() {
     },
     async deleteCheckup(id) {
       const c = db.checkups.find((x) => x.id === id);
-      if (!c || !checkupVisible(c) || !(me()?.role === 'admin' || (can('sheet.edit') && checkupBranchOk(c) && c.source !== 'archive'))) {
-        fail('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).');
+      if (!c || !checkupVisible(c) || !(me()?.role === 'admin' || (can('sheet.edit') && checkupBranchOk(c) && c.source !== 'archive' && c.source !== 'google_form'))) {
+        fail('NOT_REMOVED: this checkup could not be removed (rows from the old list or the Google Form can only be removed by Dr. Ali).');
       }
       db.checkups = db.checkups.filter((x) => x.id !== id); audit('checkups', 'DELETE', c);
     },
@@ -927,7 +927,8 @@ export function createDemoAdapter() {
       if (rows.length > 500) fail('TOO_MANY_ROWS: send at most 500 rows at a time.');
       const list = dryRun ? clone(db.checkups) : db.checkups;
       const keys = dryRun ? new Map(formKeys) : formKeys;
-      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, other_name: 0, other_answers: 0, dry_run: !!dryRun };
+      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, other_name: 0, other_answers: 0,
+        follow_up_noted: 0, dry_run: !!dryRun };
       const skip = (row, reason) => { out.skipped_count++; if (out.skipped.length < 100) out.skipped.push({ row, reason }); };
       const text = (v, max) => cleanText(typeof v === 'string' ? v : null, max).value;
       const karachi = (ms) => new Date(ms + 5 * 3600000).toISOString();     // Karachi's wall clock (+05:00 all year), as YYYY-MM-DDTHH:MM:SS
@@ -985,8 +986,11 @@ export function createDemoAdapter() {
           const nextFor = (c.checkup_for ?? null) === null || /^\s*ch[ea]{1,2}c?k?[- ]?ups?\s*$/i.test(c.checkup_for) ? checkupFor ?? c.checkup_for ?? null : c.checkup_for;
           const nextDoctors = c.doctors ?? doctors;
           const nextBranch = c.branch_id ?? branch;
+          const nextFollow = kind === 'filled_day' && c.follow_up === 'Not Contacted' && follow !== null ? follow : c.follow_up;
+          // the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes
+          const remind = follow !== null && String(nextFollow ?? '').toLowerCase() !== follow.toLowerCase() ? `Reminder (Google Form): ${follow}` : null;
           let nextNotes = c.notes ?? null;
-          for (const part of [notes,
+          for (const part of [notes, remind,
             doctors !== null && nextDoctors.toLowerCase() !== doctors.toLowerCase() ? `On the Google Form: "Who did your checkup?" ${doctors}` : null,
             checkupFor !== null && nextFor.toLowerCase() !== checkupFor.toLowerCase() ? `On the Google Form: "What was your checkup for?" ${checkupFor}` : null,
             branch !== null && nextBranch !== branch ? `On the Google Form: "Which branch did you visit?" ${db.branches.find((b) => b.id === branch)?.name}` : null]) {
@@ -995,10 +999,11 @@ export function createDemoAdapter() {
           const next = {
             ali_recommended: c.ali_recommended ?? ali, pricing_understood: c.pricing_understood ?? pricing, wants_treatment: c.wants_treatment ?? wants,
             treatment_plan: c.treatment_plan ?? plan, doctors: nextDoctors, checkup_for: nextFor, phone: c.phone ?? phone, branch_id: nextBranch,
-            follow_up: kind === 'filled_day' && c.follow_up === 'Not Contacted' && follow !== null ? follow : c.follow_up,
+            follow_up: nextFollow,
             notes: nextNotes,
           };
           if (Object.keys(next).some((k) => (next[k] ?? null) !== (c[k] ?? null))) {
+            if (remind !== null && !(c.notes || '').includes(remind) && (nextNotes || '').includes(remind)) out.follow_up_noted++;
             Object.assign(c, next, { form_submitted_at: c.form_submitted_at ?? new Date(ms).toISOString(), updated_at: new Date().toISOString() });
             if (!dryRun) audit('checkups', 'UPDATE', c);
             out[kind]++;

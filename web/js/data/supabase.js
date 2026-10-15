@@ -1333,7 +1333,7 @@ export async function createSupabaseAdapter() {
     async deleteCheckup(id) {
       return checkupsCall(async () => {
         const rows = check(await sb.from('checkups').delete().eq('id', id).select('id'));
-        if (!rows.length) throw plainError('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).', 'NOT_REMOVED');
+        if (!rows.length) throw plainError('NOT_REMOVED: this checkup could not be removed (rows from the old list or the Google Form can only be removed by Dr. Ali).', 'NOT_REMOVED');
       });
     },
     /** Gives the person a patient file with the next Mr# and links it. -> { patient_id, mr_number, full_name } */

@@ -10,7 +10,7 @@ import { state, can, isAdmin, myBranches, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { FOLLOW_UP_STATUSES, SOURCE_LABELS, PRICING_LABELS, monthLabel, checkupsToSheet, yesNo } from '../../lib/checkups.js';
 import { loadSheetJS } from '../../lib/sheetjs.js';
-import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, discardGuard, canRemoveCheckup, canRegisterCheckup, registeredMr } from './checkup-actions.js';
+import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, discardGuard, canRemoveCheckup, whyNoRemove, canRegisterCheckup, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'checkups-pending-v1';
 const PAGE_SIZE = 50;
@@ -250,7 +250,9 @@ export async function renderCheckups(root, params, signal) {
       q.el,
       h('details', { class: 'form-more', open: true },
         h('summary', {}, 'More'),
-        h('div', { class: 'form-grid' }, field('City', city), field('Treatment details', details), field('Estimated fee (Rs)', fee, 'Optional.'))));
+        h('div', { class: 'form-grid' }, field('City', city), field('Treatment details', details), field('Estimated fee (Rs)', fee, 'Optional.'))),
+      // (right above the buttons, where Remove would be)
+      whyNoRemove(c) ? h('p', { class: 'muted' }, whyNoRemove(c)) : null);
     let saved = false;
     // Remove asks on top of this dialog, which stays open: "Keep it" goes back to the answers as they were typed, and only a removal closes it.
     const editDialog = modal(`Edit ${c.patient_name}`, body, [

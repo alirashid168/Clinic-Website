@@ -797,6 +797,76 @@ await step('Aaj ki List: a checkup typed in on arrival gets its answers with "Fi
     await row.waitFor({ state: 'detached' });
   }
 });
+// Someone typed into the Google Sheet on arrival often has no phone there: the form finds them on today's list by the name (the site's
+// name-fit rule) and offers to fill in their answers, so filling in the form makes no second row; two people of one name can still be two.
+await step('Aaj ki List: "+ Add checkup patient" finds someone typed in on arrival without a phone by the name, fills in their answers on that row (and its phone); two people of one name can still be two checkups', async () => {
+  await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    for (const name of ['Arrival Nophone Person', 'Arrival Same Name']) {
+      await state.data.addCheckup({ checkup_date: localISO(), branch_id: 2, patient_name: name, phone: null, checkup_for: 'Checkup', day_status: 'waiting', follow_up: 'Not Contacted' });
+    }
+  });
+  await page.goto(BASE + '#/staff/sheet');
+  const typedIn = checkupRow(page, 'Arrival Nophone Person');
+  await typedIn.waitFor();
+  assert.equal(await typedIn.locator('input[aria-label^="Phone for"]').inputValue(), '', 'typed in without a phone');
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = page.locator('.modal').first();
+  // the name first, no phone yet: already found
+  await m.getByLabel(/^Patient full name/).fill('Arrival  Nophone Person');
+  await m.getByLabel(/^Patient full name/).press('Tab');
+  const warning = m.locator('.alert-warning', { hasText: 'Already on the list for' });
+  await warning.waitFor();
+  assert.match(await warning.innerText(), /Already on the list for .+: Arrival Nophone Person \(no phone\)\. Same person\? Fill in the answers on the list, so they are not on the list twice\. Two people with the same name\? Press "Add checkup patient", then "Add as a different person"\./);
+  assert.ok(await warning.getByRole('button', { name: 'Fill in the answers for Arrival Nophone Person on the list' }).count(), 'the warning offers to fill in their answers');
+  await fillCheckupForm(m, { name: 'Arrival Nophone Person', phone: '0300 5550971', checkupFor: 'Root canal', wants: 'Yes', plan: 'Next Saturday' });
+  await m.getByLabel(/^Mobile number/).press('Tab');
+  // "Add checkup patient" waits for the check of the name and phone typed now and asks once more (that row has no phone, so it is still
+  // found by the name); filling in their answers has focus (the same name letter for letter, no answers yet)
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  const ask = page.locator('.modal', { hasText: 'Two people with the same name? Press "Add as a different person".' });
+  await ask.waitFor();
+  assert.match(await ask.innerText(), /Arrival Nophone Person \(no phone\) is already on the list for [^.]+\.\s+Same person\? Fill in the answers for Arrival Nophone Person on the list, so they are not on the list twice\.\s+Two people with the same name\? Press "Add as a different person"\./);
+  assert.deepEqual(await ask.locator('.modal-actions button').allInnerTexts(), ['Go back', 'Add as a different person', 'Fill in the answers for Arrival Nophone Person on the list']);
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Fill in the answers for Arrival Nophone Person on the list');
+  await ask.getByRole('button', { name: 'Fill in the answers for Arrival Nophone Person on the list' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+  await page.waitForSelector(".toast:has-text(\"Answers saved on Arrival Nophone Person's checkup.\")");
+  assert.equal(await checkupRow(page, 'Arrival Nophone Person').count(), 1, 'one row, not two');
+  assert.equal(await typedIn.locator('select[aria-label^="Status for"]').inputValue(), 'completed');
+  assert.equal(await typedIn.locator('input[aria-label^="Treatment for"]').inputValue(), 'Root canal');
+  assert.equal(await typedIn.locator('input[aria-label^="Phone for"]').inputValue(), '0300 5550971', 'the row typed in without a phone gets the one asked in the form');
+  // another person of the same name: "Add as a different person" adds a checkup of their own; the first one keeps no answers
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Arrival Same Name');
+  await m.getByLabel(/^Patient full name/).press('Tab');
+  await warning.waitFor();
+  await fillCheckupForm(m, { name: 'Arrival Same Name', phone: '0300 5550972', checkupFor: 'Braces', wants: 'No', plan: 'Second person plan' });
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await ask.waitFor();
+  await ask.getByRole('button', { name: 'Add as a different person' }).click();
+  await page.waitForSelector('.toast:has-text("Arrival Same Name added as a checkup patient")');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  const twins = checkupRow(page, 'Arrival Same Name');
+  await page.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr.is-checkup input[aria-label="Name of checkup patient Arrival Same Name"]').length === 2);
+  assert.deepEqual((await twins.locator('input[aria-label^="Phone for"]').evaluateAll((els) => els.map((e) => e.value))).sort(), ['', '0300 5550972'], 'two checkups: the first still without a phone');
+  const stored = await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    return (await state.data.listDayCheckups({ branchId: 2, date: localISO() })).filter((c) => c.patient_name === 'Arrival Same Name').map((c) => [c.phone, c.treatment_plan]).sort();
+  });
+  assert.deepEqual(stored, [[null, null], ['0300 5550972', 'Second person plan']], 'the first person keeps no answers');
+  // leave the list as it was
+  for (const who of ['Arrival Nophone Person', 'Arrival Same Name', 'Arrival Same Name']) {
+    const row = checkupRow(page, who).first();
+    await row.getByRole('button', { name: /Checkup options/ }).click();
+    await page.locator('.modal').getByRole('button', { name: 'Remove from the list' }).click();
+    await page.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
+    await page.waitForSelector('.modal', { state: 'detached' });
+  }
+  await page.waitForFunction(() => !document.querySelector('table.sheet tbody tr.is-checkup input[aria-label^="Name of checkup patient Arrival "]'));
+});
 // Before the form was on the website, "+ Checkup patient" put a patient on today's list as they came in (name and phone, Waiting). The form's
 // answers are only known after the checkup, so the list keeps that: "Add as Waiting (form later)", then "Fill in the checkup form".
 await step('Aaj ki List: a checkup patient who has just come in is put on today\'s list with the name and phone only ("Add as Waiting (form later)"): Waiting, no answers; the form after the checkup makes them Completed', async () => {
@@ -2754,6 +2824,7 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
   assert.match(text, /No Response\s+1/);
   assert.match(text, /Started\s+1/);
   assert.match(text, /Empty: Not Contacted\s+2/);
+  assert.match(text, /1 answer has a follow-up status from REMINDERS that the checkup does not take \(it has another status, or it is the old list's row\): it is added to its notes, e\.g\. "Reminder \(Google Form\): Follow-up Sent"\./);
   assert.match(text, /1 row has an answer in the wrong place: row 4 \(Did you understand the pricing details\?; Would you like to start the treatment\?\)\. It is imported with those answers empty; what was written there is kept in the notes\./);
   assert.match(text, /1 row has a date that could not be read and is skipped/);
   assert.match(text, /1 name given for "Who did your checkup\?" is not on the website's doctor list and is kept as written: Someone \(sample\) \(1\)/, 'a doctor of the website\'s list is matched; anyone else stays as written');
@@ -2765,7 +2836,7 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
   await section.getByRole('button', { name: 'Import 5 answers' }).click();
   await section.locator('.alert-info:has-text("Checkup Form 2.0:")').waitFor();
   assert.match(await section.locator('.alert-info').innerText(),
-    /Checkup Form 2\.0: 3 added, 1 put on a checkup already on the list, 0 already imported, 0 already had these answers, 3 skipped\./);
+    /Checkup Form 2\.0: 3 added, 1 put on a checkup already on the list, 0 already imported, 0 already had these answers, 3 skipped\. 1 follow-up status from REMINDERS was added to the notes instead\./);
   // the same file again: nothing changes
   await section.locator('input[type=file]').setInputFiles({ name: 'Checkup karwaliya - Form Responses 2.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
   await section.locator('.stat:has(strong:text-is("4")):has-text("already on the website")').waitFor();
@@ -2793,8 +2864,9 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
   await pk.waitForFunction(() => document.querySelectorAll('table.checkup-table tbody tr[data-id]').length === 1);
   const beta = rowsOf(pk).first();
   assert.equal(await beta.locator('select[aria-label^="Follow-up status"]').inputValue(), 'Interested', 'the old list\'s row keeps its follow-up status');
-  assert.equal(await beta.locator('input[aria-label^="Notes for"]').inputValue(), 'Wants to think; Reminder: treatment started; On the Google Form: "What was your checkup for?" Braces',
-    'its own treatment ("Braces consult") stays; what the form said is in the notes');
+  assert.equal(await beta.locator('input[aria-label^="Notes for"]').inputValue(),
+    'Wants to think; Reminder: treatment started; Reminder (Google Form): Started; On the Google Form: "What was your checkup for?" Braces',
+    'its own treatment ("Braces consult") stays; what the form said is in the notes, the follow-up status it did not take too');
   assert.match(await beta.innerText(), /Old list: Sample tab B, answers from the Google Form/);
   assert.match(await beta.innerText(), /After Eid/);
   // the Source filter
@@ -2895,6 +2967,27 @@ await step('Edit on an old-list row tells Dr. Ali (and only Dr. Ali) that import
   await pk.keyboard.press('Escape');
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
+await step('Checkups page: Dr. Ali may remove an answer imported from the Google Form, and is told first that importing the file again does not bring it back', async () => {
+  await pk.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.importCheckupForm([{ row: 2, submitted_at: '2026-09-15T11:00:00+05:00', name: 'Form Remove Test', phone: '0300-5550941', branch: 'NN', doctors: null,
+      checkup_for: 'Braces', ali_recommended: true, pricing_understood: 'yes', wants_treatment: true, treatment_plan: 'Next month', follow_up: null, notes: null }]);
+  });
+  await pk.goto(BASE + '#/staff/checkups?q=Form%20Remove%20Test');
+  await pk.waitForFunction(() => document.querySelectorAll('table.checkup-table tbody tr[data-id]').length === 1);
+  await rowsOf(pk).first().getByRole('button', { name: /^Edit / }).click();
+  const edit = pk.locator('.modal', { hasText: 'Edit Form Remove Test' });
+  await edit.waitFor();
+  assert.doesNotMatch(await edit.innerText(), /Only Dr\. Ali can remove/, 'Dr. Ali is offered Remove, so nothing says why not');
+  await edit.getByRole('button', { name: 'Remove', exact: true }).click();
+  const sure = pk.locator('.modal', { hasText: 'Remove Form Remove Test?' });
+  await sure.waitFor();
+  assert.match(await sure.innerText(), /Remove Form Remove Test's answers imported from the Google Form\? Importing the file again does not bring them back\./);
+  await sure.getByRole('button', { name: 'Keep it' }).click();
+  await sure.waitFor({ state: 'detached' });
+  await pk.keyboard.press('Escape');
+  await pk.waitForSelector('.modal', { state: 'detached' });
+});
 await step('Front desk (North Nazimabad) on the Checkups page sees the imported North Nazimabad row and the no-branch row, never the RJ Mall or Lahore rows, and cannot remove an old-list row; Remove in Edit asks on top of it and "Keep it" keeps the changed answers', async () => {
   await tryAnotherRole(pk);
   await pk.goto(BASE + '#/login/staff');
@@ -2908,8 +3001,20 @@ await step('Front desk (North Nazimabad) on the Checkups page sees the imported 
   assert.deepEqual(names.sort(), ['Import Test Delta', 'Import Test Gamma']);
   await pk.locator('table.checkup-table tbody tr[data-id]', { hasText: 'Import Test Delta' }).getByRole('button', { name: /^Edit / }).click();
   const m = pk.locator('.modal');
-  assert.doesNotMatch(await m.innerText(), /old list/i, 'the note about importing the file again is for Dr. Ali, not for the front desk');
+  assert.doesNotMatch(await m.innerText(), /importing that file again/i, 'the note about importing the file again is for Dr. Ali, not for the front desk');
   assert.equal(await m.getByRole('button', { name: 'Remove' }).count(), 0, 'old-list rows are removed by Dr. Ali only');
+  assert.match(await m.innerText(), /Only Dr\. Ali can remove a row from the old list\./, 'and the dialog says why Remove is not there');
+  await pk.keyboard.press('Escape');
+  await pk.waitForSelector('.modal', { state: 'detached' });
+  // an answer imported from the Google Form: removed by Dr. Ali only too (a removed answer never comes back), and the dialog says why
+  await pk.getByLabel('Name or phone').fill('Form Remove Test');
+  const formRow = pk.locator('table.checkup-table tbody tr[data-id]', { hasText: 'Form Remove Test' });
+  await formRow.waitFor();
+  await formRow.getByRole('button', { name: /^Edit / }).click();
+  const fm = pk.locator('.modal', { hasText: 'Edit Form Remove Test' });
+  await fm.waitFor();
+  assert.equal(await fm.getByRole('button', { name: 'Remove' }).count(), 0, 'an answer from the Google Form is removed by Dr. Ali only');
+  assert.match(await fm.innerText(), /Only Dr\. Ali can remove an answer imported from the Google Form: importing the file again does not bring a removed answer back\./);
   await pk.keyboard.press('Escape');
   // a row the front desk added on the website can be removed from the Edit dialog
   await pk.getByRole('button', { name: '+ Add checkup patient' }).click();

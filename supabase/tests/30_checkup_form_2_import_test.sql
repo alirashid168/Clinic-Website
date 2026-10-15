@@ -7,6 +7,8 @@
 --      undoes everything and counts the same; the same file again changes nothing, also after a removal; two people on one phone on
 --      one day are two checkups (3b); a second answer of one person that says otherwise is a checkup of its own, and what the form says
 --      that a checkup keeps its own text for is in its notes (3c);
+--      a follow-up status from REMINDERS that a checkup does not take is kept in its notes, once, and counted (3d); a row from the Google
+--      Form is removed by Dr. Ali only (a removed answer never comes back);
 --   4. the Google Sheet sync does not see any of it: today's list and its hash stay the same, an answer of today waits, and no imported
 --      row is on a list the sync keeps.
 \set ON_ERROR_STOP 1
@@ -194,9 +196,9 @@ select pg_temp.check((select p.r - 'dry_run' = i.r - 'dry_run' from f31_res p, f
 -- and 8 (8 fills in what 7 left empty); onto the old list's row: 4; nothing new: 17 (the website's checkup holds these very answers);
 -- skipped: 10 to 14
 select pg_temp.check((select array[(r->>'given')::int, (r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'already')::int, (r->>'same')::int, (r->>'skipped_count')::int,
-                              (r->>'other_answers')::int, (r->>'other_name')::int]
-                        from f31_res where n = 'import') = array[16, 5, 4, 1, 0, 1, 5, 1, 0],
-  'the counts: 5 new (1 of them a second answer that says otherwise), 4 onto the day''s checkup, 1 onto the old list''s row, 1 with nothing new, 5 skipped (given = the sum)');
+                              (r->>'other_answers')::int, (r->>'other_name')::int, (r->>'follow_up_noted')::int]
+                        from f31_res where n = 'import') = array[16, 5, 4, 1, 0, 1, 5, 1, 0, 2],
+  'the counts: 5 new (1 of them a second answer that says otherwise), 4 onto the day''s checkup, 1 onto the old list''s row, 1 with nothing new, 5 skipped (given = the sum); 2 follow-up statuses kept in the notes (rows 3 and 4)');
 select pg_temp.check((select r->'skipped' from f31_res where n = 'import') = jsonb_build_array(
     jsonb_build_object('row', 10, 'reason', 'No patient name'), jsonb_build_object('row', 11, 'reason', 'The date could not be read'),
     jsonb_build_object('row', 12, 'reason', 'The date could not be read'),
@@ -213,14 +215,15 @@ begin
     and c.form_submitted_at = '2026-08-21T19:25:03+05:00'::timestamptz and c.day_status = 'completed',
     'the website''s checkup of that day: the answers, the doctor, "checkup for" in place of the plain "Checkup", the follow-up (it said Not Contacted), the reminder and when; its name, phone and source stay');
   select * into c from public.checkups where sheet_key = 'S-00000000f311';
-  perform pg_temp.check(c.source = 'google_sheet' and c.checkup_for = 'Root canal' and c.follow_up = 'Interested' and c.notes = 'from the sheet' and c.ali_recommended
-    and c.form_submitted_at is not null, 'the Google Sheet''s checkup of that day: the answers; its follow-up status (not Not Contacted) and notes stay; its sheet key stays');
+  perform pg_temp.check(c.source = 'google_sheet' and c.checkup_for = 'Root canal' and c.follow_up = 'Interested' and c.notes = 'from the sheet; Reminder (Google Form): No Response'
+    and c.ali_recommended and c.form_submitted_at is not null,
+    'the Google Sheet''s checkup of that day: the answers; its follow-up status (not Not Contacted) and notes stay, the status REMINDERS gave is added to its notes; its sheet key stays');
   c := pg_temp.one('Sample Import Archive');
   perform pg_temp.check(c.source = 'archive' and c.date_is_month and c.checkup_date = '2026-08-01' and c.branch_id = current_setting('test.nn')::smallint
     and c.doctors = 'Dr. Sample (sample)' and c.checkup_for = 'Scaling' and c.follow_up = 'Interested'
-    and c.notes = 'called once; Reminder: not on whatsapp; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)'
+    and c.notes = 'called once; Reminder: not on whatsapp; Reminder (Google Form): No Response; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)'
     and c.ali_recommended and c.pricing_understood = 'yes' and c.wants_treatment and c.treatment_plan = 'Next month' and c.form_submitted_at = '2026-08-20T11:00:00+05:00'::timestamptz,
-    'the old list''s row of that person and month (private.checkup_key): the answers and the reminder; it keeps its follow-up status, branch, doctor, treatment and month, and what the form said about those is in its notes');
+    'the old list''s row of that person and month (private.checkup_key): the answers and the reminder; it keeps its follow-up status, branch, doctor, treatment and month, and what the form said about those (the follow-up status too) is in its notes');
   select * into c from public.checkups where patient_name = 'Sample  Import Nophone';
   perform pg_temp.check(c.phone = '0300-5553104' and not c.ali_recommended and c.pricing_understood = 'needs_explanation',
     'no phone on the website''s row: matched by name (spaces and case aside), the oldest of the two; the phone is filled in');
@@ -264,8 +267,9 @@ select pg_temp.check((select array[(r->>'inserted')::int, (r->>'filled_day')::in
                         from f31_res where n = 'again') = array[0, 0, 0, 11, 0, 5]
                      and (select (select md5(string_agg(to_jsonb(c)::text, '' order by c.id)) from public.checkups c) = a.sig and (select count(*) from public.audit_log) = a.n_audit from f31_after a),
   'the same file again: every answer "already imported", not one checkup or audit row changes');
--- the North Nazimabad desk removes a row from the Google Form at its branch (through the API; the key table is private, the database
--- clears the link itself)
+-- A removed answer never comes back, so only Dr. Ali removes a row from the Google Form (as a row of the old list): the North Nazimabad desk
+-- tries at its own branch and removes nothing, its own website row it still removes; then Dr. Ali removes it (through the API; the key table
+-- is private, the database clears the link itself)
 set role authenticated;
 do $$
 declare n int;
@@ -273,7 +277,16 @@ begin
   perform pg_temp.act_as(current_setting('test.fd'));
   delete from public.checkups where patient_name = 'Sample Import Utc' and source = 'google_form';
   get diagnostics n = row_count;
-  perform pg_temp.check(n = 1, 'front desk: may remove a row from the Google Form at its branch, like a website row');
+  perform pg_temp.check(n = 0 and exists (select 1 from public.checkups where patient_name = 'Sample Import Utc' and source = 'google_form'),
+    'front desk: may not remove a row from the Google Form, not even at its own branch (importing the file again would not bring it back)');
+  insert into public.checkups (checkup_date, branch_id, patient_name, phone) values ('2026-08-28', current_setting('test.nn')::smallint, 'Sample Desk Removes', '0300-5553197');
+  delete from public.checkups where patient_name = 'Sample Desk Removes';
+  get diagnostics n = row_count;
+  perform pg_temp.check(n = 1, 'front desk: still removes a website row of its branch (a wrong entry)');
+  perform pg_temp.act_as(current_setting('test.admin'));
+  delete from public.checkups where patient_name = 'Sample Import Utc' and source = 'google_form';
+  get diagnostics n = row_count;
+  perform pg_temp.check(n = 1, 'admin: may remove a row from the Google Form');
 end $$;
 reset role;
 insert into f31_res select 'after_delete', pg_temp.imp(rows) from f31_rows;
@@ -374,6 +387,46 @@ insert into f31_res select 'second_again', pg_temp.imp(jsonb_build_array(
   pg_temp.ans(67, '2026-09-10T12:30:00+05:00', 'Sample Typo Two', '0312-0003142', 'NN', '{"checkup_for": "Extraction"}')));
 select pg_temp.check((select (r->>'same')::int = 2 and (r->>'inserted')::int = 0 and (r->>'filled_day')::int = 0 from f31_res where n = 'second_again'),
   '"same" only when the checkup holds every answer already, or has it in its notes: the form sent a third time with the 12:05 answers, and Typo Two again');
+
+-- 3d. The follow-up status from REMINDERS is never lost (CF2-F1, 15 Oct 2026). A plain "done" (Follow-up Sent) or a status written as it is
+-- sends no "Reminder: ..." text; when the checkup does not take the status (the old list's row keeps its own, a checkup of the day has another
+-- one) it goes into the notes as 'Reminder (Google Form): ...', once, and is counted. A checkup that has that status already gets no note.
+do $$
+declare v_nn smallint := current_setting('test.nn')::smallint; r jsonb;
+begin
+  perform pg_temp.act_as(current_setting('test.admin'));
+  r := public.import_checkups(jsonb_build_array(jsonb_build_object('row', 7, 'month', '2026-09-01', 'name', 'Sample Reminder Month', 'phone', '0300-5553150', 'branch', 'NN',
+         'follow_up', 'Interested', 'source_tab', 'September')));
+  perform pg_temp.check((r->>'inserted')::int = 1, 'setup: the old list''s row of September for Sample Reminder Month (Interested)');
+  insert into public.checkups (checkup_date, branch_id, patient_name, phone, checkup_for, day_status, follow_up, created_at) values
+    ('2026-09-12', v_nn, 'Sample Reminder Scheduled', '0300-5553151', 'Checkup', 'completed', 'Scheduled', '2026-09-12 10:00+05'),
+    ('2026-09-12', v_nn, 'Sample Reminder Same', '0300-5553152', 'Checkup', 'completed', 'Follow-up Sent', '2026-09-12 10:01+05'),
+    ('2026-09-12', v_nn, 'Sample Reminder Fresh', '0300-5553153', 'Checkup', 'completed', 'Not Contacted', '2026-09-12 10:02+05');
+end $$;
+create temp table f31_remind as select jsonb_build_array(
+  pg_temp.ans(70, '2026-09-08T12:00:00+05:00', 'Sample Reminder Month', '0300-5553150', 'NN', '{"follow_up": "Follow-up Sent"}'),
+  pg_temp.ans(71, '2026-09-12T12:00:00+05:00', 'Sample Reminder Scheduled', '0300-5553151', 'NN', '{"follow_up": "Started", "notes": "Reminder: treatment started"}'),
+  pg_temp.ans(72, '2026-09-12T12:01:00+05:00', 'Sample Reminder Same', '0300-5553152', 'NN', '{"follow_up": "Follow-up Sent"}'),
+  pg_temp.ans(73, '2026-09-12T12:02:00+05:00', 'Sample Reminder Fresh', '0300-5553153', 'NN', '{"follow_up": "No Response"}'),
+  -- a second answer of the same month, the same answers and the same "done": nothing new, the note is not added twice
+  pg_temp.ans(74, '2026-09-20T12:00:00+05:00', 'Sample Reminder Month', '0300-5553150', 'NN', '{"follow_up": "Follow-up Sent"}')
+) as rows;
+insert into f31_res select 'remind_preview', pg_temp.imp(rows, true) from f31_remind;
+insert into f31_res select 'remind', pg_temp.imp(rows) from f31_remind;
+select pg_temp.check((select array[(r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'same')::int, (r->>'follow_up_noted')::int]
+                        from f31_res where n = 'remind') = array[0, 3, 1, 1, 2]
+                     and (select p.r - 'dry_run' = i.r - 'dry_run' from f31_res p, f31_res i where p.n = 'remind_preview' and i.n = 'remind'),
+  'REMINDERS: 2 statuses not taken are counted (the preview says so too); 1 onto the old list''s row, 3 onto the day''s checkups, the second answer of the month is "same"');
+select pg_temp.check((select array_agg(concat_ws('|', patient_name, follow_up, coalesce(notes, '-')) order by patient_name) from public.checkups where patient_name like 'Sample Reminder %')
+                     = array['Sample Reminder Fresh|No Response|-',
+                             'Sample Reminder Month|Interested|Reminder (Google Form): Follow-up Sent',
+                             'Sample Reminder Same|Follow-up Sent|-',
+                             'Sample Reminder Scheduled|Scheduled|Reminder: treatment started; Reminder (Google Form): Started'],
+  'REMINDERS: the old list''s row keeps Interested and has "done" in its notes; Scheduled stays and Started is in the notes; the same status or Not Contacted: no note');
+insert into f31_res select 'remind_again', pg_temp.imp(rows) from f31_remind;
+select pg_temp.check((select (r->>'already')::int = 5 and (r->>'follow_up_noted')::int = 0 and (r->>'filled_day')::int + (r->>'filled_month')::int = 0 from f31_res where n = 'remind_again')
+                     and (select notes from public.checkups where patient_name = 'Sample Reminder Month') = 'Reminder (Google Form): Follow-up Sent',
+  'REMINDERS: the same file again adds nothing (the note is there once)');
 
 -- 4. The Google Sheet sync does not see the import.
 -- Today's North Nazimabad list: a checkup from the website and one from the sheet. The list's hash before an import with an answer of

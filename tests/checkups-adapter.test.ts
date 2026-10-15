@@ -267,7 +267,7 @@ test('live: deleteCheckup says when nothing was removed', async () => {
   assert.ok(f.requests[0].ops.some((o: Op) => o[0] === 'delete') && has(f.requests[0].ops, 'eq', 'id', 'c1') && has(f.requests[0].ops, 'select', 'id'));
   rows = [];
   await assert.rejects(() => data.deleteCheckup('c1'), (e: any) => e.code === 'NOT_REMOVED'
-    && e.message === 'NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).');
+    && e.message === 'NOT_REMOVED: this checkup could not be removed (rows from the old list or the Google Form can only be removed by Dr. Ali).');
 });
 
 test('live: register, link and import call the three database functions', async () => {
@@ -692,7 +692,7 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   // new: rows 5 (another branch), 6, 8 (the website's checkup of that day holds other answers) and 14; onto that day's checkup: rows 2, 4
   // and 7 (the first answer of row 6, which had no pricing answer); onto the old list's row: 3; nothing new: 15 (the website's checkup
   // holds these very answers)
-  assert.deepEqual([r.given, r.inserted, r.filled_day, r.filled_month, r.already, r.same, r.skipped_count, r.other_answers, r.other_name], [14, 4, 3, 1, 0, 1, 5, 1, 0]);
+  assert.deepEqual([r.given, r.inserted, r.filled_day, r.filled_month, r.already, r.same, r.skipped_count, r.other_answers, r.other_name, r.follow_up_noted], [14, 4, 3, 1, 0, 1, 5, 1, 0, 1]);
   assert.equal(r.given, r.inserted + r.filled_day + r.filled_month + r.already + r.same + r.skipped_count);
   assert.deepEqual(r.skipped, [
     { row: 9, reason: 'No patient name' }, { row: 10, reason: 'The date could not be read' }, { row: 11, reason: 'The date could not be read' },
@@ -709,8 +709,8 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   const arch = (await one('Sample Archive Person'))[0];
   assert.deepEqual([arch.source, arch.date_is_month, arch.checkup_date, arch.branch_id, arch.doctors, arch.checkup_for, arch.follow_up, arch.notes, arch.ali_recommended, arch.treatment_plan],
     ['archive', true, '2026-08-01', 2, 'Dr. Sample (sample)', 'Scaling', 'Interested',
-      'called once; Reminder: not on whatsapp; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)', true, 'Next month'],
-    'the old list\'s row of that month gets the answers and keeps its follow-up status, branch, doctor and treatment; what the form said about those is in its notes');
+      'called once; Reminder: not on whatsapp; Reminder (Google Form): No Response; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)', true, 'Next month'],
+    'the old list\'s row of that month gets the answers and keeps its follow-up status, branch, doctor and treatment; what the form said about those (the follow-up status too) is in its notes');
   const np = (await one('No Phone'))[0];
   assert.deepEqual([np.id, np.phone, np.ali_recommended, np.pricing_understood], [noPhone.id, '0300-5550603', false, 'needs_explanation'], 'matched by name (the website\'s row had no phone), and the phone is filled in');
   const gul = (await one('Sample Day Person', 'google_form'))[0];
@@ -736,6 +736,59 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   assert.deepEqual([again.inserted, again.filled_day, again.filled_month, again.already, again.same, again.skipped_count], [0, 0, 0, 9, 0, 5]);
   assert.deepEqual(await d.importCheckupForm(rows, { dryRun: true }), { ...again, dry_run: true });
   assert.equal(full.source, 'website');
+});
+
+test('demo: a follow-up status from REMINDERS that a checkup does not take is kept in its notes once, and counted, as in the database', async () => {
+  const d = await demoAs('s-fd-nn');
+  // on 12 Sep at North Nazimabad: a checkup that is Scheduled, one that says Follow-up Sent already, one still Not Contacted
+  const sched = await d.addCheckup({ checkup_date: '2026-09-12', branch_id: 2, patient_name: 'Sample Reminder Scheduled', phone: '0300-5553151', checkup_for: 'Checkup', follow_up: 'Scheduled' });
+  const same = await d.addCheckup({ checkup_date: '2026-09-12', branch_id: 2, patient_name: 'Sample Reminder Same', phone: '0300-5553152', checkup_for: 'Checkup', follow_up: 'Follow-up Sent' });
+  const fresh = await d.addCheckup({ checkup_date: '2026-09-12', branch_id: 2, patient_name: 'Sample Reminder Fresh', phone: '0300-5553153', checkup_for: 'Checkup' });
+  await d.signInDemo('s-admin');
+  // and the old list's row of September for another person (Interested)
+  await d.importCheckups([wire(7, '2026-09-01', 'Sample Reminder Month', '0300-5553150', 'NN', 'Interested')]);
+  const asOld = { doctors: 'Dr. Sample (sample)', checkup_for: 'Scaling' };
+  const rows = [
+    answer(70, '2026-09-08T12:00:00+05:00', 'Sample Reminder Month', '0300-5553150', 'NN', { ...asOld, follow_up: 'Follow-up Sent' }),     // a plain "done"
+    answer(71, '2026-09-12T12:00:00+05:00', 'Sample Reminder Scheduled', '0300-5553151', 'NN', { follow_up: 'Started', notes: 'Reminder: treatment started' }),
+    answer(72, '2026-09-12T12:01:00+05:00', 'Sample Reminder Same', '0300-5553152', 'NN', { follow_up: 'Follow-up Sent' }),
+    answer(73, '2026-09-12T12:02:00+05:00', 'Sample Reminder Fresh', '0300-5553153', 'NN', { follow_up: 'No Response' }),
+    // a second answer of that month, the same answers and the same "done": nothing new, the note is not added twice
+    answer(74, '2026-09-20T12:00:00+05:00', 'Sample Reminder Month', '0300-5553150', 'NN', { ...asOld, follow_up: 'Follow-up Sent' }),
+  ];
+  const preview = await d.importCheckupForm(rows, { dryRun: true });
+  const r = await d.importCheckupForm(rows);
+  assert.deepEqual({ ...preview, dry_run: false }, r, 'the preview says the same');
+  assert.deepEqual([r.inserted, r.filled_day, r.filled_month, r.same, r.follow_up_noted], [0, 3, 1, 1, 2]);
+  const all = await d.exportCheckups({});
+  const by = (id: string) => all.find((c: any) => c.id === id);
+  const month = all.find((c: any) => c.patient_name === 'Sample Reminder Month');
+  assert.deepEqual([month.source, month.follow_up, month.notes], ['archive', 'Interested', 'Reminder (Google Form): Follow-up Sent'], 'the old list\'s row keeps its status; "done" is in its notes');
+  assert.deepEqual([by(sched.id).follow_up, by(sched.id).notes], ['Scheduled', 'Reminder: treatment started; Reminder (Google Form): Started'], 'Scheduled stays; Started is in the notes');
+  assert.deepEqual([by(same.id).follow_up, by(same.id).notes], ['Follow-up Sent', null], 'the same status already: no note');
+  assert.deepEqual([by(fresh.id).follow_up, by(fresh.id).notes], ['No Response', null], 'Not Contacted takes the status: no note');
+  const again = await d.importCheckupForm(rows);
+  assert.deepEqual([again.already, again.follow_up_noted, again.filled_day + again.filled_month], [5, 0, 0], 'the same file again adds nothing');
+  assert.equal((await d.exportCheckups({})).find((c: any) => c.patient_name === 'Sample Reminder Month').notes, 'Reminder (Google Form): Follow-up Sent');
+});
+
+test('demo: an answer imported from the Google Form is removed by Dr. Ali only, as in the database (importing the file again does not bring it back)', async () => {
+  const d = await demoAs('s-admin');
+  const form = [answer(1, '2026-09-15T11:00:00+05:00', 'Sample Form Remove', '0312-5553301', 'NN')];
+  assert.equal((await d.importCheckupForm(form)).inserted, 1);
+  const row = (await d.exportCheckups({ q: 'Sample Form Remove' }))[0];
+  assert.equal(row.source, 'google_form');
+  await d.signInDemo('s-fd-nn');
+  await assert.rejects(() => d.deleteCheckup(row.id), (e: any) => e.message.startsWith('NOT_REMOVED: ')
+    && e.message === 'NOT_REMOVED: this checkup could not be removed (rows from the old list or the Google Form can only be removed by Dr. Ali).', 'the desk of its branch may not');
+  assert.equal((await d.exportCheckups({ q: 'Sample Form Remove' })).length, 1);
+  const wrong = await d.addCheckup({ checkup_date: '2026-09-15', branch_id: 2, patient_name: 'Sample Desk Wrong Entry', phone: '0300-5553302' });
+  await d.deleteCheckup(wrong.id);   // a wrong entry on the list is still removed by the desk
+  await d.signInDemo('s-admin');
+  await d.deleteCheckup(row.id);
+  const again = await d.importCheckupForm(form);
+  assert.deepEqual([again.already, again.inserted], [1, 0], 'a removed answer never comes back');
+  assert.equal((await d.exportCheckups({ q: 'Sample Form Remove' })).length, 0);
 });
 
 test('demo: an answer imported from the Google Form is never on a day\'s list, also not in the History of Aaj ki List or in "End the day" (as 20261012000300)', async () => {

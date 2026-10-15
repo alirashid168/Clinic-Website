@@ -22,7 +22,8 @@
 --   - else into a new row: source 'google_form', source_tab 'Checkup Form 2.0', the day of the answer (date_is_month false). A second
 --     answer of a person whose checkup already holds other answers (a second visit, or the form sent again with an answer changed) is such
 --     a row too: nothing anybody answered is ever overwritten or dropped.
--- form_submitted_at says when the answer was given on the Google Form (null: never imported from it).
+-- form_submitted_at says when the answer was given on the Google Form (null: never imported from it). A row from the Google Form can be
+-- removed by Dr. Ali only, as a row of the old list (section 5): importing the file again does not bring a removed answer back.
 --
 -- The Google Sheet sync ("Aaj Sync", 20261009000300 and 20261011000100) is NOT changed and does not see the new columns:
 -- private.aaj_checkup_canon_row builds the row it sends from named columns, private.aaj_sync_checkup_row inserts and
@@ -160,14 +161,17 @@ create index if not exists checkup_form_imports_checkup_idx on private.checkup_f
 -- plain "Checkup", in any spelling the sync reads as one ("Chek up", "Check-up", "Checkups"), is no answer to "What was your checkup for?"
 -- and is replaced). What the form says about the doctor, the checkup or the branch that the checkup keeps its own text for goes into its
 -- notes ('On the Google Form: "What was your checkup for?" Root canal'), so no answer is lost. The follow-up status from REMINDERS is taken
--- only while the checkup still says 'Not Contacted', and never for an old-list row (that row keeps its follow-up; what REMINDERS said is in
--- the notes, see web/js/lib/checkup-form.js). The notes are added to the checkup's own. A checkup that already holds everything the answer
--- says is "same" (nothing to fill in, nothing to note). form_submitted_at is set on the checkup that changed.
+-- only while the checkup still says 'Not Contacted', and never for an old-list row (that row keeps its follow-up). A status that is not
+-- taken goes into the notes as 'Reminder (Google Form): Follow-up Sent' (once; nothing when the checkup already has that status): a plain
+-- "done" or a status written as it is sends no "Reminder: ..." text of its own (web/js/lib/checkup-form.js), so without it nothing would
+-- show what REMINDERS said. The notes are added to the checkup's own. A checkup that already holds everything the answer says is "same"
+-- (nothing to fill in, nothing to note). form_submitted_at is set on the checkup that changed.
 -- p_dry_run (the preview): everything is done and then undone, so the counts are exactly what the import would do.
 -- Result: given / inserted / filled_day / filled_month / already / same / skipped (up to 100 listed as { row, reason }) / skipped_count
--- / other_name / other_answers and dry_run. given = inserted + filled_day + filled_month + already + same + skipped_count (other_name is
--- part of inserted + filled_month: the answers that share a phone with another person on that day's list; other_answers is part of
--- inserted: the second answers of a person whose checkup holds other answers).
+-- / other_name / other_answers / follow_up_noted and dry_run. given = inserted + filled_day + filled_month + already + same + skipped_count
+-- (other_name is part of inserted + filled_month: the answers that share a phone with another person on that day's list; other_answers is
+-- part of inserted: the second answers of a person whose checkup holds other answers; follow_up_noted is part of filled_day + filled_month:
+-- the answers whose follow-up status from REMINDERS went into the checkup's notes instead of its status).
 -- Do the answers a checkup already holds agree with an answer from the Google Form? Each of the four agrees when it is not given on one of
 -- the two sides, or is the same ("When / why not" without regard to case). The import fills an answer in only on a checkup that agrees.
 create or replace function private.checkup_form_agrees(x public.checkups, p_ali boolean, p_pricing text, p_wants boolean, p_plan text)
@@ -189,8 +193,9 @@ declare
   v_today date := (now() at time zone 'Asia/Karachi')::date;
   v_open date := ((now() at time zone 'Asia/Karachi') - interval '3 hours')::date;    -- the first day the sync may still be keeping
   n_given int; n_ins int := 0; n_day int := 0; n_month int := 0; n_already int := 0; n_same int := 0; n_skip int := 0; n_other int := 0; n_answers int := 0;
+  n_noted int := 0;
   v_skipped jsonb := '[]'::jsonb;
-  e record; c public.checkups; v_ids uuid[]; v_second boolean; v_part text;
+  e record; c public.checkups; v_ids uuid[]; v_second boolean; v_part text; v_remind text;
   v_row int; v_name text; v_ts timestamptz; v_date date; v_why text; v_phone text; v_pk text; v_nk text; v_named boolean; v_key text; v_branch smallint;
   v_ali boolean; v_pricing text; v_wants boolean; v_plan text; v_doctors text; v_for text; v_follow text; v_notes text; v_kind text; v_id uuid;
   n_ali boolean; n_pricing text; n_wants boolean; n_plan text; n_doctors text; n_for text; n_phone text; n_branch smallint; n_follow text; n_notes text;
@@ -301,10 +306,13 @@ begin
         n_phone := coalesce(c.phone, v_phone);
         n_branch := coalesce(c.branch_id, v_branch);
         n_follow := case when v_kind = 'filled_day' and c.follow_up = 'Not Contacted' and v_follow is not null then v_follow else c.follow_up end;
-        -- the answer's notes, then what the form says that the checkup keeps its own text for; each added once
+        -- the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes
+        v_remind := case when v_follow is not null and lower(coalesce(n_follow, '')) <> lower(v_follow) then format('Reminder (Google Form): %s', v_follow) end;
+        -- the answer's notes, the reminder not taken, then what the form says that the checkup keeps its own text for; each added once
         n_notes := c.notes;
         foreach v_part in array array_remove(array[
             v_notes,
+            v_remind,
             case when v_doctors is not null and lower(n_doctors) <> lower(v_doctors) then format('On the Google Form: "Who did your checkup?" %s', v_doctors) end,
             case when v_for is not null and lower(n_for) <> lower(v_for) then format('On the Google Form: "What was your checkup for?" %s', v_for) end,
             case when v_branch is not null and n_branch <> v_branch
@@ -321,6 +329,9 @@ begin
                  form_submitted_at = coalesce(c.form_submitted_at, v_ts)
            where id = c.id;
           if v_kind = 'filled_day' then n_day := n_day + 1; else n_month := n_month + 1; end if;
+          if v_remind is not null and position(v_remind in coalesce(c.notes, '')) = 0 and position(v_remind in coalesce(n_notes, '')) > 0 then
+            n_noted := n_noted + 1;
+          end if;
         else
           v_kind := 'same';
           n_same := n_same + 1;
@@ -347,7 +358,7 @@ begin
 
   return jsonb_build_object('given', n_given, 'inserted', n_ins, 'filled_day', n_day, 'filled_month', n_month, 'already', n_already, 'same', n_same,
                             'skipped', v_skipped, 'skipped_count', n_skip, 'other_name', n_other, 'other_answers', n_answers,
-                            'dry_run', coalesce(p_dry_run, false));
+                            'follow_up_noted', n_noted, 'dry_run', coalesce(p_dry_run, false));
 end $$;
 
 revoke all on function public.import_checkup_form(jsonb, boolean) from public, anon;
@@ -362,5 +373,17 @@ create view public.checkup_list with (security_invoker = true) as
     from public.checkups c left join public.patients p on p.id = c.patient_id;
 revoke all on public.checkup_list from public, anon, authenticated;
 grant select on public.checkup_list to authenticated;
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- 5. An answer imported from the Google Form is removed by Dr. Ali only, as a row of the old list is
+-- ---------------------------------------------------------------------------------------------------------------
+-- A removed answer never comes back: its key stays in private.checkup_form_imports, so importing the file again skips it ("already").
+-- The policy of 20261009000250 is made again, the same but with 'google_form' next to 'archive'. Nobody but Dr. Ali can change the
+-- source of a checkup (private.guard_checkup_columns, 20261009000260), so the desk cannot make such a row a website row first.
+-- (Running 20261009000250 again puts its own policy back: run this file again after it.)
+drop policy if exists "remove checkups" on public.checkups;
+create policy "remove checkups" on public.checkups for delete
+  using (public.is_admin()
+         or (public.has_perm('sheet.edit') and source not in ('archive', 'google_form') and (branch_id is null or public.can_access_branch(branch_id))));
 
 notify pgrst, 'reload schema';
