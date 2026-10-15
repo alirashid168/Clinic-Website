@@ -882,17 +882,20 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 /* Rows another computer added while the person works in the list (sheet.js newRowsNote): a few words between the counts and
    the save status, in the room left on that line (it never makes the line wrap: it would push the list down). */
 .sheet-new-rows { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; font-size: var(--fs-xs); color: var(--text-muted); }
-/* The bars that come and go (the changes not saved, the Undo of a removal, a warning) on a line of their own under the counts,
-   in the page's flow: they push the list down and never cover it or the save status. One line each; the changes not
-   saved list them under that line once "Show" is pressed. */
-.sheet-bars { flex: 1 0 100%; display: grid; gap: var(--space-1); }
+/* The bars that come and go (the changes not saved, the Undo of a removal, a warning) never cover the list or the save
+   status. On a phone (here) they are on lines of their own under the counts, in the page's flow, one line each, and the
+   changes not saved list them under their line once "Show" is pressed; the note of new rows stays on the counts' line
+   (.sheet-slot holds both, and on a laptop it is a box of its own: below). */
+.sheet-slot { display: contents; }
+.sheet-bars { flex: 1 0 100%; order: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
 .sheet-bars:not(:has(> :not([hidden]))) { display: none; }
 .sheet-bars > .alert, .sheet-page > .day-end-live > .alert { margin: 0; padding: var(--space-2) var(--space-3); }
 .sheet-bars > .alert { padding-block: 3px; }
 .sheet-bars > .alert-warning { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet-bars > .alert-info, .sheet-fails-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .sheet-bars > .alert-info > span:first-child, .sheet-fails-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sheet-bars > .alert .btn { flex: none; }
+.sheet-bars > .alert .btn, .sheet-fails-retry { flex: none; }
+.sheet-bars .btn { white-space: nowrap; }
 .sheet-fails-summary { font-weight: 600; }
 .sheet-fails-list { margin: var(--space-1) 0 0; max-height: 30vh; overflow: auto; }
 .sheet-page > .day-end-live:not(:empty) { margin: 0 0 var(--space-2); }
@@ -1160,10 +1163,30 @@ table.sheet td.pp { text-align: right; }
   .sheet-page > .sheet-wrap { flex: 0 1 auto; min-height: calc(var(--sheet-row) * 5); max-height: none; }
   .sheet-page > .add-panel { order: 1; margin: -1px 0 0; }
   .add-panel .suggestions { top: auto; bottom: calc(100% + var(--space-1)); }
-  /* The note of an ended day is under the list, above the add line, where it takes its room from the bottom of the list (the
-     bars above the list push it down: they are in the page's flow, never over the list). */
+  /* The note of an ended day is under the list, above the add line, where it takes its room from the bottom of the list. */
   .sheet-page > .day-end-live { order: 1; }
   .sheet-page > .day-end-live:not(:empty) { margin: var(--space-1) 0; }
+  /* Nothing above the list changes its height by itself, so the rows never move under the mouse or the cursor: the bars
+     that come and go are on the line of the counts, in the room between the counts and the save status (like the note of
+     new rows), one line no taller than the count chips. Their words are cut with an ellipsis there (whole in the tooltip,
+     and read out when they come), never their buttons; the note of new rows gives way first. The list of the changes not
+     saved ("Show") opens over the rows, under that line, like the Filters panel. */
+  .sheet-subhead { position: relative; z-index: 5; }
+  .sheet-slot { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); overflow: hidden; }
+  .sheet-slot > .sheet-new-rows { flex: 0 100 auto; }
+  .sheet-bars { flex: 0 1 auto; min-width: auto; display: flex; gap: var(--space-1); }
+  .sheet-bars > .alert { flex: 0 1 auto; min-width: auto; height: 26px; padding: 0 var(--space-2); font-size: var(--fs-sm); line-height: 26px; }
+  /* (the words shrink to a letter or two, so a bar is never narrower than its buttons: one line, cut with an ellipsis) */
+  .sheet-bars > .alert-info > span:first-child, .sheet-fails-summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; white-space: normal; overflow-wrap: anywhere; }
+  .sheet-bars > .sheet-fails { display: flex; align-items: center; }
+  /* (while the line of the changes not saved is there it says what the save status would, and takes its room) */
+  .sheet-subhead:has(.sheet-fails:not([hidden])) > .save-status { display: none; }
+  .sheet-bars .btn-small { min-height: 24px; padding-block: 0; }
+  .sheet-bars .sheet-fails-list {
+    position: absolute; top: calc(100% + var(--space-1)); right: 0; z-index: var(--z-popover); width: min(44rem, 100%); max-height: 40vh;
+    margin: 0; padding: var(--space-2) var(--space-3) var(--space-2) var(--space-6); border: 1px solid var(--border-strong); border-radius: var(--radius-m);
+    background: var(--surface); box-shadow: var(--shadow-md); font-weight: 400; line-height: 1.4;
+  }
 }
 /* A phone or a small tablet: the page scrolls; only the name stays at the left edge (the row number and Mr# scroll away). */
 @media (max-width: 899.98px) {
@@ -1624,6 +1647,8 @@ table.invoice-lines input { min-width: 0; }
   .person button, .chip-remove { min-height: 32px; margin-block: -6px; }
   .quick-tap { width: 36px; height: 36px; }
   .count-chip, .kebab-btn { min-height: var(--target); min-width: var(--target); }
+  .sheet-bars > .alert { height: auto; } /* (on a laptop's line of the counts too: as tall as the count chips here) */
+  .sheet-bars .btn-small { min-height: var(--target); }
   .menu-list a, .menu-list .menu-btn { min-height: var(--target); }
   .show-passwords { min-height: var(--target); }
   .toast-close { min-width: var(--target); min-height: var(--target); }

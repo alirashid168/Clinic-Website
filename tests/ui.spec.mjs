@@ -2829,7 +2829,7 @@ await step('busy day: a patient another computer adds while someone types in the
     return v.id;
   });
   const note = pb.locator('.sheet-new-rows');
-  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '1 new row, it appears when you stop typing');
+  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '1 new row, it appears when you leave the list');
   assert.equal(await note.getAttribute('role'), 'status', 'said quietly to a screen reader too');
   const row = pb.locator(`table.sheet tbody tr[data-id="${id}"]`);
   assert.equal(await row.count(), 0, 'not on the list yet');
@@ -2847,6 +2847,179 @@ await step('busy day: a patient another computer adds while someone types in the
   assert.equal(await scrollTop(), top, 'the list did not scroll by itself');
   assert.equal(await details.inputValue(), `${was} U L 016`);
   await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 0; });
+});
+// (another computer puts a demo patient who is not on today's list yet on it, and the list is told; returns the visit's id)
+const addElsewhere = () => pb.evaluate(async () => {
+  const { state } = await import('/js/state.js');
+  const { localISO } = await import('/js/ui/dom.js');
+  const d = state.data;
+  const on = new Set((await d.listVisits({ branchId: 1, date: localISO() })).map((v) => v.patient_id));
+  const p = (await d.searchPatients('98')).find((x) => /^98\d\d$/.test(x.mr_number) && !on.has(x.id));
+  const v = await d.addVisit({ patient_id: p.id, branch_id: 1, visit_date: localISO(), treatment_label: 'Checkup', status: 'waiting' });
+  document.dispatchEvent(new CustomEvent('sheet-reload'));
+  return v.id;
+});
+// (an Mr# of the demo patients that is not on today's list yet)
+const freeMr = () => pb.evaluate(async () => {
+  const { state } = await import('/js/state.js');
+  const { localISO } = await import('/js/ui/dom.js');
+  const on = new Set((await state.data.listVisits({ branchId: 1, date: localISO() })).map((v) => v.patient_id));
+  return (await state.data.searchPatients('98')).find((x) => /^98\d\d$/.test(x.mr_number) && !on.has(x.id)).mr_number;
+});
+await step('busy day: while the cursor rests in a cell, the note counts every new row that waits, through the reloads that come meanwhile ("2 new rows"), and they come in once the cursor leaves the list', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 0; });
+  await pb.waitForFunction(sortedLikeTheSheet, null, { timeout: 15000 });
+  const waiting = await spareWaiting();
+  const row = (n) => pb.locator('table.sheet tbody tr', { has: pb.locator(`.name-text:text-is("${n}")`) });
+  const treatment = row(waiting[5]).locator('input[aria-label^="Treatment for"]');
+  await treatment.click(); // (and nothing typed: the cursor only rests there)
+  await pb.waitForTimeout(5300);
+  const note = () => pb.locator('.sheet-new-rows').innerText();
+  const shown = () => pb.locator('table.sheet tbody tr[data-id]').count();
+  const n0 = await shown();
+  const first = await addElsewhere();
+  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '1 new row, it appears when you leave the list');
+  // a reload with no new row (another row changed elsewhere, drawn again where it is): the note stays, the row still waits
+  await elsewhere({ [waiting[7]]: 'in_treatment' });
+  await pb.waitForFunction((n) => [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.querySelector('.name-text')?.textContent === n)?.querySelector('select[aria-label^="Status for"]').value === 'in_treatment', waiting[7], { timeout: 4000 });
+  assert.equal(await note(), '1 new row, it appears when you leave the list', 'the note stays while the row waits');
+  assert.equal(await shown(), n0, 'not on the list yet');
+  // a second patient: two rows wait
+  const second = await addElsewhere();
+  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '2 new rows, they appear when you leave the list', null, { timeout: 4000 });
+  assert.equal(await shown(), n0);
+  assert.ok(await treatment.evaluate((el) => el === document.activeElement), 'the cursor is still in the cell');
+  // the cursor leaves the list: both come in, and the note goes
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  await pb.locator(`table.sheet tbody tr[data-id="${second}"]`).waitFor({ timeout: 15000 });
+  assert.equal(await pb.locator(`table.sheet tbody tr[data-id="${first}"]`).count(), 1);
+  assert.equal(await shown(), n0 + 2);
+  assert.equal(await note(), '', 'the note has gone');
+  await pb.evaluate(() => document.activeElement?.blur());
+});
+await step('busy day: a row another computer changes while the cursor is in it is drawn again where it is at the first reload after the cursor has moved to another row (nothing moves)', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => document.activeElement?.blur());
+  await pb.waitForFunction(sortedLikeTheSheet, null, { timeout: 15000 });
+  const name = (await spareWaiting())[2];
+  const row = pb.locator('table.sheet tbody tr', { has: pb.locator(`.name-text:text-is("${name}")`) });
+  await row.locator('input[aria-label^="Treatment for"]').click();
+  const order = await listOrder();
+  await pb.evaluate(async (who) => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const v = (await state.data.listVisits({ branchId: 1, date: localISO() })).find((x) => x.patient.full_name === who);
+    await state.data.updateVisit(v.id, { status: 'in_treatment', details_text: 'Sample: written by the doctor' });
+    document.dispatchEvent(new CustomEvent('sheet-reload'));
+  }, name);
+  await pb.waitForTimeout(800);
+  assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'waiting', 'not drawn again while the cursor is in it');
+  // the cursor goes down to the next row; the next reload (a live update, the 20-second check) draws the row again in place
+  await pb.keyboard.press('ArrowDown');
+  assert.ok(!(await row.evaluate((tr) => tr.contains(document.activeElement))), 'the cursor is in another row');
+  await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload')));
+  await pb.waitForFunction((who) => [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.querySelector('.name-text')?.textContent === who)?.querySelector('select[aria-label^="Status for"]').value === 'in_treatment', name, { timeout: 4000 });
+  assert.equal(await row.locator('input[aria-label^="Treatment details for"]').inputValue(), 'Sample: written by the doctor', 'with what the doctor wrote');
+  assert.deepEqual(await listOrder(), order, 'drawn again where it was: no row moved');
+  await pb.evaluate(() => document.activeElement?.blur());
+});
+await step('busy day, slow server: after an Mr# and Enter the person clicks into a row lower down and types before the add comes back: that row does not move, the new patient waits (the note counts them) and comes in once the cursor leaves the list', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 0; });
+  await pb.waitForFunction(sortedLikeTheSheet, null, { timeout: 15000 });
+  const mr = await freeMr();
+  // (the visit is saved at once and its answer arrives 1.5 s later, as on a slow connection)
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__realAddVisit ||= d.addVisit;
+    window.__addAnswered = 0;
+    d.addVisit = async (...a) => { const v = await window.__realAddVisit.apply(d, a); await new Promise((r) => setTimeout(r, 1500)); window.__addAnswered += 1; return v; };
+  });
+  // a Completed row (below the waiting patients, where the new patient goes)
+  const name = await pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')]
+    .filter((t) => t.querySelector('select[aria-label^="Status for"]').value === 'completed').map((t) => t.querySelector('.name-text').textContent)
+    .filter((n) => /^Sample Patient \d+$/.test(n) && !['Sample Patient 060', 'Sample Patient 081', 'Sample Patient 099'].includes(n))[10]);
+  const row = pb.locator('table.sheet tbody tr', { has: pb.locator(`.name-text:text-is("${name}")`) });
+  const details = row.locator('input[aria-label^="Treatment details for"]');
+  const box = pb.locator('.add-panel input[type=search]');
+  await box.fill(mr);
+  await box.press('Enter');
+  await details.click();
+  await pb.keyboard.press('End');
+  await pb.keyboard.type(' U L 018');
+  const at = () => row.evaluate((tr) => ({ y: Math.round(tr.getBoundingClientRect().top), n: tr.querySelector('td.rownum').textContent, cursorIn: tr.contains(document.activeElement) }));
+  const before = await at();
+  await pb.waitForFunction(() => window.__addAnswered > 0, null, { timeout: 10000 });
+  await pb.waitForTimeout(300);
+  assert.deepEqual(await at(), before, 'the row with the cursor did not move');
+  assert.equal(await pb.locator('table.sheet tbody tr', { hasText: `Mr# ${mr}` }).count(), 0, 'the new patient waits');
+  assert.equal(await pb.locator('.sheet-new-rows').innerText(), '1 new row, it appears when you leave the list');
+  await pb.keyboard.type(' PC');
+  assert.match(await details.inputValue(), / U L 018 PC$/, 'what is typed stays');
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  await pb.locator('table.sheet tbody tr', { hasText: `Mr# ${mr}` }).waitFor({ timeout: 15000 });
+  assert.equal(await pb.locator('table.sheet tbody tr', { hasText: `Mr# ${mr}` }).count(), 1, 'one row for them');
+  assert.ok(await pb.evaluate(sortedLikeTheSheet), 'sorted like the sheet');
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.addVisit = window.__realAddVisit; document.activeElement?.blur(); });
+});
+await step('busy day, slow server: a reload that already has the patient just added by Mr# (it read the list after the visit was saved, before the add answered) leaves one row for them, not two', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => document.activeElement?.blur());
+  const mr = await freeMr();
+  await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__realAddVisit ||= d.addVisit;
+    window.__addSaved = 0;
+    window.__addAnswered = 0;
+    d.addVisit = async (...a) => { const v = await window.__realAddVisit.apply(d, a); window.__addSaved += 1; await new Promise((r) => setTimeout(r, 1500)); window.__addAnswered += 1; return v; };
+  });
+  const all = () => pb.evaluate(() => Number(document.querySelector('.sheet-counts button[data-key=""] strong').textContent));
+  const box = pb.locator('.add-panel input[type=search]');
+  await box.fill(mr);
+  await box.press('Enter');
+  await pb.waitForFunction(() => window.__addSaved > 0, null, { timeout: 10000 });
+  await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload'))); // (another computer's change, or the live echo of this one)
+  await pb.waitForFunction(() => window.__addAnswered > 0, null, { timeout: 10000 });
+  await pb.waitForFunction((m) => document.activeElement?.matches('input[aria-label^="Treatment for"]') && document.activeElement.closest('tr').textContent.includes(`Mr# ${m}`), mr, { timeout: 5000 });
+  await pb.waitForTimeout(300);
+  assert.equal(await pb.locator('table.sheet tbody tr', { hasText: `Mr# ${mr}` }).count(), 1, 'one row for them');
+  assert.equal(await all(), await pb.locator('table.sheet tbody tr[data-id]').count(), 'the "All" count is the rows shown');
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.addVisit = window.__realAddVisit; document.activeElement?.blur(); });
+});
+await step('busy day, slow server: a reload in the background asked while another day is on its way shows that day, never the old day\'s rows under the new date', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => document.activeElement?.blur());
+  const name = (await spareWaiting())[3];
+  const treatment = pb.locator('table.sheet tbody tr', { has: pb.locator(`.name-text:text-is("${name}")`) }).locator('input[aria-label^="Treatment for"]');
+  await treatment.click();
+  await pb.keyboard.press('End');
+  // (the list answers 0.8 s after it is asked for, as on a real connection)
+  const yesterday = await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const d = state.data;
+    window.__realListVisits ||= d.listVisits;
+    d.listVisits = async (args) => { const list = await window.__realListVisits.call(d, args); await new Promise((r) => setTimeout(r, 800)); return list; };
+    const day = new Date();
+    day.setDate(day.getDate() - 1);
+    return localISO(day);
+  });
+  await pb.locator('input[aria-label="Date"]').fill(yesterday);
+  await pb.waitForTimeout(300);
+  await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload'))); // (a live update from another computer)
+  await pb.waitForTimeout(2000);
+  const want = await pb.evaluate(async (day) => (await window.__realListVisits.call((await import('/js/state.js')).state.data, { branchId: 1, date: day })).map((v) => v.id).sort(), yesterday);
+  const got = await pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr[data-id]:not(.is-checkup)')].map((t) => t.dataset.id).sort());
+  assert.equal(await pb.locator('input[aria-label="Date"]').inputValue(), yesterday);
+  assert.deepEqual(got, want, 'the rows of the day in the date picker');
+  assert.equal(await pb.locator('table.sheet tbody tr', { hasText: name }).count(), 0, 'none of today\'s rows');
+  await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.listVisits = window.__realListVisits; });
+  await pb.getByRole('button', { name: 'Today', exact: true }).click();
+  await pb.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr').length >= 120, null, { timeout: 15000 });
+  await pb.evaluate(() => document.activeElement?.blur());
 });
 await step('busy day: while a dialog is open (and while the cursor is in the table after it) a row removed on another computer stays, with no empty line; it goes once the person is done, and at once when nobody is working in the table', async () => {
   await pb.mouse.move(5, 5);
@@ -2999,31 +3172,64 @@ await step('round 5: the Group drop-down offers the groups of Clinic setup; a gr
   await shot(pb, '24-sheet-group-unknown');
   await pb.evaluate(() => document.activeElement?.blur());
 });
-await step('busy day at 1366x768: the bars that come and go (the Undo of a removed doctor, a warning, the changes not saved) are in the page\'s flow above the list: they push it down and never cover it or the save status; the changes not saved are one line, with Show', async () => {
+await step('busy day at 1366x768: the bars that come and go (the Undo of a removed doctor, a warning, the changes not saved) are on the line of the counts and never move the list, nor cover it or the save status; a second click where a doctor was removed takes nobody from another patient; the Undo stays while the cursor is in the list; the changes not saved are one line, with Show opening over the list', async () => {
   await pb.mouse.move(5, 5);
   await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 0; });
   const wrapTop = () => pb.locator('.sheet-wrap').evaluate((w) => Math.round(w.getBoundingClientRect().top));
-  const inFlow = (bar) => bar.evaluate((el) => {
+  const onLine = (bar) => bar.evaluate((el) => {
     const b = el.getBoundingClientRect();
+    const line = document.querySelector('.sheet-subhead').getBoundingClientRect();
     const w = document.querySelector('.sheet-wrap').getBoundingClientRect();
     const s = document.querySelector('.save-status').getBoundingClientRect();
-    const overlap = !(b.right <= s.left || b.left >= s.right || b.bottom <= s.top || b.top >= s.bottom);
-    return { aboveList: b.bottom <= w.top + 0.5, coversSave: overlap, floats: ['absolute', 'fixed', 'sticky'].includes(getComputedStyle(el.parentElement).position), oneLine: b.height <= 40 };
+    const c = document.querySelector('.sheet-counts').getBoundingClientRect();
+    const hits = (r) => !(b.right <= r.left || b.left >= r.right || b.bottom <= r.top || b.top >= r.bottom);
+    return { onCountsLine: b.top >= line.top - 0.5 && b.bottom <= line.bottom + 0.5, aboveList: b.bottom <= w.top + 0.5, coversSave: hits(s), coversCounts: hits(c) };
   });
-  const inFlowOk = { aboveList: true, coversSave: false, floats: false, oneLine: true };
+  const onLineOk = { onCountsLine: true, aboveList: true, coversSave: false, coversCounts: false };
+  const people = () => pb.evaluate(() => Object.fromEntries([...document.querySelectorAll('table.sheet tbody tr[data-id]')].map((tr) => [tr.dataset.id, [...tr.querySelectorAll('.person')].map((p) => p.title).join(', ')])));
   const top0 = await wrapTop();
-  // a doctor chip's × (Sample Patient 081 has a doctor): the Undo bar comes above the list and pushes it down
+  const line0 = await pb.locator('.sheet-subhead').evaluate((el) => Math.round(el.getBoundingClientRect().height));
+  // a doctor chip's × (Sample Patient 081 has a doctor): the Undo bar comes on the line of the counts, and the list stays put
   const r81 = pb.locator('table.sheet tbody tr', { has: pb.locator('.name-text:text-is("Sample Patient 081")') });
+  const id81 = await r81.getAttribute('data-id');
   await r81.locator('.person').first().hover();
-  await r81.locator('.person .chip-remove').first().click();
+  const x = await r81.locator('.person .chip-remove').first().boundingBox();
+  const at = { x: x.x + x.width / 2, y: x.y + x.height / 2 };
+  const before = await people();
+  await pb.mouse.click(at.x, at.y);
   const undoBar = pb.locator('.sheet-bars .alert-info', { hasText: 'removed from Sample Patient 081.' });
   await undoBar.waitFor();
-  assert.deepEqual(await inFlow(undoBar), inFlowOk, 'the Undo bar');
-  assert.ok((await wrapTop()) > top0, 'the list moved down to make room');
+  assert.deepEqual(await onLine(undoBar), onLineOk, 'the Undo bar');
+  assert.equal(await wrapTop(), top0, 'the list did not move');
+  assert.equal(await pb.locator('.sheet-subhead').evaluate((el) => Math.round(el.getBoundingClientRect().height)), line0, 'the line of the counts is as tall as before');
+  assert.equal(await pb.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('tr')?.dataset.id, at), id81, 'the same patient\'s row is under the mouse');
+  // a second click at the same place (a double click, or going for the next chip) takes nobody from another patient
+  await pb.waitForTimeout(80);
+  await pb.mouse.click(at.x, at.y);
+  await pb.waitForTimeout(500);
+  const after = await people();
+  assert.deepEqual(Object.keys(before).filter((id) => id !== id81 && before[id] !== after[id]), [], 'no other patient lost a doctor');
   await undoBar.getByRole('button', { name: 'Undo' }).click();
   await undoBar.waitFor({ state: 'hidden' });
-  assert.equal(await wrapTop(), top0, 'and back up when the bar went');
-  // the checkup patients fail to load on one reload and load on the next: the warning comes and goes above the list
+  assert.equal(await wrapTop(), top0, 'and the list stays put when the bar goes');
+  // removed again, then the cursor in another row's Treatment Details: the Undo stays past its 10 seconds while the cursor
+  // is in the list (nothing moves), and goes once the person has left the list
+  await pb.mouse.move(5, 5);
+  await r81.locator('.person').first().hover();
+  await r81.locator('.person .chip-remove').first().click();
+  await undoBar.waitFor();
+  const details = pb.locator('table.sheet tbody tr', { has: pb.locator(`.name-text:text-is("${(await spareWaiting())[1]}")`) }).locator('input[aria-label^="Treatment details for"]');
+  await details.click();
+  await pb.keyboard.press('End');
+  await pb.keyboard.type(' x');
+  const y0 = await details.evaluate((el) => Math.round(el.getBoundingClientRect().top));
+  await pb.waitForTimeout(10500);
+  assert.ok(await undoBar.isVisible(), 'the Undo is still there while the cursor is in the list');
+  assert.equal(await details.evaluate((el) => Math.round(el.getBoundingClientRect().top)), y0, 'the field with the cursor did not move');
+  await pb.locator('input[aria-label="Find on this list"]').focus();
+  await undoBar.waitFor({ state: 'hidden', timeout: 10000 });
+  assert.equal(await wrapTop(), top0, 'the list did not move when it went');
+  // the checkup patients fail to load on one reload and load on the next: the warning comes and goes on the line of the counts
   await pb.evaluate(async () => {
     const { state } = await import('/js/state.js');
     const d = state.data;
@@ -3034,25 +3240,27 @@ await step('busy day at 1366x768: the bars that come and go (the Undo of a remov
   });
   const warn = pb.locator('.sheet-bars .alert-warning', { hasText: 'Checkup patients could not be loaded' });
   await warn.waitFor({ timeout: 10000 });
-  assert.deepEqual(await inFlow(warn), inFlowOk, 'the warning');
+  assert.deepEqual(await onLine(warn), onLineOk, 'the warning');
+  assert.equal(await wrapTop(), top0);
   await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload')));
   await warn.waitFor({ state: 'hidden' });
   assert.equal(await wrapTop(), top0);
-  // a typed change the server refuses: one line (what, Try again, Show); Show lists it with Discard, in the flow too
+  // a typed change the server refuses: one line (what, Try again, Show); Show lists it with Discard, over the list
   await pb.evaluate(async () => {
     const { state } = await import('/js/state.js');
     const d = state.data;
     window.__realUpdateVisit ||= d.updateVisit;
     d.updateVisit = async (id, changes) => { if ('details_text' in changes) throw new Error('Sample: the server refused this change'); return window.__realUpdateVisit.call(d, id, changes); };
   });
-  const details = pb.locator('table.sheet tbody tr', { has: pb.locator('.name-text:text-is("Sample Patient 060")') }).locator('input[aria-label^="Treatment details for"]');
-  await details.click();
+  const refused = pb.locator('table.sheet tbody tr', { has: pb.locator('.name-text:text-is("Sample Patient 060")') }).locator('input[aria-label^="Treatment details for"]');
+  await refused.click();
   await pb.keyboard.press('End');
   await pb.keyboard.type(' x');
-  await pb.locator('input[aria-label="Find on this list"]').focus();
   const fails = pb.locator('#sheet-save-failures');
   await fails.waitFor({ timeout: 10000 });
-  assert.deepEqual(await inFlow(fails), inFlowOk, 'the changes not saved');
+  assert.deepEqual(await onLine(fails), onLineOk, 'the changes not saved');
+  assert.equal(await wrapTop(), top0, 'the list did not move while the cursor is in it');
+  await pb.locator('input[aria-label="Find on this list"]').focus();
   assert.match(await fails.locator('.sheet-fails-summary').innerText(), /^Not saved yet: Sample Patient 060, Treatment details ".+ x"\.$/);
   assert.ok(await fails.getByRole('button', { name: 'Try again', exact: true }).isVisible(), 'Try again on the line');
   assert.ok(await fails.locator('.sheet-fails-list').isHidden(), 'the list is closed');
@@ -3060,14 +3268,25 @@ await step('busy day at 1366x768: the bars that come and go (the Undo of a remov
   assert.equal(await show.getAttribute('aria-expanded'), 'false');
   await show.click();
   assert.equal(await fails.getByRole('button', { name: 'Hide' }).getAttribute('aria-expanded'), 'true');
-  const open = await fails.evaluate((el) => ({ bottom: el.getBoundingClientRect().bottom, wrapTop: document.querySelector('.sheet-wrap').getBoundingClientRect().top }));
-  assert.ok(open.bottom <= open.wrapTop + 0.5, 'opened, it still pushes the list down: ' + JSON.stringify(open));
+  const open = await fails.locator('.sheet-fails-list').evaluate((el) => {
+    const b = el.getBoundingClientRect();
+    const line = document.querySelector('.sheet-subhead').getBoundingClientRect();
+    const hit = document.elementFromPoint(b.left + b.width / 2, b.top + Math.min(b.height / 2, 12));
+    return { underLine: b.top >= line.bottom - 0.5, onTop: el.contains(hit), inSight: b.left >= 0 && b.right <= window.innerWidth };
+  });
+  assert.deepEqual(open, { underLine: true, onTop: true, inSight: true }, 'opened over the list, under the line');
+  assert.equal(await wrapTop(), top0, 'the list did not move');
+  await pb.keyboard.press('Escape');
+  assert.ok(await fails.locator('.sheet-fails-list').isHidden(), 'Escape closes it');
+  assert.ok(await show.evaluate((el) => el === document.activeElement), 'and focus is back on Show');
+  await show.click();
   await fails.getByRole('button', { name: /^Discard: Sample Patient 060/ }).click();
   await pb.locator('.modal').getByRole('button', { name: 'Discard', exact: true }).click();
   await fails.waitFor({ state: 'hidden' });
   await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.updateVisit = window.__realUpdateVisit; document.activeElement?.blur(); });
   await pb.waitForTimeout(300);
-  assert.equal(await wrapTop(), top0, 'the list is back where it was');
+  assert.equal(await wrapTop(), top0, 'the list is where it was');
+  await shot(pb, '24-sheet-bars-line');
 });
 await step('busy day on a phone (390px, touch, 44px rows): every chip\'s × is in sight and takes the tap, and a name cut short is whole in the tooltip', async () => {
   const pt = await newPage({ width: 390, height: 844 }, { isMobile: true, hasTouch: true });
