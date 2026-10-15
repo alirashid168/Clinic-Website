@@ -355,6 +355,8 @@ function focusEl(el, options) {
  * onClick returning false keeps the dialog open; throwing shows the error and keeps it open.
  * opts.destructive: start on the Cancel (non-primary) button, or the title if there is none.
  * opts.initialFocus: the element to start on. opts.alert: an alertdialog (urgent).
+ * opts.startOnTitle: start on the title, for a dialog that is mostly for reading: its body opens on its top, not scrolled
+ * down to its first form control.
  * opts.onClose(): called once, however the dialog closes.
  * opts.lockWhileWorking: Escape, the × button and a click outside do nothing while an action is working (for an action that goes
  * ahead even when its dialog is gone, such as changing a password). The action buttons are disabled then too, so such an action
@@ -446,6 +448,7 @@ export function modal(title, body, actions = [], opts = {}) {
 
   const isSafe = (i) => !actions[i].primary && !actions[i].danger;
   const start = opts.initialFocus
+    || (opts.startOnTitle ? heading : null)
     || (opts.destructive ? (buttons.find((b, i) => isSafe(i)) || heading) : null)
     || dialog.querySelector('.modal-body input:not([type="hidden"]):not([disabled]), .modal-body select:not([disabled]), .modal-body textarea:not([disabled])')
     || buttons.find((b, i) => actions[i].primary && !actions[i].danger)

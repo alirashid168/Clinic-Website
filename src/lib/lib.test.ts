@@ -144,6 +144,8 @@ test('permission grid defaults', () => {
   // Owner decision, 9 Oct 2026: front desk, coordinator and admin may create and reset patient portal logins (same as the database grid).
   const mayMakeLogins = ['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'portal.invite', grid));
   assert.deepEqual(mayMakeLogins, ['front_desk', 'coordinator', 'admin']);
+  // Job applications from the website (CNIC, phone, CV) are admin only until Dr. Ali ticks someone else (20261011000200).
+  assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'jobs.view', grid)), ['admin']);
   assert.equal(hasPermission(null, 'patients.view', grid), false);
   assert.equal(new Set(PERMISSIONS.map((p) => p.key)).size, PERMISSIONS.length, 'no duplicate keys');
 });
