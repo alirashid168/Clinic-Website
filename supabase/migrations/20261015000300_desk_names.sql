@@ -28,11 +28,17 @@
 -- replaced with the same body plus the new column. It needs nothing but the earlier migrations. Safe to run more than once.
 -- New column that refers to a staff account: public.desk_names.staff_id (on delete cascade).
 --
--- HOW TO APPLY
---   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
---   With the Supabase CLI, keep the file name as it is (20261015000300 sorts after 20261015000100_staff_menu_prefs.sql).
+-- HOW TO APPLY (in this order)
+--   1. Put the new website live.
+--   2. On every staff computer, the desk computers above all, reload each open tab of the website (Ctrl+F5), or close it
+--      and open it again. Staff are not logged out any more (20261015000700_never_logout.sql), so a tab opened before the
+--      new website went live keeps the older copy until it is reloaded. That copy never asks for a name and sends none, so
+--      changes made from it under a shared login would have no name in the audit log or on End the day.
+--   3. Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
+--      With the Supabase CLI, keep the file name as it is (20261015000300 sorts after 20261015000100_staff_menu_prefs.sql).
+--   4. Then tick "Shared login" on each shared account (Admin -> Staff accounts).
 --   Until it is run the website works as before: no login is shared, so nobody is asked for a name, and Staff accounts
---   does not offer "Shared login" yet. Once it is run, tick "Shared login" on each shared account (Staff accounts).
+--   does not offer "Shared login" yet.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------------------------------------------
