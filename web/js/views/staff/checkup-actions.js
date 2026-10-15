@@ -226,8 +226,8 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
 // The form is a whole interview, filled in on phones all day, and the patient may have left by the time it is lost: every way of leaving
 // it (Cancel, Escape, the ×, a tap on the strip around the dialog, Back, a link, a reload or closing the tab) asks before the answers are
 // thrown away, with "Keep filling in" focused. snapshot() is what the form holds; nothing is asked while it holds what it opened with, or
-// once it is saved (saved()). -> the modal's { unsaved, confirmDismiss } (dom.js).
-function discardGuard(snapshot, saved = () => false) {
+// once it is saved (saved()). Edit on the Checkups page uses it too. -> the modal's { unsaved, confirmDismiss } (dom.js).
+export function discardGuard(snapshot, saved = () => false) {
   const start = snapshot();
   const unsaved = () => !saved() && snapshot() !== start;
   const confirmDismiss = () => !unsaved() || new Promise((resolve) => {
@@ -289,6 +289,9 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     let dialog = null;
     let body = null;
     let sameDayNow = []; // the checkups the warning names: the same phone on that day's list at that branch
+    let sameDayKey = null; // what sameDayNow was looked up for (dupKey()), once that check has come back
+    let dupRun = null; // the latest check: { key, run }
+    const dupKey = () => JSON.stringify([checkupPhone(phone.value), q.values().branch_id, fixedDay ? date : dateIn.value]);
 
     // The same person already on that day's list (typed into the Google Sheet on arrival, or added at the desk): the answers go on that
     // checkup instead of a second one. Its name and phone stay as they are. -> true once saved (the dialog is then closed).
@@ -337,7 +340,12 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       ], { onClose: () => answer(choice) });
     });
 
-    const checkDupes = async () => {
+    const checkDupes = () => {
+      const key = dupKey();
+      dupRun = { key, run: findDupes(key) };
+      return dupRun.run;
+    };
+    const findDupes = async (key) => {
       const mine = ++dupSeq;
       const day = fixedDay ? date : dateIn.value;
       const bId = q.values().branch_id;
@@ -353,6 +361,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
       // the checkups whose name fits the typed one first; another name, or answers already given, are said (and the button says "Replace")
       const typed = name.value.trim().replace(/\s+/g, ' ');
       sameDayNow = [...sameDay].sort((a, b) => Number(sameName(typed, b)) - Number(sameName(typed, a)));
+      sameDayKey = key;
       const phoneDigits = digitsOf(phone.value);
       const sorted = [...rows].sort((a, b) => Number(digitsOf(b.phone) === phoneDigits && phoneDigits.length >= 7) - Number(digitsOf(a.phone) === phoneDigits && phoneDigits.length >= 7)).slice(0, 3);
       mount(warn,
@@ -386,6 +395,13 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     phone.addEventListener('input', () => { clearTimeout(typing); if (digitsOf(phone.value).length >= 7) typing = setTimeout(checkDupes, 500); });
     dateIn?.addEventListener('change', checkDupes);
     branch.addEventListener('change', checkDupes);
+    // A save pressed before the check of what is typed now has come back (on arrival the phone is the last thing typed, and the check waits
+    // for a pause in the typing and then for the server) waits for it: the one under way, or a new one. So someone already on the list is
+    // never added a second time on a slow line. Nothing waits when the last check was for this phone, branch and day.
+    const sameDayChecked = async () => {
+      clearTimeout(typing);
+      for (let i = 0; i < 3 && sameDayKey !== dupKey(); i++) await (dupRun?.key === dupKey() ? dupRun.run : checkDupes());
+    };
 
     body = h('div', {},
       h('p', { class: 'muted' }, 'Ask the patient these questions after the checkup. ', fixedDay
@@ -406,6 +422,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
         return showFormErrors(body, errors);
       }
       clearFieldErrors(body);
+      await sameDayChecked();
       if (sameDayNow.length && (await sameDayChoice(sameDayNow, date, { onArrival: true })) !== 'add') { name.focus(); return false; }
       const answers = q.values();
       const b = state.ref.branches.find((x) => x.id === answers.branch_id);
@@ -436,6 +453,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
         }
         clearFieldErrors(body);
         const day = fixedDay ? date : dateIn.value;
+        await sameDayChecked();
         if (sameDayNow.length) {
           const choice = await sameDayChoice(sameDayNow, day);
           if (choice === 'back') {

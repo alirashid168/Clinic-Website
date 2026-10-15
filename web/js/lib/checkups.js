@@ -22,9 +22,11 @@ export const CLINIC_BRANCH = { 'rj mall': 'GUL', 'gulshan': 'GUL', 'gulshan (rj 
   'north nazimabad': 'NN', 'n. nazimabad': 'NN', 'nn': 'NN', 'dha karachi': 'DHA', 'dha': 'DHA',
   'lahore gulberg': 'LHR', 'gulberg lahore': 'LHR', 'gulberg': 'LHR', 'lahore': 'LHR', 'islamabad': 'ISB', 'isb': 'ISB' };
 // The clinic's "Checkup Patient Form 2.0" (owner, 11 Oct 2026: "the checkup 2.0 form is good, and we are using that form now").
-// "What was your checkup for?" offers these and "Other"; the answer is kept as written in checkup_for. "Did you understand the pricing
+// "What was your checkup for?" offers these and "Other"; the answer is kept as written in checkup_for. The last one is the Google Form's
+// last choice, which it spells "Wisdon tooth / Extraction" (20 of the 453 answers in the owner's file). "Did you understand the pricing
 // details?" is stored as a key (migration 20261011000300 allows only these three).
-export const CHECKUP_FOR_CHOICES = ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant'];
+export const CHECKUP_FOR_CHOICES = ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant',
+  'Wisdom tooth / extraction'];
 export const PRICING_LABELS = { yes: 'Yes', no: 'No', needs_explanation: 'Needs clearer explanation' };
 /** true / false / null -> 'Yes' / 'No' / '' (a checkup added before the form, from the sheet or from the old list has no answers). */
 export const yesNo = (v) => (v === true ? 'Yes' : v === false ? 'No' : '');

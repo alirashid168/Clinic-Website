@@ -172,11 +172,12 @@ export function reminderFollowUp(raw) {
 }
 
 const choiceKey = (s) => String(s).toLowerCase().replace(/&/g, ' and ').replace(/[^a-z]+/g, '');
-const CHOICE_BY_KEY = new Map(CHECKUP_FOR_CHOICES.map((c) => [choiceKey(c), c]));
+// (the Google Form's own spelling of a choice, where it is not the website's: "Wisdon tooth / Extraction")
+const CHOICE_BY_KEY = new Map([...CHECKUP_FOR_CHOICES.map((c) => [choiceKey(c), c]), [choiceKey('Wisdon tooth / Extraction'), 'Wisdom tooth / extraction']]);
 /**
  * "What was your checkup for?" -> the text to store (at most 300 characters). The form's choices are written the website's way
- * ("General Checkup" -> "General checkup", "Crown/Bridge" -> "Crown / bridge"), also inside a list of several ("Braces, Scaling and
- * Polishing"); an "Other" answer stays as written.
+ * ("General Checkup" -> "General checkup", "Crown/Bridge" -> "Crown / bridge", "Wisdon tooth / Extraction" -> "Wisdom tooth / extraction"),
+ * also inside a list of several ("Braces, Scaling and Polishing"); an "Other" answer stays as written.
  */
 export function formCheckupFor(raw) {
   const text = cleanText(isEmptyCell(raw) ? null : String(raw).replace(/\s+/g, ' '), 300);

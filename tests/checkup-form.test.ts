@@ -113,6 +113,9 @@ test('"What was your checkup for?": the form\'s choices are written the website\
   assert.equal(formCheckupFor('Root Canal').value, 'Root canal');
   assert.equal(formCheckupFor('Scaling & Polishing').value, 'Scaling and polishing');
   assert.equal(formCheckupFor('Braces, Scaling and Polishing').value, 'Braces, Scaling and polishing');
+  // the form's last choice, misspelt there the same way in every answer: the website's choice, so imported and website answers look the same
+  assert.equal(formCheckupFor('Wisdon tooth / Extraction').value, 'Wisdom tooth / extraction');
+  assert.equal(formCheckupFor('Root Canal, Wisdon tooth / Extraction').value, 'Root canal, Wisdom tooth / extraction');
   assert.equal(formCheckupFor('Braces,  pain on the left').value, 'Braces, pain on the left');
   assert.equal(formCheckupFor('pain on the left,swelling').value, 'pain on the left,swelling', 'no choice in it: kept exactly as written');
   assert.deepEqual(formCheckupFor(''), { value: null, cut: false });

@@ -424,7 +424,8 @@ await step('Today page (the first page after login): "+ Add checkup patient" ope
   assert.deepEqual([await more.innerText(), await more.getAttribute('aria-expanded')], ['Hide doctors of other cities', 'true']);
   await more.click();
   assert.deepEqual(await tickLabels(doctorGroup(m)), [...karachi, 'Other']);
-  assert.deepEqual(await tickLabels(forGroup(m)), ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant', 'Other']);
+  assert.deepEqual(await tickLabels(forGroup(m)), ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant',
+    'Wisdom tooth / extraction', 'Other'], "the Google Form's choices, in its order");
   assert.deepEqual([await ticked(doctorGroup(m)), await ticked(forGroup(m))], [[], []], 'nothing ticked for a new checkup');
   assert.match(await forGroup(m).locator('legend').innerText(), /required/);
   assert.deepEqual(await m.getByRole('group', { name: /^Did you understand the pricing details/ }).getByRole('radio').evaluateAll((els) => els.map((e) => e.labels[0].textContent.trim())),
@@ -845,6 +846,90 @@ await step('Aaj ki List: a checkup patient who has just come in is put on today\
   await page.locator('.modal').getByRole('button', { name: 'Remove from the list' }).click();
   await page.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
   await row.waitFor({ state: 'detached' });
+});
+// On a slow line (4G to Supabase) the check for the same phone on today's list comes back after a tap on a save button that follows the last
+// digit at once: the save waits for it, so a person typed into the Google Sheet on arrival is not put on the list twice. And while a save is
+// under way nothing offers to discard the form (the save would go ahead anyway): the form waits, says so, and closes once it is saved.
+await step('Aaj ki List on a slow line: a save tapped right after the last digit of the phone still finds the person on today\'s list; while a save is under way, Escape, the ×, a tap outside and Back wait for it', async () => {
+  await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const d = state.data;
+    await d.addCheckup({ checkup_date: localISO(), branch_id: 2, patient_name: 'Race Sheet Person', phone: '0300 5559931', checkup_for: 'Checkup', day_status: 'waiting', follow_up: 'Not Contacted' });
+    window.__realListDay = d.listDayCheckups;
+    d.listDayCheckups = async (...args) => { await new Promise((r) => setTimeout(r, 400)); return window.__realListDay.apply(d, args); };
+  });
+  await page.locator('.topnav a:has-text("Today")').click();
+  await page.locator('section.today-checkup').waitFor();
+  await page.locator('.topnav .menu:has-text("Aaj ki List") > button').click();
+  await page.locator('.topnav .menu-list a:text-is("Aaj ki List")').click();
+  await checkupRow(page, 'Race Sheet Person').waitFor();
+  const m = page.locator('.modal').first();
+  const again = page.locator('.modal', { hasText: 'with this phone number' });
+  const discard = async () => {
+    await again.getByRole('button', { name: 'Go back' }).click();
+    await again.waitFor({ state: 'detached' });
+    await m.getByRole('button', { name: 'Cancel' }).click();
+    await page.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click();
+    await page.waitForSelector('.modal', { state: 'detached' });
+  };
+  const typePhoneAndTap = async (button) => {
+    await m.getByLabel(/^Mobile number/).pressSequentially('03005559931', { delay: 20 });
+    await m.getByRole('button', { name: button, exact: true }).click();   // (at once: the check waits for a pause in the typing, then for the server)
+  };
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Race Sheet Person');
+  await typePhoneAndTap('Add as Waiting (form later)');
+  await again.waitFor();
+  assert.match(await again.innerText(), /Race Sheet Person \(0300 5559931\) is already on the list for .+ with this phone number\./, 'Add as Waiting');
+  await discard();
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await fillCheckupForm(m, { name: 'Race Sheet Person', checkupFor: 'Braces' });
+  await typePhoneAndTap('Add checkup patient');
+  await again.waitFor();
+  assert.match(await again.innerText(), /Race Sheet Person \(0300 5559931\) is already on the list for .+ with this phone number\./, 'the whole form');
+  await discard();
+  assert.equal(await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    return (await window.__realListDay.call(state.data, { branchId: 2, date: localISO() })).filter((c) => String(c.phone).replace(/\D/g, '') === '03005559931').length;
+  }), 1, 'one checkup with that phone on today\'s list, not two');
+  // a save under way (held until the test lets it go)
+  await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    d.listDayCheckups = window.__realListDay;
+    window.__realAdd = d.addCheckup;
+    d.addCheckup = async (...args) => { await new Promise((r) => { window.__releaseSave = r; }); return window.__realAdd.apply(d, args); };
+  });
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await fillCheckupForm(m, { name: 'Slow Save Person', phone: '0300 5559932', checkupFor: 'Implant' });
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await page.waitForFunction(() => typeof window.__releaseSave === 'function');
+  const saving = page.locator('.toast', { hasText: 'Saving, wait a moment.' });
+  await page.keyboard.press('Escape');
+  await saving.waitFor();
+  await m.getByRole('button', { name: 'Close' }).click();
+  await page.mouse.click(4, 4);   // (the strip around the dialog)
+  await page.goBack();
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('.modal', { hasText: 'Discard this checkup form?' }).count(), 0, 'nothing offers to discard a form that is being saved');
+  assert.equal(await m.locator('h2').innerText(), 'Add a checkup patient', 'the form is still open');
+  assert.match(await page.evaluate(() => location.hash), /^#\/staff\/sheet/, 'Back keeps the page while it saves');
+  await page.evaluate(() => window.__releaseSave());
+  await page.waitForSelector('.toast:has-text("Slow Save Person added as a checkup patient.")');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  await checkupRow(page, 'Slow Save Person').waitFor();
+  assert.equal(await reloadAsks(page), false, 'saved: a reload is not asked about');
+  // leave today's list as it was
+  await page.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.addCheckup = window.__realAdd; });
+  for (const who of ['Race Sheet Person', 'Slow Save Person']) {
+    const row = checkupRow(page, who);
+    await row.getByRole('button', { name: /Checkup options/ }).click();
+    await page.locator('.modal').getByRole('button', { name: 'Remove from the list' }).click();
+    await page.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
+    await row.waitFor({ state: 'detached' });
+  }
 });
 
 // ------------------------------------------------------------- assistant + braces rules
@@ -2314,8 +2399,58 @@ await step('Checkups page: a follow-up status and a note save, and are still the
   await m.getByRole('button', { name: 'Save' }).click();
   await m.locator('.field-error:has-text("Write when they want to start, or why not.")').waitFor();
   await m.getByRole('button', { name: 'Cancel' }).click();
+  await pk.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click();   // (an answer was changed)
   await pk.waitForSelector('.modal', { state: 'detached' });
   await pk.getByRole('button', { name: 'Clear filters' }).click();
+});
+// Answers are added in Edit after a follow-up call (and the form is filled in there for a row of an earlier day): every way of leaving it with
+// a changed answer asks first, as the checkup form does; untouched it closes at once.
+await step('Checkups page: Edit asks before changed answers are thrown away (Escape, the ×, a tap outside, Cancel, Back, a reload); untouched it closes at once', async () => {
+  await pk.locator('.topnav a:has-text("Today")').click();
+  await pk.waitForSelector('.stat');
+  await openCheckups(pk);
+  const row = rowsOf(pk).first();
+  const id = await row.getAttribute('data-id');
+  const m = pk.locator('.modal').first();
+  const ask = pk.locator('.modal', { hasText: 'Discard this checkup form?' });
+  await row.getByRole('button', { name: /^Edit / }).click();
+  await m.waitFor();
+  assert.equal(await reloadAsks(pk), false, 'untouched: a reload is not asked about');
+  await pk.keyboard.press('Escape');
+  await pk.waitForSelector('.modal', { state: 'detached' });
+  await row.getByRole('button', { name: /^Edit / }).click();
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await pk.waitForSelector('.modal', { state: 'detached' });
+  await row.getByRole('button', { name: /^Edit / }).click();
+  const plan = m.getByLabel(/^If yes, then when/);
+  await plan.fill('Edit guard test');
+  await m.getByRole('group', { name: /^Would you like to start the treatment/ }).getByLabel('Yes', { exact: true }).check();
+  assert.equal(await reloadAsks(pk), true, "a changed answer: a reload or closing the tab gets the browser's own question");
+  const hash = await pk.evaluate(() => location.hash);
+  const keep = async (how) => {
+    await ask.waitFor();
+    assert.match(await ask.innerText(), /Your answers are not saved\./, how);
+    assert.equal(await pk.evaluate(() => document.activeElement?.textContent), 'Keep filling in', `${how}: the safe choice has focus`);
+    await ask.getByRole('button', { name: 'Keep filling in' }).click();
+    await ask.waitFor({ state: 'detached' });
+    assert.equal(await plan.inputValue(), 'Edit guard test', `${how}: the answer is still there`);
+    assert.equal(await pk.evaluate(() => location.hash), hash, `${how}: still on the Checkups page`);
+  };
+  await pk.keyboard.press('Escape');
+  await keep('Escape');
+  await m.getByRole('button', { name: 'Close' }).click();
+  await keep('the ×');
+  await pk.mouse.click(4, 4);   // (the strip around the dialog)
+  await keep('a tap outside');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await keep('Cancel');
+  await pk.goBack();
+  await keep('Back');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await ask.getByRole('button', { name: 'Discard' }).click();
+  await pk.waitForSelector('.modal', { state: 'detached' });
+  assert.equal(await reloadAsks(pk), false, 'closed: a reload is not asked about');
+  assert.doesNotMatch(await pk.locator(`table.checkup-table tbody tr[data-id="${id}"]`).innerText(), /Edit guard test/, 'nothing was saved');
 });
 await step('Checkups page: the "Wants to start" filter shows only Yes or only No (rows without the answer match neither), and is kept in the address', async () => {
   const total = await pagerTotal(pk);

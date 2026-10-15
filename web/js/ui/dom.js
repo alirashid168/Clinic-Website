@@ -361,6 +361,7 @@ function focusEl(el, options) {
  * must have a time limit of its own, or the dialog could not be closed for as long as it hangs.
  * opts.confirmDismiss(): asked before Escape, the × button, a click outside or an action marked { dismiss: true } (Cancel) closes the
  * dialog (a long form that would lose what was typed); returning false, or a promise of false, keeps it open. Other actions do not ask.
+ * While an action is working it is not asked: the dialog stays open and says it is saving.
  * opts.unsaved(): true while the dialog holds something that is not saved (with confirmDismiss). Then confirmDismiss is also asked before
  * the page changes (Back, a link: main.js asks confirmLeave()), and a reload or closing the tab gets the browser's own question.
  * The result's mayLeave(ask = confirmDismiss) asks, unless a question is open already: for a control in the dialog that leaves it.
@@ -417,10 +418,14 @@ export function modal(title, body, actions = [], opts = {}) {
 
   // The person asks to close it (×, Escape, a click outside, Cancel); close() is also what the code calls.
   // mayLeave(): true when it may go (nothing to ask, or the answer was yes); false while a question is open already.
+  // While the form is being saved (an action, or a busy() button in the dialog: it is aria-busy while it works) nothing is asked: "Discard"
+  // would not stop the save, and the dialog closes by itself once it is saved. It stays open (so does the page), and says why.
   let asking = false;
+  const saving = () => working || !!dialog.querySelector('[aria-busy="true"]');
   async function mayLeave(ask = opts.confirmDismiss) {
     if (asking) return false;
     if (!ask) return true;
+    if (saving()) { toast('Saving, wait a moment.'); return false; }
     asking = true;
     try { return (await ask()) !== false; } catch (err) { console.error(err); return false; } finally { asking = false; }
   }

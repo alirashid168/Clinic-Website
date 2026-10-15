@@ -52,7 +52,8 @@ test('constants: eleven follow-up statuses (no "scheduled" day status), the owne
 });
 
 test('the checkup form (Checkup Patient Form 2.0): its "checkup for" choices, the three pricing answers the database allows, Yes / No', () => {
-  assert.deepEqual(CHECKUP_FOR_CHOICES, ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant']);
+  assert.deepEqual(CHECKUP_FOR_CHOICES, ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant',
+    'Wisdom tooth / extraction'], "the Google Form's choices, its last one (\"Wisdon tooth / Extraction\" there) last");
   assert.ok(CHECKUP_FOR_CHOICES.every((c) => /^[A-Z]/.test(c) && c.slice(1) === c.slice(1).toLowerCase()), 'a capital first letter only');
   assert.deepEqual(PRICING_LABELS, { yes: 'Yes', no: 'No', needs_explanation: 'Needs clearer explanation' }, 'the keys are the values of checkups_pricing_understood_check');
   assert.deepEqual([yesNo(true), yesNo(false), yesNo(null), yesNo(undefined), yesNo('yes')], ['Yes', 'No', '', '', '']);
@@ -106,6 +107,7 @@ test('tick-box answers: "Braces, Extraction" is two ticks; anything else is the 
   assert.deepEqual(splitChoices('Scaling & Polishing', CHECKUP_FOR_CHOICES), { picked: ['Scaling and polishing'], other: '' });
   assert.deepEqual(splitChoices(null, CHECKUP_FOR_CHOICES), { picked: [], other: '' });
   assert.deepEqual(splitChoices('Whitening', CHECKUP_FOR_CHOICES), { picked: [], other: 'Whitening' });
+  assert.deepEqual(splitChoices('Wisdom tooth / extraction, Braces', CHECKUP_FOR_CHOICES), { picked: ['Braces', 'Wisdom tooth / extraction'], other: '' });
   const people = ['Dr. Hina (sample)', 'Dr. Rabia (sample)'];
   assert.deepEqual(splitChoices('Dr. Rabia (sample) / dr hina (sample) & Assistant Sample', people, { split: /,|\/|&/ }), { picked: people, other: 'Assistant Sample' });
   assert.deepEqual(splitChoices('Hina', people, { split: /,/, match: (p) => (p === 'Hina' ? people[0] : null) }), { picked: [people[0]], other: '' }, 'a matcher of its own');

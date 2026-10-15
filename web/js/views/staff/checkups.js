@@ -10,7 +10,7 @@ import { state, can, isAdmin, myBranches, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { FOLLOW_UP_STATUSES, SOURCE_LABELS, PRICING_LABELS, monthLabel, checkupsToSheet, yesNo } from '../../lib/checkups.js';
 import { loadSheetJS } from '../../lib/sheetjs.js';
-import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, canRemoveCheckup, canRegisterCheckup, registeredMr } from './checkup-actions.js';
+import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, discardGuard, canRemoveCheckup, canRegisterCheckup, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'checkups-pending-v1';
 const PAGE_SIZE = 50;
@@ -238,7 +238,8 @@ export async function renderCheckups(root, params, signal) {
         canEdit ? h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Edit ${who}`, dataset: { focus: 'edit' }, onclick: () => editModal(c) }, 'Edit') : null)));
   }
 
-  // The same questions as "+ Add checkup patient", filled in; city, treatment details and the fee under "More".
+  // The same questions as "+ Add checkup patient", filled in; city, treatment details and the fee under "More". Answers are added here after
+  // a follow-up call, so every way of leaving it with changes in it asks first, as the checkup form does (discardGuard).
   function editModal(c) {
     const q = checkupQuestions({ row: c });
     const city = h('input', { value: c.city || '', maxlength: 80 });
@@ -250,8 +251,9 @@ export async function renderCheckups(root, params, signal) {
       h('details', { class: 'form-more', open: true },
         h('summary', {}, 'More'),
         h('div', { class: 'form-grid' }, field('City', city), field('Treatment details', details), field('Estimated fee (Rs)', fee, 'Optional.'))));
+    let saved = false;
     modal(`Edit ${c.patient_name}`, body, [
-      { label: 'Cancel' },
+      { label: 'Cancel', dismiss: true },
       ...(canRemoveCheckup(c) ? [{ label: 'Remove', danger: true, onClick: () => { removeCheckupModal(c, { onDone: () => load() }); } }] : []),
       { label: 'Save', primary: true, onClick: async () => {
         const errors = q.errors();
@@ -263,12 +265,14 @@ export async function renderCheckups(root, params, signal) {
         const changes = Object.fromEntries(Object.entries(next).filter(([k, v]) => (k === 'est_fee' ? (v ?? null) !== (c[k] === null || c[k] === undefined ? null : Number(c[k])) : (v ?? null) !== (c[k] ?? null))));
         if (!Object.keys(changes).length) { toast('Nothing was changed.'); return; }
         try {
-          if ((await d.updateCheckup(c.id, changes)) === null) toast(`${c.patient_name} is no longer on the list.`, 'error');
+          const row = await d.updateCheckup(c.id, changes);
+          saved = true;
+          if (row === null) toast(`${c.patient_name} is no longer on the list.`, 'error');
           else toast(`${next.patient_name} saved.`, 'ok');
         } catch (e) { toast(notSaved(e, `${c.patient_name} was not changed.`), 'error', 8000); return false; }
         await load(); // redrawn before this dialog closes, so focus can return to the page
       } },
-    ]);
+    ], discardGuard(() => JSON.stringify([q.values(), city.value, details.value, fee.value]), () => saved));
   }
 
   // ---- the table, the paging bar and the filters
