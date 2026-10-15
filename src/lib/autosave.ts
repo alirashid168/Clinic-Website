@@ -174,6 +174,11 @@ export class AutosaveQueue {
     return this.failed.map((f) => ({ key: f.key, table: f.edit.table, rowId: f.edit.rowId, changes: { ...f.edit.changes }, error: f.error, at: f.at }));
   }
 
+  /** A row's changes that are not saved yet (waiting, or being sent), the latest value of each field: { field: value }. */
+  unsentChanges(table: string, rowId: string): Record<string, unknown> {
+    return Object.assign({}, ...this.pending.filter((p) => p.table === table && p.rowId === rowId).map((p) => p.changes));
+  }
+
   /** Record a cell change. Later edits to the same row merge into one save, unless that save is already being sent. */
   edit(table: string, rowId: string, field: string, value: unknown): void {
     if (this.isDisposed) {

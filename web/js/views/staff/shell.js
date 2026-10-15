@@ -8,6 +8,7 @@ import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from 
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
+import { arrangeNav, loadArrangement, openArrangeMenu } from './nav-arrange.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
 const passwordDialogModule = () => import('../../ui/password-dialog.js');
@@ -133,7 +134,7 @@ export async function renderStaff(root, path, params, signOut) {
   // Reload these lists for every new login (and token refresh), so a settings change reaches a
   // shared computer that is never reloaded; page changes within one session reuse them.
   const session = state.session;
-  if (refSession !== session) { await loadStaffRef(); refSession = session; }
+  if (refSession !== session) { await Promise.all([loadStaffRef(), loadArrangement()]); refSession = session; }
   if (signal.aborted) return;
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
@@ -170,17 +171,23 @@ export async function renderStaff(root, path, params, signOut) {
     const listId = `menu-list-${m.key}`;
     const btn = h('button', { type: 'button', class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-expanded': 'false', 'aria-controls': listId },
       m.label, current(m.key) ? srOnly(' (current section)') : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
-    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: () => {
+    const item = (i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: () => {
       // Choosing the page already on screen fires no hashchange, so give focus back to the menu button.
       const same = i.href === location.hash;
       closeAll();
       if (same) btn.focus();
-    } }, i.label))));
+    } }, i.label));
+    // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): one group named after it, with
+    // all its pages and a line inside it (Reports: the reports, then the Accounts tabs) indented under its name.
+    const section = (i, n) => h('div', { class: 'menu-section', role: 'group', 'aria-labelledby': `${listId}-${n}` },
+      h('div', { class: 'menu-heading', id: `${listId}-${n}` }, i.heading), i.items.map(item));
+    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i, n) => (i.heading ? section(i, n) : item(i))));
     markCurrent(list);
     return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
   };
-  const navLinks = items.map((m) => (m.items ? dropdown(m)
-    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label)));
+  const navEntry = (m) => (m.items ? dropdown(m)
+    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label));
+  const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }); // its entries: arrangeNav, below the drawer
 
   // ---- patient search from any screen: name, Mr# or phone (an ARIA combobox).
   const searchBox = can('patients.view') ? (() => {
@@ -213,6 +220,7 @@ export async function renderStaff(root, path, params, signOut) {
     // The public homepage, as visitors see it (owner, 12 Oct 2026); it has a "Back to staff pages" link while signed in (views/public.js).
     h('a', { href: '#/', onclick: () => closeAll() }, 'View the website'),
     // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
+    h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
     h('button', { type: 'button', class: 'menu-btn', onclick: signOut }, 'Log out'));
   const userMenu = disclosure(h('div', { class: 'menu user-menu' }, userBtn, userList), userBtn, userList);
@@ -224,12 +232,23 @@ export async function renderStaff(root, path, params, signOut) {
   // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
   const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
+  // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): a group of its own, named after
+  // it, with all its pages (the drawer draws no lines inside a group). The pages after it are More's own, not that drop-down's,
+  // to the eye (they are not indented under it) and to a screen reader.
+  const drawerItems = (m) => m.items.filter((i) => !i.divider).map((i, n) => (i.heading
+    ? h('div', { class: 'drawer-subgroup', role: 'group', 'aria-labelledby': `drawer-group-${m.key}-${n}` },
+      h('div', { class: 'nav-group nav-subgroup', id: `drawer-group-${m.key}-${n}` }, i.heading), drawerItems(i))
+    : drawerLink(i)));
+  const drawerEntry = (m) => (m.items
+    ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), drawerItems(m))
+    : drawerLink(m, current(m.key)));
+  const drawerLinks = h('div', { class: 'drawer-links' }); // its entries: arrangeNav, below
   const drawer = h('nav', { class: 'sidebar', id: 'staff-drawer', 'aria-label': 'Staff navigation' },
     h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' }, onclick: () => closeDrawer(location.hash === '#/staff/today') }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
-    items.map((m) => (m.items
-      ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => drawerLink(i)))
-      : drawerLink(m, current(m.key)))),
+    drawerLinks,
+    // Right after the menu it arranges, so the foot that stays on a phone's screen keeps its size.
+    h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
       // On its own line: Change password and Log out keep their row, well apart.
@@ -237,6 +256,8 @@ export async function renderStaff(root, path, params, signOut) {
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); } }, 'Log out'))));
+  // The top bar and the drawer as this person arranged them ("Arrange my menu", nav-arrange.js): only what menu() allows them.
+  arrangeNav(items, { topnav, navEntry, drawerLinks, drawerEntry, signal });
   drawer.querySelectorAll('.drawer-group').forEach(markCurrent);
   drawer.inert = true;
   const scrim = h('div', { class: 'drawer-scrim', hidden: true, 'aria-hidden': 'true', onclick: () => closeDrawer(true) });
@@ -244,7 +265,7 @@ export async function renderStaff(root, path, params, signOut) {
   const topbar = h('header', { class: 'topbar' },
     toggle,
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' } }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
-    h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }, navLinks),
+    topnav,
     searchBox,
     userMenu);
 

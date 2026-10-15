@@ -341,6 +341,22 @@ test('live: subscribeCheckups listens to the table (one branch or all) and stops
   assert.equal(f.removed.length, 2);
 });
 
+// (two small reads of the Aaj ki List, which shows the checkup rows: one patient's visits of the day, asked before an Mr#
+//  adds a row, and the doctor groups of Clinic setup for its Group drop-down)
+test('live: listVisits asks for one patient only when told to, and doctorGroups reads the groups in number order', async () => {
+  const { f, data } = await openPage(() => ok([]));
+  await data.listVisits({ branchId: 1, date: '2026-10-15', patientId: 'p-1' });
+  assert.equal(f.requests[0].table, 'visits');
+  for (const [col, v] of [['visit_date', '2026-10-15'], ['branch_id', 1], ['patient_id', 'p-1']]) assert.ok(has(f.requests[0].ops, 'eq', col, v), `${col} = ${v}`);
+  f.requests.length = 0;
+  await data.listVisits({ branchId: 1, date: '2026-10-15' });
+  assert.ok(!f.requests[0].ops.some((o: Op) => o[0] === 'eq' && o[1] === 'patient_id'), 'the whole list without it');
+  f.requests.length = 0;
+  await data.doctorGroups();
+  assert.equal(f.requests[0].table, 'doctor_groups');
+  assert.ok(has(f.requests[0].ops, 'order', 'id'));
+});
+
 test('checkupFilters is a pure helper over any query object', () => {
   const calls: string[] = [];
   const q: any = new Proxy({}, { get: (_t, name) => (...a: any[]) => { calls.push(String(name) + JSON.stringify(a)); return q; } });

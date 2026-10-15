@@ -61,6 +61,9 @@ function capped(rows, cap) {
   return rows;
 }
 
+// The table of "Arrange my menu" is not there yet (20261015000100 not run): the codes PostgREST and Postgres answer with.
+const MENU_PREFS_MISSING_CODES = new Set(['PGRST205', '42P01']);
+
 // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
 // They live in public.checkups and are read through the view checkup_list (migrations 20261009000250 and ...260). While those are
 // not applied, PostgREST answers PGRST205 / PGRST202 (or 42P01 / 42883, or a 404): the list then says "not switched on yet".
@@ -819,15 +822,24 @@ export async function createSupabaseAdapter() {
     return Object.fromEntries(rows.map((r) => [r.patient_id, r]));
   }
 
+  // The visits (of a list) that have an invoice that is not void: the Invoice column of the Aaj ki List. Without billing.view
+  // the invoices are not visible (row-level security), so this is empty and the list does not show the column.
+  async function invoicedFor(visitIds) {
+    if (!visitIds.length) return new Set();
+    const rows = await byIdChunks(visitIds, (part) => sb.from('invoices').select('visit_id, status').in('visit_id', part).then(check));
+    return new Set(rows.filter((r) => r.status !== 'void').map((r) => r.visit_id));
+  }
+
   const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone,medical_history,photo_consent_public), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
   async function enrichVisits(rows) {
     const ids = [...new Set(rows.map((r) => r.patient_id))];
-    const [dues, flags] = await Promise.all([duesFor(ids), flagsFor(ids)]);
+    const [dues, flags, invoiced] = await Promise.all([duesFor(ids), flagsFor(ids), invoicedFor(rows.map((r) => r.id))]);
     return rows.map((v) => ({
       ...v,
       staff: (v.visit_staff || []).map((s) => ({ clinician_id: s.clinician_id, role: s.role, name: s.clinician?.display_name })),
       dues: dues[v.patient_id] ?? 0,
       see_dr_ali: !!flags[v.patient_id],
+      has_invoice: invoiced.has(v.id),
     }));
   }
   async function visitById(id) {
@@ -1044,10 +1056,27 @@ export async function createSupabaseAdapter() {
       return () => { data.subscription.unsubscribe(); window.removeEventListener('storage', onStorage); };
     },
 
+    // ------------------------------------------------------------ the person's own menu (Arrange my menu)
+    // One row per staff member in public.staff_menu_prefs (20261015000100_staff_menu_prefs.sql); row-level security lets each
+    // person read and save only their own. While that file is not run, the table and save_my_menu are missing (PGRST205 / 42P01,
+    // PGRST202 / 404): reading answers null (the default menu) and saving fails with the code MENU_PREFS_MISSING, so the
+    // website keeps the arrangement on that computer only.
+    /** The arrangement this staff member saved (an array of menu keys), or null when there is none. */
+    async myMenuArrangement() {
+      const res = await sb.from('staff_menu_prefs').select('arrangement').maybeSingle();
+      if (res.error && (MENU_PREFS_MISSING_CODES.has(res.error.code) || res.status === 404)) return null;
+      return check(res)?.arrangement ?? null;
+    },
+    async saveMyMenuArrangement(list) {
+      const r = await rpc('save_my_menu', { p_arrangement: list });
+      if (r.missing) throw plainError('MENU_PREFS_MISSING: the menu cannot be saved in the database until its update is run.', 'MENU_PREFS_MISSING');
+    },
+
     // ------------------------------------------------------------ reference
     async branches() { return check(await sb.from('branches').select('*').eq('active', true).order('sort_order')); },
     async cities() { return check(await sb.from('cities').select('*').order('id')); },
     async clinicians() { return check(await sb.from('clinicians').select('*').eq('active', true).order('display_name')); },
+    async doctorGroups() { return check(await sb.from('doctor_groups').select('*').order('id')); },
     async treatments() { return check(await sb.from('treatments').select('*').eq('active', true).order('sort_order')); },
     async expenseCategories() { return check(await sb.from('expense_categories').select('*').eq('active', true).order('sort_order')); },
     async settings() {
@@ -1191,10 +1220,12 @@ export async function createSupabaseAdapter() {
     // ------------------------------------------------------------ visits
     // By token, then by when the row was added and by its id: rows with no token and one created_at (an imported day's) keep one order,
     // the same as the History's copy of that day (private.day_list_rows in 20261012000100_day_list_history.sql).
-    async listVisits({ branchId, date }) {
+    // (patientId: that patient's visits of the day only, a small read: the Aaj ki List asks it before an Mr# adds a row)
+    async listVisits({ branchId, date, patientId }) {
       let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false })
         .order('created_at', { ascending: true }).order('id', { ascending: true });
       if (branchId) q = q.eq('branch_id', Number(branchId));
+      if (patientId) q = q.eq('patient_id', patientId);
       return enrichVisits(check(await q));
     },
     // Live updates: calls onChange the moment any visit at this branch (or a
@@ -1224,7 +1255,7 @@ export async function createSupabaseAdapter() {
         if (patch.dues_override_by === true) patch.dues_override_by = uid;
         if (patch.protocol_override_by === true) patch.protocol_override_by = uid;
       }
-      delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff;
+      delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff; delete patch.has_invoice;
       check(await sb.from('visits').update(patch).eq('id', id));
       return visitById(id);
     },

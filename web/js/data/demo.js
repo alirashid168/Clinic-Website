@@ -10,6 +10,7 @@
 
 import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '../lib/protocol.js';
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
+import { MAX_KEYS, KEY_PATTERN } from '../lib/menu-arrange.js';
 import { todayISO, localISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
@@ -109,17 +110,20 @@ function seed() {
     { id: 4, code: 'LHR', name: 'Gulberg Lahore', city_id: 2, address: 'Al Hafeez Business Avenue, Gulberg 3, Lahore', active: true, opened_on: '2021-11-03' },
     { id: 5, code: 'ISB', name: 'Islamabad', city_id: 3, address: 'Giga Downtown, DHA Phase II, Islamabad', active: true, opened_on: '2025-11-25' },
   ];
-  const doc = (name, group, region, is_doctor = true) => ({ id: uid(), display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
+  // Fixed ids, not uid(), so each sample clinician is the same person on every load. On the Aaj ki List each of them has
+  // a Doctor Name colour of their own (lib/tones.js: eleven people, fourteen colours).
+  const doc = (n, name, group, region, is_doctor = true) => ({ id: `00000000-0000-4000-8000-0000000c${n}`, display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
   // Fictional clinicians: one or two per braces group and region, enough to try every rule.
   db.clinicians = [
-    doc('Dr. Ali Rashid', null, null),
-    doc('Dr. Amna (sample)', 1, 'KHI'), doc('Dr. Bushra (sample)', 1, 'KHI'),
-    doc('Dr. Hina (sample)', 2, 'KHI'), doc('Dr. Iqra (sample)', 2, null),
-    doc('Dr. Nida (sample)', 3, 'KHI'), doc('Dr. Rabia (sample)', 3, 'KHI'), doc('Dr. Saba (sample)', 3, 'LHR'),
-    doc('Dr. Tania (sample)', null, 'ISB'),
-    doc('Assistant Uzma (sample)', null, 'KHI', false), doc('Assistant Zara (sample)', null, 'KHI', false),
+    doc('0104', 'Dr. Ali Rashid', null, null),
+    doc('0205', 'Dr. Amna (sample)', 1, 'KHI'), doc('0306', 'Dr. Bushra (sample)', 1, 'KHI'),
+    doc('0403', 'Dr. Hina (sample)', 2, 'KHI'), doc('0503', 'Dr. Iqra (sample)', 2, null),
+    doc('0605', 'Dr. Nida (sample)', 3, 'KHI'), doc('0700', 'Dr. Rabia (sample)', 3, 'KHI'), doc('0806', 'Dr. Saba (sample)', 3, 'LHR'),
+    doc('0905', 'Dr. Tania (sample)', null, 'ISB'),
+    doc('1006', 'Assistant Uzma (sample)', null, 'KHI', false), doc('1102', 'Assistant Zara (sample)', null, 'KHI', false),
   ];
   const cl = (name) => db.clinicians.find((c) => c.display_name === name).id;
+  db.doctor_groups = [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
 
   db.treatments = ['Monthly', 'Bonding', 'Upper Bonding', 'Lower Bonding', 'Bracket Fix', 'Braces Checkup', 'Braces Scaling', 'Braces Off',
     'Retainer Impression', 'Retainer Pick', 'Retainer Followup', 'Checkup', 'Followup', 'Scaling', 'Filling', 'RCT', 'Extraction',
@@ -134,6 +138,7 @@ function seed() {
   db.discount_caps = { front_desk: { maxPercent: 5, maxAmount: 1000 }, accountant: { maxPercent: null, maxAmount: null } };
   db.grid = defaultGrid();
   db.overrides = {};
+  db.menu_prefs = {}; // staff id -> the menu arrangement they saved (Arrange my menu), like public.staff_menu_prefs
 
   // One demo login per role. Placeholder @example.com addresses, never real staff logins.
   db.staff = [
@@ -223,6 +228,7 @@ function seed() {
     tokenCount[branch] = (tokenCount[branch] || 0) + (status === 'scheduled' ? 0 : 1);
     const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: today, token_no: status === 'scheduled' ? null : tokenCount[branch],
       status, treatment_label: label, braces_case_id: month ? bc.id : null, braces_month: month, details_text: details,
+      doctor_group_id: month && protocolFor(month).treatingGroups.length === 1 ? protocolFor(month).treatingGroups[0] : null,
       photo_required: month ? protocolFor(month).photoRequired : false, photos_uploaded: status === 'completed',
       checker_required: month ? protocolFor(month).checkerGroup !== null : false, checked_by: status === 'completed' ? cl('Dr. Bushra (sample)') : null,
       checked_in_at: today + 'T13:' + String(10 + db.visits.length % 40).padStart(2, '0') + ':00', created_at: new Date().toISOString(), notes: null };
@@ -376,7 +382,9 @@ export function createDemoAdapter() {
     const p = patient(v.patient_id);
     return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, medical_history: clone(p.medical_history) || {}, photo_consent_public: !!p.photo_consent_public },
       staff: db.visit_staff.filter((s) => s.visit_id === v.id).map((s) => ({ ...s, name: clinician(s.clinician_id)?.display_name })),
-      dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id) };
+      dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id),
+      // As in the database: invoices are seen with billing.view only, so without it no visit has one.
+      has_invoice: can('billing.view') && db.invoices.some((i) => i.visit_id === v.id && i.status !== 'void') };
   };
 
   // Checkups (patients without a patient file): which rows this person may see, how a row is shown, and the Checkups page's filters.
@@ -444,6 +452,8 @@ export function createDemoAdapter() {
       const rule = protocolFor(v.braces_month);
       v.photo_required = rule.photoRequired && v.braces_month <= LAST_DEFINED_MONTH;
       v.checker_required = rule.checkerGroup !== null;
+      // The database's default: a month treated by one group only gets that group.
+      if (v.doctor_group_id == null && rule.treatingGroups.length === 1) v.doctor_group_id = rule.treatingGroups[0];
     }
     if (!prev || prev.status !== v.status) {
       if (v.status === 'waiting' && !v.checked_in_at) v.checked_in_at = new Date().toISOString();
@@ -547,10 +557,28 @@ export function createDemoAdapter() {
     },
     async resetDemo() { db = seed(); seedDayClosing(); session = null; ownPasswords.clear(); },
 
+    // ------------------------------------------------------------ the person's own menu (Arrange my menu)
+    // Like public.staff_menu_prefs: each staff member reads and saves only their own row, and the database's check (an array of
+    // at most 60 strings of menu keys) refuses anything else.
+    async myMenuArrangement() {
+      const s = me();
+      if (!s?.active) fail('Please log in again.');
+      return db.menu_prefs[s.id] ? clone(db.menu_prefs[s.id]) : null;
+    },
+    async saveMyMenuArrangement(list) {
+      const s = me();
+      if (!s?.active) fail('NOT_STAFF: only a staff login has a menu to arrange');
+      if (!Array.isArray(list) || list.length > MAX_KEYS || !list.every((k) => typeof k === 'string' && KEY_PATTERN.test(k))) {
+        fail('new row for relation "staff_menu_prefs" violates check constraint "staff_menu_prefs_arrangement_check"');
+      }
+      db.menu_prefs[s.id] = clone(list);
+    },
+
     // ------------------------------------------------------------ reference
     async branches() { return clone(db.branches.filter((b) => b.active)); },
     async cities() { return clone(db.cities); },
     async clinicians() { return clone(db.clinicians.filter((c) => c.active)); },
+    async doctorGroups() { return clone(db.doctor_groups); },
     async treatments() { return clone(db.treatments.filter((t) => t.active)); },
     async expenseCategories() { return clone(db.expense_categories); },
     async settings() { return clone(db.settings); },
@@ -699,13 +727,82 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ visits
     // By token, then by when the row was added and by its id, as the live adapter asks the database (rows with no token and one
     // created_at, such as an imported day's, keep the order the History's copy has: lib/day-list.js orderDayList).
-    async listVisits({ branchId, date }) {
+    // (patientId: that patient's visits of the day only, as the live adapter)
+    async listVisits({ branchId, date, patientId }) {
       need('sheet.view');
-      return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && branchOk(v.branch_id))
+      return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && (!patientId || v.patient_id === patientId) && branchOk(v.branch_id))
         .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
           || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(enrichVisit);
     },
     subscribeVisits() { return () => {}; },
+    // A busy day to try the Aaj ki List with (the list's "?demo=busy", demo only): 120 more made-up patients on one branch's
+    // list for the day, in every state of a day half done. Names "Sample Patient 001" to "120", Mr# from 7001, phones
+    // 0300 555 3001 onwards; once per branch and day. (Sample Patient 111 has all three flags: medical history, Dr. Ali, a note.)
+    async fillBusyDay({ branchId, date = todayISO() }) {
+      need('sheet.view');
+      const branch = Number(branchId);
+      db.busy_days ||= [];
+      if (!db.branches.some((b) => b.id === branch) || !branchOk(branch) || db.busy_days.includes(`${branch}|${date}`)) return 0;
+      const base = 7000 + 200 * db.busy_days.length;
+      db.busy_days.push(`${branch}|${date}`);
+      const doctorsIn = (g) => db.clinicians.filter((c) => c.is_doctor && c.doctor_group_id === g);
+      const anyDoctor = db.clinicians.filter((c) => c.is_doctor);
+      const assistants = db.clinicians.filter((c) => !c.is_doctor);
+      const other = ['Retainer Pick', 'Checkup', 'Scaling', 'RCT', 'Bracket Fix', 'Followup', 'Filling', 'Extraction', 'Hygiene Appointment'];
+      const otherDetails = ['Scaling done', 'RCT 2nd sitting', 'Filling UR6', 'Retainer given', 'X-ray advised', 'Bracket rebond LL3'];
+      const wire = (m) => (m < 3 ? '012' : m < 4 ? '014' : m < 8 ? '016' : '018');
+      const invoice = (patientId, visitId, amount, issued, paid) => {
+        const inv = { id: uid(), invoice_no: 'INV-' + date.slice(0, 4) + '-' + String(db.invoices.length + 1).padStart(6, '0'), patient_id: patientId, branch_id: branch,
+          visit_id: visitId, issue_date: issued, subtotal: amount, discount_amount: 0, total: amount, status: 'issued', template_key: 'classic',
+          items: [{ description: visitId ? 'Visit (sample)' : 'Braces instalment (sample)', quantity: 1, unit_price: amount }] };
+        db.invoices.push(inv);
+        if (paid) db.payments.push({ id: uid(), patient_id: patientId, invoice_id: inv.id, branch_id: branch, amount: paid, method: 'cash', received_at: issued + 'T15:00:00' });
+      };
+      let token = Math.max(0, ...db.visits.filter((v) => v.branch_id === branch && v.visit_date === date && v.token_no).map((v) => v.token_no));
+      for (let i = 1; i <= 120; i++) {
+        const p = { id: uid(), mr_number: String(base + i), full_name: `Sample Patient ${String(i).padStart(3, '0')}`, phone: '0300555' + String(3000 + base - 7000 + i),
+          email: null, first_branch_id: branch, referral_source: 'Walk-in', photo_consent_public: false, created_at: daysAgo(200), notes: null, portal_user_id: null,
+          medical_history: i % 23 === 0 || i === 111 ? { conditions: ['Diabetes'], allergies: i % 2 ? 'Penicillin' : '' } : {} };
+        db.patients.push(p);
+        const status = i <= 70 ? 'completed' : i <= 80 ? 'in_treatment' : i <= 112 ? 'waiting' : 'scheduled';
+        const done = status === 'completed';
+        const month = i % 3 ? ((i * 7) % 18) + 1 : null;
+        const rule = month ? protocolFor(month) : null;
+        let bc = null;
+        if (month) {
+          bc = { id: uid(), patient_id: p.id, start_date: daysAgo(month * 30), extraction_plan: ['undecided', 'extraction', 'non_extraction'][i % 3],
+            extractions_done: false, kit_name: 'Sample kit A', total_fee: 60000, status: 'active', treatment_plan_by_dr_ali: 'Standard plan' };
+          db.braces_cases.push(bc);
+        }
+        const group = rule ? rule.treatingGroups[i % rule.treatingGroups.length] : [1, 2, 3, null][i % 4];
+        const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: date, token_no: status === 'scheduled' ? null : ++token, status,
+          treatment_label: month ? 'Monthly' : other[i % other.length], braces_case_id: bc?.id ?? null, braces_month: month, doctor_group_id: group,
+          details_text: done ? (month ? `U L ${wire(month)} PC refresh` : otherDetails[i % otherDetails.length]) : '',
+          photo_required: !!rule?.photoRequired, photos_uploaded: done && !!rule?.photoRequired, checker_required: rule ? rule.checkerGroup !== null : false, checked_by: null,
+          checked_in_at: status === 'scheduled' ? null : `${date}T${String(12 + Math.floor(i / 20)).padStart(2, '0')}:${String((i * 7) % 60).padStart(2, '0')}:00`,
+          created_at: new Date().toISOString(), notes: i % 29 === 0 || i === 111 ? 'Wants an evening slot next time' : null };
+        // Sample Patient 099 came from the Google Sheet with "Group 4", a group Clinic setup does not have: the sync keeps the
+        // visit in no group and the sheet's words in sheet_cells (as the live database does).
+        if (i === 99) v.sheet_cells = { group: { t: 'Group 4', v: null } };
+        db.visits.push(v);
+        if (done || status === 'in_treatment' || i % 9 === 0) {
+          const pool = group ? doctorsIn(group) : anyDoctor;
+          db.visit_staff.push({ visit_id: v.id, clinician_id: pool[i % pool.length].id, role: 'doctor' });
+          if (i % 5 === 0) db.visit_staff.push({ visit_id: v.id, clinician_id: assistants[i % assistants.length].id, role: 'assistant' });
+        }
+        if (done && rule?.checkerGroup) {
+          const checker = doctorsIn(rule.checkerGroup)[i % doctorsIn(rule.checkerGroup).length];
+          v.checked_by = checker.id;
+          db.visit_staff.push({ visit_id: v.id, clinician_id: checker.id, role: 'checker' });
+        }
+        // Dues on some patients (an older instalment part paid), and an invoice for most of today's finished visits.
+        const owe = i % 7 === 0 ? 11500 : i % 11 === 0 ? 20000 : i % 13 === 0 ? 500 : 0;
+        if (owe) invoice(p.id, null, owe + 5000, daysAgo(40), 5000);
+        if ((done || status === 'in_treatment') && i % 6) invoice(p.id, v.id, 3000, date, 3000);
+        if (i % 37 === 0) db.patient_flags.push({ id: uid(), patient_id: p.id, kind: 'see_dr_ali', reason: 'Sample: check the bite', raised_by: 's-asst', raised_at: daysAgo(1) + 'T16:00:00', cleared_at: null });
+      }
+      return 120;
+    },
     async addVisit(row) {
       need('sheet.edit');
       if (!branchOk(row.branch_id)) fail('new row violates row-level security policy (branch)');
@@ -1691,7 +1788,6 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ clinic setup (admin)
     async setupLists() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
-      db.doctor_groups ||= [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
       db.doctor_commission_rules ||= [];
       return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories,
         staff: db.staff.map(({ id, full_name, role, active, deleted_at }) => ({ id, full_name, role, active, deleted_at: deleted_at ?? null })), commission_rules: db.doctor_commission_rules });

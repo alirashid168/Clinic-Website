@@ -350,6 +350,9 @@ fieldset.fieldset-plain > legend { padding: 0; margin-bottom: .375rem; font-size
 .badge-warn { background: var(--status-warn-bg); color: var(--status-warn-text); }
 .badge-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
 .badge-inactive { background: var(--status-neutral-bg); color: var(--status-neutral-text); border-color: var(--border-strong); }
+/* The latest visit note on a patient's profile: one line, cut with an ellipsis (whole in its tooltip and under Visits). */
+.badge-note { max-width: min(100%, 36rem); background: var(--status-info-bg); color: var(--status-info-text); }
+.badge-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* Switched-off records: readable muted text (>=4.5:1) plus a badge, no opacity dimming. */
 .is-inactive, .is-inactive td { color: var(--text-muted); }
@@ -429,6 +432,11 @@ table.list tr:last-child td { border-bottom: 0; }
 }
 .toast-close:hover { background: rgba(255, 255, 255, .16); }
 body:has(.has-fab) .toasts, .has-fab .toasts, body:has(.has-fab) #toasts { bottom: calc(var(--fab-space) + env(safe-area-inset-bottom, 0px)); }
+/* The Aaj ki List on a laptop has its add line at the bottom of the window: the toasts sit above it, at the right, so they
+   cover neither "+ New walk-in" nor the Treatment cell of a patient just added (the last row). */
+@media (min-width: 900px) {
+  body:has(.sheet-page) .toasts { left: auto; right: var(--space-4); bottom: calc(48px + env(safe-area-inset-bottom, 0px)); transform: none; }
+}
 
 /* The backdrop scrolls; the dialog is capped to the small/dynamic viewport and only its body scrolls,
    so the header and the action buttons stay on screen. */
@@ -776,6 +784,46 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 .topnav-layout { grid-template-columns: 1fr; }
 .topnav-layout > .sidebar { display: none; }
 .drawer-group .nav-link { padding-left: var(--space-5); }
+/* Arrange my menu (nav-arrange.js): the drop-down names inside an arranged More, the drawer's button, and its dialog.
+   A drop-down hangs from the sticky bar, so scrolling the page never brings its last entries up: a long one (a whole menu
+   put under More) scrolls inside the window instead. */
+.topbar .menu-list {
+  max-height: calc(100vh - var(--topbar-h) - env(safe-area-inset-top, 0px) - var(--space-4));
+  max-height: calc(100dvh - var(--topbar-h) - env(safe-area-inset-top, 0px) - var(--space-4));
+  overflow-y: auto; overscroll-behavior: contain;
+}
+/* The page keeps its place when focus goes to the bar itself (back from a dialog opened in the name menu, or Escape in a
+   drop-down): the scroll-padding that keeps focused fields clear of the bar took any focus up here as "hidden behind it" and
+   scrolled the page to the top. Not the links inside a drop-down list, which scroll within it. */
+.topbar :is(.nav-link, .icon-btn, .wordmark, .topsearch input) { scroll-margin-top: calc(-1 * (var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--space-4))); }
+.menu-heading { padding: var(--space-2) var(--space-3) var(--space-1); font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+/* A drop-down under More: its pages are indented under its name, and so is a line inside it (Reports: the reports, then the Accounts
+   tabs): it reads as part of the section. The lines between More's parts run the full width. */
+.menu-section > a { padding-left: var(--space-6); }
+.menu-section > hr { margin-left: var(--space-6); }
+.nav-subgroup { padding-left: var(--space-4); }
+/* In the phone drawer such a drop-down's pages sit under its name, and a line ends them: More's own pages come after it,
+   back at the usual indent. */
+.drawer-subgroup { border-bottom: 1px solid var(--on-dark-line); padding-bottom: var(--space-1); margin-bottom: var(--space-1); }
+.drawer-group .drawer-subgroup .nav-link { padding-left: var(--space-7); }
+.drawer-links { display: flex; flex-direction: column; gap: var(--space-1); }
+.sidebar .drawer-arrange { align-self: flex-start; margin: var(--space-2) var(--space-2) var(--space-3); color: var(--on-dark-strong); font-size: var(--fs-sm); }
+/* After a click the dialog itself keeps the clicked button under the pointer (keepAt): the browser's own scroll anchoring would
+   move it a second time. */
+.arrange { overflow-anchor: none; }
+.arrange h3 { margin: var(--space-4) 0 var(--space-2); }
+.arrange h4 { margin: var(--space-3) 0 var(--space-1); font-size: var(--fs-sm); }
+.arrange-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-1); }
+.arrange-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); }
+/* The page just moved: after a click the button under the pointer belongs to the next page, so the moved row shows where it went. */
+.arrange-row.arrange-moved { border-color: var(--aubergine); background: var(--aubergine-soft); box-shadow: inset 3px 0 0 var(--aubergine); }
+.arrange-num { flex: none; min-width: 1.75em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.arrange-name { flex: 1 1 12rem; min-width: 0; font-weight: 600; }
+.arrange-name small { display: block; font-weight: 400; color: var(--text-muted); }
+.arrange-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+/* Move up on the first row (Move down on the last) keeps focus, so it is greyed out by colour: fading it would fade its focus ring too. */
+.arrange-actions .btn[aria-disabled="true"] { opacity: 1; color: var(--text-subtle); border-color: var(--border); background: var(--surface-sunken); }
+.arrange-count { margin: 0 0 var(--space-2); }
 .drawer-close { align-self: flex-end; color: inherit; flex: none; }
 /* Tap-to-close layer behind the phone drawer (a real element, so taps never reach the page). */
 .drawer-scrim {
@@ -822,27 +870,181 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
   }
 }
 
-/* ------------------------------------------------------------ sheet (Aaj ki List) */
-.sheet-toolbar { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-3); }
-.sheet-toolbar select, .sheet-toolbar input { width: auto; min-width: 150px; }
-.sheet-toolbar input[type=checkbox] { min-width: 0; width: 1.125rem; height: 1.125rem; }
-.sheet-toolbar label.inline { gap: var(--space-2); white-space: nowrap; }
-/* scroll-padding keeps a focused cell clear of the sticky header row and the frozen patient column. */
-.sheet-wrap { position: relative; overflow: auto; border: 1px solid var(--border-strong); border-radius: var(--radius-m); background: var(--surface); max-height: calc(100svh - 230px); scroll-padding: 44px 0 0 220px; }
-.sheet-wrap :focus-visible { outline-offset: -3px; }
-table.sheet { border-collapse: separate; border-spacing: 0; font-size: var(--fs-sm); min-width: 1180px; width: 100%; }
-table.sheet th {
-  position: sticky; top: 0; z-index: 2; background: var(--surface-accent); color: var(--text-on-accent); font-weight: 700; font-size: var(--fs-xs);
-  text-align: left; padding: var(--space-2); border-right: 1px solid rgba(255, 255, 255, .14); white-space: nowrap;
+/* ------------------------------------------------------------ sheet (Aaj ki List)
+   Laid out like the clinic's Google Sheet ("Aj ki List"): white cells, thin grey gridlines, a grey row-number column, a
+   purple header row with P.P in red, one line per patient (26px; text is cut with an ellipsis, never wrapped) and the
+   sheet's chip colours, so about 20 patients fit a laptop screen. The header row stays at the top and the #, Mr# and
+   name columns at the left while the rows scroll. */
+.sheet-page {
+  --sheet-font: Roboto, 'Segoe UI', system-ui, -apple-system, Arial, sans-serif;
+  --sheet-text: #202124;
+  --sheet-head: #5a3286;           /* the sheet's header purple: white text 9.4:1 */
+  --sheet-pp: #e00000;             /* the sheet's P.P red, one shade darker: white text 5.0:1 (#ff0000 would be 4.0:1); as text on #fff 5.0:1 */
+  --sheet-grid: #e1e3e6;           /* gridlines (decorative) */
+  --sheet-grid-strong: #c4c7c5;    /* the frame and the edge of the frozen columns (decorative) */
+  --sheet-rownum-bg: #f8f9fa;
+  --sheet-rownum-text: #5f6368;    /* 6.0:1 on its bg */
+  --sheet-select: #1a73e8;         /* the selected cell, as in Sheets: 4.5:1 on #fff */
+  --sheet-row: 25px;
+  --w-num: 34px;
+  --w-mr: 62px;
+  --w-name: clamp(164px, 13vw, 260px);
+  --w-treatment: clamp(138px, 9.4vw, 160px); /* every treatment of the list whole ("Hygiene Appointment") */
+  --caret-dark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath d='M0 0h8L4 5z' fill='%23444746'/%3E%3C/svg%3E");
+  --caret-light: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath d='M0 0h8L4 5z' fill='%23ffffff'/%3E%3C/svg%3E");
 }
-table.sheet td { border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); padding: 0; vertical-align: middle; background: var(--surface); }
-table.sheet tr:hover td { background: var(--surface-hover); }
-table.sheet td.frozen, table.sheet th.frozen { position: sticky; left: 0; z-index: 1; }
-table.sheet thead th.frozen { z-index: 3; } /* only the header corner: row headers (th.frozen in tbody) stay at 1, under it */
-table.sheet tbody th, table.sheet .row-head { top: auto; z-index: 1; padding: 0; background: var(--surface); color: inherit; font-weight: inherit; font-size: inherit; text-align: left; white-space: normal; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); box-shadow: 1px 0 0 var(--border-strong); }
-/* tbody only: the sticky header row keeps its accent background and white text on hover. */
-table.sheet tbody tr:hover th { background: var(--surface-hover); }
-table.sheet td.frozen { box-shadow: 1px 0 0 var(--border-strong); }
+/* The page head (title, branch, day, find, filters, links) and the status counts: about 70px together on a laptop. */
+.sheet-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.sheet-head h1 { margin: 0; font-size: var(--fs-xl); line-height: 1.2; white-space: nowrap; }
+.sheet-toolbar, .sheet-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.sheet-tools { margin-left: auto; }
+.sheet-toolbar select, .sheet-toolbar input { width: auto; min-width: 0; min-height: 32px; padding: 3px var(--space-2); border-radius: var(--radius-s); font-size: var(--fs-sm); }
+.sheet-toolbar input[type=search] { width: 12rem; }
+.sheet-toolbar input[type=checkbox] { width: 1.125rem; height: 1.125rem; min-height: 0; padding: 0; }
+.sheet-filter { position: relative; z-index: 6; } /* above the add line, which sits close under a short list */
+.sheet-filter-panel {
+  position: absolute; top: calc(100% + var(--space-1)); left: 0; z-index: var(--z-popover); display: grid; gap: var(--space-2);
+  width: 16rem; max-width: calc(100vw - 32px); padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow-md);
+}
+.sheet-filter-panel select { width: 100%; }
+.sheet-filter-panel label.inline { font-size: var(--fs-sm); white-space: nowrap; }
+.sheet-filter-panel .btn { justify-self: start; }
+.sheet-subhead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-3); margin: 6px 0; }
+.sheet-counts { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.count-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 var(--space-2); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill); background: var(--surface); color: var(--text); font: 500 var(--fs-xs)/1 var(--font); cursor: pointer;
+}
+.count-chip strong { font-weight: 800; }
+.count-chip:hover { border-color: var(--aubergine); }
+.count-chip[aria-pressed="true"] { border-color: var(--aubergine); background: var(--aubergine-soft); color: var(--text-accent); box-shadow: inset 0 0 0 1px var(--aubergine); }
+.count-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .3); }
+/* Rows another computer added while the person works in the list (sheet.js newRowsNote): a few words between the counts and
+   the save status, in the room left on that line (it never makes the line wrap: it would push the list down). */
+.sheet-new-rows { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; font-size: var(--fs-xs); color: var(--text-muted); }
+/* The bars that come and go (the changes not saved, the Undo of a removal, a warning) never cover the list or the save
+   status. On a phone (here) they are on lines of their own under the counts, in the page's flow, one line each, and the
+   changes not saved list them under their line once "Show" is pressed; the note of new rows stays on the counts' line
+   (.sheet-slot holds both, and on a laptop it is a box of its own: below). */
+.sheet-slot { display: contents; }
+.sheet-bars { flex: 1 0 100%; order: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
+/* (no connection: on a phone the staff pages' banner above the top bar says it; on a laptop this line does, below) */
+.sheet-bars > .sheet-offline { display: none; }
+.sheet-bars:not(:has(> :not([hidden], .sheet-offline))) { display: none; }
+.sheet-bars > .alert, .sheet-page > .day-end-live > .alert { margin: 0; padding: var(--space-2) var(--space-3); }
+.sheet-bars > .alert { padding-block: 3px; }
+.sheet-bars > .alert-warning { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-bars > .alert-info, .sheet-fails-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.sheet-bars > .alert-info > span:first-child, .sheet-fails-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-bars > .alert .btn, .sheet-fails-retry { flex: none; }
+.sheet-bars .btn { white-space: nowrap; }
+.sheet-fails-summary { font-weight: 600; }
+.sheet-fails-list { margin: var(--space-1) 0 0; max-height: 30vh; overflow: auto; }
+.sheet-page > .day-end-live:not(:empty) { margin: 0 0 var(--space-2); }
+
+/* scroll-padding keeps a focused cell clear of the sticky header row and the frozen columns. */
+.sheet-wrap {
+  position: relative; overflow: auto; border: 1px solid var(--sheet-grid-strong); background: var(--enamel); max-height: calc(100svh - 160px);
+  scroll-padding: calc(var(--sheet-row) + 4px) 0 0 calc(var(--w-num) + var(--w-mr) + var(--w-name));
+}
+.sheet-wrap :focus-visible { outline-offset: -2px; }
+table.sheet { table-layout: fixed; width: 100%; min-width: 1404px; border-collapse: separate; border-spacing: 0; font: 400 13px/1.25 var(--sheet-font); color: var(--sheet-text); }
+/* All branches has a Branch column on top: the list is wider by that much and scrolls sideways sooner (under the frozen
+   #, Mr# and name), rather than take it from Treatment Details. (On a laptop: below; a touch screen: TOUCH.) */
+table.sheet:has(> colgroup > .c-branch) { min-width: 1524px; }
+table.sheet col.c-branch { width: 120px; }
+table.sheet col.c-num { width: var(--w-num); }
+table.sheet col.c-mr { width: var(--w-mr); }
+table.sheet col.c-name { width: var(--w-name); }
+table.sheet col.c-month { width: 78px; }
+table.sheet col.c-treatment { width: var(--w-treatment); }
+table.sheet col.c-token { width: 48px; }
+table.sheet col.c-status { width: 104px; }
+table.sheet col.c-group { width: 86px; }
+table.sheet col.c-pp { width: 56px; }
+table.sheet col.c-invoice { width: 74px; }
+table.sheet col.c-contact { width: 100px; }
+table.sheet col.c-reminder { width: 124px; }
+/* (Doctor Name and Treatment Details share the rest of the width; on a laptop Doctor Name gets more, see below.) */
+table.sheet thead th {
+  position: sticky; top: 0; z-index: 2; height: 28px; padding: 0 var(--space-2); background: var(--sheet-head); color: var(--text-on-accent);
+  font-size: 12.5px; font-weight: 700; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-right: 1px solid rgba(255, 255, 255, .18); border-bottom: 1px solid var(--sheet-head);
+}
+table.sheet thead th.center { padding: 0 var(--space-1); text-align: center; }
+table.sheet thead th.pp-head { background: var(--sheet-pp); border-bottom-color: var(--sheet-pp); text-align: right; }
+table.sheet thead th.rownum { background: var(--sheet-rownum-bg); color: var(--sheet-rownum-text); text-align: center; border-right-color: var(--sheet-grid-strong); border-bottom-color: var(--sheet-grid-strong); }
+table.sheet thead th:has(> .th-filter) { padding-right: 26px; }
+/* The ▾ of a heading opens the filter for that column, like the filter buttons of the sheet. */
+.th-filter {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%); display: inline-grid; place-items: center; width: 20px; height: 20px;
+  padding: 0; border: 0; border-radius: var(--radius-xs); background: none; color: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+}
+.th-filter:hover { background: rgba(255, 255, 255, .2); }
+.th-filter:focus-visible { outline: 2px solid var(--text-on-accent); outline-offset: -2px; }
+/* The cells do not clip (each one clipping made every key typed in a cell of a 120-row list several times slower to draw):
+   what could be too long cuts itself (.cell-text, the inputs, the chips). */
+table.sheet tbody td, table.sheet tbody th {
+  height: var(--sheet-row); padding: 0; background: var(--enamel); color: inherit; font-size: inherit; font-weight: 400; text-align: left;
+  vertical-align: middle; white-space: nowrap;
+  border-right: 1px solid var(--sheet-grid); border-bottom: 1px solid var(--sheet-grid);
+}
+table.sheet .cell-text { display: block; overflow: hidden; text-overflow: ellipsis; }
+table.sheet tbody td.center { text-align: center; }
+table.sheet .branch-cell, table.sheet tbody td.mr-cell, table.sheet td.contact, table.sheet td.pp { padding: 0 var(--space-2); }
+table.sheet td.contact, table.sheet tbody .branch-cell { color: #3c4043; }
+table.sheet td.mr-cell a { color: var(--text-accent); }
+table.sheet tbody td.rownum { background: var(--sheet-rownum-bg); color: var(--sheet-rownum-text); font-size: 11px; text-align: center; border-right-color: var(--sheet-grid-strong); }
+table.sheet tbody tr:hover > td:not(.rownum), table.sheet tbody tr:hover > th { background: #f8fafd; }
+/* The row being worked on: its row number turns blue, as in Sheets. */
+table.sheet tbody tr:focus-within > td.rownum { background: #d3e3fd; color: #041e49; font-weight: 700; }
+/* Frozen: the row number, Mr# and name stay at the left while the other columns scroll sideways. */
+table.sheet .rownum { position: sticky; left: 0; z-index: 1; }
+table.sheet .mr-cell { position: sticky; left: var(--w-num); z-index: 1; }
+table.sheet .name-col { position: sticky; left: calc(var(--w-num) + var(--w-mr)); z-index: 1; box-shadow: 2px 0 0 var(--sheet-grid-strong); }
+table.sheet thead .rownum, table.sheet thead .mr-cell, table.sheet thead .name-col { z-index: 3; }
+table.sheet td.empty-cell { height: auto; white-space: normal; }
+
+/* The name: a click opens the row's actions (⋮), with the patient's flags (the list shows none, sheet.js SHOW_MEDICAL_ON_LIST). */
+.name-btn {
+  position: relative; display: flex; align-items: center; gap: 3px; width: 100%; height: calc(var(--sheet-row) - 1px); padding: 0 var(--space-1) 0 var(--space-2);
+  border: 0; background: none; color: var(--sheet-text); font: inherit; text-align: left; text-decoration: none; cursor: pointer;
+}
+.name-btn:hover .name-text { text-decoration: underline; }
+/* The name takes the cell, cut with an ellipsis when it must (whole in the tooltip and the row's dialog). The "Med" flag, when
+   SHOW_MEDICAL_ON_LIST puts it back, sits at the right and is always whole; the name keeps over half of a laptop's cell. */
+.name-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-flags { flex: none; display: flex; gap: 2px; }
+.name-flags .badge { flex: none; padding: 0 3px; font-size: 10.5px; line-height: 14px; }
+.name-cell .badge { flex: none; padding: 0 5px; font-size: 10.5px; line-height: 16px; }
+.kebab { flex: none; margin-left: auto; padding: 0 2px; color: var(--sheet-rownum-text); font-weight: 700; }
+.name-btn:hover .kebab, .name-btn:focus-visible .kebab { color: var(--text-accent); }
+.name-cell { display: flex; align-items: center; gap: var(--space-1); padding-right: 2px; }
+.name-cell .cell-input { flex: 1 1 auto; min-width: 0; }
+.kebab-btn {
+  flex: none; display: inline-grid; place-items: center; width: 24px; height: 22px; padding: 0; border: 0; border-radius: var(--radius-xs);
+  background: none; color: var(--sheet-rownum-text); font: 700 var(--fs-sm)/1 var(--sheet-font); cursor: pointer;
+}
+.kebab-btn:hover { background: var(--aubergine-soft); color: var(--text-accent); }
+/* Typed cells: the whole cell is the field, as in a spreadsheet; the selected one gets the blue frame. */
+table.sheet .cell-input {
+  display: block; width: 100%; height: calc(var(--sheet-row) - 1px); min-height: 0; padding: 0 var(--space-2); border: 0; border-radius: 0;
+  background: transparent; color: inherit; font: inherit; text-overflow: ellipsis;
+}
+table.sheet .cell-input.center { padding: 0 var(--space-1); text-align: center; }
+/* The arrow of a cell with a list (Treatment) keeps about 17px of the text's room even while it is not shown: it is there
+   only in the cell being typed in. (!important: Chrome sets its display on the arrow itself.) */
+table.sheet .cell-input:not(:focus)::-webkit-calendar-picker-indicator { display: none !important; }
+table.sheet .cell-input:focus { outline: 2px solid var(--sheet-select); outline-offset: -2px; background: var(--enamel); }
+table.sheet .cell-input:disabled { color: inherit; opacity: 1; cursor: default; }
+table.sheet .cell-input::placeholder { color: transparent; } /* empty cells look empty, as on the sheet; the example shows once the cell is chosen */
+table.sheet .cell-input:focus::placeholder { color: var(--text-subtle); }
+table.sheet .cell-input[aria-invalid="true"] { box-shadow: inset 0 0 0 2px var(--status-bad-text); }
+/* The box around a typed cell's field (and the details and checkup-name cells) has a set height and, while it is typed
+   in, is walled off (contain: size layout), so a key lays out that box alone and not the whole 120-row list. Only that one
+   box: walling off every box of the list gives each its own paint layer, and joining those up cost more than it saved. */
+table.sheet .cell-box, table.sheet .details-cell, table.sheet .name-cell { height: calc(var(--sheet-row) - 1px); }
+table.sheet :is(.cell-box, .details-cell, .name-cell):focus-within { contain: size layout; }
 .cell { padding: var(--space-2); display: flex; gap: var(--space-2); align-items: center; min-height: 40px; }
 .cell-input { border: 0; border-radius: 0; min-height: 40px; padding: var(--space-2); background: transparent; font-size: var(--fs-sm); width: 100%; }
 .cell-input:focus { outline: 2px solid var(--focus-ring); outline-offset: -2px; background: var(--surface); }
@@ -853,38 +1055,202 @@ select.cell-input { cursor: pointer; }
 .status-in_treatment { background: var(--aubergine-soft); color: var(--text-accent); }
 .status-completed { background: var(--status-ok-bg); color: var(--status-ok-text); }
 .status-cancelled, .status-no_show { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
-.people { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; padding: var(--space-1) var(--space-2); min-height: 40px; }
-.person { display: inline-flex; gap: var(--space-1); align-items: center; padding: 2px var(--space-1) 2px var(--space-2); border: 1px solid transparent; border-radius: var(--radius-pill); background: var(--aubergine-soft); color: var(--text-accent); font-size: var(--fs-xs); font-weight: 600; }
-.person.checker { background: var(--status-ok-bg); color: var(--status-ok-text); }
-.person.assistant { background: var(--status-neutral-bg); color: var(--status-neutral-text); border-style: dashed; border-color: var(--control-border); } /* shape cue, not just hue */
+
+/* Chips: a rounded pill that fills most of the cell; a ▾ marks the ones that are a dropdown. */
+.chip {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); max-width: 100%; height: 20px; padding: 0 var(--space-2);
+  border: 0; border-radius: 10px; font: 500 12px/20px var(--sheet-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
+}
+.chip-fill { display: flex; width: calc(100% - 8px); margin: 0 auto; }
+button.chip { cursor: pointer; }
+button.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+select.chip-select {
+  display: block; width: calc(100% - 8px); height: 20px; min-height: 0; margin: 0 auto; padding: 0 16px 0 7px; border: 0; border-radius: 10px;
+  -webkit-appearance: none; appearance: none; background-image: var(--caret-dark); background-repeat: no-repeat; background-position: right 6px center; background-size: 8px 5px;
+  font: 500 12px/20px var(--sheet-font); text-overflow: ellipsis; cursor: pointer;
+}
+select.chip-select:is(.gs-darkred, .gs-brown, .gs-darkgreen, .gs-darkblue, .gs-darkpurple, .gs-darkteal, .gs-darkgrey) { background-image: var(--caret-light); }
+select.chip-select:disabled { opacity: 1; cursor: default; background-image: none; }
+select.chip-select option { background: var(--enamel); color: var(--sheet-text); }
+/* A group the Google Sheet names that Clinic setup does not have yet (sheet.js rowEl): the sheet's words, greyed. 5.1:1. */
+select.chip-select.group-unknown { color: #5f6368; font-style: italic; }
+/* A checkup patient's Group cell: a dash (they are in no braces group). */
+.no-group { color: var(--sheet-rownum-text); }
+/* The chip palette of Google Sheets. Text is >=4.6:1 on every fill. */
+.gs-green { background-color: #d4edbc; color: #11734b; }
+.gs-yellow { background-color: #ffe5a0; color: #473822; }
+.gs-blue { background-color: #bfe1f6; color: #0a53a8; }
+.gs-purple { background-color: #e6cff2; color: #5a3286; }
+.gs-red { background-color: #ffcfc9; color: #b10202; }
+.gs-orange { background-color: #ffc8aa; color: #753800; }
+.gs-teal { background-color: #c6dbe1; color: #215a6c; }
+.gs-grey { background-color: #e8eaed; color: #3c4043; }
+.gs-darkred { background-color: #b10202; color: #fff; }
+.gs-brown { background-color: #753800; color: #fff; }
+/* The dark chips the Doctor Name column also uses (lib/tones.js), so more people get a colour of their own. White text is >=5.8:1 on each. */
+.gs-darkgreen { background-color: #11734b; color: #fff; }
+.gs-darkblue { background-color: #0a53a8; color: #fff; }
+.gs-darkpurple { background-color: #5a3286; color: #fff; }
+.gs-darkteal { background-color: #215a6c; color: #fff; }
+.gs-darkgrey { background-color: #3d3d3d; color: #fff; }
+
+/* Doctor Name: one chip per person in that person's colour, then "+" (add, and remove, in a dialog). On a touch screen,
+   short of room, the braces rule gives way first, then the names are cut; a chip never gets narrower than its ✓ and ×, so
+   every × stays in sight (overflow: clip, as a hidden overflow would scroll when Tab reaches a chip). A laptop: below. */
+.people { --x-w: 24px; display: flex; align-items: center; gap: var(--space-1); height: calc(var(--sheet-row) - 1px); padding: 0 var(--space-1); }
+.people-chips { display: flex; align-items: center; gap: 3px; flex: 0 1 auto; min-width: 0; overflow: clip; }
+/* The braces rule sits after the chips while there is room and gives way first (the zero-width space before it makes it
+   drop to a hidden second line when it does not fit whole, rather than show half). The "+" stays at the right edge. */
+.people .field-hint { flex: 0 1000 auto; display: flex; flex-wrap: wrap; min-width: 0; height: 16px; overflow: clip; font-size: 11px; line-height: 16px; color: var(--sheet-rownum-text); }
+.people .field-hint::before { content: '\200B'; }
+.person {
+  display: inline-flex; flex: 0 1 auto; align-items: center; gap: 2px; min-width: calc(var(--x-w) + 6px); height: 20px; padding: 0 1px 0 var(--space-2);
+  border: 1px solid transparent; border-radius: 10px; font: 500 12px/18px var(--sheet-font); white-space: nowrap;
+}
+.person.checker { min-width: calc(var(--x-w) + 16px); }
+.person-mark { flex: none; }
+.person-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.person.assistant { border-style: dashed; border-color: currentColor; } /* shape cue, not just hue */
 /* Chip remove: a 24x24 hit area (WCAG 2.5.8) without making the chip taller. */
 .person button, .chip-remove {
-  display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; margin: -4px -4px -4px 0; padding: 0;
-  border: 0; border-radius: var(--radius-pill); background: none; color: inherit; font-size: var(--fs-sm); line-height: 1; cursor: pointer;
+  flex: none; display: inline-grid; place-items: center; min-width: var(--x-w); min-height: 24px; margin: -3px -3px -3px -4px; padding: 0;
+  border: 0; border-radius: var(--radius-pill); background: none; color: inherit; font-size: var(--fs-sm); line-height: 1; opacity: .75; cursor: pointer;
 }
-.person button:hover, .chip-remove:hover { background: rgba(var(--shadow-base), .1); }
-.add-person, .chip-add { min-height: 28px; padding: 2px var(--space-3); border: 1px dashed var(--control-border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text-muted); font-size: var(--fs-xs); cursor: pointer; }
+.person button:hover, .chip-remove:hover { opacity: 1; background: rgba(var(--shadow-base), .12); }
+.add-person, .chip-add {
+  flex: none; display: inline-grid; place-items: center; width: 22px; height: 20px; min-height: 0; padding: 0; border: 1px dashed var(--control-border);
+  border-radius: 10px; background: var(--enamel); color: var(--sheet-rownum-text); font: 700 13px/1 var(--sheet-font); cursor: pointer;
+}
 .add-person:hover, .chip-add:hover { border-color: var(--aubergine); color: var(--text-accent); }
+.people-more { flex: none; width: 22px; color: var(--sheet-rownum-text); font: 700 12px/20px var(--sheet-font); text-align: center; }
+.people > .add-person, .people > .people-more { margin-left: auto; }
+/* A checkup row's Doctor Name is typed (sheet.js writtenPeople): the names lie over the cell as chips while it does not have
+   the cursor, and its text is hidden under them; a click goes through them to the cell, which then shows the text. */
+table.sheet .doctors-box { position: relative; }
+.written-people { position: absolute; inset: 0; display: flex; align-items: center; gap: 3px; padding: 0 var(--space-1); overflow: clip; pointer-events: none; }
+table.sheet .doctors-box.has-people:not(:focus-within) .cell-input { color: transparent; }
+table.sheet .doctors-box:focus-within .written-people { display: none; }
+/* A laptop (a mouse, 900px and wider): Doctor Name is wider than Treatment Details and a chip's × shows only on the chip
+   under the mouse (or with the keyboard on it). The first chip shows its name whole, as on the sheet; the next ones share
+   what is left, each whole when there is room and never cut to less than a few letters: a chip with no room for that
+   drops whole to a hidden second line, and sheet.js counts those in the "+" ("+2"; the "+" dialog removes them). */
+@media (min-width: 900px) and (hover: hover) and (pointer: fine) {
+  .sheet-page { --w-doctor: clamp(200px, 16.5vw, 380px); }
+  table.sheet col.c-doctor { width: var(--w-doctor); }
+  /* Every column but Treatment Details has a set width, so the list is at least those plus 260px for it, about the width
+     of the sheet's column (an entry like "UL 018 full arch PC refresh" whole; a longer one is whole in its tooltip), and
+     scrolls sideways (under the frozen #, Mr# and name) rather than squeeze it: on a laptop the sheet's last columns are
+     out of sight (Contact No and Reminder Status at 1366px, Reminder Status at 1536px), as on the sheet in such a window
+     (930px = Month, Token, Status, Group, P.P, Invoice, Contact No, Reminder Status and those 260px; All branches has its
+     120px Branch column on top; for someone who does not see invoices there is no Invoice column, and Treatment Details
+     has its 74px too). */
+  table.sheet { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 930px); }
+  table.sheet:has(> colgroup > .c-branch) { min-width: calc(var(--w-num) + var(--w-mr) + var(--w-name) + var(--w-treatment) + var(--w-doctor) + 1050px); }
+  .people-chips { flex-wrap: wrap; align-content: flex-start; height: 20px; }
+  .person, .person.checker { position: relative; min-width: 0; padding-right: var(--space-2); }
+  .person + .person { flex: 1 1 0; min-width: 6.5em; max-width: max-content; }
+  /* The × lies over the end of the chip, in the chip's colour, while the mouse is on the chip or the × has the keyboard:
+     it takes no room from the names. Its hit area is 24x24 (the padding is outside the painted 20px). */
+  .person .chip-remove {
+    position: absolute; top: -3px; right: -1px; bottom: -3px; width: 24px; min-width: 0; min-height: 0; margin: 0; padding: 2px 0;
+    border-radius: 0 10px 10px 0; background-color: inherit; background-clip: content-box; opacity: 0;
+  }
+  .person:hover .chip-remove, .person .chip-remove:focus-visible { opacity: 1; }
+  .person .chip-remove:hover { background-color: inherit; background-image: linear-gradient(rgba(var(--shadow-base), .14), rgba(var(--shadow-base), .14)); }
+}
+/* The "+" dialog: who is on the visit, each with Remove. */
+.people-on { margin-bottom: var(--space-3); }
+.people-on-list { display: grid; gap: var(--space-1); margin: var(--space-1) 0 0; padding: 0; list-style: none; }
+.people-on-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.people-on-undo { margin: var(--space-2) 0 0; }
 .token { font-weight: 800; color: var(--text-accent); }
-/* The Aaj ki List's serial number (1..n down the list), grey like a spreadsheet's row numbers; the token has its own column. */
-.serial { flex: 0 0 auto; min-width: 1.75rem; text-align: right; color: var(--text-muted); font-size: var(--fs-sm); font-weight: 700; font-variant-numeric: tabular-nums; }
-.token-cell { justify-content: center; }
-table.sheet th.center { text-align: center; }
-.month-pill { font-weight: 700; }
-.row-flags { display: flex; gap: var(--space-1); flex-wrap: wrap; }
-.add-panel { display: flex; align-items: center; gap: var(--space-3) var(--space-4); flex-wrap: wrap; margin: 0 0 var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-left: 4px solid var(--aubergine); border-radius: var(--radius-m); background: var(--surface); box-shadow: var(--shadow); }
-.add-panel-text { display: grid; gap: 2px; flex: 1 1 260px; min-width: 0; }
-.add-panel-text .muted { font-size: var(--fs-sm); }
-.add-panel .btn-primary { white-space: nowrap; }
+table.sheet .token { font-weight: 500; color: inherit; }
+.month-pill { font-weight: 500; }
+.details-cell { display: flex; align-items: center; }
+.details-cell .cell-input { flex: 1 1 auto; min-width: 0; }
+.quick-tap {
+  flex: 0 0 auto; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 3px; padding: 0; border: 1px solid var(--sheet-grid-strong);
+  border-radius: var(--radius-xs); background: var(--enamel); color: var(--sheet-rownum-text); font-weight: 700; line-height: 1; cursor: pointer;
+}
+.quick-tap:hover { color: var(--text-accent); border-color: var(--aubergine); }
+/* P.P: pending dues in red bold, written like the sheet (0, 500, 11.5k). */
+table.sheet td.pp { text-align: right; }
+.pp-due, .pp-zero { font-weight: 700; color: var(--sheet-pp); }
+
+/* The add line: before the list in the page (the keyboard reaches it from the toolbar); on a laptop it is shown under the
+   list like the sheet's next empty row, in sight at the bottom on a long day, and its list of matches opens upwards. */
+.add-panel {
+  position: relative; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-height: 34px;
+  margin: 0 0 var(--space-2); padding: 3px var(--space-2) 3px 0; border: 1px solid var(--sheet-grid-strong); background: var(--enamel);
+}
+.add-panel::before {
+  content: '+'; align-self: stretch; display: grid; place-items: center; width: var(--w-num); margin: -3px 0; border-right: 1px solid var(--sheet-grid-strong);
+  background: var(--sheet-rownum-bg); color: var(--sheet-rownum-text); font-weight: 700;
+}
+.add-label { font-size: var(--fs-sm); font-weight: 700; white-space: nowrap; }
+.add-panel input[type=search] { min-height: 28px; padding: 2px var(--space-2); border-radius: var(--radius-s); font-size: var(--fs-sm); }
+.add-panel .btn-small { min-height: 28px; white-space: nowrap; }
+.add-panel-text { flex: 1 1 14rem; min-width: 0; }
+.add-panel-text .muted { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
+
+/* A laptop or bigger: the list fills the window to its bottom edge (sheet.js measures where it starts), so the page does
+   not scroll; the rows scroll under the header row, and the add line stays at the bottom. */
+@media (min-width: 900px) {
+  .app:has(.sheet-page) { min-height: 0; } /* (its usual 100svh under the top bar would make the page scroll) */
+  .main:has(> .sheet-page) { padding: 6px var(--space-4) var(--space-1); }
+  .main:has(+ .main > .sheet-page) { padding: var(--space-1) var(--space-4) 0; }
+  .main:empty:has(+ .main > .sheet-page) { padding-top: 0; }
+  .main:has(+ .main > .sheet-page) .demo-banner { margin-bottom: 0; padding-block: 1px; font-size: var(--fs-xs); }
+  .sheet-page { display: flex; flex-direction: column; height: calc(100svh - var(--sheet-top, 140px) - var(--space-1)); min-height: 420px; }
+  .sheet-page > .sheet-wrap { flex: 0 1 auto; min-height: calc(var(--sheet-row) * 5); max-height: none; }
+  .sheet-page > .add-panel { order: 1; margin: -1px 0 0; }
+  .add-panel .suggestions { top: auto; bottom: calc(100% + var(--space-1)); }
+  /* The note of an ended day is under the list, above the add line, where it takes its room from the bottom of the list. */
+  .sheet-page > .day-end-live { order: 1; }
+  .sheet-page > .day-end-live:not(:empty) { margin: var(--space-1) 0; }
+  /* Nothing above the list changes its height by itself, so the rows never move under the mouse or the cursor: the bars
+     that come and go are on the line of the counts, in the room between the counts and the save status (like the note of
+     new rows), one line no taller than the count chips. Their words are cut with an ellipsis there (whole in the tooltip,
+     and read out when they come), never their buttons; the note of new rows gives way first. The list of the changes not
+     saved ("Show") opens over the rows, under that line, like the Filters panel. */
+  .sheet-subhead { position: relative; z-index: 5; }
+  .sheet-slot { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); overflow: hidden; }
+  .sheet-slot > .sheet-new-rows { flex: 0 100 auto; }
+  /* (min-width 0: the bars are never wider than the slot, whatever the length of a warning; each one cuts its own words,
+     a warning first, before the words of the Undo and of the changes not saved) */
+  .sheet-bars { flex: 0 1 auto; min-width: 0; display: flex; gap: var(--space-1); }
+  .sheet-bars > .alert { flex: 0 1 auto; min-width: auto; height: 26px; padding: 0 var(--space-2); font-size: var(--fs-sm); line-height: 26px; }
+  .sheet-bars > .alert-warning { flex-shrink: 4; }
+  /* No connection: said here, on the line of the counts; the banner above the top bar would push the list down. */
+  .sheet-bars > .sheet-offline { display: block; }
+  .sheet-bars:has(> .sheet-offline:not([hidden])) { display: flex; }
+  body:has(.sheet-page) .offline-banner { display: none; }
+  /* (the words shrink to a letter or two, so a bar is never narrower than its buttons: one line, cut with an ellipsis) */
+  .sheet-bars > .alert-info > span:first-child, .sheet-fails-summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; white-space: normal; overflow-wrap: anywhere; }
+  .sheet-bars > .sheet-fails { display: flex; align-items: center; }
+  /* (while the line of the changes not saved is there it says what the save status would, and takes its room) */
+  .sheet-subhead:has(.sheet-fails:not([hidden])) > .save-status { display: none; }
+  .sheet-bars .btn-small { min-height: 24px; padding-block: 0; }
+  .sheet-bars .sheet-fails-list {
+    position: absolute; top: calc(100% + var(--space-1)); right: 0; z-index: var(--z-popover); width: min(44rem, 100%); max-height: 40vh;
+    margin: 0; padding: var(--space-2) var(--space-3) var(--space-2) var(--space-6); border: 1px solid var(--border-strong); border-radius: var(--radius-m);
+    background: var(--surface); box-shadow: var(--shadow-md); font-weight: 400; line-height: 1.4;
+  }
+}
+/* A phone or a small tablet: the page scrolls; only the name stays at the left edge (the row number and Mr# scroll away). */
+@media (max-width: 899.98px) {
+  .sheet-page { --w-name: 150px; }
+  .sheet-wrap { scroll-padding-left: var(--w-name); }
+  table.sheet .rownum, table.sheet .mr-cell { left: auto; }
+  table.sheet .name-col { left: 0; }
+  .sheet-tools { margin-left: 0; }
+  .add-panel-text .muted { white-space: normal; }
+}
 
 /* ------------------------------------------------------------ checkups (no Mr#): Aaj ki List rows, the Checkups page */
 .badge-checkup { background: var(--checkup-bg); color: var(--checkup-text); border-color: var(--checkup-line); }
-/* A left edge in the row header: colour only repeats what the "Checkup" badge says. */
-table.sheet tbody tr.is-checkup > .row-head { box-shadow: inset 4px 0 0 var(--checkup-line), 1px 0 0 var(--border-strong); }
-.checkup-name { flex: 1 1 auto; min-width: 0; }
-.checkup-name .cell-input { min-height: 32px; padding-inline: var(--space-1); font-weight: 600; }
-.checkup-name .field-hint { padding-inline: var(--space-1); }
-.token-input { flex: 0 0 auto; width: 3.5rem; min-height: 32px; padding: 2px var(--space-1); text-align: center; font-size: var(--fs-sm); font-weight: 800; color: var(--text-accent); }
+/* A left edge in the name cell: colour only repeats what "no Mr#" in the MR # cell says (and a screen reader hears). */
+table.sheet tbody tr.is-checkup > .name-col { box-shadow: inset 3px 0 0 var(--checkup-line), 2px 0 0 var(--sheet-grid-strong); }
 /* Follow-up status and the day status of a checkup: one colour family per group; the text always names the status. */
 .status-unset, .status-chip.tone-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
 .status-chip.tone-ok { background: var(--status-ok-bg); color: var(--status-ok-text); }
@@ -1515,9 +1881,6 @@ table.invoice-lines input { min-width: 0; }
   .cx-group h3 { font-size: var(--fs-2xl); }
 }
 
-.details-cell { gap: 0; }
-.quick-tap { flex: 0 0 auto; display: inline-grid; place-items: center; width: 32px; height: 32px; margin-right: var(--space-1); border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface); color: var(--text-muted); font-weight: 700; line-height: 1; cursor: pointer; }
-.quick-tap:hover { color: var(--text-accent); border-color: var(--aubergine); }
 .phone-link a { display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; text-decoration: none; font-size: var(--fs-ui); opacity: .8; }
 .phone-link a:hover { opacity: 1; }
 
@@ -1542,9 +1905,25 @@ table.invoice-lines input { min-width: 0; }
   .cell-input, .topsearch input, .status-chip { font-size: var(--fs-control); }
   .topsearch input { min-height: var(--target); }
   .status-chip { min-height: 36px; }
-  .add-person, .chip-add { min-height: 36px; padding-inline: var(--space-3); }
-  .person button, .chip-remove { min-width: 32px; min-height: 32px; margin-block: -7px; }
-  .quick-tap { width: var(--target); height: var(--target); }
+  .sheet-page { --sheet-row: 44px; }
+  /* (the list scrolls sideways here anyway: wider, so the bigger chips of three people and their × fit the Doctor Name cell,
+     and Status and Group are wide enough for "In treatment" and "No group" in 16px, see below) */
+  table.sheet { min-width: 1614px; }
+  table.sheet:has(> colgroup > .c-branch) { min-width: 1734px; } /* (All branches: its Branch column on top) */
+  table.sheet col.c-status { width: 128px; }
+  table.sheet col.c-group { width: 108px; }
+  .sheet-toolbar select, .sheet-toolbar input:not([type=checkbox]), .add-panel input[type=search] { min-height: var(--target); font-size: var(--fs-control); }
+  .chip, select.chip-select, .person { height: 32px; border-radius: 16px; font-size: var(--fs-ui); }
+  /* The list's typed cells and its Status and Group chips are form fields: 16px here too (the sheet's 13px and 12px would
+     make iOS zoom on every tap). */
+  table.sheet .cell-input, select.chip-select { font-size: var(--fs-control); }
+  .add-person, .chip-add { width: 36px; height: 32px; border-radius: 16px; }
+  .people { --x-w: 32px; }
+  .person button, .chip-remove { min-height: 32px; margin-block: -6px; }
+  .quick-tap { width: 36px; height: 36px; }
+  .count-chip, .kebab-btn { min-height: var(--target); min-width: var(--target); }
+  .sheet-bars > .alert { height: auto; } /* (on a laptop's line of the counts too: as tall as the count chips here) */
+  .sheet-bars .btn-small { min-height: var(--target); }
   .menu-list a, .menu-list .menu-btn { min-height: var(--target); }
   .show-passwords { min-height: var(--target); }
   .toast-close { min-width: var(--target); min-height: var(--target); }
@@ -1571,6 +1950,8 @@ table.invoice-lines input { min-width: 0; }
     outline: 2px solid Highlight; outline-offset: -2px;
   }
   .sx-day { border: 1px solid CanvasText; }
+  /* (a checkup row's typed doctors show as typed: the chips have no colours here, and the text could show through them) */
+  .written-people { display: none; }
   .sx-day.is-today, .cx-cal-day.is-today { outline: 3px solid Highlight; outline-offset: -3px; }
   .cx-row.is-today .cx-track { outline: 2px solid Highlight; outline-offset: 2px; }
   .cx-track, .cx-legend i, .legend-swatch { forced-color-adjust: none; background: Canvas; box-shadow: none; border: 1px solid CanvasText; }
@@ -1578,7 +1959,7 @@ table.invoice-lines input { min-width: 0; }
   .cx-ali, .cx-legend .is-ali, .legend-swatch.is-ali { forced-color-adjust: none; background: repeating-linear-gradient(-45deg, Highlight 0 3px, Canvas 3px 5px); box-shadow: none; border: 1px solid Highlight; }
   .cx-cal-day.is-visit { forced-color-adjust: none; background: Highlight; color: HighlightText; }
   .cx-cal-day.is-visit.is-past { background: Canvas; color: CanvasText; border: 2px dashed Highlight; }
-  .badge, .status-chip, .person, .cx-status, .sx-chip, .sx-today { border: 1px solid CanvasText; }
+  .badge, .status-chip, .chip, .count-chip, .person, .cx-status, .sx-chip, .sx-today { border: 1px solid CanvasText; }
   .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn, .forms-card { border: 1px solid ButtonText; }
   .choice:has(input:checked) { outline: 2px solid Highlight; outline-offset: -2px; }
   .modal, .menu-list, .search-results, .suggestions, .combobox [role="listbox"], .toast { border: 1px solid CanvasText; }

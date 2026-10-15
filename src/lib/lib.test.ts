@@ -191,6 +191,23 @@ test('autosave merges edits to the same row and saves them', async () => {
   assert.equal(q.pendingCount, 0);
 });
 
+test('autosave tells a row\'s unsent changes, those waiting and the one being sent, latest value first', async () => {
+  let release: () => void = () => {};
+  const timers = manualTimers();
+  const q = new AutosaveQueue({ store: memoryStore(), send: () => new Promise<void>((r) => { release = r; }), ...timers });
+  q.edit('visits', 'r1', 'details_text', 'U L 016');
+  q.edit('visits', 'r2', 'details_text', 'other row');
+  void timers.runAll(); // r1 is being sent now
+  await new Promise((r) => setImmediate(r));
+  q.edit('visits', 'r1', 'details_text', 'U L 016 PC');
+  q.edit('visits', 'r1', 'treatment_label', 'Monthly');
+  assert.deepEqual(q.unsentChanges('visits', 'r1'), { details_text: 'U L 016 PC', treatment_label: 'Monthly' });
+  assert.deepEqual(q.unsentChanges('checkups', 'r1'), {});
+  release();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(q.unsentChanges('visits', 'r1'), { details_text: 'U L 016 PC', treatment_label: 'Monthly' }, 'the later edit still waits');
+});
+
 test('autosave keeps edits while offline and survives a page reload', async () => {
   const store = memoryStore();
   const timers = manualTimers();
