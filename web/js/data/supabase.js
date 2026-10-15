@@ -275,7 +275,7 @@ function timedFetch(input, init = {}, hooks = {}) {
 // Database functions that only read. They are sent as POST, which timedFetch leaves alone, so callRpc gives them
 // the same time limit as a GET. Saving functions (save_invoice, close_cash, merge_patients, imports ...) have none.
 const READ_RPCS = new Set(['payments_summary', 'opd_summary', 'total_dues', 'clinic_report', 'doctor_summary', 'dues_for',
-  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins', 'day_list_history', 'day_list_copy']);
+  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins', 'staff_records', 'day_list_history', 'day_list_copy']);
 // How long to wait for the server to confirm a logout before ending it on this computer alone.
 const SIGNOUT_TIMEOUT_MS = 4000;
 
@@ -802,8 +802,12 @@ export async function createSupabaseAdapter() {
     const { data, error } = await sb.functions.invoke('admin-users', { body });
     if (error) {
       let message = error.message;
+      // No answer at all (the connection dropped, maybe after the request went out): the browser's own words ("Failed to fetch"),
+      // which friendlyError turns into plain advice, instead of the library's "Failed to send a request to the Edge Function".
+      if (error.name === 'FunctionsFetchError') message = error.context?.message || 'Failed to fetch';
       try { const sent = await error.context?.json?.(); if (sent?.error) message = sent.error; } catch { /* keep the generic text */ }
-      throw new Error(oldFunction(message));
+      // The status goes with it, so a gateway's 502/503/504 reads as "did not answer in time" (friendlyError checks e.status).
+      throw Object.assign(new Error(oldFunction(message)), { status: error.context?.status });
     }
     if (data?.error) throw new Error(oldFunction(data.error));
     return data;
@@ -1937,6 +1941,19 @@ export async function createSupabaseAdapter() {
       check(await sb.from('staff').update({ active: true, deactivated_at: null }).eq('id', id));
       await sb.functions.invoke('admin-users', { body: { action: 'unban_user', user_id: id } });
     },
+    /**
+     * What the website has with this staff id on it (public.staff_records): { total, parts: [{ label, one, count }] }, most first.
+     * Only for the dialog: Delete asks the server again (delete_staff), and the server decides.
+     */
+    async staffRecords(id) {
+      const r = await rpc('staff_records', { p_staff: id });
+      if (r.missing) throw plainError('STAFF_DELETE_MISSING: Deleting staff accounts needs the database update 20261015000200_staff_delete.sql first. Nothing was changed.', 'STAFF_DELETE_MISSING');
+      return r.data;
+    },
+    /** Delete on Admin -> Staff accounts: { result: 'removed' | 'archived', total, fallback? } (admin-users delete_staff). */
+    async deleteStaff(id) { return adminUsers({ action: 'delete_staff', user_id: id }); },
+    /** Bring back from "Deleted accounts": the deleted mark goes, the account stays switched off (admin-users restore_staff). */
+    async restoreStaff(id) { await adminUsers({ action: 'restore_staff', user_id: id }); },
     async setSetting(key, value) { check(await sb.from('app_settings').update({ value, updated_at: new Date().toISOString() }).eq('key', key)); },
     async discountCaps() {
       const rows = check(await sb.from('discount_caps').select('*'));
@@ -1999,10 +2016,11 @@ export async function createSupabaseAdapter() {
         sb.from('doctor_groups').select('*').order('id').then(check),
         sb.from('treatments').select('*').order('sort_order').order('name').then(check),
         sb.from('expense_categories').select('*').order('sort_order').order('name').then(check),
-        sb.from('staff').select('id,full_name,role,active').order('full_name').then(check),
+        sb.from('staff').select('*').order('full_name').then(check),
         sb.from('doctor_commission_rules').select('*').order('percent', { ascending: false }).then(check).catch(() => []),
       ]);
-      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.filter((s) => s.active), commission_rules: rules };
+      // Every account, so a doctor's login keeps its name in the table; the Login drop-down offers only accounts that are on and not deleted.
+      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.map(({ id, full_name, role, active, deleted_at }) => ({ id, full_name, role, active, deleted_at: deleted_at ?? null })), commission_rules: rules };
     },
     async saveSetupRow(table, row) {
       const tables = ['branches', 'clinicians', 'doctor_groups', 'treatments', 'expense_categories', 'doctor_commission_rules'];
