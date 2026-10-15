@@ -66,19 +66,30 @@ function capped(rows, cap) {
 const CHECKUPS_MISSING_CODES = new Set(['PGRST205', 'PGRST202', '42P01', '42883']);
 const CHECKUPS_MISSING_TEXT = 'CHECKUPS_MISSING: the checkup list is not switched on yet. It appears once the database update has been run.';
 const checkupsMissing = (e) => !!e && (CHECKUPS_MISSING_CODES.has(e.code) || e.status === 404);
-/** Runs a checkups request; "not installed" comes out as one error with the code CHECKUPS_MISSING. */
+// The four answers of the checkup form (Checkup Patient Form 2.0) are the columns of migration 20261011000300. A website updated before
+// it is run gets PGRST204 ("Could not find the 'wants_treatment' column of 'checkups' in the schema cache") or 42703 for a filter on one:
+// that is said in plain words (the insert was refused, so nothing was saved).
+const FORM_COLUMNS = /\b(ali_recommended|pricing_understood|wants_treatment|treatment_plan)\b/;
+const formMissing = (e) => !!e && (e.code === 'PGRST204' || e.code === '42703') && FORM_COLUMNS.test(e.message || '');
+const FORM_MISSING_TEXT = 'CHECKUP_FORM_MISSING: The checkup form needs a database update (20261011000300_checkup_form_2.sql). Nothing was saved. Ask Dr. Ali to run the update, then try again.';
+// The import of the Google Form's old answers is the function import_checkup_form of the same file.
+const FORM_IMPORT_MISSING_TEXT = 'CHECKUP_FORM_MISSING: Importing the checkup form\'s answers needs a database update (20261011000300_checkup_form_2.sql). Nothing was imported. Run the update, then drop the file again.';
+/** Runs a checkups request; "not installed" comes out as one error with the code CHECKUPS_MISSING (or CHECKUP_FORM_MISSING for the form's answers). */
 async function checkupsCall(run) {
-  try { return await run(); } catch (e) { throw checkupsMissing(e) ? plainError(CHECKUPS_MISSING_TEXT, 'CHECKUPS_MISSING') : e; }
+  try { return await run(); } catch (e) {
+    if (checkupsMissing(e)) throw plainError(CHECKUPS_MISSING_TEXT, 'CHECKUPS_MISSING');
+    throw formMissing(e) ? plainError(FORM_MISSING_TEXT, 'CHECKUP_FORM_MISSING') : e;
+  }
 }
 const CHECKUP_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
-const CHECKUP_SOURCES = ['website', 'google_sheet', 'archive'];
+const CHECKUP_SOURCES = ['website', 'google_sheet', 'google_form', 'archive'];
 /** 'YYYY-MM' -> the first day of the month after it. */
 function nextMonthStart(ym) {
   const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
   return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
 }
 /** The filters of the Checkups page (and of its Excel file) put on a query of the view checkup_list. */
-export function checkupFilters(query, { q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '' } = {}) {
+export function checkupFilters(query, { q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', wants = '' } = {}) {
   let out = query;
   const text = String(q || '').replace(/[%,()*\\"]/g, '').replace(/\s+/g, ' ').trim();   // these characters would break the or() list
   if (text) {
@@ -99,10 +110,14 @@ export function checkupFilters(query, { q = '', branchId = null, from = null, to
   if (CHECKUP_SOURCES.includes(source)) out = out.eq('source', source);
   if (registered === 'yes') out = out.not('patient_id', 'is', null);
   else if (registered === 'no') out = out.is('patient_id', null);
+  // "Wants to start" (Checkup Patient Form 2.0): Yes or No; rows without the answer match neither
+  if (wants === 'yes' || wants === 'no') out = out.eq('wants_treatment', wants === 'yes');
   return out;
 }
-// The columns staff may change after a checkup exists, and how each is stored (empty text is "nothing").
-const CHECKUP_EDITABLE = ['patient_name', 'phone', 'city', 'doctors', 'checkup_for', 'details', 'day_status', 'follow_up', 'notes', 'est_fee', 'branch_id', 'token'];
+// The columns staff may change after a checkup exists, and how each is stored (empty text is "nothing"). The last four are the answers of the
+// Checkup Patient Form 2.0 (migration 20261011000300).
+const CHECKUP_EDITABLE = ['patient_name', 'phone', 'city', 'doctors', 'checkup_for', 'details', 'day_status', 'follow_up', 'notes', 'est_fee', 'branch_id', 'token',
+  'ali_recommended', 'pricing_understood', 'wants_treatment', 'treatment_plan'];
 function checkupValue(key, v) {
   const empty = v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
   switch (key) {
@@ -110,7 +125,9 @@ function checkupValue(key, v) {
     case 'phone': case 'city': case 'token': return empty ? null : String(v).trim();
     case 'est_fee': return empty || Number.isNaN(Number(v)) ? null : Number(v);
     case 'branch_id': return empty || v === 'none' ? null : Number(v);
-    default: return empty ? null : v;       // doctors, checkup_for, details, notes, day_status: as typed
+    case 'ali_recommended': case 'wants_treatment': return typeof v === 'boolean' ? v : null;   // Yes / No, or not answered
+    case 'treatment_plan': return empty ? null : String(v).trim();
+    default: return empty ? null : v;       // doctors, checkup_for, details, notes, day_status, pricing_understood: as typed
   }
 }
 /** { key: value } of the editable columns present in `changes`, ready to send. */
@@ -1265,9 +1282,9 @@ export async function createSupabaseAdapter() {
     // A checkup row = the columns of public.checkups + phone_key + mr_number (the linked patient file's Mr#). While the database update
     // is not run: listDayCheckups resolves [] with .missing = true; every other method throws an Error with code 'CHECKUPS_MISSING'.
     /** One page of the Checkups page, newest first. -> { rows, total } */
-    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', page = 0, pageSize = 50 } = {}) {
+    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', wants = '', page = 0, pageSize = 50 } = {}) {
       return checkupsCall(async () => {
-        const filters = { q, branchId, from, to, followUp, source, registered };
+        const filters = { q, branchId, from, to, followUp, source, registered, wants };
         const first = Math.max(0, Number(page) || 0) * pageSize;
         const res = await checkupFilters(sb.from('checkup_list').select('*', { count: 'exact' }), filters)
           .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id')
@@ -1286,10 +1303,11 @@ export async function createSupabaseAdapter() {
       return checkupsCall(() => fetchPaged(() => checkupFilters(sb.from('checkup_list').select('*'), filters)
         .order('checkup_date', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).order('id'), 20000));
     },
-    /** The checkups of one day (exact-day rows only), oldest first. branchId null = every branch the reader may see. */
+    /** The checkups of one day (exact-day rows only), oldest first. branchId null = every branch the reader may see. An answer imported from
+     *  the Google Form is not one of them (it is on the Checkups page; that day's list did not have it). */
     async listDayCheckups({ branchId = null, date }) {
       try {
-        let q = sb.from('checkup_list').select('*').eq('checkup_date', date).eq('date_is_month', false);
+        let q = sb.from('checkup_list').select('*').eq('checkup_date', date).eq('date_is_month', false).neq('source', 'google_form');
         if (branchId) q = q.eq('branch_id', Number(branchId));
         return check(await q.order('created_at', { ascending: true }).order('id'));
       } catch (e) {
@@ -1315,7 +1333,7 @@ export async function createSupabaseAdapter() {
         return checkupListRow(sb, check(await sb.from('checkups').insert(insert).select().single()));
       });
     },
-    /** Changes a checkup (only patient_name, phone, city, doctors, checkup_for, details, day_status, follow_up, notes, est_fee, branch_id, token are sent). -> the row, or null when no row was changed (removed, or not visible). */
+    /** Changes a checkup (only patient_name, phone, city, doctors, checkup_for, details, day_status, follow_up, notes, est_fee, branch_id, token and the four answers are sent). -> the row, or null when no row was changed (removed, or not visible). */
     async updateCheckup(id, changes) {
       return checkupsCall(async () => {
         const patch = checkupPatch(changes);
@@ -1327,7 +1345,7 @@ export async function createSupabaseAdapter() {
     async deleteCheckup(id) {
       return checkupsCall(async () => {
         const rows = check(await sb.from('checkups').delete().eq('id', id).select('id'));
-        if (!rows.length) throw plainError('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).', 'NOT_REMOVED');
+        if (!rows.length) throw plainError('NOT_REMOVED: this checkup could not be removed (rows from the old list or the Google Form can only be removed by Dr. Ali).', 'NOT_REMOVED');
       });
     },
     /** Gives the person a patient file with the next Mr# and links it. -> { patient_id, mr_number, full_name } */
@@ -1341,6 +1359,18 @@ export async function createSupabaseAdapter() {
     /** Admin: adds up to 500 rows of the old checkup list (the rows readCheckupList() makes). -> { given, inserted, updated, unchanged, kept, skipped: [{ row, reason }], skipped_count } */
     async importCheckups(rows, { overwrite = false } = {}) {
       return checkupsCall(async () => check(await sb.rpc('import_checkups', { p_rows: rows, p_overwrite: !!overwrite })));
+    },
+    /**
+     * Admin: up to 500 old answers of the Google Form "Checkup Patient Form 2.0" (the rows readFormResponses() makes). dryRun: the preview
+     * (the database does everything and undoes it). -> { given, inserted, filled_day, filled_month, already, same, skipped: [{ row, reason }], skipped_count,
+     * other_name (answers whose phone is on that day's list under another person's name), dry_run }
+     */
+    async importCheckupForm(rows, { dryRun = false } = {}) {
+      try {
+        return check(await sb.rpc('import_checkup_form', { p_rows: rows, p_dry_run: !!dryRun }));
+      } catch (e) {
+        throw checkupsMissing(e) ? plainError(FORM_IMPORT_MISSING_TEXT, 'CHECKUP_FORM_MISSING') : e;
+      }
     },
 
     // ------------------------------------------------------------ photos

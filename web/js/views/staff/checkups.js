@@ -3,18 +3,20 @@
 // Staff set the follow-up status and write notes here, and register someone as a patient (with an Mr#) when they
 // start treatment. Notes save by themselves and wait on this device if the internet drops; the follow-up status and
 // everything else needs the connection and says so when it fails.
+// The answers of the checkup form (Checkup Patient Form 2.0, 11 Oct 2026) show in two columns ("Wants to start", "When / why not") and,
+// so the list still fits a 1366 px screen, as two lines under the treatment ("Dr. Ali recommended", "Understood pricing").
 import { h, mount, toast, friendlyError, isLostAnswer, empty, modal, field, select, localISO, announce, shortDate, phoneLink, showFormErrors, clearFieldErrors, busy, srOnly, capFirst } from '../../ui/dom.js';
 import { state, can, isAdmin, myBranches, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
-import { FOLLOW_UP_STATUSES, SOURCE_LABELS, monthLabel, checkupsToSheet } from '../../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, SOURCE_LABELS, PRICING_LABELS, monthLabel, checkupsToSheet, yesNo } from '../../lib/checkups.js';
 import { loadSheetJS } from '../../lib/sheetjs.js';
-import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, canRemoveCheckup, canRegisterCheckup, registeredMr } from './checkup-actions.js';
+import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, discardGuard, canRemoveCheckup, whyNoRemove, canRegisterCheckup, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'checkups-pending-v1';
 const PAGE_SIZE = 50;
 const FIELD_NAMES = { notes: 'Notes' };
 const MISSING_TEXT = 'The checkup list is not switched on yet. It appears here once the database update has been run.';
-const SOURCES = ['website', 'google_sheet', 'archive'];
+const SOURCES = ['website', 'google_sheet', 'google_form', 'archive'];
 
 // Same wording rules as the Aaj ki List: only a browser that reports itself offline is "no internet connection".
 const notSaved = (e, still) => {
@@ -91,7 +93,12 @@ window.addEventListener('offline', () => queue?.setOnline(false));
 window.addEventListener('beforeunload', (e) => { if (queue?.pendingCount && !queue.disposed && queueUser === currentUser()) { e.preventDefault(); e.returnValue = ''; } });
 
 const whenText = (c) => (!c.checkup_date ? 'Not recorded' : c.date_is_month ? monthLabel(c.checkup_date) : shortDate(c.checkup_date));
-const sourceText = (c) => (c.source === 'archive' ? `${SOURCE_LABELS.archive}${c.source_tab ? `: ${c.source_tab}` : ''}` : SOURCE_LABELS[c.source] || c.source || '');
+// An answer imported from the Google Form is a row of its own ("From the Google Form") or went onto a checkup the list already had.
+const sourceText = (c) => {
+  if (c.source === 'google_form') return 'From the Google Form';
+  const base = c.source === 'archive' ? `${SOURCE_LABELS.archive}${c.source_tab ? `: ${c.source_tab}` : ''}` : SOURCE_LABELS[c.source] || c.source || '';
+  return c.form_submitted_at ? `${base}, answers from the Google Form` : base;
+};
 const number = (n) => Number(n || 0).toLocaleString('en-PK');
 // Only digits (a piece of a phone number) and fewer than 4 of them: the search cannot use that for a phone, so the empty list says why.
 const shortPhoneFragment = (q) => { const t = String(q || '').trim(); const n = t.replace(/\D/g, '').length; return n > 0 && n < 4 && !/[^\d\s+()-]/.test(t); };
@@ -117,16 +124,17 @@ export async function renderCheckups(root, params, signal) {
     status: (params.get('status') || '').slice(0, 60),
     source: SOURCES.includes(params.get('source')) ? params.get('source') : '',
     file: ['yes', 'no'].includes(params.get('file')) ? params.get('file') : '',
+    wants: ['yes', 'no'].includes(params.get('wants')) ? params.get('wants') : '',
     page: Math.max(0, (parseInt(params.get('page'), 10) || 1) - 1),
   };
   const args = () => ({
     q: f.q.trim(), branchId: f.branch === 'none' ? 'none' : f.branch ? Number(f.branch) : null, from: f.from || null, to: f.to || null,
-    followUp: f.status, source: f.source, registered: f.file,
+    followUp: f.status, source: f.source, registered: f.file, wants: f.wants,
   });
-  const filtered = () => !!(f.q.trim() || f.branch || f.from || f.to || f.status || f.source || f.file);
+  const filtered = () => !!(f.q.trim() || f.branch || f.from || f.to || f.status || f.source || f.file || f.wants);
   const setURL = () => {
     const p = new URLSearchParams();
-    for (const [k, v] of [['q', f.q.trim()], ['branch', f.branch], ['from', f.from], ['to', f.to], ['status', f.status], ['source', f.source], ['file', f.file]]) if (v) p.set(k, v);
+    for (const [k, v] of [['q', f.q.trim()], ['branch', f.branch], ['from', f.from], ['to', f.to], ['status', f.status], ['wants', f.wants], ['source', f.source], ['file', f.file]]) if (v) p.set(k, v);
     if (f.page > 0) p.set('page', String(f.page + 1));
     const text = p.toString();
     history.replaceState(null, '', `#/staff/checkups${text ? `?${text}` : ''}`);
@@ -215,7 +223,12 @@ export async function renderCheckups(root, params, signal) {
         c.phone ? h('div', { class: 'field-hint' }, phoneLink(c.phone)) : null,
         c.patient_id ? (mr ? h('a', { class: 'mr', href: `#/staff/patient/${c.patient_id}` }, `Mr# ${mr}`) : h('span', { class: 'badge badge-ok' }, 'Has a patient file')) : null),
       h('td', {}, c.branch_id ? branchName(c.branch_id) : h('span', { class: 'muted' }, 'No branch')),
-      h('td', {}, capFirst(c.checkup_for) || h('span', { class: 'muted' }, '–'), c.doctors ? h('div', { class: 'muted field-hint' }, c.doctors) : null),
+      h('td', { class: 'checkup-treat' }, capFirst(c.checkup_for) || h('span', { class: 'muted' }, '–'), c.doctors ? h('div', { class: 'muted field-hint' }, c.doctors) : null,
+        yesNo(c.ali_recommended) ? h('div', { class: 'field-hint answer-line' }, `Dr. Ali recommended: ${yesNo(c.ali_recommended)}`) : null,
+        PRICING_LABELS[c.pricing_understood] ? h('div', { class: 'field-hint answer-line' }, `Understood pricing: ${PRICING_LABELS[c.pricing_understood]}`) : null),
+      h('td', { class: 'nowrap' }, yesNo(c.wants_treatment)
+        ? h('span', { class: ['badge', c.wants_treatment ? 'badge-ok' : 'badge-muted'] }, yesNo(c.wants_treatment)) : h('span', { class: 'muted' }, '–')),
+      h('td', { class: 'checkup-plan' }, c.treatment_plan || h('span', { class: 'muted' }, '–')),
       h('td', {}, h('div', { class: 'cell' }, follow, savedMark)),
       h('td', { class: 'cell-td' }, notes),
       h('td', { class: 'muted' }, sourceText(c)),
@@ -225,49 +238,47 @@ export async function renderCheckups(root, params, signal) {
         canEdit ? h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Edit ${who}`, dataset: { focus: 'edit' }, onclick: () => editModal(c) }, 'Edit') : null)));
   }
 
+  // The same questions as "+ Add checkup patient", filled in; city, treatment details and the fee under "More". Answers are added here after
+  // a follow-up call, so every way of leaving it with changes in it asks first, as the checkup form does (discardGuard).
   function editModal(c) {
-    const stamp = Math.random().toString(36).slice(2, 7);
-    const name = h('input', { value: c.patient_name, maxlength: 200, autocomplete: 'off' });
-    const phone = h('input', { type: 'tel', value: c.phone || '', maxlength: 40 });
+    const q = checkupQuestions({ row: c });
     const city = h('input', { value: c.city || '', maxlength: 80 });
-    const branchChoices = [{ value: '', label: 'No branch' }, ...branches.map((b) => ({ value: b.id, label: b.name }))];
-    if (c.branch_id && !branchChoices.some((b) => String(b.value) === String(c.branch_id))) branchChoices.push({ value: c.branch_id, label: branchName(c.branch_id) || `Branch ${c.branch_id}` });
-    const branch = select(branchChoices, c.branch_id ?? '');
-    const doctors = h('input', { value: c.doctors || '', maxlength: 300, list: `ce-doctors-${stamp}`, autocomplete: 'off' });
-    const checkupFor = h('input', { value: c.checkup_for || '', maxlength: 300, list: `ce-treatments-${stamp}`, autocomplete: 'off' });
     const details = h('textarea', { rows: 2, maxlength: 2000, value: c.details || '' });
     const fee = h('input', { type: 'number', min: '0', step: 'any', inputmode: 'decimal', value: c.est_fee ?? '' });
     const body = h('div', {},
       c.source === 'archive' && isAdmin() ? h('p', { class: 'muted' }, 'This row came from the old list. If you change the name or phone, importing that file again adds this person a second time.') : null,
-      h('div', { class: 'form-grid' },
-        field('Name', name, null, { required: true }), field('Phone number', phone), field('City', city), field('Branch', branch),
-        field("Doctor's name", doctors), field('Treatment', checkupFor), field('Treatment details', details), field('Estimated fee (Rs)', fee, 'Optional.')),
-      h('datalist', { id: `ce-doctors-${stamp}` }, state.ref.clinicians.filter((x) => x.is_doctor).map((x) => h('option', { value: x.display_name }))),
-      h('datalist', { id: `ce-treatments-${stamp}` }, state.ref.treatments.map((t) => h('option', { value: t.name }))));
-    modal(`Edit ${c.patient_name}`, body, [
-      { label: 'Cancel' },
-      ...(canRemoveCheckup(c) ? [{ label: 'Remove', danger: true, onClick: () => { removeCheckupModal(c, { onDone: () => load() }); } }] : []),
+      q.el,
+      h('details', { class: 'form-more', open: true },
+        h('summary', {}, 'More'),
+        h('div', { class: 'form-grid' }, field('City', city), field('Treatment details', details), field('Estimated fee (Rs)', fee, 'Optional.'))),
+      // (right above the buttons, where Remove would be)
+      whyNoRemove(c) ? h('p', { class: 'muted' }, whyNoRemove(c)) : null);
+    let saved = false;
+    // Remove asks on top of this dialog, which stays open: "Keep it" goes back to the answers as they were typed, and only a removal closes it.
+    const editDialog = modal(`Edit ${c.patient_name}`, body, [
+      { label: 'Cancel', dismiss: true },
+      ...(canRemoveCheckup(c) ? [{ label: 'Remove', danger: true, onClick: () => {
+        removeCheckupModal(c, { onDone: () => { saved = true; editDialog.close(); load(); } });
+        return false;
+      } }] : []),
       { label: 'Save', primary: true, onClick: async () => {
-        const errors = [];
-        if (!name.value.trim()) errors.push({ input: name, message: 'Write the patient name.' });
+        const errors = q.errors();
         const feeNumber = fee.value === '' ? null : Number(fee.value);
         if (feeNumber !== null && (!Number.isFinite(feeNumber) || feeNumber < 0)) errors.push({ input: fee, message: 'Write the fee as a number, or leave it empty.' });
         if (errors.length) return showFormErrors(body, errors);
         clearFieldErrors(body);
-        const next = {
-          patient_name: name.value.trim().replace(/\s+/g, ' '), phone: phone.value.trim() || null, city: city.value.trim() || null,
-          branch_id: branch.value ? Number(branch.value) : null, doctors: doctors.value.trim() || null, checkup_for: checkupFor.value.trim() || null,
-          details: details.value.trim() || null, est_fee: feeNumber,
-        };
+        const next = { ...q.values(), city: city.value.trim() || null, details: details.value.trim() || null, est_fee: feeNumber };
         const changes = Object.fromEntries(Object.entries(next).filter(([k, v]) => (k === 'est_fee' ? (v ?? null) !== (c[k] === null || c[k] === undefined ? null : Number(c[k])) : (v ?? null) !== (c[k] ?? null))));
         if (!Object.keys(changes).length) { toast('Nothing was changed.'); return; }
         try {
-          if ((await d.updateCheckup(c.id, changes)) === null) toast(`${c.patient_name} is no longer on the list.`, 'error');
+          const row = await d.updateCheckup(c.id, changes);
+          saved = true;
+          if (row === null) toast(`${c.patient_name} is no longer on the list.`, 'error');
           else toast(`${next.patient_name} saved.`, 'ok');
         } catch (e) { toast(notSaved(e, `${c.patient_name} was not changed.`), 'error', 8000); return false; }
         await load(); // redrawn before this dialog closes, so focus can return to the page
       } },
-    ]);
+    ], discardGuard(() => JSON.stringify([q.values(), city.value, details.value, fee.value]), () => saved));
   }
 
   // ---- the table, the paging bar and the filters
@@ -287,7 +298,8 @@ export async function renderCheckups(root, params, signal) {
   const head = (label) => h('th', { scope: 'col' }, label);
   const tableWrap = h('div', { class: 'table-scroll checkup-table-wrap' },
     h('table', { class: 'list checkup-table' },
-      h('thead', {}, h('tr', {}, head('Date'), h('th', { scope: 'col', class: 'checkup-who' }, 'Patient'), head('Branch'), head('Treatment'), head('Follow-up'), head('Notes'), head('Source'), h('th', { scope: 'col' }, srOnly('Actions')))),
+      h('thead', {}, h('tr', {}, head('Date'), h('th', { scope: 'col', class: 'checkup-who' }, 'Patient'), head('Branch'), head('Treatment'),
+        head('Wants to start'), head('When / why not'), head('Follow-up'), head('Notes'), head('Source'), h('th', { scope: 'col' }, srOnly('Actions')))),
       tbody));
 
   const searchBox = h('input', { type: 'search', value: f.q, maxlength: 100, autocomplete: 'off', placeholder: 'Name or phone', 'aria-label': 'Name or phone', 'aria-describedby': 'checkup-search-hint' });
@@ -299,9 +311,11 @@ export async function renderCheckups(root, params, signal) {
   const statusSel = select(statusChoices, f.status);
   const sourceSel = select([{ value: '', label: 'Any' }, ...SOURCES.map((s) => ({ value: s, label: SOURCE_LABELS[s] }))], f.source);
   const fileSel = select([{ value: '', label: 'Any' }, { value: 'yes', label: 'Has a patient file' }, { value: 'no', label: 'No patient file' }], f.file);
+  // The checkup form's "Would you like to start the treatment?": who the follow-up calls are for (rows from before the form match neither).
+  const wantsSel = select([{ value: '', label: 'Any' }, { value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }], f.wants);
   const clearBtn = h('button', { type: 'button', class: 'btn', onclick: () => {
-    Object.assign(f, { q: '', branch: '', from: '', to: '', status: '', source: '', file: '', page: 0 });
-    searchBox.value = ''; branchSel.value = ''; fromIn.value = ''; toIn.value = ''; statusSel.value = ''; sourceSel.value = ''; fileSel.value = '';
+    Object.assign(f, { q: '', branch: '', from: '', to: '', status: '', source: '', file: '', wants: '', page: 0 });
+    searchBox.value = ''; branchSel.value = ''; fromIn.value = ''; toIn.value = ''; statusSel.value = ''; sourceSel.value = ''; fileSel.value = ''; wantsSel.value = '';
     setURL(); load(); searchBox.focus();
   } }, 'Clear filters');
 
@@ -310,11 +324,11 @@ export async function renderCheckups(root, params, signal) {
   searchBox.addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(() => { f.q = searchBox.value; changed(); }, 300); });
   searchBox.addEventListener('search', () => { clearTimeout(typing); if (f.q !== searchBox.value) { f.q = searchBox.value; changed(); } });
   searchBox.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(typing); f.q = searchBox.value; changed(); } });
-  for (const [el, key] of [[branchSel, 'branch'], [fromIn, 'from'], [toIn, 'to'], [statusSel, 'status'], [sourceSel, 'source'], [fileSel, 'file']]) {
+  for (const [el, key] of [[branchSel, 'branch'], [fromIn, 'from'], [toIn, 'to'], [statusSel, 'status'], [sourceSel, 'source'], [fileSel, 'file'], [wantsSel, 'wants']]) {
     el.addEventListener('change', () => { f[key] = el.value; changed(); });
   }
   const ff = (label, control, cls, hint) => h('label', { class: ['filter-field', cls] }, h('span', { class: 'filter-label' }, label), control, hint || null);
-  // Name or phone and Follow-up are what people use all day; the rest sits behind "More filters" (open when one of them is in use).
+  // Name or phone, Follow-up and Wants to start are what people use all day; the rest sits behind "More filters" (open when one of them is in use).
   const moreCount = () => [f.branch, f.from, f.to, f.source, f.file].filter(Boolean).length;
   const moreSummary = h('summary', {}, 'More filters');
   const more = h('details', { class: 'checkup-more', open: moreCount() > 0 },
@@ -322,7 +336,7 @@ export async function renderCheckups(root, params, signal) {
     h('div', { class: 'checkup-more-grid' }, ff('Branch', branchSel), ff('Month from', fromIn), ff('Month to', toIn), ff('Source', sourceSel), ff('Patient file', fileSel)));
   const toolbar = h('div', { class: 'checkup-filters' },
     ff('Name or phone', searchBox, 'filter-wide', h('span', { class: 'filter-hint', id: 'checkup-search-hint' }, 'Part of the name, or at least 4 digits of the phone.')),
-    ff('Follow-up', statusSel), h('div', { class: 'filter-clear' }, clearBtn), more);
+    ff('Follow-up', statusSel), ff('Wants to start', wantsSel), h('div', { class: 'filter-clear' }, clearBtn), more);
 
   function draw() {
     const first = f.page * PAGE_SIZE + 1;
@@ -332,7 +346,7 @@ export async function renderCheckups(root, params, signal) {
     const active = document.activeElement;
     const focusKey = active && tbody.contains(active) ? { id: active.closest('tr')?.dataset.id, key: active.dataset.focus, caret: typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null } : null;
     mount(tbody, rows.length ? rows.map(rowEl)
-      : h('tr', {}, h('td', { colspan: 8 }, h('div', { class: 'empty' }, filtered() ? `No checkups match these filters.${shortPhoneFragment(f.q) ? ' To search by phone, type at least 4 digits.' : ''}` : 'No checkups on the list yet.'))));
+      : h('tr', {}, h('td', { colspan: 10 }, h('div', { class: 'empty' }, filtered() ? `No checkups match these filters.${shortPhoneFragment(f.q) ? ' To search by phone, type at least 4 digits.' : ''}` : 'No checkups on the list yet.'))));
     if (focusKey) {
       const tr = [...tbody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === focusKey.id);
       const el = tr && [...tr.querySelectorAll('[data-focus]')].find((x) => x.dataset.focus === focusKey.key);
@@ -351,7 +365,13 @@ export async function renderCheckups(root, params, signal) {
 
   function buildActions() {
     mount(actionsHost,
-      canEdit ? h('button', { type: 'button', class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: () => checkupFormModal({ branchId: f.branch && f.branch !== 'none' ? Number(f.branch) : null, onSaved: () => load() }) }, '+ Add checkup') : null,
+      canEdit ? h('button', { type: 'button', class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: async () => {
+        // the branch the list is filtered on, else the person's home branch, else they choose it
+        const row = await checkupFormModal({ branchId: f.branch && f.branch !== 'none' ? Number(f.branch) : null });
+        if (!row) return;
+        toast(row.updated ? `Answers saved on ${row.updated.patient_name}'s checkup.` : `${row.patient_name} added as a checkup patient.`, 'ok');
+        await load();
+      } }, '+ Add checkup patient') : null,
       can('export.data') ? h('button', { type: 'button', class: 'btn', onclick: busy(download) }, 'Download Excel') : null);
   }
 
@@ -397,7 +417,7 @@ export async function renderCheckups(root, params, signal) {
         if (cell && cell.t !== 's') { cell.t = 's'; cell.v = String(cell.v); delete cell.w; }
       }
     }
-    ws['!cols'] = aoa[0].map((label) => ({ wch: /name|treatment|notes|source|doctor/i.test(label) ? 28 : 14 }));
+    ws['!cols'] = aoa[0].map((label) => ({ wch: /name|treatment|notes|source|doctor|why not/i.test(label) ? 28 : 14 }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Checkups');
     const code = f.branch === 'none' ? 'NONE' : f.branch ? state.ref.branches.find((b) => b.id === Number(f.branch))?.code || 'BRANCH' : 'ALL';

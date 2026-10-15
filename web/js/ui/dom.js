@@ -361,6 +361,12 @@ function focusEl(el, options) {
  * opts.lockWhileWorking: Escape, the × button and a click outside do nothing while an action is working (for an action that goes
  * ahead even when its dialog is gone, such as changing a password). The action buttons are disabled then too, so such an action
  * must have a time limit of its own, or the dialog could not be closed for as long as it hangs.
+ * opts.confirmDismiss(): asked before Escape, the × button, a click outside or an action marked { dismiss: true } (Cancel) closes the
+ * dialog (a long form that would lose what was typed); returning false, or a promise of false, keeps it open. Other actions do not ask.
+ * While an action is working it is not asked: the dialog stays open and says it is saving.
+ * opts.unsaved(): true while the dialog holds something that is not saved (with confirmDismiss). Then confirmDismiss is also asked before
+ * the page changes (Back, a link: main.js asks confirmLeave()), and a reload or closing the tab gets the browser's own question.
+ * The result's mayLeave(ask = confirmDismiss) asks, unless a question is open already: for a control in the dialog that leaves it.
  * Focus stays inside the dialog and returns to the button that opened it.
  */
 export function modal(title, body, actions = [], opts = {}) {
@@ -380,6 +386,7 @@ export function modal(title, body, actions = [], opts = {}) {
     onclick: async () => {
       // One click at a time: a double tap must not save (or create) the same thing twice.
       if (working) return;
+      if (a.dismiss) { dismiss(); return; }
       working = true;
       const active = document.activeElement;
       buttons.forEach((b) => { b.disabled = true; });
@@ -411,8 +418,36 @@ export function modal(title, body, actions = [], opts = {}) {
   h('div', { class: 'sr-only' }, polite, assertive));
   const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === backdrop) dismiss(); } }, dialog);
 
-  // The person asks to close it (×, Escape, a click outside); close() is also what the code calls.
-  function dismiss() { if (!(opts.lockWhileWorking && working)) close(); }
+  // The person asks to close it (×, Escape, a click outside, Cancel); close() is also what the code calls.
+  // mayLeave(): true when it may go (nothing to ask, or the answer was yes); false while a question is open already.
+  // While the form is being saved (an action, or a busy() button in the dialog: it is aria-busy while it works) nothing is asked: "Discard"
+  // would not stop the save, and the dialog closes by itself once it is saved. It stays open (so does the page), and says why.
+  let asking = false;
+  const saving = () => working || !!dialog.querySelector('[aria-busy="true"]');
+  async function mayLeave(ask = opts.confirmDismiss) {
+    if (asking) return false;
+    if (!ask) return true;
+    if (saving()) { toast('Saving, wait a moment.'); return false; }
+    asking = true;
+    try { return (await ask()) !== false; } catch (err) { console.error(err); return false; } finally { asking = false; }
+  }
+  async function dismiss() {
+    if ((opts.lockWhileWorking && working) || asking) return;
+    if (await mayLeave()) close();
+  }
+
+  // A reload or closing the tab while the dialog holds unsaved work: the browser's own question. The listener is there only while
+  // something is unsaved (a page with one can be kept out of the browser's back/forward cache).
+  const onUnload = (e) => { if (opts.unsaved()) { e.preventDefault(); e.returnValue = ''; } };
+  let armed = false;
+  const arm = () => {
+    const want = !closed && !!opts.unsaved?.();
+    if (want === armed) return;
+    armed = want;
+    if (want) window.addEventListener('beforeunload', onUnload);
+    else window.removeEventListener('beforeunload', onUnload);
+  };
+  if (opts.unsaved) for (const type of ['input', 'change']) dialog.addEventListener(type, arm);
 
   const onKey = (e) => {
     if (openModals[openModals.length - 1] !== entry) return; // only the dialog on top reacts
@@ -433,13 +468,14 @@ export function modal(title, body, actions = [], opts = {}) {
     const i = openModals.indexOf(entry);
     if (i >= 0) openModals.splice(i, 1);
     document.removeEventListener('keydown', onKey);
+    arm();
     backdrop.remove();
     syncInert();
     if (restoreFocus) returnFocus(opener, openerFp);
     opts.onClose?.();
   }
   const close = () => finish(true);
-  const entry = { backdrop, dialog, polite, assertive, close: finish };
+  const entry = { backdrop, dialog, polite, assertive, close: finish, unsaved: opts.unsaved && opts.confirmDismiss ? opts.unsaved : null, mayLeave };
 
   document.body.append(backdrop);
   openModals.push(entry);
@@ -454,7 +490,21 @@ export function modal(title, body, actions = [], opts = {}) {
     || buttons.find((b, i) => actions[i].primary && !actions[i].danger)
     || heading;
   focusEl(start);
-  return { close, dialog };
+  return { close, dialog, mayLeave };
+}
+
+/** Whether an open dialog holds unsaved work (opts.unsaved). */
+export const unsavedWork = () => openModals.some((m) => m.unsaved?.());
+
+/**
+ * Before the page changes: each dialog with unsaved work asks (the top one first). Resolves true when the page may change; the dialogs
+ * stay open (closeAllModals() closes them), false when the person keeps one, or a question is open already.
+ */
+export async function confirmLeave() {
+  for (const m of [...openModals].reverse()) {
+    if (m.unsaved?.() && !(await m.mayLeave())) return false;
+  }
+  return true;
 }
 
 // ---- keeping the person's place after a dialog
