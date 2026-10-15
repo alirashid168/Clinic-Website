@@ -392,10 +392,6 @@ export function createDemoAdapter() {
   };
   const need = (key) => { if (!can(key)) fail('new row violates row-level security policy (' + key + ')'); };
   const branchOk = (branchId) => { const s = me(); return !!s && (s.role === 'admin' || !s.restrict_to_branches || s.branch_ids.includes(Number(branchId))); };
-<<<<<<< billing-desk
-  const audit = (table, action, row, before = null) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString(),
-    old_data: before ? clone(before) : null, new_data: action === 'DELETE' ? null : clone(row) });
-=======
   // The clinic's money (20261015000400_finance_privacy.sql): totals for finance.view or billing.view; the cash closing's amounts for
   // finance.view, cash.verify or billing.view; the rest of the staff are refused, or get rows without amounts.
   const seesTotals = () => can('finance.view') || can('billing.view');
@@ -405,8 +401,8 @@ export function createDemoAdapter() {
   const karachiDay = (ts) => (/(Z|[+-]\d\d:?\d\d)$/.test(String(ts)) ? localISO(new Date(ts)) : String(ts).slice(0, 10));
   // Cash taken at a branch on a day (public.expected_cash: cash payments minus cash refunds, every row whoever asks).
   const cashIn = (branchId, date) => db.payments.filter((p) => p.branch_id === Number(branchId) && p.method === 'cash' && karachiDay(p.received_at) === date).reduce((s, p) => s + p.amount, 0);
-  const audit = (table, action, row) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString() });
->>>>>>> golive
+  const audit = (table, action, row, before = null) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString(),
+    old_data: before ? clone(before) : null, new_data: action === 'DELETE' ? null : clone(row) });
   const patient = (id) => db.patients.find((p) => p.id === id);
   // An invoice line as invoice_items keeps it (with its discount, its price-list item and who did it), and the database's line rules.
   const lineRow = (it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price), discount_amount: Number(it.discount_amount || 0),
@@ -736,10 +732,11 @@ export function createDemoAdapter() {
         braces_case: bc ? { ...clone(bc), next_month: nextMonth(bc.id) } : null,
         visits: db.visits.filter((v) => v.patient_id === id).sort((a, b) => b.visit_date.localeCompare(a.visit_date)).map(enrichVisit),
         // As the database: staff read invoices and payments with billing.view; the front desk, which makes invoices and takes payments
-        // (billing.create), gets those of its branches ("billers view ...", 20261015000500); the rest of the staff get none. Plans:
-        // billing.view, or billing.create (which manages them). A patient: their own issued ones.
-        invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || (can('billing.create') && branchOk(i.branch_id))))),
-        payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || (can('billing.create') && branchOk(x.branch_id))))),
+        // (billing.create), gets those of its branches ("billers view ...", 20261015000500), and so does "Edit or void invoices"
+        // (billing.edit, "editors view ...", 20261015000900); the rest of the staff get none. Plans: billing.view, or billing.create
+        // (which manages them). A patient: their own issued ones.
+        invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(i.branch_id))))),
+        payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(x.branch_id))))),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
         plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || can('billing.create')))),
@@ -1306,16 +1303,12 @@ export function createDemoAdapter() {
       return clone(pay);
     },
     async patientBilling(patientId) {
-<<<<<<< billing-desk
-      if (!can('billing.view') && !can('billing.create') && !can('billing.edit')) need('billing.view');
-      return { invoices: clone(db.invoices.filter((i) => i.patient_id === patientId)), payments: clone(db.payments.filter((x) => x.patient_id === patientId)) };
-=======
-      // billing.view reads them; the front desk (billing.create alone) reads this patient's own at its branches (20261015000500).
-      if (!can('billing.view') && !can('billing.create')) fail('NOT_ALLOWED: a patient\'s invoices need "Create invoices and take payments" or "View invoices and payments" in the access list.');
+      // billing.view reads them; the front desk (billing.create alone) reads this patient's own at its branches (20261015000500), and
+      // so does "Edit or void invoices" (billing.edit, to correct them: "editors view ...", 20261015000900).
+      if (!can('billing.view') && !can('billing.create') && !can('billing.edit')) fail('NOT_ALLOWED: a patient\'s invoices need "Create invoices and take payments", "Edit or void invoices" or "View invoices and payments" in the access list.');
       const mine = (r) => r.patient_id === patientId && (can('billing.view') || branchOk(r.branch_id));
       // (and, as the live data layer, the dues as they are now for who sees the dues flag: every branch counts)
       return { invoices: clone(db.invoices.filter(mine)), payments: clone(db.payments.filter(mine)), dues: can('dues.view') ? dues(patientId) : undefined };
->>>>>>> golive
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {

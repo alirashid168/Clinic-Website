@@ -355,8 +355,11 @@ export async function renderPatient(root, id) {
   // The patient's invoices, payments and installment plans (owner, 15 Oct 2026: the clinic's money is for Dr. Ali and accounts, and "yes
   // the front desk takes the payment"): with "View invoices and payments", or with "Create invoices and take payments" alone (the front
   // desk: this patient's own at its branches, 20261015000500_front_desk_billing.sql), who also makes invoices and plans and prints the
-  // bill and receipts. The rest of the staff see the dues only. No total across patients here either way.
-  const seesBills = can('billing.view') || can('billing.create');
+  // bill and receipts. "Edit or void invoices" (billing.edit: the accountant, and the clinic coordinator since 15 Oct) reads them too, at
+  // its branches, to correct them ("editors view ..." policies, 20261015000900_billing_desk.sql); installment plans stay with
+  // billing.view and billing.create (the plan policies). The rest of the staff see the dues only. No total across patients here either way.
+  const seesBills = can('billing.view') || can('billing.create') || can('billing.edit');
+  const seesPlans = can('billing.view') || can('billing.create');
   const makesBills = can('billing.create');
 
   mount(root,
@@ -426,19 +429,12 @@ export async function renderPatient(root, id) {
               h('td', { class: 'nowrap' }, shortDate(dayOf(pay.received_at))),
               h('td', {}, pay.method.replace('_', ' '), pay.invoice_id ? h('div', { class: 'muted' }, p.invoices.find((i) => i.id === pay.invoice_id)?.invoice_no || '') : null),
               h('td', { class: ['right', Number(pay.amount) < 0 && 'status-bad'] }, rupees(pay.amount)),
-<<<<<<< billing-desk
               h('td', { class: 'right nowrap' },
                 can('billing.edit') ? h('button', { class: 'btn btn-small', 'aria-label': `Edit payment, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)} ${pay.method.replace('_', ' ')}`, onclick: () => editPaymentModal(pay, p, { onDone: reload }) }, 'Edit') : null, ' ',
                 h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
-        h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
-          can('billing.create') ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null),
-        (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
-=======
-              h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
-        seesBills ? h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
+        seesPlans ? h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
           makesBills ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null) : null,
-        !seesBills ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
->>>>>>> golive
+        !seesPlans ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
           planTable(plan, p.payments),
           makesBills && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
           : h('p', { class: 'muted' }, 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'))),

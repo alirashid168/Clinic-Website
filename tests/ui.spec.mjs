@@ -1578,14 +1578,18 @@ await step('money: the front desk (Create invoices and take payments, no View in
   const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
   await money.locator('table.list tbody tr').first().waitFor();
   assert.match(await money.innerText(), /INV-2026-\d+[\s\S]*Rs 15,000 unpaid/, 'the patient\'s own invoice, with what is unpaid');
-  // A new invoice (the owner: the front desk makes the invoice and prints the bill).
+  // A new invoice (the owner: the front desk makes the invoice and prints the bill), with nothing paid in the same form.
   await pfin.getByRole('button', { name: 'New invoice', exact: true }).click();
   const inv = pfin.locator('.modal:has(h2:has-text("New invoice · Hamza Qureshi"))');
   await inv.getByLabel('Treatment, line 1').fill('Sample bracket repair');
-  await inv.getByLabel('Price (Rs), line 1').fill('1000');
-  assert.equal(await inv.getByLabel('Discount (Rs)').count(), 0, 'no discount box ("Give discounts" is off for the desk)');
-  await inv.getByRole('button', { name: 'Save invoice' }).click();
-  await pfin.waitForSelector('.toast:has-text("Invoice INV-2026-")');
+  await inv.getByLabel('Rate (Rs), line 1').fill('1000');
+  assert.ok(await inv.getByLabel('Discount, line 1').isDisabled() && await inv.getByLabel('Total discount', { exact: true }).count() === 0, 'no discount ("Give discounts" is off for the desk)');
+  await inv.getByLabel('Payment (Rs)').fill('0');
+  await inv.getByRole('button', { name: 'Save', exact: true }).click();
+  const bill = pfin.locator('.modal', { has: pfin.locator('h2', { hasText: /^Invoice INV-2026-/ }) });
+  await bill.waitFor();
+  await bill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await pfin.waitForSelector('.modal', { state: 'detached' });
   await money.locator('strong', { hasText: 'Rs 16,000 pending' }).waitFor();
   await money.locator('table.list tbody tr', { hasText: 'Rs 1,000 unpaid' }).waitFor();
   // A payment against it.
@@ -8702,7 +8706,6 @@ await step('End the day after midnight: a page opened before midnight says what 
 });
 await pmid.close();
 
-<<<<<<< billing-desk
 // ------------------------------------------------------------- Bill on the Aaj ki List, the invoice form with the payment, the printed bill and
 // "Create ▾" (owner, 15 Oct 2026: "the add invoice button should be on the aaj ki list ... payment could be taken and an invoice bill printout
 // provided for the patient"; "a create button with drop down having patient, invoice and health record").
@@ -9019,9 +9022,9 @@ await step('The assistant sees no Edit; Dr. Ali\'s Audit log shows both payment 
   await tryAnotherRole(pdesk);
   await loginAs(pdesk, 'Assistant');
   await openMoney(pdesk, '9825', 'Kinza Rauf');
-  await moneyOf(pdesk).locator('details summary').click();
-  await moneyOf(pdesk).getByRole('button', { name: /^Receipt, / }).first().waitFor();
-  assert.equal(await moneyOf(pdesk).getByRole('button', { name: /^Edit (invoice|payment)/ }).count(), 0, 'no Edit for the assistant');
+  // The money lock (20261015000400_finance_privacy.sql): the assistant sees the patient's dues only, not the invoices and payments.
+  await moneyOf(pdesk).getByText('Invoices and payments are with accounts.').waitFor();
+  assert.equal(await moneyOf(pdesk).getByRole('button', { name: /^(Edit (invoice|payment)|Receipt, )/ }).count(), 0, 'no invoices, payments or Edit for the assistant');
   await tryAnotherRole(pdesk);
   await loginAs(pdesk, 'Dr. Ali Rashid');
   await pdesk.goto(BASE + '#/staff/admin?tab=audit');
@@ -9195,6 +9198,12 @@ await step('A refund and a closed cash day: the coordinator (no "View invoices a
   await plive.waitForSelector('.toast:has-text("Payment saved as Card.")');
   const { payments } = await billingOf(plive, '9825');
   assert.equal(payments.find((p) => p.notes === 'Sample refund').method, 'card');
+  // Editing is not seeing the clinic's money (20261015000400_finance_privacy.sql): no rupees on Today, no pending dues added up.
+  await plive.goto(BASE + '#/staff/today');
+  await plive.locator('h2:text("Branches today")').waitFor();
+  assert.deepEqual(await rupeesShown(plive), [], 'no rupees on the coordinator\'s Today page');
+  assert.match(await plive.evaluate(async () => { const { state } = await import('/js/state.js'); try { await state.data.totalDues(); return 'answered'; } catch (e) { return e.message; } }),
+    /NOT_ALLOWED/, 'the pending dues are not added up for the coordinator');
 });
 await step('A discount rejected, then the invoice edited: the line\'s discount went with the rejection, so Edit shows none and saves none (the accountant), and the coordinator is not refused', async () => {
   await tryAnotherRole(plive);
@@ -9333,7 +9342,7 @@ await step('Bill on a phone: a name beside Bill is not cut; the invoice form nam
   assert.ok(await m.getByLabel('Performed by, line 1').evaluate((s) => s.scrollWidth <= s.clientWidth + 1 && s.getBoundingClientRect().width > 250), 'the doctor box has the width of the line');
   await pp.close();
 });
-=======
+
 // ------------------------------------------------------------- logging out after no activity
 // The owner (15 Oct): "please remove force log out. the google sheet stays logged in for days and days". session_timeout_minutes 0
 // (or no value) = never; 5 to 720 = after that many minutes. The demo never logs out for no activity (its login lives in the page), so
@@ -9427,7 +9436,6 @@ await step('No activity with Never (0, or no value): days later still signed in,
   assert.equal(await pnever.locator('.topbar').count(), 1, '"Stay signed in" keeps the login');
 });
 await pnever.close();
->>>>>>> golive
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

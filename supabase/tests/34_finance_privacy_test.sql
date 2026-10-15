@@ -1,7 +1,7 @@
 -- Finance privacy (20261015000400_finance_privacy.sql): the clinic's money is for Dr. Ali and accounts. Made-up people only.
 -- The grid is set as the clinic has it live (15 Oct 2026): the front desk makes invoices and takes payments ("Create invoices and take
 -- payments", 20261015000500_front_desk_billing.sql) without "View invoices and payments" or "Give discounts"; "View invoices and
--- payments" off for the coordinator.
+-- payments" off for the coordinator, who has "Edit or void invoices" (billing.edit, 20261015000900_billing_desk.sql).
 --   0. the file runs again (earlier test files run older migrations again, which put back the old payments_summary, total_dues and
 --      doctor_summary), and a second run leaves a choice made in the access list alone; it runs after 20261015000500 (as on live) and
 --      leaves the front desk's "Create invoices and take payments" and the "billers view ..." policies alone;
@@ -10,8 +10,9 @@
 --      took it), never another day or branch and never a total; the assistant, doctor and coordinator are refused; a choice for
 --      one person in the access list (unticked for a desk, ticked for an assistant) is followed;
 --   3. money totals (payments_summary, total_dues, clinic_report, the branch income views) refuse everyone but accounts and Dr. Ali;
---      a patient's own login still gets its own; the money tables give the assistant, doctor and coordinator nothing, and the front
---      desk only its own branch's invoices and payments one by one;
+--      a patient's own login still gets its own; the money tables give the assistant and doctor nothing, the front desk only its own
+--      branch's invoices and payments one by one, and the coordinator (billing.edit, to correct them) the invoices and payments of
+--      its branches one by one, never a total and no expenses, cash closings, discount requests or plans;
 --   4. doctor_summary: the counts for whoever may open it, the rupees only for accounts, Dr. Ali, or the doctor on their own
 --      (not a shared doctors login with no doctor record of its own, not a coordinator with "See own doctor percentage");
 --   5. the cash closing is a blind count for the front desk: no expected cash, no difference, no amounts in its list;
@@ -108,6 +109,8 @@ select pg_temp.check((select allowed from public.role_permissions where role = '
 update public.role_permissions set allowed = false
  where (role::text, permission_key) in (('front_desk', 'billing.view'), ('front_desk', 'discount.give'), ('coordinator', 'billing.view'));
 update public.role_permissions set allowed = true where role = 'front_desk' and permission_key = 'billing.create';
+-- The coordinator edits invoices and payments (20261015000900_billing_desk.sql, which runs after this file on live).
+update public.role_permissions set allowed = true where role = 'coordinator' and permission_key = 'billing.edit';
 
 insert into auth.users (id, email) values
   (:admin, 'admin34@dralirashid.com'), (:fd, 'fd34@dralirashid.com'), (:fdall, 'fdall34@dralirashid.com'), (:asst, 'asst34@dralirashid.com'),
@@ -255,6 +258,18 @@ begin
         'tables: the desk reads only its own branch''s payments, invoices and lines, and no expenses, cash closings or discount requests');
       perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0,
         'views: the branch income per day and per month add up nothing for the desk');
+    elsif who = 'coord' then
+      -- The coordinator corrects invoices and payments ("Edit or void invoices", 20261015000900_billing_desk.sql): it reads the
+      -- invoices, their lines and the payments of its branches one by one (this coordinator works at every branch), and nothing that
+      -- adds up a branch's or the clinic's money; no expenses, cash closings, discount requests or installment plans.
+      perform pg_temp.check(exists (select 1 from public.payments) and exists (select 1 from public.invoices)
+          and exists (select 1 from public.invoice_items where description = 'Sample braces kit')
+          and (select count(*) from public.expenses) = 0 and (select count(*) from public.cash_closings) = 0 and (select count(*) from public.discount_requests) = 0
+          and (select count(*) from public.payment_plans) = 0 and (select count(*) from public.plan_installments) = 0,
+        'tables: the coordinator (billing.edit) reads payments, invoices and lines one by one, and no expenses, cash closings, discount requests or plans');
+      perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0
+          and (select count(*) from public.installment_status) = 0,
+        'views: the branch income per day and per month and the installments add up nothing for the coordinator');
     else
       -- the money tables and the views that add them up give them nothing
       perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0 and (select count(*) from public.invoice_items) = 0

@@ -1629,7 +1629,6 @@ export async function createSupabaseAdapter() {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
       check(await sb.from('invoices').update({ status: 'void', void_reason: reason?.trim() || null }).eq('id', id));
     },
-<<<<<<< billing-desk
     /**
      * Changes an issued invoice's lines, discounts and note in one database call (edit_invoice, 20261015000900_billing_desk.sql): all or
      * nothing, with the discount limits and their approval. The same edit sent again changes nothing, so a retry after a lost answer is safe.
@@ -1654,12 +1653,9 @@ export async function createSupabaseAdapter() {
       if (!rows?.length) throw new Error('This payment could not be changed: it is not at a branch you work at, or you may not edit payments.');
       return rows[0];
     },
-    // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
-=======
     // Invoices and payments only (no photos): what the payment form needs to match money to invoices. With "See $$ pending dues
     // flag", the patient's dues as they are now too (dues_for counts every branch; the front desk reads only its own branches'
     // payments, 20261015000500, so the form fills in no more than the dues).
->>>>>>> golive
     async patientBilling(patientId) {
       const seesDues = !!(await this.getSession().catch(() => null))?.perms?.has('dues.view');
       const [invoices, payments, dues] = await Promise.all([
