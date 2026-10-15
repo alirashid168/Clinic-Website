@@ -2,7 +2,7 @@
 // 12 Oct 2026). The rules are in ../../lib/menu-arrange.js. This file keeps the person's arrangement, applies it to shell.js's
 // menu, keeps the top bar on one line, and has the dialog (opened from the name menu and from the phone drawer).
 //
-// Where the arrangement lives: one row per staff member in the database (public.staff_menu_prefs, 20261012000300), so it
+// Where the arrangement lives: one row per staff member in the database (public.staff_menu_prefs, 20261015000100), so it
 // follows them to any computer, plus a copy on this computer (localStorage, per staff id) so the menu draws at once. The row
 // is read again at every sign-in (loadArrangement) and its answer replaces the copy. Until that database update is run the
 // website works as before: the default menu for everyone, and Save keeps the arrangement on this computer only (it says so).
@@ -10,7 +10,7 @@
 // The copy holds only page keys, nothing about patients, so it is left behind at logout like the other per-person settings.
 import { h, modal, toast, announce } from '../../ui/dom.js';
 import { state } from '../../state.js';
-import { menuEntries, topKeys, arrangeMenu, arrangementFor, cleanArrangement } from '../../lib/menu-arrange.js';
+import { menuEntries, topKeys, arrangeMenu, arrangementFor, cleanArrangement, barLabel } from '../../lib/menu-arrange.js';
 
 const COPY_KEY = (staffId) => `staff-menu:${staffId}`;
 const LONG_BAR = 9; // more entries than this on the top bar: the dialog warns that it may not fit on a small laptop
@@ -140,7 +140,13 @@ export function openArrangeMenu(menu) {
   const defaults = entries.filter((e) => e.top).map((e) => e.key);
   const start = topKeys(entries, myArrangement());
   let top = [...start];
-  const name = (e) => (e.kind === 'group' ? `${e.label} drop-down` : e.groupLabel ? `${e.label} (${e.groupLabel})` : e.label);
+  // A page is named as the top bar names it (barLabel: "Aaj ki List (today)", "Patients (Reports)"), and a drop-down's page that
+  // the bar leaves plain still says which drop-down it is in: "Queue board (Aaj ki List)".
+  const name = (e) => {
+    if (e.kind === 'group') return `${e.label} drop-down`;
+    const onBar = barLabel(entries, e);
+    return onBar === e.label && e.groupLabel ? `${e.label} (${e.groupLabel})` : onBar;
+  };
 
   const topId = 'arrange-top-title';
   const topHeading = h('h3', { id: topId, tabindex: '-1' }, 'On the top bar');
@@ -152,13 +158,14 @@ export function openArrangeMenu(menu) {
   const button = (key, action, text, label, onclick, stuck = null) => {
     // The name says which page ("Move up: Patients"), starting with the words on the button. One that cannot act (Move up on the
     // first row) only looks disabled: it keeps focus, so one Enter too many says why instead of moving the page back down.
-    // The second click of a double-click is left alone, focus included: after the first one another page's button may be under
-    // the pointer, and a double-click would move that one too (or move the same page back).
+    // The second click of a double-click is left alone, focus included, so a double-click does one thing (as most people who
+    // double-click a button mean). The clicks of a quick series after it act again: under the pointer is still the same page's
+    // Move up (or the next page's Put on the top bar), and a person clicking fast wants it to go on moving.
     const act = stuck ? () => announce(stuck) : onclick;
     const b = h('button', {
       type: 'button', class: 'btn btn-small', 'aria-disabled': stuck ? 'true' : null,
-      onmousedown: (ev) => { if (ev.detail > 1) ev.preventDefault(); },
-      onclick: (ev) => { if (!(ev?.detail > 1)) act(ev); }, 'aria-label': `${text}: ${label}`,
+      onmousedown: (ev) => { if (ev.detail === 2) ev.preventDefault(); },
+      onclick: (ev) => { if (ev?.detail !== 2) act(ev); }, 'aria-label': `${text}: ${label}`,
     }, text);
     buttons.set(`${key} ${action}`, b);
     return b;
@@ -175,8 +182,8 @@ export function openArrangeMenu(menu) {
     const i = ids.indexOf(id);
     return { next: [...ids.slice(i + 1), ...ids.slice(0, i).reverse()], y: buttons.get(id).getBoundingClientRect().top };
   };
-  // A mouse click on Move up / Move down keeps the moved page's button under the pointer (the dialog scrolls by the row's shift,
-  // as far as it can), so the next click moves the same page again instead of the one that took its place.
+  // A mouse click on Move up / Move down keeps the moved page's button under the pointer (keepAt, below), so the next click
+  // moves the same page again instead of the one that took its place, all the way to the first or last place.
   const move = (key, by, ev) => {
     const i = top.indexOf(key);
     const j = i + by;
@@ -200,8 +207,51 @@ export function openArrangeMenu(menu) {
     announce(`${name(byKey.get(key))} is now last on the top bar, number ${top.length}.`);
   };
 
+  // Space the dialog adds so that a clicked button can stay under the pointer where scrolling alone cannot bring it there: above
+  // the top-bar list when the dialog is scrolled to the top already (Move up near the top), below everything when it cannot
+  // scroll down any further (Move down at the end of a short list). The space above shrinks again as the page goes back down,
+  // goes once it is scrolled out of sight (dropLift), and goes at the next change made with the keyboard or Reset.
+  let lift = 0;
+  let room = 0;
+  // (In fractions of a pixel as measured, so many clicks in a row never add up to a drift.)
+  const setLift = (px) => { lift = px > 0.01 ? px : 0; topList.style.paddingTop = lift ? `${lift}px` : ''; };
+  const setRoom = (px) => { room = px > 0.01 ? px : 0; body.style.paddingBottom = room ? `${room}px` : ''; };
+  // Brings `el` (a button just drawn) back to `y` on the screen, where the pointer is: the dialog scrolls by the shift, as far
+  // as it can, and the space above or below makes up the rest.
+  function keepAt(el, y) {
+    const scroller = el.closest('.modal-body');
+    if (!scroller) return;
+    setLift(0); // worked out afresh each time
+    for (let n = 0; n < 3; n++) {
+      const shift = el.getBoundingClientRect().top - y; // > 0: the button went down, so the dialog scrolls down
+      if (Math.abs(shift) < 0.5) return;
+      const want = scroller.scrollTop + shift;
+      if (want < 0) {
+        scroller.scrollTop = 0;
+        setLift(lift - want);
+      } else {
+        const most = scroller.scrollHeight - scroller.clientHeight;
+        if (want > most) setRoom(room + want - most);
+        scroller.scrollTop = want;
+      }
+    }
+  }
+  // The space above the list once the person scrolled it out of sight: taken away with the dialog scrolled back by as much, so
+  // nothing on the screen moves. (The scroll position is read first: once the space is gone, the browser would pull a position
+  // near the end back to the new end before the dialog scrolls back.)
+  function dropLift(scroller) {
+    if (!lift || topList.getBoundingClientRect().top + lift > scroller.getBoundingClientRect().top) return;
+    const at = scroller.scrollTop - lift;
+    setLift(0);
+    scroller.scrollTop = at;
+  }
+
   // `moved`: the page just moved, whose row stands out until the next change, so the eye can follow it after a click.
   function draw({ focus = [], moved = null, place = null } = {}) {
+    // A click: the dialog keeps the height it has, so the lists growing or shrinking scroll inside it instead of moving the whole
+    // dialog (it is centred on the screen), and the button under the pointer with it.
+    const box = topList.closest('.modal');
+    if (place && box && !box.style.height) box.style.height = `${box.getBoundingClientRect().height}px`;
     buttons = new Map();
     const rowClass = (key) => ['arrange-row', key === moved && 'arrange-moved'];
     topList.replaceChildren(...top.map((key, i) => {
@@ -243,15 +293,16 @@ export function openArrangeMenu(menu) {
     if (top.length > LONG_BAR) count.textContent += ' That is a long top bar: on a small laptop screen the last ones will be under More.';
 
     // After a mouse click: the button to stay under the pointer (the moved page's own, or after a page went to the other list
-    // the next button of the same kind), the dialog scrolled to bring it there.
+    // the next button of the same kind), brought back there.
     const stay = place?.next.map((k) => buttons.get(k)).find(Boolean);
     if (stay) {
       stay.focus({ preventScroll: true });
-      const scroller = stay.closest('.modal-body');
-      if (scroller) scroller.scrollTop += stay.getBoundingClientRect().top - place.y;
-    } else if (focus.length) {
+      keepAt(stay, place.y);
+    } else {
+      setLift(0);
+      setRoom(0);
       // Focus stays with the row that was changed (the same button, or its first one for a page that changed lists), or the list heading.
-      (focus.map((k) => buttons.get(k)).find(Boolean) || topHeading).focus();
+      if (focus.length) (focus.map((k) => buttons.get(k)).find(Boolean) || topHeading).focus();
     }
   }
 
@@ -264,7 +315,7 @@ export function openArrangeMenu(menu) {
     h('h3', {}, 'Not on the top bar'),
     rest);
   draw();
-  modal('Arrange my menu', body, [
+  const { dialog } = modal('Arrange my menu', body, [
     { label: 'Reset to default', onClick: () => {
       top = [...defaults];
       draw();
@@ -283,4 +334,6 @@ export function openArrangeMenu(menu) {
       redraw?.();
     } },
   ], { initialFocus: topHeading });
+  const scroller = dialog.querySelector('.modal-body');
+  scroller.addEventListener('scroll', () => dropLift(scroller), { passive: true });
 }

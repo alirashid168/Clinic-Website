@@ -19,10 +19,11 @@
 //
 // On an arranged top bar the pages that are not on it are under More: first the pages of the clinic's top bar that were taken
 // off it, then each drop-down that is not on the top bar under its own name (Aaj ki List, Reports, Coordinator), then More's
-// own pages.
+// own pages. Every name on the bar is different from the others (barLabel): a page put on it from a drop-down says where it
+// comes from when its name is taken ("Patients (Reports)"), and the Aaj ki List page reads "Aaj ki List (today)".
 
 export const MAX_KEYS = 60;
-// The same rule as the database's check constraint (supabase/migrations/20261012000300_staff_menu_prefs.sql).
+// The same rule as the database's check constraint (supabase/migrations/20261015000100_staff_menu_prefs.sql).
 export const KEY_PATTERN = /^-?[A-Za-z0-9:_?=&./-]{1,80}$/;
 
 const MORE = 'more';
@@ -65,6 +66,22 @@ export function menuEntries(menu) {
     }
   }
   return entries;
+}
+
+// A drop-down's page that has the drop-down's own name (the Aaj ki List page in the Aaj ki List drop-down): on the top bar by
+// itself it says what it opens, so it is never a second "Aaj ki List" beside the drop-down. The drop-down keeps the name
+// everyone knows from the clinic's menu; only the link the person added reads differently.
+const OWN_PAGE_NOTE = { sheet: 'today' }; // #/staff/sheet opens today's list (other days are in History of Aaj ki List)
+
+/**
+ * A page's name on the top bar (and in the dialog), different from every other name there. A page from a drop-down whose
+ * name another page or a drop-down also has says which drop-down it comes from: "Patients (Reports)". One with its own
+ * drop-down's name says what it opens: "Aaj ki List (today)" ("(page)" for one this file has no word for).
+ */
+export function barLabel(entries, e) {
+  if (e.kind !== 'page' || !e.groupLabel) return e.label;
+  if (e.label === e.groupLabel) return `${e.label} (${OWN_PAGE_NOTE[e.key] || 'page'})`;
+  return entries.some((x) => x !== e && x.label === e.label) ? `${e.label} (${e.groupLabel})` : e.label;
 }
 
 const defaultTop = (entries) => entries.filter((e) => e.top).map((e) => e.key);
@@ -123,15 +140,12 @@ export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
   if (sameList(top, defaultTop(entries))) return menu;
   const onTop = new Set(top);
   const open = (i) => i.divider || !onTop.has(pageKey(i.href)); // still in its drop-down (anything that is not a page stays too)
-  // A page on the top bar with a label another page also has says which drop-down it comes from: "Patients (Reports)".
-  const labels = entries.filter((e) => e.kind === 'page').map((e) => e.label);
   const now = parse(here);
   const pinned = (e) => {
     const { path, params } = parse(e.key);
     const tab = [...params.keys()].length > 0;
     const current = !tab || (now.path === path && [...params].every(([k, v]) => now.params.get(k) === v));
-    const label = e.groupLabel && labels.filter((l) => l === e.label).length > 1 ? `${e.label} (${e.groupLabel})` : e.label;
-    return { ...e.item, label, key: current ? (e.item.key || path) : `page:${e.key}` };
+    return { ...e.item, label: barLabel(entries, e), key: current ? (e.item.key || path) : `page:${e.key}` };
   };
   const out = [];
   for (const k of top) {

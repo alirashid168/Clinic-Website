@@ -1,4 +1,4 @@
--- Arrange my menu (20261012000300_staff_menu_prefs.sql): each staff member reads and saves only their own menu order,
+-- Arrange my menu (20261015000100_staff_menu_prefs.sql): each staff member reads and saves only their own menu order,
 -- nobody else reads it (the admin included), a switched-off account, a patient login and anonymous visitors cannot save,
 -- and the saved JSON stays small (an array of at most 60 strings of menu keys, each 1 to 80 characters).
 \set ON_ERROR_STOP 1

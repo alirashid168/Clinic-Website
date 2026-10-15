@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import {
-  MAX_KEYS, KEY_PATTERN, pageKey, cleanArrangement, menuEntries, topKeys, arrangementFor, arrangeMenu,
+  MAX_KEYS, KEY_PATTERN, pageKey, cleanArrangement, menuEntries, topKeys, arrangementFor, arrangeMenu, barLabel,
 } from '../web/js/lib/menu-arrange.js';
 
 // ---- a menu like shell.js's
@@ -109,6 +109,34 @@ test('a page pinned out of a drop-down leaves it; a pinned tab page is "current"
   assert.ok(out.some((x: Item) => x.label === 'Patients (Reports)'), 'the Patients report is told apart from the Patients page');
   assert.ok(out.some((x: Item) => x.label === 'Patients' && x.href === '#/staff/patients'));
   assert.deepEqual(out.find((x: Item) => x.key === 'reports').items.map((i: Item) => i.divider ? '---' : i.label), ['Financial', 'OPD', '---', 'Expenses', 'Cash closing']);
+});
+
+test('the Aaj ki List page on the top bar beside the Aaj ki List drop-down reads "Aaj ki List (today)": no name is on the bar twice', () => {
+  const m = ADMIN();
+  const e = menuEntries(m);
+  const labels = (menu: Item[]) => menu.map((x: Item) => x.label); // as the bar shows them (no ▾ to tell them apart)
+  const unique = (menu: Item[]) => assert.equal(new Set(labels(menu)).size, menu.length, `every name once: ${labels(menu).join(' | ')}`);
+  const out = arrangeMenu(m, arrangementFor(e, ['today', 'sheet', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator']));
+  assert.deepEqual(bar(out), ['Today', 'Aaj ki List (today)', 'Aaj ki List ▾', 'Patients', 'Billing', 'Reports ▾', 'Coordinator ▾', 'More ▾']);
+  unique(out);
+  const page = out.find((x: Item) => x.label === 'Aaj ki List (today)');
+  assert.deepEqual([page.href, page.key, page.items], ['#/staff/sheet', 'sheet', undefined], 'a plain link to the Aaj ki List page');
+  assert.deepEqual(out.find((x: Item) => x.items && x.key === 'sheet').items.map((i: Item) => i.label), ['Queue board', 'Checkups'],
+    'the drop-down keeps its name and the rest of its pages');
+  // The same name wherever it is: with the drop-down under More, and in the dialog (which names pages with barLabel).
+  assert.deepEqual(bar(arrangeMenu(m, arrangementFor(e, ['sheet', 'today', 'patients']))), ['Aaj ki List (today)', 'Today', 'Patients', 'More ▾']);
+  const entry = (k: string) => e.find((x: any) => x.key === k);
+  assert.deepEqual(['sheet', 'reports?group=patients', 'patients', 'queue', 'stock', 'menu:sheet'].map((k) => barLabel(e, entry(k))),
+    ['Aaj ki List (today)', 'Patients (Reports)', 'Patients', 'Queue board', 'Stock', 'Aaj ki List']);
+  // Every page and drop-down pinned at once, and pages that share a name with another page or with a drop-down.
+  unique(arrangeMenu(m, e.map((x: any) => x.key)));
+  const later = ADMIN();
+  later.splice(later.length - 1, 0, { label: 'Forms', key: 'forms', items: [link('Forms', 'forms'), link('Reports', 'forms?tab=reports'), link('Homepage forms', 'forms?tab=home')] });
+  const le = menuEntries(later);
+  const many = arrangeMenu(later, [...le.filter((x: any) => x.top).map((x: any) => x.key), 'forms', 'forms?tab=reports', 'sheet', 'reports?group=patients']);
+  unique(many);
+  assert.deepEqual(labels(many).slice(-6), ['Forms', 'Forms (page)', 'Reports (Forms)', 'Aaj ki List (today)', 'Patients (Reports)', 'More'],
+    'a drop-down\'s page with the drop-down\'s name, and a page named like another drop-down, are told apart too');
 });
 
 test('a drop-down whose pages are all on the top bar themselves is not shown; dividers never end up at an edge or doubled', () => {
@@ -297,7 +325,7 @@ test('live: the saved order is read from staff_menu_prefs (row-level security gi
   assert.equal(await (none.data as any).myMenuArrangement(), null, 'no row: nothing saved');
 });
 
-test('live: before 20261012000300 is run the read answers null and Save fails with MENU_PREFS_MISSING; other failures are errors', async () => {
+test('live: before 20261015000100 is run the read answers null and Save fails with MENU_PREFS_MISSING; other failures are errors', async () => {
   for (const missing of [{ code: 'PGRST205', status: 404 }, { code: '42P01', status: 400 }]) {
     const { data } = await livePage(() => ({ data: null, error: { code: missing.code, message: 'relation does not exist' }, status: missing.status }),
       () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' }, status: 404 }));
@@ -374,10 +402,10 @@ test('through shell.js\'s hook: a page added to menu() later is in its default p
 });
 
 // ======================================================================================= saved before the database update was run
-// Until 20261012000300 is run, Save keeps the arrangement on this computer only and says it will follow the person once the update
+// Until 20261015000100 is run, Save keeps the arrangement on this computer only and says it will follow the person once the update
 // is run. loadArrangement (at every sign-in) keeps that promise: no row in the database but an arrangement on this computer, so
 // it is sent up, in the background, until a sign-in finds the row.
-test('a menu kept on this computer before 20261012000300 was run is sent up at the next sign-in, until the database has it', async () => {
+test('a menu kept on this computer before 20261015000100 was run is sent up at the next sign-in, until the database has it', async () => {
   const st = (globalThis as any).__navState;
   const was = { session: st.session, data: st.data };
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));

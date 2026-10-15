@@ -1724,6 +1724,73 @@ await step('Arrange my menu: a double-click on "Move up" moves the page one plac
   assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS, 'back to the clinic\'s order');
   await d.locator('.modal-body').evaluate((el) => { el.scrollTop = 0; });
 });
+await step('Arrange my menu: clicks at one spot take the same page all the way to the top and back, with the dialog scrolled to the top (it cannot scroll up any further)', async () => {
+  const d = arrangeDialog(pn);
+  const body = d.locator('.modal-body');
+  const lift = () => d.locator('ol.arrange-list').evaluate((el) => parseFloat(el.style.paddingTop || '0'));
+  // The name of the button under the pointer.
+  const under = ([x, y]) => pn.evaluate(([px, py]) => document.elementFromPoint(px, py)?.closest('button')?.getAttribute('aria-label') || null, [x, y]);
+  const spot = async (name) => { const b = await d.getByRole('button', { name, exact: true }).boundingBox(); return [b.x + b.width / 2, b.y + b.height / 2]; };
+  const where = async () => (await topRows(pn)).indexOf('Coordinator drop-down');
+  assert.equal(await body.evaluate((el) => el.scrollTop), 0);
+  const up = await spot('Move up: Coordinator drop-down');
+  for (let n = 1; n <= 5; n++) {
+    await pn.mouse.click(...up);
+    assert.equal(await where(), 5 - n, `click ${n} moved it one more place up`);
+    assert.equal(await under(up), 'Move up: Coordinator drop-down', `after click ${n} its own button is still under the pointer`);
+    assert.deepEqual(await movedRows(pn), ['Coordinator drop-down']);
+  }
+  assert.deepEqual(await topRows(pn), ['Coordinator drop-down', ...ADMIN_TOP_ROWS.slice(0, 5)]);
+  assert.equal(await focusedName(pn), 'Move up: Coordinator drop-down', 'focus stays on the pressed button');
+  assert.equal(await body.evaluate((el) => el.scrollTop), 0, 'the dialog could not scroll up: space above the list took its place');
+  assert.ok((await lift()) > 0);
+  await pn.mouse.click(...up);
+  assert.equal(await where(), 0, 'a click too many leaves it first');
+  await saidInDialog(pn, 'Coordinator drop-down is already first on the top bar.');
+  await shot(pn, '19b-clicks-at-one-spot');
+  // Back down the same way: the space above the list shrinks again and is gone at the last place.
+  const down = await spot('Move down: Coordinator drop-down');
+  for (let n = 1; n <= 5; n++) {
+    await pn.mouse.click(...down);
+    assert.equal(await where(), n, `click ${n} moved it one more place down`);
+    assert.equal(await under(down), 'Move down: Coordinator drop-down', `after click ${n} its own button is still under the pointer`);
+  }
+  assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
+  assert.ok((await lift()) < 1, `no space left above the list (${await lift()} px)`);
+  // Clicking fast: the browser counts the clicks of a quick series (1, 2, 3, 4). The second one, which makes a double-click, is left
+  // alone; the ones after it go on moving the same page.
+  const fast = await spot('Move up: Coordinator drop-down');
+  await pn.mouse.click(...fast, { clickCount: 4 });
+  assert.equal(await where(), 2, 'four quick clicks: three places up');
+  assert.equal(await under(fast), 'Move up: Coordinator drop-down');
+  // The keyboard afterwards: focus stays on the pressed button, also at the first place, and the space above the list goes.
+  assert.ok((await lift()) > 0);
+  await pn.keyboard.press('Enter');
+  await pn.keyboard.press('Enter');
+  await pn.keyboard.press('Enter');
+  assert.equal(await where(), 0);
+  assert.equal(await focusedName(pn), 'Move up: Coordinator drop-down');
+  assert.equal(await lift(), 0, 'a change made with the keyboard takes the space away');
+  const toLast = async () => {
+    await d.getByRole('button', { name: 'Move down: Coordinator drop-down', exact: true }).focus();
+    for (let n = 0; n < 6; n++) await pn.keyboard.press('Enter');
+    assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
+    assert.equal(await focusedName(pn), 'Move down: Coordinator drop-down', 'at the last place focus stays on its row');
+  };
+  await toLast();
+  // Scrolled past the space above the list (here to the very end), the space goes without anything on the screen moving.
+  await body.evaluate((el) => { el.scrollTop = 0; });
+  const again = await spot('Move up: Coordinator drop-down');
+  await pn.mouse.click(...again);
+  await pn.mouse.click(...again);
+  assert.ok((await lift()) > 0);
+  const seen = await body.evaluate((el) => { el.scrollTop = el.scrollHeight; return el.querySelector('[aria-label="Put on the top bar: Audit log"]').getBoundingClientRect().top; });
+  await pn.waitForFunction(() => !document.querySelector('.modal ol.arrange-list').style.paddingTop);
+  const now = (await d.getByRole('button', { name: 'Put on the top bar: Audit log', exact: true }).boundingBox()).y;
+  assert.ok(Math.abs(now - seen) <= 1, `the last button stayed where it was (moved ${Math.round(now - seen)} px)`);
+  await toLast();
+  await body.evaluate((el) => { el.scrollTop = 0; });
+});
 await step('Arrange my menu: "Move up" moves a page up, its row stands out and focus stays on it, also with the keyboard; one Enter too many does not move it back', async () => {
   const d = arrangeDialog(pn);
   await d.getByRole('button', { name: 'Move up: Patients', exact: true }).click();
@@ -1792,6 +1859,29 @@ await step('Arrange my menu: "Reset to default" brings back the clinic\'s menu, 
   await saveArrange(pn, ADMIN_BAR);
   assert.equal(await pn.evaluate(() => localStorage.getItem('staff-menu:s-admin')), '[]');
   assert.deepEqual(await pn.evaluate(async () => (await import('/js/state.js')).state.data.myMenuArrangement()), []);
+});
+await step('Arrange my menu: the Aaj ki List page put on the top bar beside its drop-down reads "Aaj ki List (today)", so no name is on the bar twice', async () => {
+  await openArrange(pn);
+  const d = arrangeDialog(pn);
+  await d.getByRole('button', { name: 'Put on the top bar: Aaj ki List (today)', exact: true }).click();
+  assert.equal((await topRows(pn)).at(-1), 'Aaj ki List (today)', 'the dialog calls it what the top bar will');
+  assert.match(await d.locator('ol.arrange-list > li', { hasText: 'Aaj ki List drop-down' }).innerText(), /History of Aaj ki List, Queue board, Checkups/);
+  const bar = [...ADMIN_BAR.slice(0, -1), 'Aaj ki List (today)', 'More'];
+  await saveArrange(pn, bar);
+  assert.equal(new Set(bar).size, bar.length);
+  // The drop-down keeps its name and its other pages; the link opens today's Aaj ki List and shows it is the page on screen.
+  await pn.locator('.topnav .menu:has(> button:has-text("Aaj ki List")) > button').click();
+  assert.deepEqual((await pn.locator('.topnav .menu.open .menu-list a').allTextContents()).map((t) => t.trim()), ['History of Aaj ki List', 'Queue board', 'Checkups']);
+  await pn.keyboard.press('Escape');
+  await pn.locator('.topnav > a:text-is("Aaj ki List (today)")').click();
+  await pn.waitForSelector('h1:text-is("Aaj ki List")');
+  assert.equal(await pn.locator('.topnav > a:text-is("Aaj ki List (today)")').getAttribute('aria-current'), 'page');
+  assert.deepEqual(await barLabels(pn), bar);
+  await shot(pn, '20b-aaj-ki-list-pinned');
+  // Back to the clinic's menu for the steps below.
+  await openArrange(pn);
+  await arrangeDialog(pn).getByRole('button', { name: 'Reset to default' }).click();
+  await saveArrange(pn, ADMIN_BAR);
 });
 await step('Arrange my menu: another role sees its own default, not Dr. Ali\'s arrangement', async () => {
   await openArrange(pn);
@@ -1949,7 +2039,7 @@ await step('Arrange my menu: with the Reports drop-down under More, the long Mor
   await last.click();
   await pnShort.waitForFunction(() => location.hash === '#/staff/admin?tab=audit');
 });
-// Before 20261012000300 is run (the owner runs it by hand in the SQL Editor), Save keeps the menu on this computer only and says
+// Before 20261015000100 is run (the owner runs it by hand in the SQL Editor), Save keeps the menu on this computer only and says
 // it will follow the person once the update is run. The stand-in below answers like supabase.js does then: no row, and Save
 // fails with MENU_PREFS_MISSING.
 const pnEarly = await newPage();

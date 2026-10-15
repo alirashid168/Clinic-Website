@@ -28,7 +28,7 @@
 --
 -- HOW TO APPLY
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
---   With the Supabase CLI, keep the file name as it is (20261012000300 sorts after 20261011000100_aaj_sync_quiet_token.sql).
+--   With the Supabase CLI, keep the file name as it is (20261015000100 sorts after the migrations of 11 and 12 Oct 2026).
 --   Until it is run the website still works: every menu is the clinic's default until someone arranges theirs, and
 --   "Arrange my menu" then keeps that person's arrangement on that one computer only (the message after Save says so). Once
 --   this file is run, their next login on that computer (or their next Save) puts it in this table.
