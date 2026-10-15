@@ -33,6 +33,9 @@ const PAGES = {
   accounts: { render: lazy(() => import('./accounts.js'), 'renderAccounts'), show: () => can('finance.view') || can('cash.close') || can('cash.verify') },
   reports: { render: lazy(() => import('./reports.js'), 'renderReports'), show: () => can('finance.view') || can('billing.view') || can('patients.view') || can('sheet.view') },
   coordinator: { render: lazy(() => import('./coordinator.js'), 'renderCoordinator'), show: () => can('reminders.manage') || can('lab.manage') || can('retainers.manage') },
+  // Laid out like the clinic's Google Sheets; anyone who may open patient files reads them, the manage rights change them.
+  retainers: { render: lazy(() => import('./retainers.js'), 'renderRetainers'), show: () => can('retainers.manage') || can('patients.view') },
+  lab: { render: lazy(() => import('./lab.js'), 'renderLab'), show: () => can('lab.manage') || can('patients.view') },
   stock: { render: lazy(() => import('./inventory.js'), 'renderInventory'), show: () => can('inventory.manage') },
   complaints: { render: lazy(pagesModule, 'renderComplaints'), show: () => can('complaints.view') },
   jobs: { render: lazy(() => import('./jobs.js'), 'renderJobs'), show: () => can('jobs.view') },
@@ -62,11 +65,11 @@ function menu() {
       { ...link('Expenses', 'accounts?tab=expenses'), show: () => can('finance.view') },
       { ...link('Cash closing', 'accounts?tab=cash'), show: () => can('cash.close') || can('cash.verify') },
     ] },
-    { label: 'Coordinator', key: 'coordinator', show: () => show('coordinator'), items: [
+    { label: 'Coordinator', key: 'coordinator', show: () => show('coordinator') || show('retainers') || show('lab'), items: [
       { ...link('Reminders', 'coordinator?tab=reminders'), show: () => can('reminders.manage') },
       { ...link('Drop-offs', 'coordinator?tab=dropoffs'), show: () => can('reminders.manage') },
-      { ...link('Lab work', 'coordinator?tab=lab'), show: () => can('lab.manage') },
-      { ...link('Retainers', 'coordinator?tab=retainers'), show: () => can('retainers.manage') || can('patients.view') },
+      link('Lab work', 'lab'),
+      link('Retainer Record', 'retainers'),
       { ...link('Low ratings', 'coordinator?tab=ratings'), show: () => can('reminders.manage') },
     ] },
     { label: 'More', key: 'more', show: () => true, items: [
@@ -78,7 +81,7 @@ function menu() {
       { ...link('Clinic setup', 'admin?tab=setup'), show: () => isAdmin() },
       { ...link("Dr. Ali's calendar", 'admin?tab=calendar'), show: () => can('schedule.manage') },
       { ...link('Download data', 'admin?tab=export'), show: () => can('export.data') },
-      { ...link('Import (Healthwire, Aaj ki List, checkups)', 'admin?tab=import'), show: () => isAdmin() },
+      { ...link('Import (Healthwire, Aaj ki List, checkups, retainers)', 'admin?tab=import'), show: () => isAdmin() },
       { ...link('Duplicate patients', 'admin?tab=duplicates'), show: () => isAdmin() },
       { ...link('Audit log', 'admin?tab=audit'), show: () => can('audit.view') },
     ] },
@@ -135,7 +138,7 @@ export async function renderStaff(root, path, params, signOut) {
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
-  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || (section === 'day-history' && key === 'sheet');
+  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || ((section === 'retainers' || section === 'lab') && key === 'coordinator') || (section === 'day-history' && key === 'sheet');
   const items = menu();
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).

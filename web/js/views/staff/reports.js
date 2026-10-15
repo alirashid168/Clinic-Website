@@ -311,7 +311,7 @@ export async function renderReports(root, params) {
     },
     'accounts/lab': async () => {
       const rows = sumBy(byBranch(await report('lab_costs')), branch.value ? ['month'] : ['month', 'branch_id'], ['cases', 'cost']).sort((a, b) => a.month.localeCompare(b.month));
-      return [table('Lab and retainer costs', 'From Coordinator → Lab work and Retainers. Add these as expenses if they are not already paid through Accounts.', rows, [['Month', 'month', 'month'], ...(branch.value ? [] : [['Branch', 'branch_id', 'branch']]), ['Cases', 'cases', 'num'], ['Cost', 'cost', 'money']], 'lab_costs', { cases: total(rows, 'cases'), cost: total(rows, 'cost') })];
+      return [table('Lab and retainer costs', 'From Lab work (the Cost column) and the Retainer Record (a retainer\'s lab cost, in its "More" dialog; rows without a lab cost are not counted). Add these as expenses if they are not already paid through Accounts.', rows, [['Month', 'month', 'month'], ...(branch.value ? [] : [['Branch', 'branch_id', 'branch']]), ['Cases', 'cases', 'num'], ['Cost', 'cost', 'money']], 'lab_costs', { cases: total(rows, 'cases'), cost: total(rows, 'cost') })];
     },
 
     'hr/doctors': async () => {

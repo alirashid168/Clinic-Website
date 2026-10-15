@@ -1,13 +1,13 @@
-// Clinic coordinator: follow-up reminders, drop-off list, lab work,
-// retainers (made in-house), low ratings.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, tabs, localISO, addMonthsISO, srOnly, announce, showFormErrors, clearFieldErrors, busy } from '../../ui/dom.js';
-import { state, can, branchName, myBranches, defaultBranchId } from '../../state.js';
+// Clinic coordinator: follow-up reminders, drop-off list, low ratings. Lab work and the retainers have their own pages
+// (lab.js, retainers.js, laid out like the clinic's Google Sheets); their old tabs here send people there. The overdue retainer
+// checks the old Retainers tab warned about are still named over the tabs.
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, tabs, localISO, srOnly, announce, showFormErrors, clearFieldErrors, busy } from '../../ui/dom.js';
+import { state, can, defaultBranchId, cityName } from '../../state.js';
 import { patientSearch, commitOnFinish, capNote } from './common.js';
+import { retainerStatuses, checkOverdue } from '../../lib/records.js';
 
 const REMINDER_KINDS = { followup: 'Follow-up', appointment: 'Appointment due', installment: 'Installment', retainer: 'Retainer', lab: 'Lab', recall: 'Recall', dues: 'Dues' };
 const REMINDER_STATUS = { open: 'Open', contacted: 'Contacted', no_answer: 'No answer', booked: 'Booked', done: 'Done', cancelled: 'Cancelled' };
-const LAB_STATUS = { sent: 'Sent to lab', received: 'Received', fitted: 'Fitted', returned: 'Returned to lab', cancelled: 'Cancelled' };
-const RETAINER_STAGES = { impression: 'Impression / scan', fabrication: 'Being made', ready: 'Ready', delivered: 'Delivered', follow_up: 'Follow-up check', replacement_needed: 'Needs replacement', closed: 'Closed' };
 const COMMIT_HINT = 'coordinator-commit-hint';
 
 const greeting = (p) => `Assalam o Alaikum ${(p?.full_name || '').split(' ')[0]}, this is Dr. Ali Rashid's Dental Clinic. `;
@@ -59,14 +59,42 @@ function pickPatient(onPick) {
   return { el, input, get: () => chosen };
 }
 
+// The old tabs of lab work and retainers, and where they are now.
+const MOVED = { lab: '#/staff/lab', retainers: '#/staff/retainers' };
+
+// The overdue retainer checks (the old Retainers tab warned about them; the Retainer Record sets the first check a month after delivery):
+// every city this person may see, the names (a row linked to a patient file opens it) and, per city, a link to its tab of the Retainer
+// Record showing only the overdue checks. Drawn when the list arrives, so the tabs never wait for it; when it cannot be read (the Retainer
+// Record is not switched on yet) there is no warning.
+function overdueChecks() {
+  const host = h('div', {});
+  if (!can('retainers.manage') && !can('patients.view')) return host;
+  const today = localISO();
+  const statuses = retainerStatuses(state.ref.settings);
+  Promise.resolve(state.data.retainerChecksOverdue?.({ today })).then((list) => {
+    const late = (list || []).filter((r) => checkOverdue(r, statuses, today));
+    if (!late.length) return;
+    const cities = [...new Set(late.map((r) => r.city_id))].sort((a, b) => a - b);
+    mount(host, h('div', { class: 'alert alert-warning' },
+      `${list.truncated ? 'At least ' : ''}${late.length} retainer check${late.length > 1 ? 's are' : ' is'} overdue: `,
+      late.slice(0, 6).map((r, i) => [i ? ', ' : '', r.patient_id && r.patient ? h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient.full_name) : r.patient_name || 'a patient']),
+      late.length > 6 ? ', …' : '', '. Call them for a follow-up. On the Retainer Record: ',
+      cities.map((c, i) => [i ? ' · ' : '', h('a', { href: `#/staff/retainers?city=${c}&status=__overdue` }, `${cityName(c) || 'another city'} (${late.filter((r) => r.city_id === c).length})`)]), '.'));
+  }).catch(() => { /* not switched on yet, or not readable: no warning */ });
+  return host;
+}
+
 export async function renderCoordinator(root, params) {
+  if (MOVED[params.get('tab')]) { location.replace(MOVED[params.get('tab')]); return; }
   const available = [
     can('reminders.manage') && ['reminders', 'Reminders'],
     can('reminders.manage') && ['dropoffs', 'Drop-offs'],
-    can('lab.manage') && ['lab', 'Lab work'],
-    (can('retainers.manage') || can('patients.view')) && ['retainers', 'Retainers'],
     can('reminders.manage') && ['ratings', 'Low ratings'],
   ].filter(Boolean);
+  const moved = h('p', { class: 'muted' }, "Lab work and the retainers have their own pages, laid out like the clinic's sheets: ",
+    h('a', { href: MOVED.lab }, 'Lab work'), ' and ', h('a', { href: MOVED.retainers }, 'Retainer Record'), '.');
+  const checks = overdueChecks();
+  if (!available.length) { mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Coordinator')), checks, moved); return; }
   let tab = available.some(([k]) => k === params.get('tab')) ? params.get('tab') : available[0]?.[0];
   const panel = h('div', {});
   // Each draw gets a number. A list that arrives after the person has moved to another tab (or
@@ -85,8 +113,6 @@ export async function renderCoordinator(root, params) {
     try {
       if (tab === 'reminders') await reminders(panel, draw, live);
       else if (tab === 'dropoffs') await dropoffs(panel, live);
-      else if (tab === 'lab') await lab(panel, draw, live);
-      else if (tab === 'retainers') await retainers(panel, draw, live);
       else await ratings(panel, draw, live);
       if (live()) shown = tab;
     } catch (e) {
@@ -103,7 +129,7 @@ export async function renderCoordinator(root, params) {
   });
   const hint = srOnly('Choices save when you press Enter or move to the next control. Escape undoes a change that is not saved yet.');
   hint.id = COMMIT_HINT;
-  mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Coordinator')), hint, strip.el, panel);
+  mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Coordinator')), checks, moved, hint, strip.el, panel);
   await draw();
 }
 
@@ -171,128 +197,6 @@ async function dropoffs(root, live) {
         h('td', {}, h('a', { href: `#/staff/patient/${r.patient?.id || r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, phoneLink(r.patient?.phone, greeting(r.patient)))),
         h('td', {}, r.last_visit ? shortDate(r.last_visit) : 'No visit yet'),
         h('td', { class: 'right' }, r.days_since !== null && r.days_since !== undefined ? `${r.days_since} days` : '')))))) : empty('Every braces patient has been seen recently.')));
-}
-
-async function lab(root, redraw, live) {
-  const d = state.data;
-  const rows = await d.labCases();
-  if (!live()) return;
-  const add = () => {
-    const pp = pickPatient();
-    const branch = select(myBranches().map((b) => ({ value: b.id, label: b.name })), defaultBranchId());
-    const labName = h('input', { placeholder: 'In-house lab or lab name', value: 'In-house lab' });
-    const work = h('input', { placeholder: 'Crown, veneers, denture, retainer…' });
-    const dueDate = h('input', { type: 'date' });
-    const cost = h('input', { type: 'number', min: 0, placeholder: 'Rs' });
-    const body = h('div', {}, pp.el, h('div', { class: 'form-grid' }, field('Branch', branch), field('Lab', labName), field('Work', work, null, { required: true }), field('Expected back', dueDate), field('Lab cost', cost)));
-    modal('New lab case', body, [
-      { label: 'Cancel' },
-      { label: 'Save', primary: true, onClick: async () => {
-        const errors = [];
-        if (!pp.get()) errors.push({ input: pp.input, message: 'Choose a patient: type a name, Mr# or phone and pick from the list.' });
-        if (!work.value.trim()) errors.push({ input: work, message: 'Write the work, e.g. crown or retainer.' });
-        if (errors.length) { showFormErrors(body, errors); return false; }
-        clearFieldErrors(body);
-        try { await d.saveLabCase({ patient_id: pp.get().id, branch_id: Number(branch.value), lab_name: labName.value, work_type: work.value, due_date: dueDate.value || null, cost: cost.value ? Number(cost.value) : null }); setTimeout(redraw); } catch (e) { toast(friendlyError(e), 'error'); return false; }
-      } },
-    ]);
-  };
-  const today = localISO();
-  const labRow = (r) => {
-    const late = () => !!r.due_date && r.due_date < today && r.status === 'sent';
-    let dateTd = dueCell(r.due_date, late());
-    const statusCell = can('lab.manage') ? statusSelect(LAB_STATUS, r.status, { label: `Lab status for ${r.patient?.full_name || 'patient'}, ${r.work_type || 'lab work'}`, key: `lab-${r.id}`, minWidth: '140px', save: async (value) => {
-      const patch = { id: r.id, status: value };
-      if (value === 'received') patch.received_date = today;
-      if (value === 'fitted') patch.fitted_date = today;
-      await d.saveLabCase(patch);
-      r.status = value;
-      const fresh = dueCell(r.due_date, late()); dateTd.replaceWith(fresh); dateTd = fresh;
-    } }) : LAB_STATUS[r.status];
-    return h('tr', {},
-      h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), h('div', { class: 'muted' }, branchName(r.branch_id))),
-      h('td', {}, r.work_type), h('td', {}, r.lab_name), h('td', { class: 'nowrap' }, shortDate(r.sent_date)),
-      dateTd,
-      h('td', { class: 'right' }, r.cost ? rupees(r.cost) : ''),
-      h('td', {}, statusCell));
-  };
-  remount(root, h('section', { class: 'panel' },
-    h('div', { class: 'panel-head' }, h('h2', {}, 'Lab work'), h('button', { class: 'btn btn-primary btn-small', dataset: { key: 'add' }, onclick: add }, 'New lab case')),
-    capNote(rows, 'lab cases (newest first)', 'older cases are not listed'),
-    rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Work'), h('th', { scope: 'col' }, 'Lab'), h('th', { scope: 'col' }, 'Sent'), h('th', { scope: 'col' }, 'Due'), h('th', { scope: 'col', class: 'right' }, 'Cost'), h('th', { scope: 'col' }, 'Status'))),
-      h('tbody', {}, rows.map(labRow)))) : empty('No lab cases yet.')));
-}
-
-async function retainers(root, redraw, live) {
-  const d = state.data;
-  const rows = await d.retainerCases();
-  if (!live()) return;
-  const add = () => {
-    const pp = pickPatient();
-    const arch = select([{ value: 'both', label: 'Upper and lower' }, { value: 'upper', label: 'Upper' }, { value: 'lower', label: 'Lower' }], 'both');
-    const type = h('input', { placeholder: 'Type (optional)' });
-    const price = h('input', { type: 'number', min: 0, placeholder: 'Rs' });
-    const labCost = h('input', { type: 'number', min: 0, placeholder: 'In-house cost (Rs)' });
-    const repl = h('input', { type: 'checkbox' });
-    const reason = h('input', { placeholder: 'If a repeat, why?' });
-    const body = h('div', {}, pp.el, h('div', { class: 'form-grid' }, field('Arch', arch), field('Type', type), field('Price', price), field('Lab cost', labCost)),
-      h('label', { class: 'inline' }, repl, 'Replacement or repeat'), field('Reason', reason));
-    modal('New retainer', body, [
-      { label: 'Cancel' },
-      { label: 'Save', primary: true, onClick: async () => {
-        if (!pp.get()) { showFormErrors(body, [{ input: pp.input, message: 'Choose a patient: type a name, Mr# or phone and pick from the list.' }]); return false; }
-        clearFieldErrors(body);
-        try { await d.saveRetainerCase({ patient_id: pp.get().id, arch: arch.value, retainer_type: type.value || null, price: price.value ? Number(price.value) : null, lab_cost: labCost.value ? Number(labCost.value) : null, is_replacement: repl.checked, repeat_reason: reason.value || null, branch_id: defaultBranchId() }); setTimeout(redraw); } catch (e) { toast(friendlyError(e), 'error'); return false; }
-      } },
-    ]);
-  };
-  const stageDate = { fabrication: 'fabricated_date', ready: 'ready_date', delivered: 'delivered_date' };
-  const today = localISO();
-  const isLate = (r) => !!r.next_check_date && r.next_check_date < today && r.stage !== 'closed';
-  const alertHost = h('div', {});
-  const drawAlert = () => {
-    const overdue = rows.filter(isLate);
-    // On a cut-off list there may be more overdue checks than the ones shown.
-    const atLeast = rows.truncated ? 'At least ' : '';
-    mount(alertHost, overdue.length ? h('div', { class: 'alert alert-warning' }, `${atLeast}${overdue.length} retainer check${overdue.length > 1 ? 's are' : ' is'} overdue: `, overdue.slice(0, 6).map((r, i) => [i ? ', ' : '', h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name || 'patient')]), overdue.length > 6 ? ', …' : '', '. Call them for a follow-up.') : null);
-  };
-  const nextCheckCell = (r) => {
-    const late = isLate(r);
-    if (!can('retainers.manage')) return dueCell(r.next_check_date, late);
-    const input = h('input', { type: 'date', value: r.next_check_date || '', 'aria-label': `Next check for ${r.patient?.full_name || 'patient'}`, 'aria-describedby': COMMIT_HINT, style: { width: '150px' }, dataset: { key: `next-${r.id}` } });
-    const ctl = commitOnFinish(input, async (value, previous) => {
-      try { await d.saveRetainerCase({ id: r.id, next_check_date: value || null }); r.next_check_date = value || null; drawAlert(); toast('Next check saved.', 'ok'); } catch (err) { ctl.set(previous); toast(friendlyError(err), 'error'); }
-    });
-    return h('td', { class: 'nowrap' }, input, overdueBadge(late));
-  };
-  const retainerRow = (r) => {
-    let nextTd = nextCheckCell(r);
-    const stage = can('retainers.manage') ? statusSelect(RETAINER_STAGES, r.stage, { label: `Retainer stage for ${r.patient?.full_name || 'patient'}`, key: `stage-${r.id}`, minWidth: '160px', save: async (value) => {
-      const patch = { id: r.id, stage: value };
-      if (stageDate[value]) patch[stageDate[value]] = today;
-      // Delivered → first check a month later (calendar month, Karachi date), unless a date is already set.
-      if (value === 'delivered' && !r.next_check_date) patch.next_check_date = addMonthsISO(today, 1);
-      if (value === 'closed') patch.next_check_date = null;
-      await d.saveRetainerCase(patch);
-      Object.assign(r, patch);
-      // Update this row's check date and the overdue note in place (instead of redrawing the
-      // whole table), so the stage select keeps focus.
-      const fresh = nextCheckCell(r); nextTd.replaceWith(fresh); nextTd = fresh; drawAlert();
-    } }) : RETAINER_STAGES[r.stage];
-    return h('tr', {},
-      h('td', {}, h('a', { href: `#/staff/patient/${r.patient_id}` }, r.patient?.full_name), r.is_replacement ? h('span', { class: 'badge badge-warn', style: { marginLeft: '6px' } }, 'Repeat') : null),
-      h('td', {}, r.arch), h('td', { class: 'nowrap' }, shortDate(r.impression_date)), nextTd, h('td', { class: 'right' }, r.lab_cost ? rupees(r.lab_cost) : ''),
-      h('td', {}, stage));
-  };
-  drawAlert();
-  remount(root, h('section', { class: 'panel' },
-    h('div', { class: 'panel-head' }, h('h2', {}, 'Retainers (made in-house)'), can('retainers.manage') ? h('button', { class: 'btn btn-primary btn-small', dataset: { key: 'add' }, onclick: add }, 'New retainer') : null),
-    capNote(rows, 'retainer cases (newest first)', 'older cases are not listed'),
-    alertHost,
-    rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Arch'), h('th', { scope: 'col' }, 'Impression'), h('th', { scope: 'col' }, 'Next check'), h('th', { scope: 'col', class: 'right' }, 'Lab cost'), h('th', { scope: 'col' }, 'Stage'))),
-      h('tbody', {}, rows.map(retainerRow)))) : empty('No retainer cases yet.')));
 }
 
 async function ratings(root, redraw, live) {

@@ -16,6 +16,7 @@ import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel, nameFits, nameNorm, dayListCheckups } from '../lib/checkups.js';
+import { seedRecords, recordsDemo } from './demo-records.js';
 import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
 import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS, HONEYPOT } from '../lib/public-forms.js';
 
@@ -223,13 +224,8 @@ function seed() {
     { id: uid(), expense_date: daysAgo(1), branch_id: 2, city_id: 1, category_id: 12, amount: 2000, paid_to: 'Staff lunch', method: 'cash', notes: 'Sample figure' },
   ];
   db.cash_closings = [];
-  db.lab_cases = [
-    { id: uid(), patient_id: db.patients[14].id, branch_id: 2, lab_name: 'In-house lab', work_type: 'Crown', sent_date: daysAgo(6), due_date: daysAgo(-1), status: 'received', cost: 5000 },
-    { id: uid(), patient_id: db.patients[17].id, branch_id: 1, lab_name: 'Sample lab', work_type: 'Veneers (6 units)', sent_date: daysAgo(10), due_date: daysAgo(2), status: 'sent', cost: 30000 },
-  ];
-  db.retainer_cases = [
-    { id: uid(), patient_id: db.patients[7].id, arch: 'both', stage: 'fabrication', impression_date: daysAgo(4), lab_cost: 2000, price: 10000 },
-  ];
+  // Retainer Record and Lab Work (team, rows on every tab, lab work at every branch): data/demo-records.js
+  seedRecords(db, { uid, daysAgo });
   db.reminders = [
     { id: uid(), patient_id: db.patients[5].id, kind: 'dues', due_date: daysAgo(0), note: 'Month 8 dues checkpoint', status: 'open' },
     { id: uid(), patient_id: db.patients[11].id, kind: 'appointment', due_date: daysAgo(-2), note: 'Monthly due', status: 'open' },
@@ -1301,6 +1297,9 @@ export function createDemoAdapter() {
         rule: rule ? { percent: rule.percent, basis: rule.basis, notes: rule.notes } : null, share: rule ? Math.round(base * rule.percent) / 100 : null };
     },
 
+    // ------------------------------------------------------------ Retainer Record and Lab Work (data/demo-records.js)
+    ...recordsDemo({ db: () => db, me, can, need, branchOk, clone, fail, uid, audit, patient }),
+
     // ------------------------------------------------------------ the homepage forms (visitors, no login)
     // The same rules as the database functions (submit_job_application, submit_feedback): every field checked again, the honeypot
     // and the per-phone / per-CNIC limits answer { ok: true } without storing, the whole-website limits ask to try again later
@@ -1414,24 +1413,7 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ coordinator
-    // Like the live lists, these leave out what is finished: lab work that is fitted or cancelled (once 90 days old), closed retainers, done or cancelled reminders.
-    async labCases() {
-      if (!can('lab.manage') && !can('patients.view')) return [];
-      const since = daysAgo(90);
-      return db.lab_cases.filter((l) => ['sent', 'received', 'returned'].includes(l.status) || String(l.updated_at || l.sent_date).slice(0, 10) >= since)
-        .map((l) => ({ ...clone(l), patient: clone(patient(l.patient_id)) }));
-    },
-    async saveLabCase(row) {
-      need('lab.manage');
-      if (row.id) Object.assign(db.lab_cases.find((l) => l.id === row.id), row, { updated_at: new Date().toISOString() });
-      else db.lab_cases.push({ ...row, id: uid(), sent_date: row.sent_date || todayISO(), status: row.status || 'sent' });
-    },
-    async retainerCases() { return db.retainer_cases.filter((r) => r.stage !== 'closed').map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) })); },
-    async saveRetainerCase(row) {
-      need('retainers.manage');
-      if (row.id) Object.assign(db.retainer_cases.find((r) => r.id === row.id), row);
-      else db.retainer_cases.push({ ...row, id: uid(), stage: row.stage || 'impression', impression_date: row.impression_date || todayISO() });
-    },
+    // Like the live list, this leaves out what is finished: done or cancelled reminders.
     async reminders() { need('reminders.manage'); return db.reminders.filter((r) => r.status !== 'done' && r.status !== 'cancelled').map((r) => ({ ...clone(r), patient: clone(patient(r.patient_id)) })).sort((a, b) => a.due_date.localeCompare(b.due_date)); },
     async saveReminder(row) {
       need('reminders.manage');
