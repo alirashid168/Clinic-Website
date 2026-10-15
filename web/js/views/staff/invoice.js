@@ -104,12 +104,14 @@ function ageOn(dob, today = localISO()) {
   return age >= 0 && age < 130 ? age : null;
 }
 
-function billSheet(inv, patient, t, payments) {
+function billSheet(inv, patient, t, payments, credit = 0) {
   const branch = state.ref.branches.find((b) => b.id === inv.branch_id);
   const items = inv.items || [];
   const total = Number(inv.total ?? inv.subtotal - inv.discount_amount);
   const mine = (payments || []).filter((p) => p.invoice_id === inv.id);
-  const paid = mine.reduce((s, p) => s + Number(p.amount), 0);
+  // credit: money the patient paid ahead (an advance, or more than an earlier invoice) that goes towards this one (invoiceBalances).
+  const ahead = Math.max(0, Math.min(Number(credit) || 0, total - mine.reduce((s, p) => s + Number(p.amount), 0)));
+  const paid = mine.reduce((s, p) => s + Number(p.amount), 0) + ahead;
   const modes = [...new Set(mine.filter((p) => Number(p.amount) > 0).map((p) => METHOD_WORDS[p.method] || p.method))];
   const age = ageOn(patient?.date_of_birth);
   const ageGender = [age === null ? '' : `${age} Y`, patient?.gender ? capFirst(patient.gender) : ''].filter(Boolean).join(' / ');
@@ -132,7 +134,7 @@ function billSheet(inv, patient, t, payments) {
       h('tbody', {}, items.map((it) => h('tr', {},
         h('td', {}, it.description), h('td', {}, billNumber(it.unit_price)), h('td', {}, billNumber(it.quantity)), h('td', {}, billNumber(Number(it.quantity) * Number(it.unit_price))))))),
     h('div', { class: 'bill-foot' },
-      h('p', { class: 'bill-mode' }, h('strong', {}, 'Payment Mode: '), modes.length ? modes.join(', ') : 'Not paid yet'),
+      h('p', { class: 'bill-mode' }, h('strong', {}, 'Payment Mode: '), [...modes, ahead ? 'Advance paid earlier' : ''].filter(Boolean).join(', ') || 'Not paid yet'),
       h('table', { class: 'bill-sums' }, h('tbody', {},
         sum('Sub-Total', billRupees(inv.subtotal)),
         Number(inv.discount_amount) ? sum('Discount', `- ${billRupees(inv.discount_amount)}`) : null,
@@ -146,11 +148,14 @@ function billSheet(inv, patient, t, payments) {
   return sheet;
 }
 
-/** The invoice as printed: the A4 bill (payments: this invoice's, for Paid, Due and Payment Mode), or the 80mm thermal receipt as before. */
-export function invoiceSheet(inv, patient, templateKey, { payments } = {}) {
+/**
+ * The invoice as printed: the A4 bill (payments: this invoice's, for Paid, Due and Payment Mode; credit: an advance paid earlier that
+ * goes towards it), or the 80mm thermal receipt as before.
+ */
+export function invoiceSheet(inv, patient, templateKey, { payments, credit = 0 } = {}) {
   const t = TEMPLATES[templateKey || inv.template_key] || TEMPLATES.classic;
   const thermal = (templateKey || inv.template_key) === 'thermal';
-  if (!thermal) return billSheet(inv, patient, t, payments ?? patient?.payments);
+  if (!thermal) return billSheet(inv, patient, t, payments ?? patient?.payments, credit);
   const branch = state.ref.branches.find((b) => b.id === inv.branch_id);
   const items = inv.items || [];
   const sheet = h('div', { class: ['invoice-sheet', 'print-area', thermal && 'thermal', thermal && 'print-thermal'] },
@@ -178,11 +183,12 @@ export function invoiceSheet(inv, patient, templateKey, { payments } = {}) {
  * payments: the payments the bill counts (those on this invoice); a patient record's own payments by default.
  * receipt: { payment, due } adds "Print receipt" for the money just taken. autoPrint: print at once ("Save & Print").
  * saved: a line above the bill saying what was just saved. onClose: runs once the dialog (or the receipt after it) has closed.
+ * credit: an advance paid earlier that goes towards this invoice (invoiceBalances' credit_used).
  */
-export function printInvoice(inv, patient, { patientView = state.session?.kind !== 'staff', payments = patient?.payments, receipt = null, autoPrint = false, saved = '', onClose } = {}) {
+export function printInvoice(inv, patient, { patientView = state.session?.kind !== 'staff', payments = patient?.payments, credit = 0, receipt = null, autoPrint = false, saved = '', onClose } = {}) {
   let key = inv.template_key || 'classic';
   const holder = h('div', {});
-  const draw = () => mount(holder, invoiceSheet(inv, patient, key, { payments }));
+  const draw = () => mount(holder, invoiceSheet(inv, patient, key, { payments, credit }));
   draw();
   const picker = patientView ? null : select(Object.entries(TEMPLATES).map(([value, t]) => ({ value, label: t.name })), key, { onchange: (e) => { key = e.target.value; draw(); } });
   // The receipt opens once this dialog has closed, so only one sheet is on screen (and on paper) at a time.
@@ -238,7 +244,11 @@ function invoiceEditor({ items = null, treatment = '', doctorId = '', discount =
       h('span', {}, 'Treatment'), h('span', {}, 'Description'), h('span', {}, 'Rate (Rs)'), h('span', {}, 'Qty'), h('span', { class: 'right' }, 'Amount'),
       h('span', { class: 'bill-disc-head' }, 'Discount'), h('span', {}, 'Performed by'), h('span', {})));
   const totalsEl = h('div', { class: 'bill-totals', 'aria-live': 'polite' });
-  const lineOffBefore = (items || []).reduce((s, it) => s + Number(it.discount_amount || 0), 0);
+  // The lines' discounts are a part of the invoice's. Lines saying more than the invoice (a discount rejected before the database took
+  // the lines' discounts off with it, 20261015000900) show none: the invoice's own discount is what was given.
+  const linesSay = (items || []).reduce((s, it) => s + Number(it.discount_amount || 0), 0);
+  const lineDiscounts = linesSay <= Number(discount || 0);
+  const lineOffBefore = lineDiscounts ? linesSay : 0;
   const totalOff = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', value: Math.max(0, Number(discount || 0) - lineOffBefore) || 0, 'aria-label': 'Total discount', disabled: !mayDiscount, oninput: () => recalc() });
   const totalKind = select([{ value: 'rs', label: 'Rs' }, { value: 'pct', label: '%' }], 'rs', { 'aria-label': 'Total discount in Rs or %', disabled: !mayDiscount, onchange: () => recalc() });
   const reasonIn = h('input', { value: reason || '', maxlength: 300, placeholder: 'Reason (needed for discounts)', disabled: !mayDiscount });
@@ -269,12 +279,17 @@ function invoiceEditor({ items = null, treatment = '', doctorId = '', discount =
       h('strong', {}, `Grand total ${rupees(t.total)}`));
     onChange?.(t);
   }
-  // The price list's rate goes in when an item from it is chosen, unless a rate was typed for this line by hand.
+  // The price list's rate goes in when an item from it is chosen, unless a rate was typed for this line by hand. A rate that came from
+  // the list goes again once the treatment no longer names that item (changed to something not on the list, misspelt, or cleared):
+  // the line then asks for a rate instead of billing the earlier item's price.
   function fillRate(line) {
     const t = byName.get(nameKey(line.treat.value));
     if (t && (line.auto || line.price.value === '')) {
       line.price.value = String(Number(t.default_price ?? 0));
       line.auto = true;
+    } else if (!t && line.auto) {
+      line.price.value = '';
+      line.auto = false;
     }
     recalc();
   }
@@ -287,24 +302,33 @@ function invoiceEditor({ items = null, treatment = '', doctorId = '', discount =
     const known = it?.treatment_id ? allById.get(Number(it.treatment_id)) : null;
     const desc = String(it?.description || '');
     const treatName = known ? known.name : it ? desc : (byName.get(nameKey(treatment))?.name || '');
-    const rest = known && nameKey(desc).startsWith(nameKey(known.name)) ? desc.slice(known.name.length).replace(/^\s*-\s*/, '') : '';
+    // A saved line keeps its description as it is unless this form changes the treatment or the description: an imported line (the
+    // visit type "Bonding" with "Braces Kit (Made in China), Monthly (x2)" from Healthwire) or a line whose price-list item was renamed
+    // since would otherwise be saved as the bare item name. The Description box shows what follows the item's name, or all of the
+    // description when it does not start with that name.
+    const rest = !known ? '' : nameKey(desc).startsWith(nameKey(known.name)) ? desc.slice(known.name.length).replace(/^\s*-\s*/, '') : desc;
     line.keep = it?.treatment_id ? { id: Number(it.treatment_id), name: treatName } : null;
+    line.saved = it ? { treat: treatName, desc: rest, description: desc } : null;
     line.treat = h('input', { value: treatName, list: listId, autocomplete: 'off', placeholder: 'Search the price list', 'aria-label': `Treatment, line ${n}`, oninput: () => fillRate(line), onchange: () => fillRate(line) });
     line.desc = h('input', { value: rest, autocomplete: 'off', placeholder: 'Description', maxlength: 300, 'aria-label': `Description, line ${n}` });
     line.price = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', placeholder: 'Rate', value: it ? Number(it.unit_price) : '', 'aria-label': `Rate (Rs), line ${n}`, oninput: () => { line.auto = false; recalc(); } });
     line.qty = h('input', { type: 'number', min: 1, value: it ? Number(it.quantity) : 1, inputmode: 'numeric', 'aria-label': `Qty, line ${n}`, oninput: () => recalc() });
     line.amount = h('output', { class: 'right bill-amount', 'aria-label': `Amount, line ${n}` });
-    line.off = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', value: Number(it?.discount_amount || 0) || '', placeholder: 'Discount', disabled: !mayDiscount, 'aria-label': `Discount, line ${n}`, oninput: () => recalc() });
+    line.off = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', value: (lineDiscounts && Number(it?.discount_amount || 0)) || '', placeholder: 'Discount', disabled: !mayDiscount, 'aria-label': `Discount, line ${n}`, oninput: () => recalc() });
     line.offKind = select([{ value: 'rs', label: 'Rs' }, { value: 'pct', label: '%' }], 'rs', { 'aria-label': `Discount in Rs or %, line ${n}`, disabled: !mayDiscount, onchange: () => recalc() });
     const doc = it ? it.clinician_id || '' : doctorId || '';
     const gone = doc && !doctors.some((c) => c.id === doc) ? [{ value: doc, label: 'A doctor no longer listed' }] : [];
     line.doctor = select([{ value: '', label: 'Doctor not set' }, ...doctors.map((c) => ({ value: c.id, label: c.display_name })), ...gone], doc, { 'aria-label': `Performed by, line ${n}` });
-    line.row = h('div', { class: 'bill-line' }, line.treat, line.desc, line.price, line.qty, line.amount,
-      h('div', { class: 'bill-disc' }, line.off, line.offKind), line.doctor,
+    // Each box with its name above it, seen only where the column names are not (narrower than a laptop: app.css .bill-cell-label);
+    // a screen reader hears each box's own label.
+    const cell = (label, control, cls = null) => h('div', { class: ['bill-cell', cls] }, h('span', { class: 'bill-cell-label', 'aria-hidden': 'true' }, label), control);
+    line.row = h('div', { class: 'bill-line' },
+      cell('Treatment', line.treat), cell('Description', line.desc), cell('Rate (Rs)', line.price), cell('Qty', line.qty), cell('Amount', line.amount, 'bill-amount-cell'),
+      cell('Discount', h('div', { class: 'bill-disc' }, line.off, line.offKind), 'bill-disc-cell'), cell('Performed by', line.doctor, 'bill-doc-cell'),
       h('button', { type: 'button', class: 'icon-btn bill-remove', 'aria-label': `Remove line ${n}`, title: 'Remove this line', onclick: () => {
         if (lines.length === 1) {
           for (const k of ['treat', 'desc', 'price', 'off']) line[k].value = '';
-          line.qty.value = 1; line.auto = false; line.keep = null; recalc(); line.treat.focus(); return;
+          line.qty.value = 1; line.auto = false; line.keep = null; line.saved = null; recalc(); line.treat.focus(); return;
         }
         lines.splice(lines.indexOf(line), 1);
         line.row.remove();
@@ -326,8 +350,9 @@ function invoiceEditor({ items = null, treatment = '', doctorId = '', discount =
       field('Discount on the total', h('div', { class: 'bill-discount' }, totalOff, totalKind),
         mayDiscount ? 'Above your limit, it goes to the accountant or Dr. Ali for approval.' : 'Only staff who give discounts change them.'),
       field('Discount reason', reasonIn, 'Needed when there is a discount.')) : null,
-    totalsEl,
-    field('Invoice note', noteIn));
+    totalsEl);
+  // The note is placed by the form (after the payment in a new invoice, so the payment and what stays due are in sight above it).
+  const noteField = field('Invoice note', noteIn);
   recalc();
 
   function read() {
@@ -353,15 +378,16 @@ function invoiceEditor({ items = null, treatment = '', doctorId = '', discount =
     const out = filled.map((l) => {
       const hit = byName.get(nameKey(l.treat.value));
       const treatmentId = hit ? Number(hit.id) : l.keep && nameKey(l.keep.name) === nameKey(l.treat.value) ? l.keep.id : null;
+      const untouched = l.saved && l.treat.value === l.saved.treat && l.desc.value === l.saved.desc;
       return {
-        description: [l.treat.value.trim(), l.desc.value.trim()].filter(Boolean).join(' - '), quantity: qtyOf(l), unit_price: Number(l.price.value),
+        description: untouched ? l.saved.description : [l.treat.value.trim(), l.desc.value.trim()].filter(Boolean).join(' - '), quantity: qtyOf(l), unit_price: Number(l.price.value),
         discount_amount: Math.max(0, lineOff(l)), treatment_id: treatmentId, clinician_id: l.doctor.value || null,
       };
     });
     return { errors, items: out, discount: t.off, reason: t.off > 0 ? reasonIn.value.trim() || null : null, notes: noteIn.value.trim() || null, total: t.total };
   }
-  const lock = () => { for (const x of el.querySelectorAll('input, select, textarea, button')) x.disabled = true; };
-  return { el, read, totals, lock, first: () => lines[0].treat };
+  const lock = () => { for (const x of [...el.querySelectorAll('input, select, textarea, button'), noteIn]) x.disabled = true; };
+  return { el, noteField, read, totals, lock, first: () => lines[0].treat };
 }
 
 /**
@@ -406,13 +432,16 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
     invoicePart,
     h('fieldset', { class: 'bill-pay' }, h('legend', {}, 'Payment now'),
       h('div', { class: 'form-grid' }, field('Payment method', method), field('Payment (Rs)', paidNow, 'What the patient pays now. Less is fine; 0 when nothing is paid now.')),
-      dueEl));
+      dueEl),
+    editor.noteField);
   showDue();
 
   let stuck = null; // the message of an IDEMPOTENCY_MISMATCH: this form's key is used up, so Save is refused until a new form is opened
   let inv = null; // the saved invoice: Save again only finishes the payment
   let pay = null; // the saved payment
+  let paySent = null; // the payment as it was last sent (a lost answer: what may have been saved)
   let payUnsure = false; // a payment was sent and its answer was lost: it may be saved
+  let credit = 0; // an advance the patient paid earlier that goes towards this invoice (shown on the bill)
   let finished = false;
   let print = false;
   let savedWords = '';
@@ -448,12 +477,21 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
     }
     if (paid > 0 && !pay) {
       try {
-        // The earlier try may have been saved: this invoice is new, so a payment on it can only be that one.
-        if (payUnsure) pay = (await d.patientBilling(patient.id)).payments?.find((x) => x.invoice_id === inv.id) || null;
-        if (!pay) pay = await d.recordPayment({ patient_id: patient.id, branch_id: inv.branch_id, amount: paid, method: method.value, invoice_id: inv.id, notes: null });
+        // The earlier try may have been saved: this invoice is new, so a payment on it can only be that one. The look-up reads a few of
+        // its columns (the live patientBilling: id, invoice, amount, time), so the rest (method, branch) are those of the try that was
+        // sent, for the bill's Payment Mode and the receipt.
+        if (payUnsure) {
+          const found = (await d.patientBilling(patient.id)).payments?.find((x) => x.invoice_id === inv.id);
+          if (found) pay = { ...paySent, ...found };
+        }
+        if (!pay) {
+          paySent = { patient_id: patient.id, branch_id: inv.branch_id, amount: paid, method: method.value, invoice_id: inv.id, notes: null };
+          pay = await d.recordPayment(paySent);
+        }
       } catch (e) {
         payUnsure = payUnsure || isLostAnswer(e);
-        toast(`Invoice ${inv.invoice_no} is saved. The payment ${payUnsure ? 'may or may not have been saved' : 'was not saved'}: ${friendlyError(e)} Press Save again to ${payUnsure ? 'check and finish' : 'try again'}.`, 'error', 12000);
+        // (a lost answer: the payment may be saved, so the error's own words, "did not go through", are not said)
+        toast(`Invoice ${inv.invoice_no} is saved. ${payUnsure ? `The payment may or may not have been saved: ${navigator.onLine ? 'the server did not answer' : 'the connection dropped'}.` : `The payment was not saved: ${friendlyError(e)}`} Press Save again to ${payUnsure ? 'check and finish' : 'try again'}.`, 'error', 12000);
         return false;
       }
     }
@@ -463,9 +501,18 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
     const words = inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`;
     savedWords = pay ? `${words} Payment of ${rupees(pay.amount)} saved.` : words;
     announce(savedWords);
-    await details;
-    await afterSave(onDone, inv);
+    await Promise.all([details, afterSave(onDone, inv), creditFor()]);
     return undefined;
+  }
+  // What stays due on the bill counts an advance paid earlier (invoiceBalances). Only asked when something stays due; without an answer
+  // the bill shows this invoice's own payments, as before.
+  async function creditFor() {
+    const due = Number(inv.total ?? inv.subtotal - inv.discount_amount) - Number(pay?.amount || 0);
+    if (!(due > 0)) return;
+    try {
+      const { invoices, payments } = await d.patientBilling(patient.id);
+      credit = invoiceBalances(invoices, payments).find((i) => i.id === inv.id)?.credit_used || 0;
+    } catch { credit = 0; }
   }
 
   modal(`New invoice · ${patient.full_name}`, body, [
@@ -478,7 +525,7 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
       // Saved: the bill, with Print (and Print receipt for the money taken); "Save & Print" prints it at once.
       if (finished) {
         const due = Number(inv.total ?? inv.subtotal - inv.discount_amount);
-        printInvoice(inv, who, { payments: pay ? [pay] : [], receipt: pay ? { payment: pay, due: Math.max(0, due - Number(pay.amount)) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
+        printInvoice(inv, who, { payments: pay ? [pay] : [], credit, receipt: pay ? { payment: pay, due: Math.max(0, due - Number(pay.amount) - credit) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
       } else if (inv) afterSave(onDone, inv).then(() => afterBill?.()); // the invoice was saved, the payment was not: the page still shows the new invoice
     },
   });
@@ -494,7 +541,8 @@ export function editInvoiceModal(inv, patient, { onDone } = {}) {
   const editor = invoiceEditor({ items: inv.items || [], discount: inv.discount_amount, reason: inv.discount_reason, notes: inv.notes });
   const body = h('div', { class: 'bill-form' },
     h('p', { class: 'muted' }, `${patient?.full_name || ''}${patient?.mr_number ? ` · Mr# ${patient.mr_number}` : ''} · ${branchName(inv.branch_id) || ''} · ${shortDate(inv.issue_date)}. Payments on this invoice stay as they are. The change is kept in the audit log.`),
-    editor.el);
+    editor.el,
+    editor.noteField);
   modal(`Edit invoice ${inv.invoice_no}`, body, [
     { label: 'Cancel' },
     { label: 'Save changes', primary: true, onClick: async () => {
@@ -524,13 +572,17 @@ const fromKarachiInput = (v) => new Date(`${v}:00+05:00`).toISOString();
 /**
  * Edit a payment (owner, 15 Oct 2026: "if we enter cash payment as card or vice versa, it creates a problem. so edit option should be
  * given"): its method, amount, date and time, and note, for "Edit or void invoices" (billing.edit). Only what was changed is sent; the
- * change is in the audit log. A refund stays a refund (its amount is changed as what was given back).
+ * change is in the audit log. A refund stays a refund (its amount is changed as what was given back, by staff who give refunds; anyone
+ * with Edit corrects its method or note). A change to the cash of a day whose cash is already closed asks once more first: that day's
+ * closing counted the payment as it was, so its expected cash and difference stay as they were (the accountant is told to check it).
  */
 export function editPaymentModal(pay, patient, { onDone } = {}) {
   const refund = Number(pay.amount) < 0;
   const known = PAY_METHODS.some((m) => m.value === pay.method);
   const method = select(known ? PAY_METHODS : [...PAY_METHODS, { value: pay.method, label: METHOD_WORDS[pay.method] || pay.method }], pay.method);
-  const amount = h('input', { type: 'number', min: 1, step: 100, inputmode: 'decimal', value: Math.abs(Number(pay.amount)) });
+  const amount = h('input', { type: 'number', min: 1, step: 100, inputmode: 'decimal', value: Math.abs(Number(pay.amount)), disabled: refund && !can('billing.refund') });
+  const closedNote = h('p', { class: 'alert alert-warning', role: 'alert', hidden: true });
+  let warned = '';
   const startedAt = pay.received_at ? karachiInput(pay.received_at) : '';
   const when = h('input', { type: 'datetime-local', value: startedAt, step: 60 });
   const notes = h('input', { value: pay.notes || '', maxlength: 500, placeholder: 'Optional' });
@@ -538,9 +590,10 @@ export function editPaymentModal(pay, patient, { onDone } = {}) {
     h('p', { class: 'muted' }, `${patient?.full_name || ''}${patient?.mr_number ? ` · Mr# ${patient.mr_number}` : ''}. The change is kept in the audit log.`),
     h('div', { class: 'form-grid' },
       field('Method', method),
-      field(refund ? 'Amount given back (Rs)' : 'Amount (Rs)', amount, null, { required: true }),
+      field(refund ? 'Amount given back (Rs)' : 'Amount (Rs)', amount, refund && amount.disabled ? 'The amount of a refund is changed by staff who give refunds.' : null, { required: true }),
       field('Date and time', when, 'Karachi time.'),
-      field('Note', notes)));
+      field('Note', notes)),
+    closedNote);
   modal(`Edit ${refund ? 'refund' : 'payment'} · ${rupees(Math.abs(Number(pay.amount)))} ${METHOD_WORDS[pay.method] || pay.method}`, body, [
     { label: 'Cancel' },
     { label: 'Save changes', primary: true, onClick: async () => {
@@ -557,6 +610,25 @@ export function editPaymentModal(pay, patient, { onDone } = {}) {
       if (when.value !== startedAt) changes.received_at = fromKarachiInput(when.value);
       if ((notes.value.trim() || null) !== (pay.notes || null)) changes.notes = notes.value.trim() || null;
       if (!Object.keys(changes).length) { toast('Nothing was changed.'); return undefined; }
+      // The cash of a day changes when a cash payment's amount or day changes, or a payment becomes cash or stops being cash.
+      const wasCash = pay.method === 'cash';
+      const nowCash = method.value === 'cash';
+      const days = [...new Set([
+        wasCash && (changes.method || changes.amount !== undefined || changes.received_at) ? dayOf(pay.received_at) : '',
+        nowCash && (changes.method || changes.amount !== undefined || changes.received_at) ? dayOf(changes.received_at || pay.received_at) : '',
+      ].filter(Boolean))];
+      const closed = [];
+      for (const day of days) {
+        try { if (await state.data.cashDayClosed(pay.branch_id, day)) closed.push(day); } catch { /* not known: no warning */ }
+      }
+      const key = JSON.stringify([changes, closed]);
+      if (closed.length && warned !== key) {
+        warned = key;
+        closedNote.textContent = `The cash of ${closed.map((x) => shortDate(x)).join(' and ')} at ${branchName(pay.branch_id) || 'this branch'} is already closed. That closing counted this payment as it was, so after this change its expected cash will not match. Tell the accountant to check that day's closing. Press Save changes again to save.`;
+        closedNote.hidden = false;
+        closedNote.scrollIntoView?.({ block: 'nearest' });
+        return false;
+      }
       try { await state.data.updatePayment(pay.id, changes); } catch (e) { toast(friendlyError(e), 'error', 10000); return false; }
       toast(changes.method ? `Payment saved as ${METHOD_WORDS[changes.method] || changes.method}.` : 'Payment saved.', 'ok');
       await afterSave(onDone);
@@ -565,13 +637,38 @@ export function editPaymentModal(pay, patient, { onDone } = {}) {
   ], { initialFocus: method });
 }
 
-/** Issued invoices with what is still unpaid on each (payments are matched to invoices when taken). */
+/**
+ * Issued invoices with what is still unpaid on each. Payments are matched to invoices when taken. Money paid ahead (a payment on no
+ * invoice, one on an invoice since voided, or more than its invoice's total) goes towards the patient's other issued invoices, oldest
+ * first (credit_used), as the patient's dues count it: every payment against every issued invoice. So an advance never leaves the
+ * next invoice looking unpaid, to be collected again. A payment on an invoice waiting for its discount's approval stays with it.
+ */
 export function invoiceBalances(invoices, payments) {
+  const list = invoices || [];
+  const byId = new Map(list.map((i) => [i.id, i]));
+  const totalOf = (i) => Number(i.total ?? i.subtotal - i.discount_amount);
   const paid = {};
-  for (const p of payments || []) if (p.invoice_id) paid[p.invoice_id] = (paid[p.invoice_id] || 0) + Number(p.amount);
-  return (invoices || []).filter((i) => i.status === 'issued').map((i) => {
-    const total = Number(i.total ?? i.subtotal - i.discount_amount);
-    return { ...i, paid_amount: paid[i.id] || 0, remaining: Math.max(0, total - (paid[i.id] || 0)) };
+  let ahead = 0;
+  for (const p of payments || []) {
+    const inv = p.invoice_id ? byId.get(p.invoice_id) : null;
+    if (inv && inv.status !== 'void') paid[inv.id] = (paid[inv.id] || 0) + Number(p.amount);
+    else if (!p.invoice_id || inv) ahead += Number(p.amount); // (a payment on an invoice not in the list is left out)
+  }
+  const issued = list.filter((i) => i.status === 'issued');
+  for (const i of issued) ahead += Math.max(0, (paid[i.id] || 0) - totalOf(i));
+  ahead = Math.max(0, ahead);
+  const order = [...issued].sort((a, b) => String(a.issue_date || '').localeCompare(String(b.issue_date || '')) || String(a.created_at || '').localeCompare(String(b.created_at || '')) || String(a.invoice_no || '').localeCompare(String(b.invoice_no || '')));
+  const used = {};
+  for (const i of order) {
+    if (ahead <= 0) break;
+    const open = Math.max(0, totalOf(i) - (paid[i.id] || 0));
+    used[i.id] = Math.min(open, ahead);
+    ahead -= used[i.id];
+  }
+  return issued.map((i) => {
+    const own = paid[i.id] || 0;
+    const credit = used[i.id] || 0;
+    return { ...i, paid_amount: own + credit, credit_used: credit, remaining: Math.max(0, totalOf(i) - own - credit) };
   });
 }
 

@@ -369,7 +369,7 @@ export async function renderPatient(root, id) {
           h('tbody', {}, p.invoices.map((i) => {
             const bal = balances[i.id];
             return h('tr', {},
-              h('td', {}, h('button', { class: 'link-btn', onclick: () => printInvoice(i, p) }, i.invoice_no), h('div', { class: 'muted' }, shortDate(i.issue_date))),
+              h('td', {}, h('button', { class: 'link-btn', onclick: () => printInvoice(i, p, { credit: balances[i.id]?.credit_used || 0 }) }, i.invoice_no), h('div', { class: 'muted' }, shortDate(i.issue_date))),
               h('td', {}, i.status !== 'issued' ? h('span', { class: 'badge badge-warn' }, i.status.replace('_', ' ')) : bal ? h('span', { class: ['badge', bal.remaining > 0 ? 'badge-dues' : 'badge-ok'] }, bal.remaining > 0 ? `${rupees(bal.remaining)} unpaid` : 'Paid') : null),
               h('td', { class: 'right' }, rupees(i.total ?? i.subtotal - i.discount_amount)),
               can('billing.edit') && i.status === 'issued' ? h('td', { class: 'right nowrap' },

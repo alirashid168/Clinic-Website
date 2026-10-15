@@ -33,24 +33,34 @@
 --    (billing.edit) at the branches the person works at. The discount limits and their approval: an edit that makes the discount
 --    bigger than it was before the edit (in rupees, or as a share of the sub-total) is checked against the person's limit like a new
 --    invoice (over it, the invoice waits for approval and the request is raised); a discount that is not made bigger stays as it was
---    approved or given. A discount that was approved cannot be made bigger in rupees without an approver, and an invoice waiting for
---    approval or void is not changed. The same edit sent twice (a slow line) changes nothing the second time. Every change is in the
---    audit log (invoices and invoice_items are audited).
+--    approved or given. A discount that was approved (the invoice's latest discount request was approved: a rejection fills in
+--    discount_approved_by too, so that column alone does not say it) cannot be made bigger in rupees without an approver, and an
+--    invoice waiting for approval or void is not changed. The same edit sent twice (a slow line) changes nothing the second time.
+--    Every change is in the audit log (invoices and invoice_items are audited).
+--    decide_discount (20261005000200) is the same but for one addition: a rejected discount also takes the lines' discounts off
+--    (the invoice's discount becomes 0, and its lines' discounts are a part of it), so Edit never shows, or saves again, a discount
+--    that was rejected.
 --    invoice_before_write (the discount-limit rule of every invoice change, last set by 20261007002000_audit_fixes.sql) is the same
 --    function with one addition: while edit_invoice swaps an invoice's lines it leaves that invoice's limit check to edit_invoice,
 --    which compares with the invoice as it was before the edit (the rule sees one row change at a time: lines going out and in one by
 --    one would look like a bigger discount, or a smaller one, on the way). Only edit_invoice sets the marker, for its own transaction.
 -- 6. Payments: billing.edit may change a payment's method, amount, time and note (the "edit payments" policy, now also at the
---    person's branches only, and a refund's amount only with "Give refunds"); payment_stamp lets them correct the time; who took the
---    payment still cannot be changed. Every change is in the audit log (payments are audited).
+--    person's branches only); payment_stamp lets them correct the time, and keeps a refund's amount (or turning a payment into a
+--    refund) for "Give refunds": the method or note of a refund may be corrected by any billing.edit. Who took the payment still
+--    cannot be changed. Every change is in the audit log (payments are audited).
+--    cash_day_closed(branch, day): whether that day's cash is closed at that branch (yes or no, never an amount), so the payment form
+--    warns before a payment of a closed day is changed (that closing's expected cash was counted with the payment as it was).
 -- 7. The role grid: the clinic coordinator gets billing.edit ("Edit or void invoices"), on purpose (the owner asked); with the
 --    accountant and Dr. Ali that makes three.
 -- 8. Reading back what they edit: like the "billers view" policies of 20261015000500 for billing.create, billing.edit may read the
---    invoices, invoice lines and payments of the branches they work at. No totals come with it: every clinic, branch or day total stays
---    behind billing.view or finance.view.
+--    invoices, invoice lines and payments of the branches they work at. No totals come with it once 20261015000400_finance_privacy.sql
+--    is in: it refuses payments_summary() and total_dues() and empties the branch income views for whoever has neither billing.view
+--    nor finance.view. Before it, those add up whatever payments the caller may read. So this file refuses to run while a role has
+--    billing.edit without billing.view or finance.view (live: the coordinator) and 20261015000400 is not in yet.
 --
 -- Additive and safe to run more than once.
--- HOW TO APPLY: Supabase dashboard -> SQL Editor -> paste this whole file -> Run (after 20261015000800_invoice_note.sql).
+-- HOW TO APPLY: Supabase dashboard -> SQL Editor -> paste this whole file -> Run, after 20261015000400_finance_privacy.sql and
+-- 20261015000800_invoice_note.sql (order on live: 000400, 000800, 000900).
 -- =============================================================================
 begin;
 
@@ -211,6 +221,45 @@ begin
   return new;
 end $$;
 
+-- Whether an invoice's discount stands approved: its latest discount request was approved. (A rejection fills in
+-- invoices.discount_approved_by too, so that column does not say it.) Security definer: whoever changes the invoice may not read the
+-- requests themselves (only approvers and the requester do). Staff only; yes or no, nothing else.
+create or replace function public.invoice_discount_approved(p_invoice uuid)
+returns boolean
+language sql stable security definer set search_path = public
+as $$
+  select public.is_staff() and coalesce((select r.status = 'approved' from public.discount_requests r where r.invoice_id = p_invoice
+                                          order by r.created_at desc limit 1), false)
+$$;
+revoke all on function public.invoice_discount_approved(uuid) from public, anon;
+grant execute on function public.invoice_discount_approved(uuid) to authenticated;
+
+-- decide_discount as 20261005000200 left it, and a rejection takes the lines' discounts off with the invoice's (they are a part of it).
+create or replace function public.decide_discount(p_request uuid, p_approve boolean)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_req public.discount_requests;
+begin
+  if not public.has_perm('discount.approve') then
+    raise exception 'You are not allowed to approve discounts';
+  end if;
+  select * into v_req from public.discount_requests where id = p_request for update;
+  if v_req.status <> 'pending' then raise exception 'Already decided'; end if;
+  update public.discount_requests
+     set status = case when p_approve then 'approved'::public.approval_status else 'rejected' end,
+         decided_by = auth.uid(), decided_at = now()
+   where id = p_request;
+  if p_approve then
+    update public.invoices set status = 'issued', discount_approved_by = auth.uid()
+     where id = v_req.invoice_id;
+  else
+    update public.invoice_items set discount_amount = 0 where invoice_id = v_req.invoice_id and discount_amount <> 0;
+    update public.invoices set status = 'issued', discount_amount = 0, discount_approved_by = auth.uid()
+     where id = v_req.invoice_id;
+  end if;
+end $$;
+
 -- edit_invoice: an issued invoice's lines, discounts and note, all or nothing.
 create or replace function public.edit_invoice(p_invoice_id uuid, p_invoice jsonb, p_items jsonb)
 returns jsonb
@@ -261,7 +310,7 @@ begin
       v_line_discounts, v_discount;
   end if;
   -- An approved discount was approved for its amount: a bigger one needs an approver again (a smaller one never does).
-  if v_discount > v_old.discount_amount and v_old.discount_approved_by is not null and not public.has_perm('discount.approve') then
+  if v_discount > v_old.discount_amount and public.invoice_discount_approved(p_invoice_id) and not public.has_perm('discount.approve') then
     raise exception 'This invoice''s discount was approved by the accountant or Dr. Ali. A bigger discount needs one of them.';
   end if;
 
@@ -320,10 +369,12 @@ $$;
 revoke all on function public.edit_invoice(uuid, jsonb, jsonb) from public, anon;
 grant execute on function public.edit_invoice(uuid, jsonb, jsonb) to authenticated;
 
--- 6. Payments: billing.edit corrects the method, amount, time and note, at their branches; a refund stays a refund-giver's.
+-- 6. Payments: billing.edit corrects the method, amount, time and note, at their branches. A refund's amount (and making a payment a
+-- refund) stays a refund-giver's: payment_stamp sees the amount before and after, which a policy cannot, so the method or note of a
+-- refund is still corrected by any billing.edit (a cash refund entered as card). New payments keep the "take payments" policy.
 alter policy "edit payments" on public.payments
   using (public.has_perm('billing.edit') and public.can_access_branch(branch_id))
-  with check (public.has_perm('billing.edit') and public.can_access_branch(branch_id) and (amount > 0 or public.has_perm('billing.refund')));
+  with check (public.has_perm('billing.edit') and public.can_access_branch(branch_id));
 
 create or replace function public.payment_stamp() returns trigger
 language plpgsql security definer set search_path = public as $$
@@ -335,10 +386,28 @@ begin
     elsif new.received_by is distinct from old.received_by
           or (new.received_at is distinct from old.received_at and not public.has_perm('billing.edit')) then
       raise exception 'Payment time and receiver cannot be changed';
+    elsif new.amount is distinct from old.amount and (new.amount < 0 or old.amount < 0) and not public.has_perm('billing.refund') then
+      raise exception 'Only staff who give refunds ("Give refunds" in the access list) change the amount of a refund or turn a payment into one.'
+        using errcode = '42501';
     end if;
   end if;
   return new;
 end $$;
+
+-- Whether the cash of a day is closed at a branch: yes or no, never an amount (the payment form warns before a payment of a closed day
+-- is changed). For billing.edit at their branches.
+create or replace function public.cash_day_closed(p_branch smallint, p_day date)
+returns boolean
+language plpgsql stable security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null or not public.has_perm('billing.edit') or not public.can_access_branch(p_branch) then
+    raise exception 'NOT_ALLOWED: this is for "Edit or void invoices" at the branches you work at.' using errcode = '42501';
+  end if;
+  return exists (select 1 from public.cash_closings c where c.branch_id = p_branch and c.closing_date = p_day);
+end $$;
+revoke all on function public.cash_day_closed(smallint, date) from public, anon;
+grant execute on function public.cash_day_closed(smallint, date) to authenticated;
 
 -- 7. The clinic coordinator edits invoices and payments.
 insert into public.role_permissions (role, permission_key, allowed)
@@ -359,6 +428,27 @@ create policy "editors view invoice items" on public.invoice_items for select
 drop policy if exists "editors view payments" on public.payments;
 create policy "editors view payments" on public.payments for select
   using (public.has_perm('billing.edit') and public.can_access_branch(branch_id));
+
+-- 9. No totals through these reads: until 20261015000400_finance_privacy.sql is in, payments_summary(), total_dues() and the branch
+-- income views add up every payment the caller may read. A role with billing.edit but neither billing.view nor finance.view (live:
+-- the coordinator) would get its branches' totals from them, so this file is undone (the whole transaction) until 000400 is applied.
+-- (000400's payments_summary refuses with NOT_ALLOWED; it runs the same before or after this file.) Only the role grid is looked
+-- at, not a tick for one person (staff_permission_overrides).
+do $$
+declare
+  v_role text;
+begin
+  select rp.role::text into v_role
+    from public.role_permissions rp
+   where rp.permission_key = 'billing.edit' and rp.allowed and rp.role::text <> 'admin'
+     and not exists (select 1 from public.role_permissions v
+                      where v.role = rp.role and v.permission_key in ('billing.view', 'finance.view') and v.allowed)
+   order by rp.role::text limit 1;
+  if v_role is not null
+     and position('NOT_ALLOWED' in coalesce((select p.prosrc from pg_proc p where p.oid = to_regprocedure('public.payments_summary(date, date, bigint, text)')), '')) = 0 then
+    raise exception 'Apply 20261015000400_finance_privacy.sql before this file. The role "%" gets "Edit or void invoices" without "View invoices and payments", and until that file is in, the payments it may read would be added up into branch and day totals for it. Nothing in this file was applied.', v_role;
+  end if;
+end $$;
 
 commit;
 

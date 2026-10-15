@@ -1593,13 +1593,14 @@ table.invoice-lines input { min-width: 0; }
    printed bill and the top bar's "Create ▾". */
 /* The form, as Healthwire's "Create Invoice": a line per treatment (treatment, description, rate, qty, amount, discount, performed by,
    ×), the totals, the payment now with what stays due. Narrower than a laptop each line is four rows: treatment and ×, description,
-   rate, qty and amount, then discount and performed by. */
+   rate, qty and amount, then discount and performed by (on a phone performed by gets a row of its own), each box with its name above
+   it. The rate and the amount hold seven digits whole (Rs 1,200,000), the number box's arrows included. */
 .modal:has(.bill-form) { width: min(1120px, 100%); }
 .modal:has(.bill-sheet) { width: min(880px, 100%); }
 .bill-lines { display: grid; gap: var(--space-2); margin: var(--space-3) 0 var(--space-2); }
 .bill-line {
   display: grid; gap: var(--space-2); align-items: center;
-  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 5.5rem 3.75rem 6rem 10.75rem minmax(0, 1.6fr) 2.75rem;
+  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 7.5rem 3.75rem 7rem 10.75rem minmax(0, 1.6fr) 2.75rem;
   grid-template-areas: "treat desc rate qty amount disc doc rm";
 }
 .bill-line > :nth-child(1) { grid-area: treat; }
@@ -1611,6 +1612,9 @@ table.invoice-lines input { min-width: 0; }
 .bill-line > :nth-child(7) { grid-area: doc; }
 .bill-line > :nth-child(8) { grid-area: rm; }
 .bill-line input, .bill-line select { min-width: 0; width: 100%; }
+.bill-cell { display: grid; gap: 2px; min-width: 0; align-content: center; }
+.bill-cell-label { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+.bill-amount-cell .bill-cell-label { text-align: right; }
 .bill-line-head { font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
 .bill-line output { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .bill-disc { display: flex; gap: 4px; min-width: 0; }
@@ -1618,22 +1622,31 @@ table.invoice-lines input { min-width: 0; }
 .bill-disc select { flex: 0 0 3.6rem; width: 3.6rem; padding-inline: 6px; }
 .bill-disc input { padding-inline: 10px; }
 /* Someone who may not give discounts: the column stays (the lines keep their shape) but holds nothing. */
-.bill-lines.no-discount :is(.bill-disc, .bill-disc-head) { visibility: hidden; }
+.bill-lines.no-discount :is(.bill-disc-cell, .bill-disc-head) { visibility: hidden; }
 .bill-remove { min-width: 40px; min-height: 40px; font-size: var(--fs-xl); }
 .bill-discount { display: flex; gap: var(--space-2); }
 .bill-discount input { flex: 1 1 auto; min-width: 0; }
 .bill-discount select { flex: 0 0 5rem; }
 @media (max-width: 1000px) {
   .bill-line-head { display: none; }
+  .bill-cell-label { display: block; }
   .bill-line {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 2.75rem;
     grid-template-areas: "treat treat treat rm" "desc desc desc desc" "rate qty amount amount" "disc disc doc doc";
-    padding-bottom: var(--space-2); border-bottom: 1px solid var(--border);
+    align-items: end; padding-bottom: var(--space-2); border-bottom: 1px solid var(--border);
   }
+}
+@media (max-width: 600px) {
+  .bill-line { grid-template-areas: "treat treat treat rm" "desc desc desc desc" "rate qty amount amount" "disc disc disc disc" "doc doc doc doc"; }
 }
 .bill-totals { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1) var(--space-4); margin: var(--space-3) 0; font-variant-numeric: tabular-nums; }
 .bill-pay { margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
 .bill-pay legend { padding: 0 var(--space-1); font-weight: 700; }
+/* On a laptop the payment and what stays due stay in sight at the foot of the form, above Save and Save & Print, while the lines scroll
+   (a short laptop screen, or many lines); the note comes after them. */
+@media (min-width: 1001px) {
+  .bill-form > .bill-pay { position: sticky; bottom: 0; z-index: 1; background: var(--surface); box-shadow: 0 -10px 12px -12px rgb(0 0 0 / 0.35); }
+}
 .bill-due { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
 /* The printed bill (A4), on white paper also in dark mode: the clinic's mark and name centred, a rule, the patient and the invoice, a
    rule, the boxed lines, the totals on the right with the payment mode on their left. */
@@ -1671,6 +1684,11 @@ table.bill-sums .bill-grand :is(th, td) { font-weight: 800; font-size: 16px; }
 }
 /* Bill on a row of the Aaj ki List: in the name cell, which stays at the left edge on a laptop and on a phone. */
 table.sheet .name-cell.has-bill { gap: 2px; padding-right: 3px; }
+/* A phone or a small tablet: Bill takes about 45px of the name column on a touch screen, so the column grows by that much and a name
+   is as readable as it is without Bill. */
+@media (max-width: 899.98px) {
+  .sheet-page:has(.bill-btn) { --w-name: 196px; }
+}
 table.sheet .name-cell.has-bill .name-btn { flex: 1 1 auto; min-width: 0; width: auto; }
 .bill-btn {
   flex: none; height: 20px; padding: 0 7px; border: 1px solid var(--aubergine); border-radius: 10px; background: var(--enamel); color: var(--aubergine);

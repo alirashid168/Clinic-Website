@@ -1287,7 +1287,9 @@ export function createDemoAdapter() {
       if (items.some((it) => !(Number(it.quantity || 1) > 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_quantity_check"');
       const off = Number(discount_amount) || 0;
       checkLines(items, off);
-      if (off > inv.discount_amount && inv.discount_approved_by && !can('discount.approve')) fail('This invoice\'s discount was approved by the accountant or Dr. Ali. A bigger discount needs one of them.');
+      // (approved: the invoice's latest discount request was approved; a rejection fills in discount_approved_by too, as live)
+      const lastRequest = db.discount_requests.filter((r) => r.invoice_id === inv.id).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).pop();
+      if (off > inv.discount_amount && lastRequest?.status === 'approved' && !can('discount.approve')) fail('This invoice\'s discount was approved by the accountant or Dr. Ali. A bigger discount needs one of them.');
       const before = clone(inv);
       const subtotal = items.reduce((s, it) => s + Number(it.quantity || 1) * Number(it.unit_price || 0), 0);
       const why = off > 0 ? (String(discount_reason ?? '').trim() || null) : null;
@@ -1318,11 +1320,17 @@ export function createDemoAdapter() {
       const next = { ...pay, ...Object.fromEntries(Object.entries(changes).filter(([k]) => ['method', 'amount', 'received_at', 'notes'].includes(k))) };
       next.amount = Number(next.amount);
       if (!next.amount) fail('new row for relation "payments" violates check constraint "payments_amount_check"');
-      if (next.amount < 0 && !can('billing.refund')) fail('new row violates row-level security policy for table "payments"');
+      // (payment_stamp: a refund's amount, or turning a payment into a refund, needs "Give refunds"; its method or note does not)
+      if (next.amount !== Number(pay.amount) && (next.amount < 0 || Number(pay.amount) < 0) && !can('billing.refund')) fail('Only staff who give refunds ("Give refunds" in the access list) change the amount of a refund or turn a payment into one.');
       const before = clone(pay);
       Object.assign(pay, next);
       audit('payments', 'UPDATE', pay, before);
       return clone(pay);
+    },
+    /** As cash_day_closed (20261015000900): whether the cash of a day is closed at a branch, for billing.edit at their branches. */
+    async cashDayClosed(branchId, day) {
+      if (!can('billing.edit') || !branchOk(branchId)) fail('NOT_ALLOWED: this is for "Edit or void invoices" at the branches you work at.');
+      return db.cash_closings.some((c) => Number(c.branch_id) === Number(branchId) && c.closing_date === day);
     },
     async discountRequests() {
       if (!can('discount.approve')) return [];
@@ -1336,7 +1344,10 @@ export function createDemoAdapter() {
       const r = db.discount_requests.find((x) => x.id === id);
       const inv = db.invoices.find((i) => i.id === r.invoice_id);
       r.status = approve ? 'approved' : 'rejected';
-      if (!approve) { inv.discount_amount = 0; inv.total = inv.subtotal; }
+      // As decide_discount (20261015000900): a rejection takes the lines' discounts off with the invoice's; either way the approver is
+      // written in discount_approved_by.
+      if (!approve) { inv.discount_amount = 0; inv.total = inv.subtotal; for (const it of inv.items || []) it.discount_amount = 0; }
+      inv.discount_approved_by = me().id;
       inv.status = 'issued'; audit('discount_requests', 'UPDATE', r);
     },
 

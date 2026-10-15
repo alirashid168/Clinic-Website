@@ -689,8 +689,8 @@ export function quickCheckupModal({ branchId = null, branchFixed = false, fileAc
 
 /**
  * "Register as patient": gives a checkup patient a patient file with the next Mr# (or links them to the file they
- * already have). onDone() runs as soon as something changed. list = { add(patient, treatment) } when opened from the
- * Aaj ki List, which adds "Put Mr# N on this list".
+ * already have). onDone() runs as soon as something changed. list = { add(patient, treatment), bill(patient)? } when opened from the
+ * Aaj ki List, which adds "Put Mr# N on this list" (and Bill, when list.bill is given).
  */
 export function registerCheckupModal(row, { onDone, list } = {}) {
   const d = state.data;
@@ -705,10 +705,15 @@ export function registerCheckupModal(row, { onDone, list } = {}) {
       await list.add({ id: r.patient_id, full_name: r.full_name, mr_number: r.mr_number, braces_active: false }, row.checkup_for || 'Checkup');
       dialog?.close();
     }) }, `Put Mr# ${r.mr_number} on this list`) : null;
+    // Bill (list.bill, for whoever makes invoices): the invoice and the payment for the patient file just made.
+    const bill = list?.bill ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => {
+      dialog?.close();
+      list.bill({ id: r.patient_id, full_name: r.full_name, mr_number: r.mr_number });
+    } }, 'Bill') : null;
     mount(content,
       h('p', { class: 'registered-mr', tabindex: '-1', role: 'status' }, `${verb}: Mr# ${r.mr_number}`),
       h('p', { class: 'muted' }, `${r.full_name} has a patient file now. Their checkup stays on the Checkups page.`),
-      h('div', { class: 'inline' }, open, put, h('button', { type: 'button', class: 'btn', onclick: () => dialog?.close() }, 'Close')));
+      h('div', { class: 'inline' }, open, put, bill, h('button', { type: 'button', class: 'btn', onclick: () => dialog?.close() }, 'Close')));
     announce(`${verb}: Mr# ${r.mr_number}.`);
     open.focus();
   };

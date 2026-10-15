@@ -8388,7 +8388,16 @@ await step('Create ▾ (front desk): Invoice finds the patient by name, then the
   await m.waitFor();
   assert.equal(await pick.count(), 0, 'the search dialog has closed');
   assert.equal(await m.getByLabel('Branch').evaluate((s) => s.selectedOptions[0].textContent), 'North Nazimabad');
-  assert.equal(await m.getByLabel('Performed by').count(), 1, 'for their visit on today\'s list: "Performed by" (the visit\'s doctor)');
+  // For their visit on today's list: every line starts with that visit's doctor as "Performed by" (a patient on no list gets "Doctor not set").
+  const visitDoctor = await pbill.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const v = (await state.data.listVisits({ date: localISO(), branchId: 2 })).find((x) => x.patient.full_name === 'Hamza Qureshi');
+    const doc = (v?.staff || []).find((x) => x.role === 'doctor');
+    return state.ref.clinicians.find((c) => c.id === doc?.clinician_id)?.display_name || null;
+  });
+  assert.ok(visitDoctor, 'Hamza Qureshi\'s visit today has a doctor');
+  assert.equal(await m.getByLabel('Performed by, line 1').evaluate((sel) => sel.selectedOptions[0].textContent), visitDoctor, 'for their visit on today\'s list: "Performed by" is the visit\'s doctor');
   await m.getByRole('button', { name: 'Cancel' }).click();
   await pbill.waitForSelector('.modal', { state: 'detached' });
   await pbill.locator('.create-btn').click();
@@ -8645,6 +8654,258 @@ await step('Clinic setup: Dr. Ali adds a price-list item, re-prices and renames 
   await pdesk.waitForSelector('.modal', { state: 'detached' });
 });
 await pdesk.close();
+
+// ------------------------------------------------------------- The billing desk with the access list as the clinic has it live (15 Oct 2026: the front
+// desk bills with "Create invoices and take payments" alone, without "View invoices and payments" or "Give discounts"; the coordinator edits without
+// "View invoices and payments"), and what the review of it found: a rate that came from the price list, a six-digit rate, the payment in sight, a
+// payment whose answer was lost, a discount rejected then edited, an imported line edited, a refund and a closed cash day, an advance, and a
+// checkup patient registered then billed.
+const plive = await newPage({ width: 1366, height: 768 });
+const asLive = (pg) => pg.evaluate(async () => {
+  const { state } = await import('/js/state.js');
+  for (const [role, key] of [['front_desk', 'billing.view'], ['front_desk', 'discount.give'], ['coordinator', 'billing.view']]) await state.data.setRolePermission(role, key, false);
+});
+const patientId = (pg, mr) => pg.evaluate(async (mr) => (await (await import('/js/state.js')).state.data.searchPatients(mr)).find((x) => x.mr_number === mr).id, mr);
+await step('Live access list, front desk: Bill on the list; a rate from the price list goes when the treatment is not on the list; a six-digit rate is whole; the payment and what is due are in sight at 1366 x 768', async () => {
+  await loginAs(plive, 'Dr. Ali Rashid');
+  await asLive(plive);
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Front desk \\(North Nazimabad\\)');
+  assert.ok(await plive.evaluate(async () => { const { can } = await import('/js/state.js'); return can('billing.create') && !can('billing.view') && !can('discount.give'); }), 'the front desk as live');
+  await stubPrint(plive);
+  await plive.goto(BASE + '#/staff/sheet');
+  await plive.locator('table.sheet tbody tr', { hasText: 'Kinza Rauf' }).getByRole('button', { name: 'Bill Kinza Rauf' }).click();
+  const m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Kinza Rauf' }) });
+  await m.waitFor();
+  assert.ok(await m.getByLabel('Discount, line 1').isDisabled() && await m.getByLabel('Total discount', { exact: true }).count() === 0, 'no "Give discounts": no discount to type');
+  assert.equal(await m.getByLabel('Treatment, line 1').inputValue(), 'Crown Insertion', 'the row\'s treatment');
+  assert.equal(await m.getByLabel('Rate (Rs), line 1').inputValue(), '20000');
+  await m.getByLabel('Treatment, line 1').fill('Whitening (special)');
+  assert.equal(await m.getByLabel('Rate (Rs), line 1').inputValue(), '', 'a treatment not on the list: its rate is asked for, the crown\'s is not kept');
+  assert.equal(await m.getByLabel('Payment (Rs)').inputValue(), '0', 'and the payment follows the total');
+  await m.getByRole('button', { name: 'Save', exact: true }).click();
+  await m.locator('.field-error', { hasText: 'Enter a rate for this treatment.' }).waitFor();
+  await m.getByLabel('Treatment, line 1').fill('Braces Kit (Self-ligating, sample)');
+  const rate = m.getByLabel('Rate (Rs), line 1');
+  assert.equal(await rate.inputValue(), '100000');
+  await rate.fill('120000');
+  await rate.focus();
+  assert.ok(await rate.evaluate((el) => el.scrollWidth <= el.clientWidth), `Rs 120,000 is whole in the Rate box: ${await rate.evaluate((el) => `${el.scrollWidth} > ${el.clientWidth}`)}`);
+  const sight = await m.evaluate((modal) => {
+    const body = modal.querySelector('.modal-body').getBoundingClientRect();
+    const due = modal.querySelector('.bill-due').getBoundingClientRect();
+    const pay = modal.querySelector('.bill-pay input').getBoundingClientRect();
+    return { body: Math.round(body.bottom), due: Math.round(due.bottom), pay: Math.round(pay.bottom) };
+  });
+  assert.ok(sight.due <= sight.body && sight.pay <= sight.body, `the payment and Due in sight without scrolling: ${JSON.stringify(sight)}`);
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.waitFor({ state: 'detached' });
+});
+await step('A slow line: the payment\'s answer is lost; Save again finds it (no second payment) and the bill says Card, the receipt Card and the branch; the front desk (no "View invoices and payments") sees the invoice on the patient\'s page', async () => {
+  await plive.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    window.__real = { recordPayment: d.recordPayment, patientBilling: d.patientBilling };
+    let lose = true;
+    d.recordPayment = async (p) => { const saved = await window.__real.recordPayment.call(d, p); if (lose) { lose = false; throw new TypeError('Failed to fetch'); } return saved; };
+    // as the live data layer: a few columns of each invoice and payment
+    d.patientBilling = async (id) => {
+      const b = await window.__real.patientBilling.call(d, id);
+      return { invoices: b.invoices.map(({ id: i, invoice_no, issue_date, subtotal, discount_amount, total, status }) => ({ id: i, invoice_no, issue_date, subtotal, discount_amount, total, status })),
+        payments: b.payments.map(({ id: i, invoice_id, amount, received_at }) => ({ id: i, invoice_id, amount, received_at })) };
+    };
+  });
+  const before = (await billingOf(plive, '9825')).payments.length;
+  await plive.locator('table.sheet tbody tr', { hasText: 'Kinza Rauf' }).getByRole('button', { name: 'Bill Kinza Rauf' }).click();
+  const m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Kinza Rauf' }) });
+  await m.getByLabel('Treatment, line 1').fill('Braces Kit (Ceramic, sample)');
+  await m.getByLabel('Payment method').selectOption('card');
+  await m.getByLabel('Payment (Rs)').fill('30000');
+  await m.getByRole('button', { name: 'Save & Print' }).click();
+  await plive.locator('.toast', { hasText: 'may or may not have been saved' }).locator('.toast-close').click(); // (it lies over the dialog's buttons)
+  await m.getByRole('button', { name: 'Save & Print' }).click();
+  const bill = plive.locator('.modal', { has: plive.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  await plive.waitForFunction(() => window.__printed.length === 1);
+  const paper = (await plive.evaluate(() => window.__printed))[0].sheets[0];
+  for (const re of [/Payment Mode: Card/, /Paid Amount\s+Rs\. 30,000/, /Due Amount\s+Rs\. 45,000/]) assert.match(paper, re);
+  await bill.getByRole('button', { name: 'Print receipt' }).click();
+  const receipt = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'Payment receipt' }) });
+  const text = await receipt.innerText();
+  assert.match(text, /By\s+Card/);
+  assert.match(text, /North Nazimabad/);
+  await receipt.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
+  await plive.evaluate(async () => { const { state } = await import('/js/state.js'); Object.assign(state.data, window.__real); });
+  const after = await billingOf(plive, '9825');
+  assert.equal(after.payments.length, before + 1, 'one payment, though it was sent twice');
+  await openMoney(plive, '9825', 'Kinza Rauf');
+  assert.match(await moneyOf(plive).innerText(), /Rs 45,000 unpaid/, 'the invoice with what is unpaid on it');
+});
+await step('A refund and a closed cash day: the coordinator (no "View invoices and payments") corrects a refund\'s method (its amount is for "Give refunds"); a change to the cash of a closed day asks once more first', async () => {
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Dr. Ali Rashid');
+  const kinza = await patientId(plive, '9825');
+  await plive.evaluate(async (pid) => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    await state.data.recordPayment({ patient_id: pid, branch_id: 2, amount: -1000, method: 'cash', invoice_id: null, notes: 'Sample refund' });
+    await state.data.closeCash(2, localISO(), 0, null);
+  }, kinza);
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Clinic coordinator');
+  await openMoney(plive, '9825', 'Kinza Rauf');
+  const money = moneyOf(plive);
+  await money.locator('details summary').click();
+  await money.getByRole('button', { name: /^Edit payment, .*1,000 cash$/ }).click();
+  const e = plive.locator('.modal', { has: plive.locator('h2', { hasText: /^Edit refund/ }) });
+  assert.ok(await e.getByLabel(/Amount given back/).isDisabled(), 'the refund\'s amount: not for the coordinator');
+  await e.getByLabel('Method').selectOption('card');
+  await e.getByRole('button', { name: 'Save changes' }).click();
+  await e.getByText(/is already closed/).waitFor();
+  assert.match(await e.locator('.alert-warning').innerText(), /Tell the accountant to check that day's closing/);
+  await e.getByRole('button', { name: 'Save changes' }).click();
+  await plive.waitForSelector('.toast:has-text("Payment saved as Card.")');
+  const { payments } = await billingOf(plive, '9825');
+  assert.equal(payments.find((p) => p.notes === 'Sample refund').method, 'card');
+});
+await step('A discount rejected, then the invoice edited: the line\'s discount went with the rejection, so Edit shows none and saves none (the accountant), and the coordinator is not refused', async () => {
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Dr. Ali Rashid');
+  await plive.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.setOverride('s-fd-nn', 'discount.give', true); });
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Front desk \\(North Nazimabad\\)');
+  await plive.goto(BASE + '#/staff/sheet');
+  await plive.locator('table.sheet tbody tr', { hasText: 'Areeba Siddiqui' }).getByRole('button', { name: 'Bill Areeba Siddiqui' }).click();
+  const m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Areeba Siddiqui' }) });
+  await m.getByLabel('Treatment, line 1').fill('Braces Kit (Metal, sample)');
+  await m.getByLabel('Discount, line 1').fill('20000');
+  await m.getByLabel('Discount reason').fill('Sample family offer');
+  await m.getByLabel('Payment (Rs)').fill('0');
+  await m.getByRole('button', { name: 'Save', exact: true }).click();
+  const bill = plive.locator('.modal', { has: plive.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  const invNo = (await bill.locator('h2').innerText()).replace('Invoice ', '');
+  assert.match(await bill.innerText(), /discount waiting for approval/i);
+  await bill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Accountant');
+  await plive.evaluate(async (no) => {
+    const { state } = await import('/js/state.js');
+    const r = (await state.data.discountRequests()).find((x) => x.invoice.invoice_no === no);
+    await state.data.decideDiscount(r.id, false);
+  }, invNo);
+  await openMoney(plive, '9811', 'Areeba Siddiqui');
+  await moneyOf(plive).getByRole('button', { name: `Edit invoice ${invNo}` }).click();
+  let ei = plive.locator('.modal', { has: plive.locator('h2', { hasText: `Edit invoice ${invNo}` }) });
+  assert.equal(await ei.getByLabel('Discount, line 1').inputValue(), '', 'the rejected discount is not shown');
+  assert.equal((await ei.locator('.bill-totals').innerText()).replace(/\s+/g, ' ').trim(), 'Sub-total Rs 50,000 Grand total Rs 50,000');
+  await ei.getByLabel('Invoice note').fill('Kit fitted');
+  await ei.getByRole('button', { name: 'Save changes' }).click();
+  await plive.waitForSelector(`.toast:has-text("Invoice ${invNo} saved.")`);
+  let saved = (await billingOf(plive, '9811')).invoices.find((i) => i.invoice_no === invNo);
+  assert.deepEqual([saved.discount_amount, saved.total, saved.status, saved.items[0].discount_amount, saved.notes], [0, 50000, 'issued', 0, 'Kit fitted'], 'nothing brought the rejected discount back');
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Clinic coordinator');
+  await openMoney(plive, '9811', 'Areeba Siddiqui');
+  await moneyOf(plive).getByRole('button', { name: `Edit invoice ${invNo}` }).click();
+  ei = plive.locator('.modal', { has: plive.locator('h2', { hasText: `Edit invoice ${invNo}` }) });
+  await ei.getByLabel('Description, line 1').fill('Upper and lower');
+  await ei.getByRole('button', { name: 'Save changes' }).click();
+  await plive.waitForSelector(`.toast:has-text("Invoice ${invNo} saved.")`);
+  saved = (await billingOf(plive, '9811')).invoices.find((i) => i.invoice_no === invNo);
+  assert.deepEqual([saved.status, saved.items[0].description], ['issued', 'Braces Kit (Metal, sample) - Upper and lower'], 'the coordinator\'s change is saved');
+});
+await step('An imported line (the visit type "Bonding", the Healthwire procedure as its description): Edit shows the description whole and a note-only change keeps the line as it was', async () => {
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Dr. Ali Rashid');
+  const invNo = await plive.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const p = (await state.data.searchPatients('9825')).find((x) => x.mr_number === '9825');
+    const bonding = state.ref.treatments.find((t) => t.name === 'Bonding');
+    const inv = await state.data.createInvoice({ patient_id: p.id, branch_id: 2, items: [{ description: 'Braces Kit (Made in China, sample), Monthly (x2)', quantity: 1, unit_price: 55000, treatment_id: bonding.id }], discount_amount: 0 });
+    return inv.invoice_no;
+  });
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Accountant');
+  await openMoney(plive, '9825', 'Kinza Rauf');
+  await moneyOf(plive).getByRole('button', { name: `Edit invoice ${invNo}` }).click();
+  const ei = plive.locator('.modal', { has: plive.locator('h2', { hasText: `Edit invoice ${invNo}` }) });
+  assert.equal(await ei.getByLabel('Treatment, line 1').inputValue(), 'Bonding');
+  assert.equal(await ei.getByLabel('Description, line 1').inputValue(), 'Braces Kit (Made in China, sample), Monthly (x2)', 'the description whole');
+  await ei.getByLabel('Invoice note').fill('From Healthwire');
+  await ei.getByRole('button', { name: 'Save changes' }).click();
+  await plive.waitForSelector(`.toast:has-text("Invoice ${invNo} saved.")`);
+  const saved = (await billingOf(plive, '9825')).invoices.find((i) => i.invoice_no === invNo);
+  assert.deepEqual([saved.items[0].description, saved.notes], ['Braces Kit (Made in China, sample), Monthly (x2)', 'From Healthwire'], 'the line as it was; the note changed');
+});
+await step('An advance: paid more than the invoice, the rest goes towards the next invoice: its bill counts it (Paid, Due, "Advance paid earlier"), and the patient\'s page does not show it unpaid', async () => {
+  await tryAnotherRole(plive);
+  await loginAs(plive, 'Front desk \\(North Nazimabad\\)');
+  await stubPrint(plive);
+  await plive.goto(BASE + '#/staff/sheet');
+  const row = plive.locator('table.sheet tbody tr', { hasText: 'Mariam Akhtar' });
+  await row.getByRole('button', { name: 'Bill Mariam Akhtar' }).click();
+  let m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Mariam Akhtar' }) });
+  await m.getByLabel('Treatment, line 1').fill('Scaling');
+  await m.getByLabel('Payment (Rs)').fill('5000');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Advance Rs 1,000 (counts towards the next invoice)');
+  await m.getByRole('button', { name: 'Save', exact: true }).click();
+  let bill = plive.locator('.modal', { has: plive.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  await bill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
+  await row.getByRole('button', { name: 'Bill Mariam Akhtar' }).click();
+  m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Mariam Akhtar' }) });
+  await m.getByLabel('Treatment, line 1').fill('Checkup');
+  await m.getByLabel('Payment (Rs)').fill('0');
+  await m.getByRole('button', { name: 'Save', exact: true }).click();
+  bill = plive.locator('.modal', { has: plive.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  const second = (await bill.locator('h2').innerText()).replace('Invoice ', '');
+  const text = await bill.locator('.bill-sheet').innerText();
+  for (const re of [/Paid Amount\s+Rs\. 1,000/, /Due Amount\s+Rs\. 500/, /Payment Mode: Advance paid earlier/]) assert.match(text, re);
+  await bill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
+  await openMoney(plive, '9824', 'Mariam Akhtar');
+  assert.match(await moneyOf(plive).locator('table.list').first().locator('tbody tr', { hasText: second }).innerText(), /Rs 500 unpaid/, 'the advance counted on the second invoice');
+});
+await step('A checkup patient registered from the list: Bill in the register dialog, and Bill beside their name on the row', async () => {
+  await plive.goto(BASE + '#/staff/sheet');
+  await plive.getByRole('button', { name: 'Checkup options for Bareera Khalid' }).click();
+  await plive.locator('.modal').getByRole('button', { name: 'Register as patient' }).click();
+  const reg = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'Register Bareera Khalid as a patient' }) });
+  await reg.getByRole('button', { name: 'Create patient file' }).click();
+  await reg.locator('.registered-mr').waitFor();
+  await reg.getByRole('button', { name: 'Bill', exact: true }).click();
+  let m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Bareera Khalid' }) });
+  await m.waitFor();
+  assert.equal(await m.getByLabel('Branch').evaluate((s) => s.selectedOptions[0].textContent), 'North Nazimabad');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
+  await plive.getByRole('button', { name: 'Bill Bareera Khalid' }).click();
+  m = plive.locator('.modal', { has: plive.locator('h2', { hasText: 'New invoice · Bareera Khalid' }) });
+  await m.waitFor();
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
+});
+await plive.close();
+await step('Bill on a phone: a name beside Bill is not cut; the invoice form names each box (Rate, Qty, Amount, Performed by) and the doctor is whole', async () => {
+  const pp = await newPage({ width: 390, height: 844 }, { hasTouch: true, isMobile: true });
+  await loginAs(pp, 'Front desk \\(North Nazimabad\\)');
+  await pp.goto(BASE + '#/staff/sheet');
+  await pp.getByRole('button', { name: 'Bill Areeba Siddiqui' }).waitFor();
+  const cut = await pp.locator('table.sheet tbody tr:not(.is-checkup) .name-cell.has-bill .name-text').evaluateAll((els) => els.filter((e) => e.textContent.length <= 16 && e.scrollWidth > e.clientWidth).map((e) => e.textContent));
+  assert.deepEqual(cut, [], 'no name of up to 16 letters is cut');
+  await pp.getByRole('button', { name: 'Bill Kinza Rauf' }).click();
+  const m = pp.locator('.modal', { has: pp.locator('h2', { hasText: 'New invoice · Kinza Rauf' }) });
+  await m.waitFor();
+  const labels = await m.locator('.bill-line:not(.bill-line-head)').first().locator('.bill-cell-label').evaluateAll((els) => els.filter((e) => e.offsetParent && e.getBoundingClientRect().height > 0).map((e) => e.textContent));
+  for (const name of ['Rate (Rs)', 'Qty', 'Amount', 'Performed by']) assert.ok(labels.includes(name), `${name} is named: ${labels.join(', ')}`);
+  assert.ok(await m.getByLabel('Performed by, line 1').evaluate((s) => s.scrollWidth <= s.clientWidth + 1 && s.getBoundingClientRect().width > 250), 'the doctor box has the width of the line');
+  await pp.close();
+});
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

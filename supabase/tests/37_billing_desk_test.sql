@@ -161,7 +161,7 @@ select pg_temp.check(public.has_perm('billing.edit') and not public.has_perm('bi
 update public.payments set method = 'bank_transfer' where id = current_setting('test.pay1')::uuid;
 select pg_temp.check((select method::text from public.payments where id = current_setting('test.pay1')::uuid) = 'bank_transfer', 'coordinator: card -> online');
 select pg_temp.expect_error(format($f$update public.payments set amount = -10000 where id = %L$f$, current_setting('test.pay1')),
-  'row-level security', 'coordinator: cannot turn a payment into a refund (billing.refund)');
+  'Give refunds', 'coordinator: cannot turn a payment into a refund (billing.refund)');
 do $$
 declare
   inv uuid := current_setting('test.inv1')::uuid;
@@ -243,6 +243,59 @@ select pg_temp.expect_error(format($f$select public.edit_invoice(%L, %L, %L)$f$,
 update public.payments set method = 'card' where invoice_id = current_setting('test.inv2')::uuid;
 reset role;
 select pg_temp.check((select method::text from public.payments where invoice_id = current_setting('test.inv2')::uuid) = 'cash', 'a payment at another branch: not changed');
+
+-- A rejected discount takes the lines' discounts off with the invoice's, and it is not an approved discount: the coordinator then
+-- changes the invoice's note without being refused, and putting the rejected discount back asks for approval again.
+select pg_temp.act_as(:fd);
+set role authenticated;
+select set_config('test.inv3', public.save_invoice(pg_temp.k37(6), pg_temp.hdr37(current_setting('test.pat1')::uuid, 1, 20000, 'Family'),
+  jsonb_build_array(pg_temp.ln37('Braces Kit (Sample T37)', 1, 50000, 20000, current_setting('test.kit')::int)))->>'id', false);
+select pg_temp.check((select status::text from public.invoices where id = current_setting('test.inv3')::uuid) = 'pending_approval',
+  'a line discount over the front desk''s limit waits for approval');
+select pg_temp.act_as(:acc);
+select public.decide_discount((select id from public.discount_requests where invoice_id = current_setting('test.inv3')::uuid and status = 'pending'), false);
+select pg_temp.check((select status = 'issued' and discount_amount = 0 and total = 50000 from public.invoices where id = current_setting('test.inv3')::uuid),
+  'rejected: no discount, the whole Rs 50,000 is the total');
+select pg_temp.check((select sum(discount_amount) from public.invoice_items where invoice_id = current_setting('test.inv3')::uuid) = 0,
+  'rejected: the line''s discount is taken off too (Edit would otherwise show it and save it again)');
+select pg_temp.check(not public.invoice_discount_approved(current_setting('test.inv3')::uuid)
+                     and (select discount_approved_by from public.invoices where id = current_setting('test.inv3')::uuid) is not null,
+  'a rejected discount is not an approved one (although discount_approved_by is filled in)');
+select pg_temp.act_as(:coord);
+select pg_temp.check((public.edit_invoice(current_setting('test.inv3')::uuid, pg_temp.hdr37(current_setting('test.pat1')::uuid, 1) || jsonb_build_object('notes', 'Kit fitted'),
+  jsonb_build_array(pg_temp.ln37('Braces Kit (Sample T37)', 1, 50000, 0, current_setting('test.kit')::int))))->>'notes' = 'Kit fitted',
+  'after the rejection the coordinator changes the note (no "was approved" refusal)');
+select pg_temp.check((public.edit_invoice(current_setting('test.inv3')::uuid, pg_temp.hdr37(current_setting('test.pat1')::uuid, 1, 20000, 'Family'),
+  jsonb_build_array(pg_temp.ln37('Braces Kit (Sample T37)', 1, 50000, 20000, current_setting('test.kit')::int))))->>'status' = 'pending_approval',
+  'the rejected discount put back waits for approval again');
+
+-- A refund: its method or note is corrected by billing.edit; its amount only with "Give refunds".
+reset role;
+select pg_temp.act_as(:admin);
+set role authenticated;
+insert into public.payments (patient_id, branch_id, amount, method, invoice_id) values (current_setting('test.pat1')::uuid, 1, -2000, 'cash', null);
+select set_config('test.refund', (select id::text from public.payments where patient_id = current_setting('test.pat1')::uuid and amount = -2000), false);
+select pg_temp.act_as(:coord);
+update public.payments set method = 'card', notes = 'Given back on the card' where id = current_setting('test.refund')::uuid;
+select pg_temp.check((select method::text from public.payments where id = current_setting('test.refund')::uuid) = 'card', 'coordinator: a refund entered as cash is card now');
+select pg_temp.expect_error(format($f$update public.payments set amount = -1000 where id = %L$f$, current_setting('test.refund')),
+  'Give refunds', 'coordinator: a refund''s amount is for "Give refunds"');
+select pg_temp.expect_error(format($f$update public.payments set amount = 2000 where id = %L$f$, current_setting('test.refund')),
+  'Give refunds', 'coordinator: nor is turning a refund into a payment');
+
+-- Whether a day's cash is closed: yes or no for billing.edit at their branches, nobody else.
+reset role;
+select pg_temp.act_as('');
+insert into public.cash_closings (branch_id, closing_date, expected_cash, counted_cash, closed_by) values (1, date '2026-01-02', 5000, 5000, :fd);
+select pg_temp.act_as(:coord);
+set role authenticated;
+select pg_temp.check(public.cash_day_closed(1::smallint, date '2026-01-02') and not public.cash_day_closed(1::smallint, date '2026-01-03'),
+  'cash_day_closed: yes for a closed day, no for a day not closed');
+select pg_temp.act_as(:fd);
+select pg_temp.expect_error($q$select public.cash_day_closed(1::smallint, date '2026-01-02')$q$, 'NOT_ALLOWED', 'cash_day_closed: not for the front desk (no billing.edit)');
+select pg_temp.act_as(:doced);
+select pg_temp.expect_error($q$select public.cash_day_closed(2::smallint, date '2026-01-02')$q$, 'NOT_ALLOWED', 'cash_day_closed: not at a branch they do not work at');
+reset role;
 
 -- Void invoices stay as they are.
 select pg_temp.act_as(:acc);

@@ -1542,6 +1542,11 @@ export async function createSupabaseAdapter() {
       if (res.missing) throw new Error('Changing an invoice needs the database update 20261015000900_billing_desk.sql. Ask for it to be run, then try again.');
       return res.data;
     },
+    /** Whether the cash of a day (YYYY-MM-DD) is closed at a branch (cash_day_closed, 20261015000900): yes or no, never an amount; null before that update. */
+    async cashDayClosed(branchId, day) {
+      const res = await rpc('cash_day_closed', { p_branch: Number(branchId), p_day: day });
+      return res.missing ? null : !!res.data;
+    },
     /** A payment's method, amount, time or note ("edit payments": billing.edit at their branches; every change is in the audit log). */
     async updatePayment(id, changes) {
       const allowed = Object.fromEntries(Object.entries(changes).filter(([k]) => ['method', 'amount', 'received_at', 'notes'].includes(k)));

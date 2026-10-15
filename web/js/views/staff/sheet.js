@@ -716,14 +716,9 @@ export async function renderSheet(root, params, signal) {
       canEdit && !formComplete(c) ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => { dialog?.close(); fillCheckupForm(c); } }, 'Fill in the checkup form') : null,
       c.patient_id
         ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
-        : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
+        : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: registerList(c) }); } }, 'Register as patient') : null,
       // Registered: Bill (for their row on this list when they are on it, else for the patient file at this checkup's branch).
-      c.patient_id && can('billing.create') ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => {
-        dialog?.close();
-        const there = rows.find((r) => r.patient_id === c.patient_id && r.branch_id === c.branch_id);
-        if (there) billRow(there);
-        else newInvoiceModal({ id: c.patient_id, full_name: who, mr_number: mr || null, phone: c.phone || null }, { branchId: c.branch_id, treatment: c.checkup_for, onDone: load });
-      } }, 'Bill') : null,
+      c.patient_id && can('billing.create') ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => { dialog?.close(); billCheckup(c); } }, 'Bill') : null,
       h('a', { class: 'btn', href: inCheckupList }, 'Open in the checkup list'),
       canRemoveCheckup(c) ? h('button', { type: 'button', class: 'btn btn-danger', onclick: () => { dialog?.close(); removeCheckupModal(c, { onDone: () => { checkups = checkups.filter((x) => x.id !== c.id); listVersion++; draw(); } }); } }, 'Remove from the list') : null,
     ];
@@ -984,6 +979,19 @@ export async function renderSheet(root, params, signal) {
       afterBill: () => setTimeout(() => backToRow(now.id, focus)),
     });
   }
+  // Bill for a checkup patient who has a patient file (registered, or p: the file just made for them): for their row on this list when
+  // they are on it, else for the patient file at this checkup's branch. Afterwards the cursor goes back to the checkup row's Bill.
+  function billCheckup(c, p = null) {
+    const id = p?.id || c.patient_id;
+    const there = rows.find((r) => r.patient_id === id && r.branch_id === c.branch_id);
+    if (there) { billRow(there); return; }
+    newInvoiceModal({ id, full_name: p?.full_name || c.patient_name, mr_number: p?.mr_number || registeredMr(c) || null, phone: c.phone || null }, {
+      branchId: c.branch_id, treatment: c.checkup_for, onDone: load, afterBill: () => setTimeout(() => backToRow(c.id, 'bill')),
+    });
+  }
+  // "Register as patient" opened from the list: "Put Mr# N on this list", and Bill for whoever makes invoices (owner, 15 Oct 2026: a
+  // checkup patient "wants to start the treatment, ready to pay").
+  const registerList = (c) => ({ add: addPatient, bill: can('billing.create') ? (p) => billCheckup(c, p) : null });
 
   // The Invoice column (the sheet's "Healthwire" column: billing is done on the website now). Done when this visit has an
   // invoice; Pending (dark red) once the patient is being treated or done and has none. A patient not seen yet (waiting,
@@ -1185,9 +1193,14 @@ export async function renderSheet(root, params, signal) {
       h('td', { class: 'mr-cell frozen' }, cellText(c.patient_id
         ? h('a', { class: 'mr', href: `#/staff/patient/${c.patient_id}`, title: 'Open the patient file' }, mr ? [srOnly('Mr# '), mr] : 'File')
         : h('span', { class: 'muted' }, 'no Mr#'))),
-      h('th', { scope: 'row', class: 'frozen row-head name-col' }, h('div', { class: 'name-cell' },
+      h('th', { scope: 'row', class: 'frozen row-head name-col' }, h('div', { class: ['name-cell', c.patient_id && can('billing.create') && 'has-bill'] },
         nameIn,
         srOnly('Checkup patient'),
+        // Registered (a patient file): Bill beside the name, as on a patient's row.
+        c.patient_id && can('billing.create') ? h('button', {
+          type: 'button', class: 'bill-btn', 'aria-haspopup': 'dialog', 'aria-label': `Bill ${who}`, title: 'Bill: invoice, payment and the printed bill',
+          dataset: { focus: 'bill' }, onclick: () => billCheckup(c),
+        }, 'Bill') : null,
         h('button', { type: 'button', class: 'kebab-btn', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, title: 'Options: checkup form, follow-up, notes, register, remove', dataset: { focus: 'options' }, onclick: () => checkupOptions(c) },
           h('span', { 'aria-hidden': 'true' }, '⋮')))),
       h('td', {}, formBtn || h('span', { class: 'chip chip-fill gs-grey' }, srOnly('Not braces'))),
