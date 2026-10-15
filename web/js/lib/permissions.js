@@ -32,6 +32,9 @@ export const PERMISSIONS = [
     { key: 'dues.view', label: 'See $$ pending dues flag', category: 'Billing', defaults: [Y, Y, Y, Y, Y] },
     { key: 'dues.override', label: 'Override the dues hold', category: 'Billing', defaults: [N, N, N, N, Y] },
     { key: 'billing.view', label: 'View invoices and payments', category: 'Billing', defaults: [Y, N, N, Y, Y] },
+    // Today's payments one by one, each with the patient's name, and never a total (owner, 15 Oct 2026: "only front desk can see the daily
+    // payments with each payment along with patient name. but not the full amount"). Totals are for finance.view and billing.view.
+    { key: 'payments.day_list', label: "Today's payments, one by one (no totals)", category: 'Billing', defaults: [Y, N, N, N, Y] },
     { key: 'billing.create', label: 'Create invoices and take payments', category: 'Billing', defaults: [Y, N, N, N, Y] },
     { key: 'billing.edit', label: 'Edit or void invoices', category: 'Billing', defaults: [N, N, N, N, Y] },
     { key: 'billing.refund', label: 'Give refunds', category: 'Billing', defaults: [N, N, N, N, Y] },

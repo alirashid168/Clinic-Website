@@ -892,7 +892,8 @@ export async function createSupabaseAdapter() {
 
   async function duesFor(ids) {
     if (!ids.length) return {};
-    const rows = check(await callRpc('dues_for', { p_patients: ids }));
+    // A hundred at a time: the database answers at most 500 patients a call for whoever does not see the totals (20261015000400).
+    const rows = await byIdChunks(ids, async (part) => check(await callRpc('dues_for', { p_patients: part })));
     return Object.fromEntries(rows.map((r) => [r.patient_id, Number(r.dues)]));
   }
   async function flagsFor(ids) {
@@ -1634,13 +1635,17 @@ export async function createSupabaseAdapter() {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
       check(await sb.from('invoices').update({ status: 'void', void_reason: reason?.trim() || null }).eq('id', id));
     },
-    // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
+    // Invoices and payments only (no photos): what the payment form needs to match money to invoices. With "See $$ pending dues
+    // flag", the patient's dues as they are now too (dues_for counts every branch; the front desk reads only its own branches'
+    // payments, 20261015000500, so the form fills in no more than the dues).
     async patientBilling(patientId) {
-      const [invoices, payments] = await Promise.all([
+      const seesDues = !!(await this.getSession().catch(() => null))?.perms?.has('dues.view');
+      const [invoices, payments, dues] = await Promise.all([
         sb.from('invoices').select('id,invoice_no,issue_date,subtotal,discount_amount,total,status').eq('patient_id', patientId).order('issue_date').then(check),
         sb.from('payments').select('id,invoice_id,amount,received_at').eq('patient_id', patientId).then(check),
+        seesDues ? duesFor([patientId]).then((d) => d[patientId] ?? 0).catch(() => undefined) : undefined,
       ]);
-      return { invoices, payments };
+      return { invoices, payments, dues };
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
@@ -1914,6 +1919,23 @@ export async function createSupabaseAdapter() {
       return check(await sb.rpc('close_cash', { p_branch: Number(branchId), p_date: date, p_counted: Number(counted), p_notes: notes || null }));
     },
     async cashClosings() { return capped(check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(201)), 200); },
+    /**
+     * The closings of the person's branches without any amount (cash_closings_blind, 20261015000400): for whoever closes the cash but
+     * does not see the money (a blind count). Rows { id, branch_id, closing_date, closed_at, closed_by_name, checked }. Before the
+     * database update the closer still reads the table itself (the old "view closings" policy): the same rows from the columns
+     * without any amount, so Today still says Closed or Not closed and a second closing is still stopped. If that fails too, an
+     * empty list marked missing.
+     */
+    async cashClosingsBlind() {
+      const r = await rpc('cash_closings_blind', { p_limit: 200 });
+      if (!r.missing) return r.data || [];
+      try {
+        const rows = check(await sb.from('cash_closings').select('id,branch_id,closing_date,closed_at,verified_at,verified_by')
+          .order('closing_date', { ascending: false }).limit(200));
+        return rows.map((c) => ({ id: c.id, branch_id: c.branch_id, closing_date: c.closing_date, closed_at: c.closed_at, closed_by_name: null,
+          checked: !!(c.verified_at || c.verified_by) }));
+      } catch { return Object.assign([], { missing: true }); }
+    },
     async verifyClosing(id) { check(await sb.from('cash_closings').update({ verified_by: await userId(), verified_at: new Date().toISOString() }).eq('id', id)); },
     // ---- report queries (Reports page): payments, invoices, advances, daily visits in a date range.
     // Lists page through every row up to the cap (then .truncated); totals should come from paymentsSummary / opdSummary.
@@ -1958,6 +1980,15 @@ export async function createSupabaseAdapter() {
       if (!r.missing) return { totals: r.data?.totals || summarizeVisits([]).totals, byDay: r.data?.byDay || [], waitByBranch: r.data?.waitByBranch || [], source: 'server', truncated: false };
       const rows = await fetchPaged(() => visitsQuery({ from, to, branchId }), 20000);
       return { ...summarizeVisits(rows), source: 'rows', truncated: !!rows.truncated };
+    },
+    /**
+     * Today's payments one by one, never a total (payments_today, 20261015000400: "Today's payments, one by one (no totals)"): rows
+     * { id, received_at, patient_id, patient_name, mr_number, amount, method, branch_id, received_by_name } of the person's branches,
+     * newest first. Before the database update, an empty list marked missing.
+     */
+    async paymentsToday({ branchId = null } = {}) {
+      const r = await rpc('payments_today', { p_branch: branchId ? Number(branchId) : null });
+      return r.missing ? Object.assign([], { missing: true }) : r.data || [];
     },
     async todaysPayments(branchId) {
       const d = todayISO();
@@ -2086,13 +2117,20 @@ export async function createSupabaseAdapter() {
     },
     async dashboard(date) {
       const day = date || todayISO();
+      // What came in, the cash closing's amounts and the dues added up per branch are for who may see the money (20261015000400): the
+      // others get whether the cash is closed (cash_closings_blind) and how many patients on the list have dues. (The front desk reads
+      // its branch's payments one by one to bill, 20261015000500: the branch's income is still not asked for, nor given, for it.)
+      const perms = (await this.getSession().catch(() => null))?.perms || new Set();
+      const seesCash = ['finance.view', 'cash.verify', 'billing.view'].some((k) => perms.has(k));
+      const seesTotals = perms.has('finance.view') || perms.has('billing.view');
       const [branches, visits, closings] = await Promise.all([
         this.branches(),
         sb.from('visits').select('branch_id,status,patient_id').eq('visit_date', day).then(check),
-        sb.from('cash_closings').select('*').eq('closing_date', day).then(check),
+        seesCash ? sb.from('cash_closings').select('*').eq('closing_date', day).then(check)
+          : this.cashClosingsBlind().then((rows) => rows.filter((c) => c.closing_date === day)).catch(() => []),
       ]);
       let income = []; let complaints = []; let dues = {};
-      try { income = check(await sb.from('branch_daily_income').select('*').eq('day', day)); } catch { income = []; }
+      if (seesTotals) { try { income = check(await sb.from('branch_daily_income').select('*').eq('day', day)); } catch { income = []; } }
       try { complaints = check(await sb.from('complaints').select('branch_id').eq('status', 'new')); } catch { complaints = []; }
       try { dues = await duesFor([...new Set(visits.map((v) => v.patient_id))]); } catch { dues = {}; }
       return branches.map((b) => {
@@ -2101,7 +2139,7 @@ export async function createSupabaseAdapter() {
         return { branch: b, patients: vs.length, completed: vs.filter((v) => v.status === 'completed').length,
           waiting: vs.filter((v) => v.status === 'waiting').length,
           received: Number(income.find((i) => i.branch_id === b.id)?.net || 0),
-          dues_patients: withDues.length, dues: withDues.reduce((s, pid) => s + dues[pid], 0),
+          dues_patients: withDues.length, dues: seesTotals ? withDues.reduce((s, pid) => s + dues[pid], 0) : null,
           new_complaints: complaints.filter((c) => c.branch_id === b.id).length,
           closing: closings.find((c) => c.branch_id === b.id) || null };
       });

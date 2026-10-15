@@ -258,6 +258,19 @@ function seed() {
     { id: uid(), expense_date: daysAgo(1), branch_id: 2, city_id: 1, category_id: 12, amount: 2000, paid_to: 'Staff lunch', method: 'cash', notes: 'Sample figure' },
   ];
   db.cash_closings = [];
+  // Payments taken today (made up) at North Nazimabad, Gulshan and Lahore, for the front desk's "Payments today". Each pays an
+  // invoice of last week in full, so nobody's dues change.
+  for (const [pi, branch, amount, method, at, by] of [
+    [13, 2, 2500, 'cash', '13:20', 'Accountant (sample)'], [14, 2, 8000, 'card', '14:05', 'Accountant (sample)'],
+    [15, 1, 3000, 'cash', '13:40', 'Accountant (sample)'], [16, 1, 1500, 'bank_transfer', '15:10', 'Dr. Ali Rashid'],
+    [19, 4, 4000, 'cash', '12:30', 'Accountant (sample)'],
+  ]) {
+    const p = db.patients[pi];
+    const inv = { id: uid(), invoice_no: 'INV-2026-' + String(db.invoices.length + 1).padStart(6, '0'), patient_id: p.id, branch_id: branch, issue_date: daysAgo(7),
+      subtotal: amount, discount_amount: 0, total: amount, status: 'issued', template_key: 'classic', items: [{ description: 'Sample treatment', quantity: 1, unit_price: amount }] };
+    db.invoices.push(inv);
+    db.payments.push({ id: uid(), patient_id: p.id, invoice_id: inv.id, branch_id: branch, amount, method, received_at: `${today}T${at}:00`, received_by: by });
+  }
   // Retainer Record and Lab Work (team, rows on every tab, lab work at every branch): data/demo-records.js
   seedRecords(db, { uid, daysAgo });
   db.reminders = [
@@ -380,6 +393,15 @@ export function createDemoAdapter() {
   let desk = null; // { staffId, name }
   const deskName = () => (me()?.shared_login && desk?.staffId === me().id ? desk.name : null);
   const audit = (table, action, row, { viaFunction = false } = {}) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', desk_name: viaFunction ? null : deskName(), at: new Date().toISOString() });
+  // The clinic's money (20261015000400_finance_privacy.sql): totals for finance.view or billing.view; the cash closing's amounts for
+  // finance.view, cash.verify or billing.view; the rest of the staff are refused, or get rows without amounts.
+  const seesTotals = () => can('finance.view') || can('billing.view');
+  const seesCash = () => can('finance.view') || can('cash.verify') || can('billing.view');
+  const totalsRefused = () => fail('NOT_ALLOWED: money totals are for Dr. Ali and accounts ("View all financial reports" or "View invoices and payments" in the access list).');
+  // The Pakistan day of a payment: a moment with a time zone (Z or +05:00) is converted, a sample's plain local time is that day.
+  const karachiDay = (ts) => (/(Z|[+-]\d\d:?\d\d)$/.test(String(ts)) ? localISO(new Date(ts)) : String(ts).slice(0, 10));
+  // Cash taken at a branch on a day (public.expected_cash: cash payments minus cash refunds, every row whoever asks).
+  const cashIn = (branchId, date) => db.payments.filter((p) => p.branch_id === Number(branchId) && p.method === 'cash' && karachiDay(p.received_at) === date).reduce((s, p) => s + p.amount, 0);
   const patient = (id) => db.patients.find((p) => p.id === id);
   const dues = (pid) => db.invoices.filter((i) => i.patient_id === pid && i.status === 'issued').reduce((s, i) => s + i.total, 0)
     - db.payments.filter((p) => p.patient_id === pid).reduce((s, p) => s + p.amount, 0);
@@ -729,11 +751,14 @@ export function createDemoAdapter() {
         ...clone(p), dues: dues(id), flag: clone(activeFlag(id)),
         braces_case: bc ? { ...clone(bc), next_month: nextMonth(bc.id) } : null,
         visits: db.visits.filter((v) => v.patient_id === id).sort((a, b) => b.visit_date.localeCompare(a.visit_date)).map(enrichVisit),
-        invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind === 'staff' || i.status === 'issued'))),
-        payments: clone(db.payments.filter((x) => x.patient_id === id)),
+        // As the database: staff read invoices and payments with billing.view; the front desk, which makes invoices and takes payments
+        // (billing.create), gets those of its branches ("billers view ...", 20261015000500); the rest of the staff get none. Plans:
+        // billing.view, or billing.create (which manages them). A patient: their own issued ones.
+        invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || (can('billing.create') && branchOk(i.branch_id))))),
+        payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || (can('billing.create') && branchOk(x.branch_id))))),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
-        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id)),
+        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || can('billing.create')))),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
         complaints: db.complaints.filter((c) => c.patient_id === id).map((c) => ({ ...clone(c), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id && (s?.kind === 'staff' || !m.internal_note))) })),
       };
@@ -1253,11 +1278,18 @@ export function createDemoAdapter() {
       return clone(pay);
     },
     async patientBilling(patientId) {
-      need('billing.view');
-      return { invoices: clone(db.invoices.filter((i) => i.patient_id === patientId)), payments: clone(db.payments.filter((x) => x.patient_id === patientId)) };
+      // billing.view reads them; the front desk (billing.create alone) reads this patient's own at its branches (20261015000500).
+      if (!can('billing.view') && !can('billing.create')) fail('NOT_ALLOWED: a patient\'s invoices need "Create invoices and take payments" or "View invoices and payments" in the access list.');
+      const mine = (r) => r.patient_id === patientId && (can('billing.view') || branchOk(r.branch_id));
+      // (and, as the live data layer, the dues as they are now for who sees the dues flag: every branch counts)
+      return { invoices: clone(db.invoices.filter(mine)), payments: clone(db.payments.filter(mine)), dues: can('dues.view') ? dues(patientId) : undefined };
     },
     // ------------------------------------------------------------ installment plans
-    async paymentPlans(patientId) { return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId)); },
+    async paymentPlans(patientId) {
+      // row-level security: "view plans" (billing.view) and "manage plans" (billing.create); a patient reads their own
+      if (me() && !can('billing.view') && !can('billing.create')) return [];
+      return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId));
+    },
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
       need('billing.create');
       db.payment_plans ||= [];
@@ -1378,12 +1410,14 @@ export function createDemoAdapter() {
       const billed = db.invoices.filter((i) => i.status === 'issued' && treatedVisits.includes(i.visit_id)).reduce((t, i) => t + Number(i.total), 0);
       const rule = (db.doctor_commission_rules || []).find((r) => r.active && r.clinician_id === clinicianId) || (db.doctor_commission_rules || []).find((r) => r.active && !r.clinician_id) || null;
       const base = rule ? (rule.basis === 'treated' ? billed : rule.basis === 'referred' ? paid : billed + paid) : 0;
+      // The rupees only for finance.view, or a doctor's own with "See own doctor percentage" (20261015000400): the counts for the rest.
+      const money = can('finance.view') || (mine === clinicianId && can('commission.view_own'));
       return { treated: treatedVisits.length, checked: vs.filter((x) => x.role === 'checker').length, assisted: vs.filter((x) => x.role === 'assistant').length,
-        days: new Set(vs.map((x) => x.visit.visit_date)).size, billed, branches: [...new Set(vs.map((x) => x.visit.branch_id))],
-        referred_patients: own.length, referred_paid: paid,
+        days: new Set(vs.map((x) => x.visit.visit_date)).size, billed: money ? billed : null, branches: [...new Set(vs.map((x) => x.visit.branch_id))],
+        referred_patients: own.length, referred_paid: money ? paid : null,
         // only complaints: a website suggestion or thank-you linked to a doctor is not a complaint about their work (a patient's has no kind)
         complaints: db.complaints.filter((c) => c.clinician_id === clinicianId && (c.kind || 'complaint') === 'complaint' && inRange(c.created_at.slice(0, 10))).map((c) => ({ id: c.id, subject: c.subject, status: c.status, created_at: c.created_at, branch_id: c.branch_id, patient_name: patient(c.patient_id)?.full_name, mr_number: patient(c.patient_id)?.mr_number, source: c.source || 'portal' })),
-        rule: rule ? { percent: rule.percent, basis: rule.basis, notes: rule.notes } : null, share: rule ? Math.round(base * rule.percent) / 100 : null };
+        rule: money && rule ? { percent: rule.percent, basis: rule.basis, notes: rule.notes } : null, share: money && rule ? Math.round(base * rule.percent) / 100 : null };
     },
 
     // ------------------------------------------------------------ Retainer Record and Lab Work (data/demo-records.js)
@@ -1593,19 +1627,29 @@ export function createDemoAdapter() {
       return rows;
     },
     async expectedCash(branchId, date) {
-      if (!can('cash.close') && !can('finance.view')) fail('row-level security policy (cash.close)');
-      return db.payments.filter((p) => p.branch_id === Number(branchId) && p.method === 'cash' && p.received_at.slice(0, 10) === date).reduce((s, p) => s + p.amount, 0);
+      // Added up from the payments this person may read (row-level security: billing.view at their branches); 0 for everyone else.
+      return can('billing.view') && branchOk(branchId) ? cashIn(branchId, date) : 0;
     },
     async closeCash(branchId, date, counted, notes) {
       need('cash.close');
       if (!branchOk(branchId)) fail('You are not allowed to close cash for this branch');
       if (db.cash_closings.some((c) => c.branch_id === Number(branchId) && c.closing_date === date)) fail('Cash for this branch and day is already closed.');
-      const expected = await this.expectedCash(branchId, date);
+      const expected = cashIn(branchId, date);
       const c = { id: uid(), branch_id: Number(branchId), closing_date: date, expected_cash: expected, counted_cash: Number(counted), difference: Number(counted) - expected, closed_by: me().full_name, closed_at: new Date().toISOString(), notes, verified_by: null };
       db.cash_closings.push(c); audit('cash_closings', 'INSERT', c);
-      return clone(c);
+      // A blind count: whoever may not see the money is told neither the expected cash nor the difference.
+      return seesCash() ? clone(c) : { ...clone(c), expected_cash: null, difference: null };
     },
-    async cashClosings() { if (!can('finance.view') && !can('cash.close')) return []; return clone(db.cash_closings.filter((c) => branchOk(c.branch_id))).sort((a, b) => b.closing_date.localeCompare(a.closing_date)); },
+    async cashClosings() {
+      // As the "view closings" policy: finance.view everywhere, cash.verify or billing.view at their branches, nobody else.
+      const rows = can('finance.view') ? db.cash_closings : seesCash() ? db.cash_closings.filter((c) => branchOk(c.branch_id)) : [];
+      return clone(rows).sort((a, b) => b.closing_date.localeCompare(a.closing_date));
+    },
+    async cashClosingsBlind() {
+      if (!can('cash.close') && !seesCash()) fail('NOT_ALLOWED: the cash closings need "Daily cash closing" in the access list.');
+      return db.cash_closings.filter((c) => branchOk(c.branch_id)).sort((a, b) => b.closing_date.localeCompare(a.closing_date) || String(b.closed_at).localeCompare(String(a.closed_at)))
+        .map((c) => ({ id: c.id, branch_id: c.branch_id, closing_date: c.closing_date, closed_at: c.closed_at, closed_by_name: c.closed_by, checked: !!(c.verified_at || c.verified_by) }));
+    },
     async verifyClosing(id) { need('cash.verify'); const c = db.cash_closings.find((x) => x.id === id); c.verified_by = me().full_name; c.verified_at = new Date().toISOString(); },
     async paymentsReport({ from, to, branchId, method } = {}) {
       if (!can('finance.view') && !can('billing.view')) fail('row-level security policy (finance.view)');
@@ -1629,6 +1673,15 @@ export function createDemoAdapter() {
     // Report totals: same shapes as the live adapter (which gets them from SQL), computed here from the sample rows.
     async paymentsSummary(args = {}) { return { ...summarizePayments(await this.paymentsReport(args)), source: 'rows', truncated: false }; },
     async opdSummary(args = {}) { return { ...summarizeVisits(await this.visitsDaily(args)), source: 'rows', truncated: false }; },
+    async paymentsToday({ branchId = null } = {}) {
+      if (!can('payments.day_list')) fail('NOT_ALLOWED: today\'s payments need "Today\'s payments, one by one (no totals)" in the access list.');
+      if (branchId && !branchOk(branchId)) fail('NOT_ALLOWED: you can see the payments only at the branches you work at.');
+      const today = todayISO();
+      return db.payments.filter((p) => karachiDay(p.received_at) === today && branchOk(p.branch_id) && (!branchId || p.branch_id === Number(branchId)))
+        .sort((a, b) => String(b.received_at).localeCompare(String(a.received_at)))
+        .map((p) => ({ id: p.id, received_at: p.received_at, patient_id: p.patient_id, patient_name: patient(p.patient_id)?.full_name || '', mr_number: patient(p.patient_id)?.mr_number || '',
+          amount: p.amount, method: p.method, branch_id: p.branch_id, received_by_name: p.received_by || null }));
+    },
     async todaysPayments(branchId) {
       need('billing.view');
       return db.payments.filter((p) => (!branchId || p.branch_id === Number(branchId)) && p.received_at.slice(0, 10) === todayISO() && branchOk(p.branch_id))
@@ -1797,16 +1850,20 @@ export function createDemoAdapter() {
       const day = date || todayISO();
       return db.branches.map((b) => {
         const visits = db.visits.filter((v) => v.branch_id === b.id && v.visit_date === day);
-        const received = db.payments.filter((p) => p.branch_id === b.id && p.received_at.slice(0, 10) === day).reduce((s, p) => s + p.amount, 0);
-        const closing = db.cash_closings.find((c) => c.branch_id === b.id && c.closing_date === day) || null;
+        // As the live data layer: what came in only for billing.view (row-level security), the dues added up only for who sees totals,
+        // and the cash closing's amounts only for who sees the money (the others get whether it is closed).
+        const received = can('billing.view') && branchOk(b.id) ? db.payments.filter((p) => p.branch_id === b.id && p.received_at.slice(0, 10) === day).reduce((s, p) => s + p.amount, 0) : 0;
+        const closed = db.cash_closings.find((c) => c.branch_id === b.id && c.closing_date === day && branchOk(c.branch_id)) || null;
+        const closing = !closed ? null : seesCash() ? closed
+          : can('cash.close') ? { id: closed.id, branch_id: closed.branch_id, closing_date: closed.closing_date, closed_at: closed.closed_at, closed_by_name: closed.closed_by, checked: !!closed.verified_at } : null;
         const withDues = [...new Set(visits.map((v) => v.patient_id))].filter((pid) => dues(pid) > 0);
         return { branch: clone(b), patients: visits.length, completed: visits.filter((v) => v.status === 'completed').length,
           waiting: visits.filter((v) => v.status === 'waiting').length, received, closing: clone(closing),
-          dues_patients: withDues.length, dues: withDues.reduce((s, pid) => s + dues(pid), 0),
+          dues_patients: withDues.length, dues: seesTotals() ? withDues.reduce((s, pid) => s + dues(pid), 0) : null,
           new_complaints: can('complaints.view') ? db.complaints.filter((c) => c.branch_id === b.id && c.status === 'new').length : 0 };
       });
     },
-    async totalDues() { return db.patients.reduce((s, p) => s + Math.max(0, dues(p.id)), 0); },
+    async totalDues() { if (me() && !seesTotals()) totalsRefused(); return db.patients.reduce((s, p) => s + Math.max(0, dues(p.id)), 0); },
     async commissionRules() { return clone((db.doctor_commission_rules || []).filter((r) => r.active !== false)); },
     // Reports (a few of the real ones, from the demo data).
     async report(kind, from, to) {

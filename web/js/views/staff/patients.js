@@ -319,6 +319,13 @@ export async function renderPatient(root, id) {
     }
   };
 
+  // The patient's invoices, payments and installment plans (owner, 15 Oct 2026: the clinic's money is for Dr. Ali and accounts, and "yes
+  // the front desk takes the payment"): with "View invoices and payments", or with "Create invoices and take payments" alone (the front
+  // desk: this patient's own at its branches, 20261015000500_front_desk_billing.sql), who also makes invoices and plans and prints the
+  // bill and receipts. The rest of the staff see the dues only. No total across patients here either way.
+  const seesBills = can('billing.view') || can('billing.create');
+  const makesBills = can('billing.create');
+
   mount(root,
     h('p', {}, h('a', { href: '#/staff/patients' }, '← Patients')),
     h('div', { class: 'profile-head page-head' },
@@ -348,7 +355,7 @@ export async function renderPatient(root, id) {
         }) }, 'Invite to patient portal') : null,
         resetSlot,
         can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(p, { onDone: reload }) }, 'Upload photos') : null,
-        can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
+        makesBills ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
         can('billing.create') ? h('button', { class: 'btn btn-primary', onclick: () => paymentModal(p, { dues: p.dues, invoices: p.invoices, payments: p.payments, onDone: reload }) }, 'Take payment') : null)),
     p.flag ? h('div', { class: 'alert alert-warning inline', style: { justifyContent: 'space-between' } },
       h('span', {}, h('strong', {}, 'Next appointment with Dr. Ali Rashid. '), p.flag.reason),
@@ -364,7 +371,8 @@ export async function renderPatient(root, id) {
           guidancePanel(g)) : h('p', { class: 'muted' }, 'No active braces case.')),
       h('section', { class: 'panel' },
         h('div', { class: 'panel-head' }, h('h2', {}, 'Money'), can('dues.view') ? h('strong', { class: p.dues > 0 ? 'status-bad' : 'status-ok' }, p.dues > 0 ? `${rupees(p.dues)} pending` : 'No dues') : null),
-        p.invoices.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+        !seesBills ? h('p', { class: 'muted' }, 'Invoices and payments are with accounts.')
+        : p.invoices.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
           h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Invoice'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col', class: 'right' }, 'Amount'), h('th', { scope: 'col' }, srOnly('Actions')))),
           h('tbody', {}, p.invoices.map((i) => {
             const bal = balances[i.id];
@@ -374,7 +382,7 @@ export async function renderPatient(root, id) {
               h('td', { class: 'right' }, rupees(i.total ?? i.subtotal - i.discount_amount)),
               can('billing.edit') && i.status === 'issued' ? h('td', { class: 'right' }, h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Void invoice ${i.invoice_no}`, onclick: () => voidInvoice(i) }, 'Void')) : h('td', {}));
           })))) : h('p', { class: 'muted' }, 'No invoices.'),
-        p.payments.length ? h('details', { style: { marginTop: '10px' } },
+        seesBills && p.payments.length ? h('details', { style: { marginTop: '10px' } },
           h('summary', { class: 'muted', style: { cursor: 'pointer' } }, `${p.payments.length} payments · ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))} received`),
           h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { marginTop: '6px' } },
             h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Method'), h('th', { scope: 'col', class: 'right' }, 'Amount'), h('th', { scope: 'col' }, srOnly('Receipt')))),
@@ -383,11 +391,11 @@ export async function renderPatient(root, id) {
               h('td', {}, pay.method.replace('_', ' '), pay.invoice_id ? h('div', { class: 'muted' }, p.invoices.find((i) => i.id === pay.invoice_id)?.invoice_no || '') : null),
               h('td', { class: ['right', Number(pay.amount) < 0 && 'status-bad'] }, rupees(pay.amount)),
               h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
-        h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
-          can('billing.create') ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null),
-        (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
+        seesBills ? h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
+          makesBills ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null) : null,
+        !seesBills ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
           planTable(plan, p.payments),
-          can('billing.create') && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
+          makesBills && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
           : h('p', { class: 'muted' }, 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'))),
     h('section', { class: 'panel' },
       h('h2', {}, 'Visits'),
