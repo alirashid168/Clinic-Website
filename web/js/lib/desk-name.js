@@ -56,33 +56,90 @@ export function withSuggestion(list, name) {
 // ---- where the name is kept
 // This tab, until logout or the next sign-in (sessionStorage: a reload keeps it, a new tab or a new login asks again). It is
 // tied to the login it was given for, so it can never be put on another login's work. Also kept in memory, for a browser that
-// blocks storage (the name then lasts until the page is reloaded).
+// blocks storage (the name then lasts until the page is reloaded). With the time it was last used: a browser that brings the tab
+// back after a power cut or a restart ("Restore pages") brings its sessionStorage back too, and the next person must not carry
+// on under the name of the one before (see dropStaleDeskName).
 const SESSION_KEY = 'desk-name';
 // Names typed before on this computer, per login: offered as suggestions in the popup. A convenience of this computer only.
 const SUGGEST_KEY = 'desk-names:';
-let inMemory = null;
+// The latest name given on this computer, per login: the other tabs of that login see it change ('storage') and ask too.
+const NOW_KEY = 'desk-name-now';
+const TOUCH_EVERY_MS = 60 * 1000; // how often the time of last use is written while the person works
+let inMemory = null; // { staffId, name, at }
+
+/** The name kept by this tab (or by an earlier page of it) for the login staffId: { name, at }, or null. */
+function kept(staffId) {
+  try {
+    const k = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+    const name = k?.staffId === staffId ? cleanDeskName(k.name).name : null;
+    return name ? { name, at: Number(k.at) || 0 } : null;
+  } catch { return null; }
+}
 
 /** The name given in this tab for the login `staffId`, or null. */
 export function deskNameFor(staffId) {
   if (!staffId) return null;
   if (inMemory?.staffId === staffId) return inMemory.name;
-  try {
-    const kept = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
-    const name = kept?.staffId === staffId ? cleanDeskName(kept.name).name : null;
-    if (name) inMemory = { staffId, name };
-    return name || null;
-  } catch { return null; }
+  const k = kept(staffId);
+  if (k) inMemory = { staffId, ...k };
+  return k?.name || null;
 }
 
 export function keepDeskName(staffId, name) {
-  inMemory = { staffId, name };
+  inMemory = { staffId, name, at: Date.now() };
   try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(inMemory)); } catch { /* storage blocked: kept in memory only */ }
+  try { localStorage.setItem(NOW_KEY, JSON.stringify(inMemory)); } catch { /* storage blocked: the other tabs are not told */ }
 }
 
 /** At logout, at the next sign-in and on "Change name". */
 export function forgetDeskName() {
   inMemory = null;
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* storage blocked */ }
+}
+
+/** The person is working: the name stays good (written at most once a minute). */
+export function touchDeskName(now = Date.now()) {
+  if (!inMemory || now - inMemory.at < TOUCH_EVERY_MS) return;
+  inMemory.at = now;
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(inMemory)); } catch { /* storage blocked */ }
+}
+
+/**
+ * When a page starts with a name kept by an earlier page of the tab (a reload, or a tab the browser restored): that name holds only
+ * if it was used within maxAgeMs (the clinic's idle logout time), otherwise it is forgotten and the popup asks again. A name this
+ * page was given itself is never dropped here (the idle logout ends it).
+ */
+export function dropStaleDeskName(staffId, maxAgeMs, now = Date.now()) {
+  if (!staffId || inMemory?.staffId === staffId) return;
+  const k = kept(staffId);
+  if (k && !(now - k.at <= maxAgeMs)) forgetDeskName();
+}
+
+/**
+ * From a 'storage' event: the name just given in another tab of this browser for the login staffId, when this tab has a different
+ * one (the next person at this computer chose "Change name" there); null otherwise.
+ */
+export function deskNameFromOtherTab(event, staffId) {
+  if (event?.key !== NOW_KEY || !staffId) return null;
+  const mine = deskNameFor(staffId);
+  if (!mine) return null; // this tab is asking already
+  try {
+    const now = JSON.parse(event.newValue || 'null');
+    const name = now?.staffId === staffId ? cleanDeskName(now.name).name : null;
+    return name && name.toLocaleLowerCase() !== mine.toLocaleLowerCase() ? name : null;
+  } catch { return null; }
+}
+
+/**
+ * Whose typed edits an offline queue holds (lib/autosave.js keeps them on this computer under this key and sends them only while
+ * the same owner is signed in): the login; on a shared login, the login and the name typed at its desk (any capitals), so the next
+ * person never sends the previous person's waiting edits under their own name. Those wait for that same name on that login.
+ */
+export function editOwner(staff) {
+  if (!staff?.id) return null;
+  if (!staff.shared_login) return staff.id;
+  const name = deskNameFor(staff.id);
+  return `${staff.id}~${name ? encodeURIComponent(name.toLocaleLowerCase()) : ''}`;
 }
 
 export function deskNameSuggestions(staffId) {

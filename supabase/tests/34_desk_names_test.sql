@@ -12,6 +12,7 @@
 \set fd      '''00000000-0000-0000-0000-000000003402'''
 \set mgr     '''00000000-0000-0000-0000-000000003403'''
 \set off     '''00000000-0000-0000-0000-000000003404'''
+\set shared2 '''00000000-0000-0000-0000-000000003405'''
 
 create or replace function pg_temp.check(ok boolean, msg text) returns void language plpgsql as $$
 begin
@@ -49,13 +50,14 @@ select pg_temp.headers(null);
 begin;
 insert into auth.users (id, email) values
   (:admin, 'admin34@dralirashid.com'), (:shared, 'isb.desk34@dralirashid.com'), (:fd, 'fd34@dralirashid.com'),
-  (:mgr, 'mgr34@dralirashid.com'), (:off, 'off34@dralirashid.com');
+  (:mgr, 'mgr34@dralirashid.com'), (:off, 'off34@dralirashid.com'), (:shared2, 'asst.desk34@dralirashid.com');
 insert into public.staff (id, full_name, email, role) values
   (:admin,  'Admin Thirtyfour', 'admin34@dralirashid.com', 'admin'),
   (:shared, 'Front desk Sample Branch', 'isb.desk34@dralirashid.com', 'front_desk'),
   (:fd,     'Personal Desk Thirtyfour', 'fd34@dralirashid.com', 'front_desk'),
   (:mgr,    'User Manager Thirtyfour', 'mgr34@dralirashid.com', 'coordinator'),
-  (:off,    'Switched Off Shared Desk', 'off34@dralirashid.com', 'front_desk');
+  (:off,    'Switched Off Shared Desk', 'off34@dralirashid.com', 'front_desk'),
+  (:shared2, 'Assistants Sample Branch', 'asst.desk34@dralirashid.com', 'assistant');
 insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:mgr, 'users.manage', true);
 insert into public.app_settings (key, value) values ('test_desk_names', '"start"');
 
@@ -68,6 +70,7 @@ set role authenticated;
 select pg_temp.act_as(:admin);
 update public.staff set shared_login = true where id in (:shared, :off);
 select pg_temp.check((select count(*) from public.staff where id in (:shared, :off) and shared_login) = 2, 'the admin marks two accounts as shared logins');
+update public.staff set shared_login = true where id = :shared2;
 update public.staff set active = false where id = :off;
 select pg_temp.expect_error(format($$update public.staff set shared_login = true where id = %L$$, :admin), 'staff_shared_login_not_admin',
   'an admin account can never be a shared login, not even by the admin');
@@ -88,7 +91,7 @@ select pg_temp.expect_error(format($$update public.staff set shared_login = fals
 select pg_temp.check((select shared_login from public.staff where id = :mgr), 'their own login stays shared');
 update public.staff set full_name = 'User Manager 34' where id = :mgr;
 select pg_temp.check((select full_name from public.staff where id = :mgr) = 'User Manager 34', 'other changes to their own row still go through');
-select pg_temp.expect_error(format($$update public.staff set shared_login = true where id = %L$$, :admin), 'admin',
+select pg_temp.expect_error(format($$update public.staff set shared_login = true where id = %L$$, :admin), 'Only admin can create or promote admin accounts',
   'a user manager cannot touch the admin account');
 select pg_temp.act_as(:shared);
 update public.staff set shared_login = false where id = :shared;
@@ -116,15 +119,23 @@ select pg_temp.expect_error(format($$insert into public.desk_names (staff_id, na
 insert into public.desk_names (staff_id, name) values (:shared, repeat('b', 60));
 select pg_temp.expect_error(format($$insert into public.desk_names (staff_id, name) values (%L, ' Sample Space')$$, :shared), 'desk_names_name_check', 'a name with spaces around it is refused (the website trims it)');
 select pg_temp.expect_error(format($$insert into public.desk_names (staff_id, name) values (%L, E'Sample\nNewline')$$, :shared), 'desk_names_name_check', 'a name with a line break is refused');
+-- Two shared logins: each reads its own names only.
+select pg_temp.act_as(:shared2);
+insert into public.desk_names (staff_id, name) values (:shared2, 'Sample Other Desk');
+select pg_temp.check((select count(*) from public.desk_names) = 1 and (select bool_and(staff_id = :shared2::uuid) from public.desk_names),
+  'a second shared login reads its own names only');
+select pg_temp.act_as(:shared);
+select pg_temp.check((select count(*) from public.desk_names where staff_id = :shared2) = 0, '... and the first does not read the second''s');
 select pg_temp.act_as(:fd);
 select pg_temp.expect_error(format($$insert into public.desk_names (staff_id, name) values (%L, 'Sample Personal')$$, :fd), 'row-level security',
   'a personal (not shared) login cannot add names');
-select pg_temp.check((select count(*) from public.desk_names) = 0, 'and does not read the shared login''s names');
+select pg_temp.check((select count(*) from public.desk_names) = 0, 'and does not read the shared logins'' names');
 select pg_temp.act_as(:off);
 select pg_temp.expect_error(format($$insert into public.desk_names (staff_id, name) values (%L, 'Sample Off')$$, :off), 'row-level security',
   'a switched-off shared login cannot add names');
 select pg_temp.act_as(:mgr);
-select pg_temp.check((select count(*) from public.desk_names where staff_id = :shared) = 3, 'a user manager reads every shared login''s names');
+select pg_temp.check((select count(*) from public.desk_names where staff_id = :shared) = 3 and (select count(*) from public.desk_names where staff_id = :shared2) = 1,
+  'a user manager reads every shared login''s names');
 select pg_temp.act_as(:admin);
 select pg_temp.check((select count(*) from public.desk_names where staff_id = :shared) = 3, 'so does the admin');
 select pg_temp.expect_error(format($$insert into public.desk_names (staff_id, name) values (%L, 'Sample Admin')$$, :shared), 'row-level security',

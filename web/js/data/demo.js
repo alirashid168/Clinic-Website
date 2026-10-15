@@ -343,9 +343,10 @@ export function createDemoAdapter() {
   const need = (key) => { if (!can(key)) fail('new row violates row-level security policy (' + key + ')'); };
   const branchOk = (branchId) => { const s = me(); return !!s && (s.role === 'admin' || !s.restrict_to_branches || s.branch_ids.includes(Number(branchId))); };
   // The name typed at a shared login's desk (setDeskName), like the x-desk-name header the live site sends: it goes with each change.
+  // { viaFunction: true }: a row the live site's admin-users Edge Function writes itself, which never gets the header (no name).
   let desk = null; // { staffId, name }
   const deskName = () => (me()?.shared_login && desk?.staffId === me().id ? desk.name : null);
-  const audit = (table, action, row) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', desk_name: deskName(), at: new Date().toISOString() });
+  const audit = (table, action, row, { viaFunction = false } = {}) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', desk_name: viaFunction ? null : deskName(), at: new Date().toISOString() });
   const patient = (id) => db.patients.find((p) => p.id === id);
   const dues = (pid) => db.invoices.filter((i) => i.patient_id === pid && i.status === 'issued').reduce((s, i) => s + i.total, 0)
     - db.payments.filter((p) => p.patient_id === pid).reduce((s, p) => s + p.amount, 0);
@@ -653,7 +654,7 @@ export function createDemoAdapter() {
       if (db.portal_logins.some((l) => l.email === email) || db.staff.some((x) => x.email === email)) fail('That username is already used by another login.');
       db.portal_logins.push({ patient_id: id, email, password: String(password), must_change: true });
       p.portal_user_id = 'p-' + id;
-      audit('patients', 'PORTAL_LOGIN_CREATED', p);
+      audit('patients', 'PORTAL_LOGIN_CREATED', p, { viaFunction: true });
       return { username: email };
     },
     /** Staff set a new password for a login made that way; the patient must choose their own again. Resolves { username }. */
@@ -668,7 +669,7 @@ export function createDemoAdapter() {
       if (!login) fail('This patient logs in with their own email address. They can set a new password with "Forgot password" on the login page.');
       login.password = String(password);
       login.must_change = true;
-      audit('patients', 'PORTAL_PASSWORD_RESET', p);
+      audit('patients', 'PORTAL_PASSWORD_RESET', p, { viaFunction: true });
       return { username: login.email };
     },
     /** { has_login, clinic_login, username } */

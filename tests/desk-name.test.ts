@@ -2,12 +2,15 @@
 // (counted like the database counts them), tidied the same way every time; it travels in the x-desk-name header percent-encoded, and
 // reading it back follows the same rules as the database's private.request_desk_name() (20261015000300_desk_names.sql): anything that
 // is not a clean name is null, never an error. The name is kept per tab and per login, never handed to another login, and the
-// storage helpers keep working (in memory) when the browser blocks storage.
+// storage helpers keep working (in memory) when the browser blocks storage. A kept name that was not used for longer than the idle
+// logout time is dropped (a tab restored after a power cut); another tab taking a new name is noticed; and the offline typing of a
+// shared login is kept per login and name (editOwner), so the next person never sends it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DESK_NAME_MIN, DESK_NAME_MAX, DESK_NAME_HEADER, SUGGESTIONS_KEPT, cleanDeskName, encodeDeskName, decodeDeskName, withDeskName, deskLabel,
   withSuggestion, deskNameFor, keepDeskName, forgetDeskName, deskNameSuggestions, rememberDeskName,
+  touchDeskName, dropStaleDeskName, deskNameFromOtherTab, editOwner,
 } from '../web/js/lib/desk-name.js';
 
 const URDU = 'عائشہ نمونہ'; // "Ayesha Namuna" (a made-up name), 11 characters
@@ -88,7 +91,8 @@ test('the name is kept for this tab and this login only, until it is forgotten',
   assert.equal(deskNameFor('s-fd-isb'), 'Sadia');
   assert.equal(deskNameFor('s-other'), null, 'never handed to another login');
   assert.equal(deskNameFor(null as any), null);
-  assert.deepEqual(JSON.parse(g.sessionStorage.getItem('desk-name')), { staffId: 's-fd-isb', name: 'Sadia' }, 'in sessionStorage: a reload of the tab keeps it');
+  const kept = JSON.parse(g.sessionStorage.getItem('desk-name'));
+  assert.deepEqual({ ...kept, at: typeof kept.at }, { staffId: 's-fd-isb', name: 'Sadia', at: 'number' }, 'in sessionStorage, with the time: a reload of the tab keeps it');
   forgetDeskName();
   assert.equal(deskNameFor('s-fd-isb'), null, 'gone after logout or a new sign-in');
   assert.equal(g.sessionStorage.getItem('desk-name'), null);
@@ -133,4 +137,76 @@ test('names typed before on this computer are offered again, per login', () => {
   g.localStorage.setItem('desk-names:s-y', 'not json');
   assert.deepEqual(deskNameSuggestions('s-y'), []);
   delete g.localStorage;
+});
+
+test('a name kept by an earlier page holds only within the idle logout time; working keeps it fresh', () => {
+  g.sessionStorage = storage();
+  const HOUR = 60 * 60 * 1000;
+  const keptBy = (name: string, at: number | undefined) => { forgetDeskName(); g.sessionStorage.setItem('desk-name', JSON.stringify({ staffId: 's-fd-isb', name, at })); };
+  keptBy('Sadia', Date.now() - 10 * 60 * 1000);
+  dropStaleDeskName('s-fd-isb', HOUR / 2);
+  assert.equal(deskNameFor('s-fd-isb'), 'Sadia', 'used 10 minutes ago, the idle limit is 30: a reload keeps it');
+  keptBy('Sadia', Date.now() - 2 * HOUR);
+  dropStaleDeskName('s-fd-isb', HOUR / 2);
+  assert.equal(deskNameFor('s-fd-isb'), null, 'a tab brought back two hours later (a power cut, "Restore pages"): asked again');
+  assert.equal(g.sessionStorage.getItem('desk-name'), null);
+  keptBy('Sadia', undefined);
+  dropStaleDeskName('s-fd-isb', HOUR / 2);
+  assert.equal(deskNameFor('s-fd-isb'), null, 'a copy without its time is not trusted');
+  keptBy('Sadia', Date.now() - 2 * HOUR);
+  dropStaleDeskName('s-other', HOUR / 2);
+  assert.equal(deskNameFor('s-fd-isb'), 'Sadia', 'only the login being opened is looked at');
+  // A name this page was given is never dropped here (the idle logout ends it), and working keeps the time fresh.
+  forgetDeskName();
+  keepDeskName('s-fd-isb', 'Mehak');
+  const at0 = JSON.parse(g.sessionStorage.getItem('desk-name')).at;
+  dropStaleDeskName('s-fd-isb', 0, at0 + 5 * HOUR);
+  assert.equal(deskNameFor('s-fd-isb'), 'Mehak');
+  touchDeskName(at0 + 30 * 1000);
+  assert.equal(JSON.parse(g.sessionStorage.getItem('desk-name')).at, at0, 'written at most once a minute');
+  touchDeskName(at0 + 20 * 60 * 1000);
+  assert.equal(JSON.parse(g.sessionStorage.getItem('desk-name')).at, at0 + 20 * 60 * 1000);
+  forgetDeskName();
+  touchDeskName(at0 + 40 * 60 * 1000);
+  assert.equal(g.sessionStorage.getItem('desk-name'), null, 'nothing to keep fresh after logout');
+  delete g.sessionStorage;
+});
+
+test('another tab of this browser takes a new name for the same login: this tab notices; the same name, another login or a tab still asking do not count', () => {
+  g.sessionStorage = storage();
+  g.localStorage = storage();
+  forgetDeskName();
+  keepDeskName('s-fd-isb', 'Ayesha');
+  assert.deepEqual({ ...JSON.parse(g.localStorage.getItem('desk-name-now')), at: 0 }, { staffId: 's-fd-isb', name: 'Ayesha', at: 0 }, 'the latest name is told to the other tabs');
+  const ev = (value: any, key = 'desk-name-now') => ({ key, newValue: value === null ? null : JSON.stringify(value) });
+  assert.equal(deskNameFromOtherTab(ev({ staffId: 's-fd-isb', name: 'Sadia', at: 1 }), 's-fd-isb'), 'Sadia');
+  assert.equal(deskNameFromOtherTab(ev({ staffId: 's-fd-isb', name: 'ayesha', at: 1 }), 's-fd-isb'), null, 'the same name (other capitals) changes nothing');
+  assert.equal(deskNameFromOtherTab(ev({ staffId: 's-asst-isb', name: 'Sadia', at: 1 }), 's-fd-isb'), null, 'another login');
+  assert.equal(deskNameFromOtherTab(ev({ staffId: 's-fd-isb', name: 'S', at: 1 }), 's-fd-isb'), null, 'not a clean name');
+  assert.equal(deskNameFromOtherTab(ev({ staffId: 's-fd-isb', name: 'Sadia' }, 'staff-last-active'), 's-fd-isb'), null, 'another key');
+  assert.equal(deskNameFromOtherTab(ev(null), 's-fd-isb'), null, 'cleared');
+  assert.equal(deskNameFromOtherTab({ key: 'desk-name-now', newValue: '{broken' }, 's-fd-isb'), null);
+  forgetDeskName();
+  assert.equal(deskNameFromOtherTab(ev({ staffId: 's-fd-isb', name: 'Sadia', at: 1 }), 's-fd-isb'), null, 'this tab is asking already');
+  delete g.sessionStorage;
+  delete g.localStorage;
+});
+
+test('whose offline typing a queue holds: the login; on a shared login the login and the name at the desk', () => {
+  g.sessionStorage = storage();
+  forgetDeskName();
+  assert.equal(editOwner(null), null, 'nobody signed in');
+  assert.equal(editOwner({ id: 's-fd2', shared_login: false }), 's-fd2', 'a personal login: its id, as before');
+  assert.equal(editOwner({ id: 's-fd-isb', shared_login: true }), 's-fd-isb~', 'a shared login before a name is given: never the bare id, never another key');
+  keepDeskName('s-fd-isb', 'Ayesha Khan');
+  const ayesha = editOwner({ id: 's-fd-isb', shared_login: true });
+  assert.equal(ayesha, 's-fd-isb~ayesha%20khan');
+  keepDeskName('s-fd-isb', 'AYESHA KHAN');
+  assert.equal(editOwner({ id: 's-fd-isb', shared_login: true }), ayesha, 'the same person typing their name in other capitals finds their edits');
+  keepDeskName('s-fd-isb', 'Sadia');
+  assert.notEqual(editOwner({ id: 's-fd-isb', shared_login: true }), ayesha, 'the next person has a queue of their own');
+  keepDeskName('s-fd-isb', URDU);
+  assert.match(editOwner({ id: 's-fd-isb', shared_login: true })!, /^s-fd-isb~[A-Za-z0-9%._~*'()!-]+$/, 'an Urdu name makes a plain key');
+  forgetDeskName();
+  delete g.sessionStorage;
 });

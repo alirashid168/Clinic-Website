@@ -9,8 +9,11 @@ import { cleanDeskName, deskNameFor, keepDeskName, forgetDeskName, deskNameSugge
 
 // The popup waits this long for the name to be saved in the list of names (public.desk_names), then lets the person carry on anyway.
 const SAVE_WAIT_MS = 8000;
+// "Change name" first sends the edits the person before typed (with their name) and waits this long at most, as a logout does.
+const FLUSH_WAIT_MS = 3000;
 const NAMES_DAYS = 60; // "Names used" lists this many days back
 let asking = null; // the popup on screen (one at a time)
+let changing = false; // "Change name" is sending the waiting edits
 
 /** Tells the data layer which name goes with this login's requests: the name given in this tab, for a shared login only. */
 export function syncDeskName(staff) {
@@ -66,13 +69,28 @@ export function askDeskName({ staff, signOut, onName, onGone }) {
 }
 
 /**
- * "Change name" (a new person at the desk): the name given so far stops at once, and the popup asks for the new one, over the page
- * that is on screen (it stays as it is, and cannot be used until a name is given).
+ * "Change name" (a new person at the desk): the edits the person before typed that are still waiting (the Aaj ki List's offline
+ * typing) are sent first, with their name, and the queues stop, as at a logout; whatever cannot go now waits on this computer under
+ * their name (lib/desk-name.js editOwner) and goes out only when that name is given on this login here again. Then the name stops,
+ * and the popup asks for the new one over the page on screen (which cannot be used until a name is given; shell.js draws it again
+ * for the new person after that). Also run when another tab of this browser took a new name (shell.js).
  */
-export function changeDeskName({ staff, signOut, onName }) {
+export async function changeDeskName({ staff, signOut, onName }) {
+  if (changing) return;
+  changing = true;
+  const before = deskNameFor(staff.id);
+  let left = null;
+  try {
+    const autosave = await import('../../lib/autosave.js');
+    left = await autosave.clearForUser({ flush: true, timeoutMs: FLUSH_WAIT_MS });
+  } catch (e) { console.error(e); } finally { changing = false; }
+  // (a logout or another login while the edits were being sent: nothing left to ask)
+  if (state.session?.staff?.id !== staff.id) return;
   forgetDeskName();
   state.data?.setDeskName?.(staff.id, null);
   onName?.(null);
+  const waiting = (left?.pending || 0) + (left?.failed || 0);
+  if (waiting && before) toast(`${waiting} change${waiting === 1 ? '' : 's'} typed by ${before} could not be sent yet. ${waiting === 1 ? 'It waits' : 'They wait'} on this computer for ${before}, until that name is given on this login here again.`, 'info', 12000);
   askDeskName({ staff, signOut, onName });
 }
 

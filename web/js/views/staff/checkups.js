@@ -8,6 +8,7 @@
 import { h, mount, toast, friendlyError, isLostAnswer, empty, modal, field, select, localISO, announce, shortDate, phoneLink, showFormErrors, clearFieldErrors, busy, srOnly, capFirst } from '../../ui/dom.js';
 import { state, can, isAdmin, myBranches, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
+import { editOwner } from '../../lib/desk-name.js';
 import { FOLLOW_UP_STATUSES, SOURCE_LABELS, PRICING_LABELS, monthLabel, checkupsToSheet, yesNo } from '../../lib/checkups.js';
 import { loadSheetJS } from '../../lib/sheetjs.js';
 import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, discardGuard, canRemoveCheckup, whyNoRemove, canRegisterCheckup, registeredMr } from './checkup-actions.js';
@@ -33,13 +34,14 @@ const errorText = (error) => {
 
 // ---------------------------------------------------------------- offline queue for the notes
 // One queue per signed-in staff member (autosave.js keeps their edits under a key with their user id),
-// so a note typed offline is never sent under someone else's login on a shared computer.
+// so a note typed offline is never sent under someone else's login on a shared computer (nor, on a shared login, under the name
+// of the next person at the desk: editOwner).
 let queue = null;
 let queueUser = null;
 let saveUI = null; // the save-status display of the Checkups page on screen, if any
 let hadProblem = false;
 
-const currentUser = () => state.session?.staff?.id || null;
+const currentUser = () => editOwner(state.session?.staff);
 const failedEdits = () => (Array.isArray(queue?.failed) ? queue.failed : []);
 
 function describeEdit(edit) {
@@ -445,4 +447,6 @@ export async function renderCheckups(root, params, signal) {
     tableWrap,
     pager);
   await load();
+  // Notes still waiting on this computer from before (this person's own: getQueue) go out now, as on the Aaj ki List.
+  if (!signal?.aborted) q.setOnline(navigator.onLine);
 }

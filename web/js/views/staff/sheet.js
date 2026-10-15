@@ -5,6 +5,7 @@
 import { h, mount, toast, friendlyError, isLostAnswer, rupees, modal, select, field, timeOf, downloadCSV, $$, announce, localISO, srOnly, busy, capFirst } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId, branchName } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
+import { editOwner } from '../../lib/desk-name.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
@@ -59,13 +60,14 @@ const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
 // ---------------------------------------------------------------- offline queue
 // One queue per signed-in staff member: autosave.js stores their typed edits under a key that
 // includes their user id, so they are never sent under someone else's account on a shared
-// computer. Logout stops the queue (autosave.clearForUser); the next render starts a fresh one.
+// computer. Logout stops the queue (autosave.clearForUser); the next render starts a fresh one. On a shared login the key also
+// has the name typed at the desk (editOwner), and "Change name" stops the queue the same way.
 let queue = null;
 let queueUser = null;
 let saveUI = null; // the save-status display of the Aaj ki List on screen, if any
 let hadProblem = false;
 
-const currentUser = () => state.session?.staff?.id || null;
+const currentUser = () => editOwner(state.session?.staff);
 const failedEdits = () => (Array.isArray(queue?.failed) ? queue.failed : []);
 // Why a typed change is on the "not saved" list (autosave keeps only the message). A change whose answer was lost is
 // kept on this device either way; the list has Try again and Discard.

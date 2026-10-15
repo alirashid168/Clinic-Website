@@ -69,9 +69,12 @@ const MENU_PREFS_MISSING_CODES = new Set(['PGRST205', '42P01']);
 // The name goes with every request to the database's REST API (tables and functions: /rest/v1/) in the x-desk-name header, where
 // audit_row() picks it up. It is added in the client's own fetch (createSupabaseAdapter), so it is on every such request supabase-js
 // makes, read at the moment the request goes out (supabase-js 2.117.2 sends every PostgREST and RPC request through global.fetch).
-// Never to the login server, Storage or the Edge Functions: their CORS rules do not list the header, and nothing there is audited.
+// Never to the login server, Storage or the Edge Functions: their CORS rules do not list the header. So the audit rows the
+// admin-users Edge Function writes itself carry no desk name: a patient's portal login made, its password reset, a portal invite.
 const REST_URL = /\/rest\/v1\//;
 const DESK_PROBE_TIMEOUT_MS = 5000;
+const DESK_PROBE_AGAIN_MS = 60 * 1000; // a probe that got no answer at all (no connection) is tried again this much later
+const DESK_WRITE_WAIT_MS = 4000; // a change (not a read) waits this long at most for a probe that is running
 const DESK_NAMES_CAP = 500; // "Names used": rows listed at most
 const SHARED_MISSING_TEXT = 'SHARED_LOGIN_MISSING: Shared logins need a database update (20261015000300_desk_names.sql). Nothing was changed. Run the update first, then try again.';
 
@@ -488,11 +491,14 @@ export async function createSupabaseAdapter() {
   let startChecked = false; // getSession() looks for what this page's start-up found out only the first time
   let desk = null; // the name typed at a shared login's desk (setDeskName): { staffId, value } with value percent-encoded, or null
   // Whether the server takes the x-desk-name header. A browser asks the server first (CORS) whether a request may carry a header of
-  // its own; if it were refused, every request of a shared login would fail. So the first request that would carry it waits for one
-  // small read that tries it (probeDeskHeader): true = it is taken; false = refused (then it is left off for this page, and the name
-  // is only in desk_names); null = not known yet (no connection: asked again with the next request).
+  // its own; if it were refused, every request of a shared login would fail. So one small read tries it first (probeDeskHeader), as
+  // soon as a name is set: true = it is taken; false = refused (then it is left off for this page, and the name is only in
+  // desk_names); null = not known yet (no connection). Until it is known requests go without it: reads never wait, and a change
+  // waits a few seconds at most for a probe that is running, so it can carry the name. A probe that got no answer is tried again a
+  // minute later (DESK_PROBE_AGAIN_MS), never once per request.
   let deskHeaderOk = null;
   let deskProbe = null;
+  let deskProbedAt = 0;
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true },
     global: {
@@ -514,11 +520,13 @@ export async function createSupabaseAdapter() {
   async function probeDeskHeader(value) {
     const url = `${String(CONFIG.SUPABASE_URL).replace(/\/+$/, '')}/rest/v1/branches?select=id&limit=1`;
     const key = CONFIG.SUPABASE_ANON_KEY;
+    // 'ok' = any answer at all (even a refusal means the request was let through); 'slow' = no answer in time; 'failed' = stopped at once
     const ask = (withName) => fetchWithin(url, { headers: { apikey: key, Authorization: `Bearer ${key}`, ...(withName ? { [DESK_NAME_HEADER]: value } : {}) } }, DESK_PROBE_TIMEOUT_MS)
-      .then(() => true, () => false); // any answer at all (even a refusal) means the request was let through
-    if (await ask(true)) return true;
-    if (!(await ask(false))) return null; // no connection at all
-    return (await ask(true)) ? true : false; // asked twice, so one dropped request does not leave the header off
+      .then(() => 'ok', (e) => (e?.name === 'TIMEOUT' ? 'slow' : 'failed'));
+    if ((await ask(true)) === 'ok') return true;
+    if ((await ask(false)) !== 'ok') return null; // no connection at all
+    const again = await ask(true); // asked twice, so one dropped request does not leave the header off
+    return again === 'ok' ? true : again === 'failed' ? false : null; // (a slow answer is no refusal: tried again later)
   }
   /**
    * Sends the request with send(init). A REST request while a name is set gets the x-desk-name header first (deskInit); every other
@@ -528,6 +536,15 @@ export async function createSupabaseAdapter() {
     if (!desk || !REST_URL.test(String(input?.url ?? input))) return send(init);
     return deskInit(init).then(send);
   }
+  function startDeskProbe() {
+    if (!desk || deskProbe || deskHeaderOk !== null || Date.now() - deskProbedAt < DESK_PROBE_AGAIN_MS) return;
+    deskProbedAt = Date.now();
+    const run = probeDeskHeader(desk.value).then((ok) => {
+      deskHeaderOk = ok;
+      if (ok === false) console.warn('The clinic server does not accept the x-desk-name header: changes are not marked with the desk name on this page.');
+    }, () => {}).finally(() => { if (deskProbe === run) deskProbe = null; });
+    deskProbe = run;
+  }
   /** init with the x-desk-name header, when the request is sent with the token of the login the name was given for. Never fails. */
   async function deskInit(init) {
     try {
@@ -536,12 +553,13 @@ export async function createSupabaseAdapter() {
       const sub = () => claimsOf(String(headers.get('authorization') || '').replace(/^Bearer /i, ''))?.sub;
       if (sub() !== desk.staffId) return init;
       if (deskHeaderOk === null) {
-        deskProbe ||= probeDeskHeader(desk.value).then((ok) => {
-          deskHeaderOk = ok;
-          deskProbe = null;
-          if (ok === false) console.warn('The clinic server does not accept the x-desk-name header: changes are not marked with the desk name on this page.');
-        });
-        await deskProbe;
+        startDeskProbe();
+        const method = String(init?.method || 'GET').toUpperCase();
+        if (deskProbe && method !== 'GET' && method !== 'HEAD') {
+          let timer;
+          await Promise.race([deskProbe, new Promise((resolve) => { timer = setTimeout(resolve, DESK_WRITE_WAIT_MS); })]);
+          clearTimeout(timer);
+        }
       }
       if (!deskHeaderOk || !desk || sub() !== desk.staffId) return init; // (the name may have changed or ended while it waited)
       headers.set(DESK_NAME_HEADER, desk.value);
@@ -1124,7 +1142,10 @@ export async function createSupabaseAdapter() {
     // Until that file is run no staff row has shared_login, so nobody is asked for a name; the list of names answers { missing: true }
     // and marking an account shared fails with SHARED_LOGIN_MISSING.
     /** From now on every database request of the login staffId carries this name (null: none). Not async. */
-    setDeskName(staffId, name) { desk = staffId && name ? { staffId, value: encodeDeskName(name) } : null; },
+    setDeskName(staffId, name) {
+      desk = staffId && name ? { staffId, value: encodeDeskName(name) } : null;
+      startDeskProbe(); // (finds out whether the header is taken before the person changes anything)
+    },
     /** Adds the name to the signed-in shared login's list of names (public.desk_names) -> { missing }. */
     async saveDeskName(name) {
       const { name: clean, error } = cleanDeskName(name);
