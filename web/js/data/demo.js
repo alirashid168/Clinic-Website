@@ -728,6 +728,9 @@ export function createDemoAdapter() {
           photo_required: !!rule?.photoRequired, photos_uploaded: done && !!rule?.photoRequired, checker_required: rule ? rule.checkerGroup !== null : false, checked_by: null,
           checked_in_at: status === 'scheduled' ? null : `${date}T${String(12 + Math.floor(i / 20)).padStart(2, '0')}:${String((i * 7) % 60).padStart(2, '0')}:00`,
           created_at: new Date().toISOString(), notes: i % 29 === 0 || i === 111 ? 'Wants an evening slot next time' : null };
+        // Sample Patient 099 came from the Google Sheet with "Group 4", a group Clinic setup does not have: the sync keeps the
+        // visit in no group and the sheet's words in sheet_cells (as the live database does).
+        if (i === 99) v.sheet_cells = { group: { t: 'Group 4', v: null } };
         db.visits.push(v);
         if (done || status === 'in_treatment' || i % 9 === 0) {
           const pool = group ? doctorsIn(group) : anyDoctor;

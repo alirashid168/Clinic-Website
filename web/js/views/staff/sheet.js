@@ -51,13 +51,11 @@ const byToken = (a, b) => (a.branch_id ?? 0) - (b.branch_id ?? 0)
 // then Scheduled and checkups with no status yet, then Completed, then Cancelled and No show. Checkup patients take part by
 // their own day status. Inside one status the patients come first by token (no token last), then the checkup patients by
 // theirs (tokens are numbered per kind of treatment, so the two series are not mixed), then by when they were added.
-// (All branches view: by branch first.) Each item is { row, checkup, rank, token, late }: draw() works out the rank and
-// token, and late (1: a row that came while the mouse is on the list, put after the others; see there).
+// (All branches view: by branch first.) Each item is { row, checkup, rank, token }: draw() works out the rank and token.
 const STATUS_RANK = { waiting: 0, in_treatment: 1, scheduled: 2, '': 3, completed: 4, cancelled: 5, no_show: 6 };
 const rankOf = (item) => STATUS_RANK[(item.checkup ? item.row.day_status : item.row.status) || ''] ?? 3;
 const tokenOf = (item) => (item.checkup ? tokenNo(item.row) : item.row.token_no ?? Infinity);
-const listOrder = (a, b) => a.late - b.late
-  || (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
+const listOrder = (a, b) => (a.row.branch_id ?? 0) - (b.row.branch_id ?? 0)
   || a.rank - b.rank
   || Number(a.checkup) - Number(b.checkup)
   || byNumber(a.token, b.token)
@@ -73,9 +71,8 @@ const COMPLETED_OWN_COUNT = false;
 const SHOW_MEDICAL_ON_LIST = false;
 // A row of the list as a key, the same for every copy of it the list draws (visits and checkups are told apart).
 const keyOf = (item) => `${item.checkup ? 'c' : 'v'}:${item.row.id}`;
-// Whether a row is no longer where it was sorted (held: its { rank, token, late } when the list was last drawn). A late row
-// (put at the end while the mouse was on the list) is not in its place either.
-const movedFrom = (item, held) => !!held.late || rankOf(item) !== held.rank || tokenOf(item) !== held.token;
+// Whether a row is no longer where it was sorted (was: its { rank, token } when the list was last drawn).
+const movedFrom = (item, was) => rankOf(item) !== was.rank || tokenOf(item) !== was.token;
 
 // ---------------------------------------------------------------- the sheet's chip colours
 // The chip colours of the clinic's Google Sheet (app.css .gs-*). A chip always carries its text too, so colour is never the only cue.
@@ -225,15 +222,16 @@ export async function renderSheet(root, params, signal) {
   let checkupsOnly = false; // the "Checkups" count was clicked
 
   const tableBody = h('tbody', {});
+  // The whole table (header row and rows): see "When the rows move", below. (Filled where the page is put together.)
+  const sheetTable = h('table', { class: 'sheet' });
   // Typed text that is not saved yet: Treatment, and a checkup patient's name, token and phone, save when the cell is left
-  // (the other typed cells save as they are typed). A redraw of the row keeps it (restoreFocus), and a reload in the
-  // background waits for it while that cell has the cursor, and for a few seconds after the last key or tap in the list
-  // (userIsBusy). A cell left with the text it had fires no change, so unsavedCell can stay set after it is left.
+  // (the other typed cells save as they are typed). It is only ever in the cell with the cursor, so the list is not drawn
+  // meanwhile (waitMs), and a row drawn again after a save keeps that cell as it is (replaceRow). A cell left with the text
+  // it had fires no change, so unsavedCell can stay set after it is left.
   const SAVED_ON_LEAVE = new Set(['treatment_label', 'patient_name', 'token', 'phone']);
   let unsavedCell = null;
-  let lastTouch = 0;
   // Every change made to the list on this screen (a patient added or removed, a cell typed, a status, group or doctor
-  // saved) counts up listVersion: a reload asked for before it does not have it, so its answer is not drawn (see load).
+  // saved) counts up listVersion: a reload asked for before it does not have it, so its answer is not used (see load).
   let listVersion = 0;
   // Treatment Details is often longer than its cell: the whole text is in the cell's tooltip (title), kept up to date here.
   const LONG_TEXT = new Set(['details_text', 'details']);
@@ -242,83 +240,82 @@ export async function renderSheet(root, params, signal) {
     if (LONG_TEXT.has(e.target.dataset.field)) e.target.title = e.target.value;
   });
   tableBody.addEventListener('change', (e) => { if (e.target === unsavedCell) unsavedCell = null; });
-  for (const ev of ['keydown', 'pointerdown', 'input']) tableBody.addEventListener(ev, () => { lastTouch = Date.now(); });
 
-  // Where each row was sorted when the list was last drawn (keyOf -> { rank, token, late, name }, in the order drawn, see
-  // draw; placedFor: for which branch and day), and the row the add line last put the cursor in (keyOf; onKey).
+  // ---- When the rows move (owner, 11 Oct 2026: a row must never jump away under the cursor).
+  // Only draw() sorts the list; a save in one row draws that row alone, in its place, with its number (redrawRow). draw()
+  // never runs by itself while the person is working in the table: the cursor (focus) is in it, a key or a press (mouse,
+  // pen or finger) in it was less than QUIET_MS ago, or a dialog is open. A mouse that only rests on the rows is not
+  // working in it. A reload meanwhile (a live update, the 20-second check, a dialog's change) keeps what it brought: a row
+  // changed on another computer is drawn again where it is (not the row with the cursor), a new row waits (a short note
+  // says so, newRowsNote), and the whole list is drawn and sorted as soon as the person is done: whenFree looks again when
+  // the cursor leaves the table and when the quiet time is over. A redraw never scrolls the list or the page (draw).
+  // (The person's own changes to what the list shows, a filter or a patient they add or remove, draw it at once: they are
+  // at the toolbar, the add line or a dialog then.)
+  const QUIET_MS = 5000;
+  let lastTouch = 0; // the last key or press in the table
+  let drawHeld = false; // the list waits to be drawn and sorted again
+  let reloadHeld = false; // a reload in the background came back older than a change made here: asked again when the person is done
+  let freeTimer = null;
+  for (const ev of ['keydown', 'pointerdown', 'input']) sheetTable.addEventListener(ev, () => { lastTouch = Date.now(); });
+  // How long until the person is done with the table (0: done now).
+  function waitMs() {
+    if (document.querySelector('.modal') || sheetTable.contains(document.activeElement)) return 1000;
+    return Math.max(0, QUIET_MS - (Date.now() - lastTouch));
+  }
+  function whenFree() {
+    clearTimeout(freeTimer);
+    if (life.signal.aborted || !(drawHeld || reloadHeld)) return;
+    const wait = waitMs();
+    if (wait) { freeTimer = setTimeout(whenFree, wait); return; }
+    if (reloadHeld) { reloadHeld = false; reloadQuietly(); return; } // (its answer draws the list)
+    draw();
+  }
+  const requestDraw = () => { drawHeld = true; whenFree(); };
+
+  // Where each row was sorted when the list was last drawn (keyOf -> { rank, token }, see draw), and the row the add line
+  // last put the cursor in (keyOf; onKey).
   let placed = new Map();
-  let placedFor = '';
-  let drawnView = ''; // the list and filters it was last drawn with (draw)
   let fromAddLine = null;
   const rowKey = (el) => {
     const tr = el && tableBody.contains(el) ? el.closest('tr[data-id]') : null;
     return tr ? `${tr.dataset.kind === 'checkup' ? 'c' : 'v'}:${tr.dataset.id}` : null;
   };
-  const itemOf = (key) => {
-    const checkup = key.startsWith('c:');
-    const row = (checkup ? checkups : rows).find((r) => String(r.id) === key.slice(2));
-    return row ? { row, checkup } : null;
-  };
-  // A row that kept its place for the cursor (its status, or the token that came with it, changed since the list was
-  // drawn, or it no longer matches the filters) goes where it belongs once the cursor is out of it: a quiet reload draws
-  // the list again when nobody is typing or clicking in it (reloadQuietly waits for that), and while the mouse is on the
-  // rows every row keeps its place (mouseOn, below), so a click on another row is never moved from under the mouse.
-  function settle(key) {
-    const item = placed.has(key) && rowKey(document.activeElement) !== key ? itemOf(key) : null;
-    if (item && (movedFrom(item, placed.get(key)) || !(item.checkup ? checkupMatches(item.row) : matches(item.row)))) reloadQuietly();
+  // A row drawn again after a save whose status (or the token that came with it) changed, or that no longer matches the
+  // filters, goes to its new place at the next draw, once the person is done.
+  function settle(item) {
+    const was = placed.get(keyOf(item));
+    if (was && (movedFrom(item, was) || !(item.checkup ? checkupMatches(item.row) : matches(item.row)))) requestDraw();
   }
-  // The cursor has left a row (looked at a moment later: a row drawn again by redrawRow puts it back in the new copy).
-  // A row left for another row is no longer the add line's (onKey).
-  tableBody.addEventListener('focusout', (e) => {
+  // The cursor has left a row (looked at a moment later, once it is in its new place): a row left for another row is no
+  // longer the add line's (onKey), and the cursor leaving the table lets a waiting draw run after the quiet time.
+  sheetTable.addEventListener('focusout', (e) => {
     const key = rowKey(e.target);
-    if (!key) return;
     setTimeout(() => {
       const now = rowKey(document.activeElement);
-      if (now === key) return;
-      if (now && key === fromAddLine) fromAddLine = null;
-      settle(key);
+      if (key && now && now !== key && key === fromAddLine) fromAddLine = null;
+      whenFree();
     });
   });
 
-  // The mouse on the rows (a busy day: the front desk marks one waiting patient after another with the mouse, or points at
-  // the patient just called and waits for them to walk in): a redraw meanwhile (a live update, a reload in the background)
-  // keeps every row where it was (draw: what is in the rows is drawn new, a row added meanwhile goes at the end, a row that
-  // has gone leaves an empty line), so the patient under the mouse stays under it and a click lands on the row that was
-  // seen. The list is sorted again (orderHeld) once the mouse leaves the rows, a key is pressed, or the mouse has not moved
-  // for MOUSE_IDLE_MS (a screen nobody is using shows the list in order again); the row under the mouse then stays where it
-  // is on the screen as far as the list can scroll (draw, pointerAt). A finger rests on nothing: the 5 seconds after a tap
-  // hold up the reloads instead (userIsBusy).
-  const MOUSE_IDLE_MS = 2 * 60 * 1000;
-  let mouseOn = false;
-  let orderHeld = false;
-  let mouseTimer = null;
-  let pointerAt = null; // where the mouse is over the rows ({ x, y } in the window), null once it has left them
-  function mouseMoved(e) {
-    if (e.pointerType === 'touch') return;
-    mouseOn = true;
-    pointerAt = { x: e.clientX, y: e.clientY };
-    clearTimeout(mouseTimer);
-    mouseTimer = setTimeout(mouseDone, MOUSE_IDLE_MS);
-  }
-  function mouseDone() {
-    clearTimeout(mouseTimer);
-    if (!mouseOn) return;
-    mouseOn = false;
-    if (orderHeld) reloadQuietly();
-  }
-  tableBody.addEventListener('pointermove', mouseMoved);
-  tableBody.addEventListener('wheel', mouseMoved, { passive: true });
-  tableBody.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') { pointerAt = null; mouseDone(); } });
-  document.addEventListener('keydown', mouseDone, { signal: life.signal });
-
   // ---- save status, the list of changes that could not be saved, and undo for removals.
   const saveStatus = h('span', { class: 'save-status save-state', tabindex: '-1', dataset: { state: 'saved' } }, 'All changes saved');
-  const failList = h('ul', {});
-  // (.btn sets display, which beats the hidden attribute, so the button is mounted only when needed.)
+  // The changes that could not be saved: one line above the list (how many, Try again, Show), and the list of them, with
+  // Try again and Discard for each, under it once "Show" is pressed. Both are in the page's flow: they push the list down
+  // and never cover it or the save status.
+  const failList = h('ul', { class: 'sheet-fails-list', id: 'sheet-save-failures-list', hidden: true });
+  const failSummary = h('span', { class: 'sheet-fails-summary' });
   const retryAll = h('button', { type: 'button', class: 'btn btn-small', onclick: () => { q.retryFailed(); announce('Trying the unsaved changes again.'); } }, 'Try all again');
-  const retryAllHost = h('div', {});
-  const failBox = h('div', { class: 'alert alert-stop', id: 'sheet-save-failures', hidden: true },
-    h('strong', {}, 'These changes are not saved yet:'), failList, retryAllHost);
+  const retryAllHost = h('span', { class: 'sheet-fails-retry' });
+  const failToggle = h('button', { type: 'button', class: 'btn btn-small', 'aria-expanded': 'false', 'aria-controls': failList.id, onclick: () => showFails(failList.hidden) });
+  const failBox = h('div', { class: 'alert alert-stop sheet-fails', id: 'sheet-save-failures', hidden: true },
+    h('div', { class: 'sheet-fails-line' }, failSummary, retryAllHost, failToggle), failList);
+  function showFails(open) {
+    failList.hidden = !open;
+    failToggle.setAttribute('aria-expanded', String(open));
+    failToggle.textContent = open ? 'Hide' : 'Show';
+    failToggle.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} the changes that are not saved`);
+  }
+  showFails(false);
   const discard = (f) => modal('Discard this change?', h('p', {}, `${describeEdit(f.edit)} will not be saved. This cannot be undone.`), [
     { label: 'Keep it' },
     { label: 'Discard', danger: true, onClick: () => { q.discardFailed(f.key); announce('Change discarded.'); } },
@@ -340,7 +337,11 @@ export async function renderSheet(root, params, signal) {
           : `${failed.length || 'Some'} change${failed.length === 1 ? ' is' : 's are'} not saved`;
       const hadFocus = failBox.contains(document.activeElement);
       failBox.hidden = s !== 'error';
-      mount(retryAllHost, failed.length > 1 ? retryAll : null);
+      if (failBox.hidden) showFails(false);
+      failSummary.textContent = failed.length === 1 ? `Not saved yet: ${describeEdit(failed[0].edit)}.` : `${failed.length || 'Some'} changes are not saved yet.`;
+      failSummary.title = failSummary.textContent;
+      retryAll.textContent = failed.length > 1 ? 'Try all again' : 'Try again';
+      mount(retryAllHost, failed.length ? retryAll : null);
       mount(failList, failed.map((f) => {
         const what = describeEdit(f.edit);
         return h('li', {}, what, f.error ? h('span', { class: 'muted' }, ` (${errorText(f.error)})`) : null, ' ',
@@ -348,7 +349,7 @@ export async function renderSheet(root, params, signal) {
           h('button', { type: 'button', class: 'btn btn-small btn-danger', 'aria-label': `Discard: ${what}`, onclick: () => discard(f) }, 'Discard'));
       }));
       // The button that had focus was redrawn or hidden: keep focus in the box, or on the status.
-      if (hadFocus && !failBox.contains(document.activeElement)) (failBox.hidden ? saveStatus : failBox.querySelector('button:not([hidden])') || saveStatus).focus();
+      if (hadFocus && !failBox.contains(document.activeElement)) (failBox.hidden ? saveStatus : [...failBox.querySelectorAll('button')].find((b) => b.getClientRects().length) || saveStatus).focus();
       markInvalid();
       fit();
     },
@@ -388,10 +389,10 @@ export async function renderSheet(root, params, signal) {
   const allBranches = branches.length > 1;
   if (params.get('branch') === 'all' && allBranches) branchId = 0;
   const branchSel = select([...(allBranches ? [{ value: 0, label: 'All branches' }] : []), ...branches.map((b) => ({ value: b.id, label: b.name }))], branchId, {
-    'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); setURL(); draw(); load(); },
+    'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); setURL(); draw(); load(NEW_LIST); },
   });
   // (the date picker starts at FIRST_DAY, the first day that can be ended: day-end.js)
-  const dateInput = h('input', { type: 'date', value: date, min: FIRST_DAY, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
+  const dateInput = h('input', { type: 'date', value: date, min: FIRST_DAY, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(NEW_LIST); } });
   const filterSel = select([{ value: '', label: 'All statuses' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))], '', {
     'aria-label': 'Filter by status', onchange: (e) => { filter = e.target.value; checkupsOnly = false; draw(); },
   });
@@ -401,11 +402,13 @@ export async function renderSheet(root, params, signal) {
     'aria-label': 'Filter by doctor', onchange: (e) => { doctorFilter = e.target.value; draw(); },
   });
   let groupFilter = '';
-  // The doctor groups of Clinic setup (the sheet's Group 4 is one once it is added there; the protocol's three until they
-  // have loaded), and any other group a doctor is in. The Group cell of a row keeps the row's own group too.
+  // The doctor groups of Clinic setup, by the names given there (the sheet's Group 4 is one once it is added there; the
+  // protocol's three until they have loaded), and any other group a doctor is in. The Group cell of a row keeps the row's
+  // own group too, and shows a group the Google Sheet names that Clinic setup does not have (rowEl).
   const groupIds = [...new Set([...(state.ref.groups?.length ? state.ref.groups.map((g) => Number(g.id)) : [1, 2, 3]),
     ...state.ref.clinicians.map((c) => c.doctor_group_id).filter(Boolean)])].sort((a, b) => a - b);
-  const groupSel = select([{ value: '', label: 'Any group' }, ...groupIds.map((g) => ({ value: String(g), label: `Group ${g}` }))], '', {
+  const groupName = (g) => state.ref.groups?.find((x) => Number(x.id) === Number(g))?.name || `Group ${g}`;
+  const groupSel = select([{ value: '', label: 'Any group' }, ...groupIds.map((g) => ({ value: String(g), label: groupName(g) }))], '', {
     'aria-label': 'Filter by doctor group', onchange: (e) => { groupFilter = e.target.value; draw(); },
   });
   const groupOf = (id) => state.ref.clinicians.find((c) => c.id === id)?.doctor_group_id;
@@ -426,8 +429,7 @@ export async function renderSheet(root, params, signal) {
       && !groupFilter && !duesOnly && !bracesOnly
       && (!textFilter || `${c.patient_name} ${c.phone || ''} ${c.checkup_for || ''} checkup`.toLowerCase().includes(textFilter));
   };
-  // (keep: the row with the cursor, and the rows held for the mouse, stay whatever the filters say; see draw)
-  const shownCheckups = (keep) => dayListCheckups(checkups, rows).filter((c) => checkupMatches(c) || keep(`c:${c.id}`)).sort(byToken);
+  const shownCheckups = () => dayListCheckups(checkups, rows).filter(checkupMatches).sort(byToken);
   const setURL = () => history.replaceState(null, '', `#/staff/sheet?branch=${branchId || 'all'}&date=${date}${busyDemo ? '&demo=busy' : ''}`);
 
   // The less-used filters sit behind "Filters", a small panel over the list (the ▾ in a column heading opens it too); the
@@ -489,33 +491,56 @@ export async function renderSheet(root, params, signal) {
     }
   }
 
-  // (how.quiet: a reload in the background, see reloadQuietly. Its answer is not drawn when the person has started typing
-  //  or opened a dialog meanwhile: the redrawn rows would wipe what they just typed. It is tried again a little later.
-  //  load is also the onDone of dialogs, which pass it whatever they saved: only { quiet: true } is quiet.)
-  // An answer is the list as it was when it was asked for. Only the last one asked for is drawn (the day or branch may have
-  // changed meanwhile), and not one asked for before a change made on this screen (listVersion; for a reload in the
-  // background also a key or tap in the list): it would take that change off the screen again (a patient just added by
-  // Mr#, with the cursor in their row; a cell typed and saved), so the list is asked for again. Typed changes still on their
-  // way to the server are put on the rows that come back.
+  // How the list is asked for (load): NEW_LIST for another day or branch, and the first time, drawn at once; { quiet: true }
+  // for a reload in the background (reloadQuietly); anything else (load is also the onDone of dialogs, which pass it
+  // whatever they saved) after a change the person made in a dialog. Unless it is a new list, the answer waits to be drawn
+  // while the person is working in the table ("When the rows move", at the top).
+  // An answer is the list as it was when it was asked for. Only the last one asked for is used (the day or branch may have
+  // changed meanwhile), and not one asked for before a change made on this screen (listVersion): it would take that change
+  // off the screen again (a patient just added by Mr#, with the cursor in their row; a cell typed and saved), so the list is
+  // asked for again (a reload in the background: once the person is done). Typed changes still on their way to the server
+  // are put on the rows that come back.
+  const NEW_LIST = { newList: true };
   let loadSeq = 0;
   async function load(how) {
     dayEnd.refresh(); // "End the day" for this branch and day, and the note when it was ended (day-end.js)
     const quiet = how?.quiet === true;
     const seq = ++loadSeq;
     const version = listVersion;
-    const asked = Date.now();
     try {
       const [visitRows, checkupRows] = await Promise.all([d.listVisits({ branchId: branchId || null, date }), loadCheckups()]);
       if (seq !== loadSeq) return;
-      if (quiet && (version !== listVersion || lastTouch > asked || userIsBusy())) { reloadQuietly(); return; }
-      if (version !== listVersion) { await load(how); return; }
+      if (version !== listVersion) {
+        if (quiet) { reloadHeld = true; whenFree(); } else await load(how);
+        return;
+      }
       for (const r of visitRows) Object.assign(r, q.unsentChanges('visits', r.id));
       for (const c of checkupRows) Object.assign(c, q.unsentChanges('checkups', c.id));
+      const was = { rows, checkups };
       rows = visitRows;
       checkups = checkupRows;
       if (!branchId) rows.sort((a, b) => a.branch_id - b.branch_id || (a.token_no ?? 999) - (b.token_no ?? 999));
-      draw();
+      if (how === NEW_LIST || !waitMs()) draw();
+      else { refreshInPlace(was); requestDraw(); }
     } catch (e) { if (seq === loadSeq) toast(friendlyError(e), 'error'); }
+  }
+  // The person is working in the table and a reload has come: the rows another computer (or a dialog) changed are drawn
+  // again where they are, with their numbers, but not the row with the cursor; rows that are new on the list wait for the
+  // next draw (newRowsNote says how many), and rows that have gone stay until then.
+  function refreshInPlace(was) {
+    const before = new Map([...was.rows.map((r) => [`v:${r.id}`, r]), ...was.checkups.map((c) => [`c:${c.id}`, c])]);
+    const now = new Map([...rows.map((r) => [`v:${r.id}`, r]), ...checkups.map((c) => [`c:${c.id}`, c])]);
+    const here = rowKey(document.activeElement);
+    for (const tr of [...tableBody.children]) {
+      const key = rowKey(tr);
+      const row = key && key !== here ? now.get(key) : null;
+      if (row && JSON.stringify(row) !== JSON.stringify(before.get(key))) replaceRow(row, key.startsWith('c:') ? checkupRowEl : rowEl);
+    }
+    const shownNow = [...rows.filter(matches).map((r) => `v:${r.id}`), ...shownCheckups().map((c) => `c:${c.id}`)];
+    noteNewRows(shownNow.filter((key) => !placed.has(key) && !before.has(key)).length);
+    drawWarning();
+    drawCounts();
+    markInvalid();
   }
 
   // The day's list as a spreadsheet file (for the clinic cloud or printing). Checkup patients are added after the
@@ -542,8 +567,10 @@ export async function renderSheet(root, params, signal) {
   // The Invoice column is for the people who see invoices; without them (doctors, assistants) Treatment Details gets its room.
   const canBill = can('billing.view');
 
+  // (A typed change goes on the copy of the row the list has now too: a reload while the person types puts in new copies,
+  //  and the list is drawn from those once they are done.)
   function save(row, fieldName, value) {
-    row[fieldName] = value;
+    for (const r of new Set([row, rows.find((x) => x.id === row.id) || row])) r[fieldName] = value;
     listVersion++;
     q.edit('visits', row.id, fieldName, value);
   }
@@ -566,7 +593,7 @@ export async function renderSheet(root, params, signal) {
 
   // ---- checkup patients (rows without an Mr#). Typed cells go through the same queue as the visits.
   function saveCheckup(c, fieldName, value) {
-    c[fieldName] = value;
+    for (const x of new Set([c, checkups.find((y) => y.id === c.id) || c])) x[fieldName] = value;
     listVersion++;
     q.edit('checkups', c.id, fieldName, typeof value === 'string' && value.trim() === '' ? null : value);
   }
@@ -646,7 +673,7 @@ export async function renderSheet(root, params, signal) {
   }
 
   // The Group chip: which braces group sees the patient today, as on the sheet. Saved at once, like the status.
-  const groupWords = (g) => (g ? `Group ${g}` : 'in no group');
+  const groupWords = (g) => (g ? groupName(g) : 'in no group');
   async function changeGroup(row, value, ctl) {
     const before = row.doctor_group_id ? String(row.doctor_group_id) : '';
     const who = row.patient.full_name;
@@ -884,10 +911,22 @@ export async function renderSheet(root, params, signal) {
     }, Object.entries(STATUS_LABELS).map(([value, label]) => h('option', { value, selected: value === row.status }, label)));
     const ctl = commitOnFinish(status, (value) => changeStatus(row, value, ctl), (value) => { status.className = chipSelect(statusTone(value)); });
     const groupNo = row.doctor_group_id ? String(row.doctor_group_id) : '';
+    // A group the Google Sheet names that Clinic setup does not have (the sheet says "Group 4", Clinic setup has Groups 1 to
+    // 3): the sync leaves the visit in no group and keeps the sheet's words (sheet_cells.group: t the words, v the group,
+    // none here). The cell shows those words greyed, first in the list and not to be picked, until the group is added in
+    // Clinic setup; "No group" next to it saves nothing (the visit is in no group already).
+    const sheetGroup = !groupNo && row.sheet_cells?.group && row.sheet_cells.group.v == null ? String(row.sheet_cells.group.t ?? '').trim() : '';
     const group = h('select', { class: chipSelect(groupTone(groupNo)), 'aria-label': `Doctor group for ${who}`, disabled: !canEdit, dataset: { focus: 'group' } },
-      [['', 'No group'], ...[...new Set([...groupIds, ...(groupNo ? [Number(groupNo)] : [])])].map((g) => [String(g), `Group ${g}`])]
-        .map(([value, label]) => h('option', { value, selected: value === groupNo }, label)));
-    const groupCtl = commitOnFinish(group, (value) => changeGroup(row, value, groupCtl), (value) => { group.className = chipSelect(groupTone(value)); });
+      sheetGroup ? h('option', { value: '', selected: true, disabled: true, dataset: { sheet: 'yes' } }, sheetGroup) : null,
+      [['', 'No group'], ...[...new Set([...groupIds, ...(groupNo ? [Number(groupNo)] : [])])].map((g) => [String(g), groupName(g)])]
+        .map(([value, label]) => h('option', { value, selected: !sheetGroup && value === groupNo }, label)));
+    const unknownGroup = () => {
+      const unknown = !!group.selectedOptions[0]?.dataset.sheet;
+      group.classList.toggle('group-unknown', unknown);
+      group.title = unknown ? 'Add this group in Clinic setup' : '';
+    };
+    const groupCtl = commitOnFinish(group, (value) => changeGroup(row, value, groupCtl), (value) => { group.className = chipSelect(groupTone(value)); unknownGroup(); });
+    unknownGroup();
 
     const treatment = h('input', {
       class: 'cell-input center', value: capFirst(row.treatment_label), list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
@@ -1019,7 +1058,8 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, typedCell(text('checkup_for', 'Treatment', { list: 'sheet-treatments', class: 'cell-input center' }))),
       h('td', {}, typedCell(tokenIn)),
       h('td', {}, status),
-      h('td', {}),
+      // (a checkup patient sees no braces group: a dash, not an empty cell that looks forgotten)
+      h('td', { class: 'center' }, h('span', { class: 'no-group', title: 'Checkup patients have no group' }, h('span', { 'aria-hidden': 'true' }, '—'), srOnly('Checkup patients have no group'))),
       h('td', {}, doctorsBox),
       h('td', {}, typedCell(text('details', 'Treatment details', { placeholder: 'e.g. Scaling advised', title: c.details || null }))),
       h('td', { class: 'pp' }),
@@ -1028,18 +1068,21 @@ export async function renderSheet(root, params, signal) {
       h('td', {}, reminderCell()));
   }
 
-  // Redraws replace rows, so remember the focused control (row id + data-focus key + caret, and typed text the cell has not
-  // saved yet) and put focus back on the same control in the new row, or on "+" when a removed chip had it. The new cell is
-  // drawn from the row's data, which does not have that typed text yet: it is put back in, and the cell saves it.
+  // A row's button that had the cursor is drawn new (replaceRow), and so can be any control when the person's own change
+  // draws the list (a patient added from a dialog, say), so remember the focused control (row + data-focus key + caret, and
+  // typed text the cell has not saved yet) and put focus back on the same control in the new row, or on "+" when a removed
+  // chip had it. A new cell is drawn from the row's data, which does not have that typed text yet: it is put back in, and
+  // the cell saves it.
   function rememberFocus() {
     const el = document.activeElement;
     if (!el || !tableBody.contains(el)) return null;
     let caret = null;
     try { if (typeof el.selectionStart === 'number') caret = [el.selectionStart, el.selectionEnd]; } catch { /* not a text field */ }
-    return { rowId: el.closest('tr')?.dataset.id, key: el.dataset.focus, caret, typed: el === unsavedCell ? el.value : null };
+    const tr = el.closest('tr');
+    return { rowId: tr?.dataset.id, kind: tr?.dataset.kind || '', key: el.dataset.focus, caret, typed: el === unsavedCell ? el.value : null };
   }
   function restoreFocus(saved) {
-    const tr = saved && [...tableBody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === saved.rowId);
+    const tr = saved && [...tableBody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === saved.rowId && (t.dataset.kind || '') === saved.kind);
     if (!tr) return;
     const target = (saved.key && [...tr.querySelectorAll('[data-focus]')].find((el) => el.dataset.focus === saved.key))
       || tr.querySelector('[data-focus="add-person"]') || tr.querySelector('[data-focus="patient"]') || tr.querySelector('[data-focus="name"]');
@@ -1054,22 +1097,39 @@ export async function renderSheet(root, params, signal) {
     if (saved.caret && target?.setSelectionRange) { try { target.setSelectionRange(saved.caret[0], saved.caret[1]); } catch { /* not a text field */ } }
   }
 
-  // Replace one row after a save (make = rowEl for a visit, checkupRowEl for a checkup patient); it keeps its place and its
-  // row number, whatever its status is now (only draw sorts the list, see there). A status saved after the cursor has
-  // left the row (a slow answer) moves it at the next quiet reload (settle).
+  // Draw one row again after a save (make = rowEl for a visit, checkupRowEl for a checkup patient): it keeps its place and
+  // its row number, whatever its status is now (only draw sorts the list; settle asks for that once the person is done).
   function redrawRow(row, make = rowEl) {
     listVersion++; // (a change made here: a reload asked for before it would take it off the screen, see load)
-    const old = tableBody.querySelector(`tr[data-id="${row.id}"]`);
-    if (old) {
-      const saved = old.contains(document.activeElement) ? rememberFocus() : null;
-      const tr = make(row, Number(old.dataset.n) || old.sectionRowIndex + 1);
+    replaceRow(row, make);
+    settle({ row, checkup: make === checkupRowEl });
+    drawCounts();
+    markInvalid();
+  }
+  // The row with the cursor is never taken out of the table: its other cells are drawn new around the cell with the cursor,
+  // which stays as it is when the cursor is in a field (typed text not saved yet, the caret, a status or group chosen with
+  // the arrow keys and not saved yet: only Enter or leaving the field saves that, and Escape undoes it). A button with the
+  // cursor (a chip's ×, the name, "+") is drawn new with its cell, and the cursor goes to the new one (or to "+").
+  function replaceRow(row, make) {
+    const checkup = make === checkupRowEl;
+    const old = [...tableBody.querySelectorAll('tr[data-id]')].find((t) => t.dataset.id === String(row.id) && (t.dataset.kind === 'checkup') === checkup);
+    if (!old) return;
+    const tr = make(row, Number(old.dataset.n) || old.sectionRowIndex + 1);
+    const focused = old.contains(document.activeElement) ? document.activeElement : null;
+    if (focused && old.children.length === tr.children.length) {
+      const keep = focused.matches('input, select, textarea') ? [...old.children].find((cell) => cell.contains(focused)) : null;
+      const saved = keep ? null : rememberFocus();
+      const cells = [...old.children];
+      [...tr.children].forEach((cell, i) => { if (cells[i] !== keep) cells[i].replaceWith(cell); });
+      old.className = tr.className;
+      restoreFocus(saved);
+      countHiddenPeople(old);
+    } else {
+      const saved = focused ? rememberFocus() : null;
       old.replaceWith(tr);
       restoreFocus(saved);
       countHiddenPeople(tr);
-      settle(keyOf({ row, checkup: make === checkupRowEl }));
     }
-    drawCounts();
-    markInvalid();
   }
 
   // On a laptop the Doctor Name chips that do not fit drop out of sight whole (app.css): the cell's "+" then says how many
@@ -1117,15 +1177,13 @@ export async function renderSheet(root, params, signal) {
   const columns = () => [!branchId && 'branch', 'num', 'mr', 'name', 'month', 'treatment', 'token', 'status', 'group', 'doctor', 'details', 'pp', canBill && 'invoice', 'contact', 'reminder']
     .filter(Boolean).map((k) => h('col', { class: `c-${k}` }));
 
+  // The whole list, sorted like the sheet (listOrder): only here do rows move. It runs at once for the person's own changes
+  // to what the list shows (a filter, another day or branch, a patient they add or remove), and otherwise only once they
+  // are not working in the table ("When the rows move", at the top). Every row is numbered 1..n in the order shown, like
+  // the sheet's row numbers (owner, 11 Oct 2026; COMPLETED_OWN_COUNT, at the top); that is not the token, which repeats
+  // from one kind of treatment to another. The list and the page stay scrolled where they were.
   function draw() {
-    // The row with the cursor stays in the list even when it no longer matches the filters (its status was just changed
-    // under the Waiting filter, say), as it keeps its place below: it goes once the cursor has left it (settle). So do the
-    // rows while the mouse is on them (mouseOn, at the top).
-    const here = rowKey(document.activeElement);
-    if (placedFor !== `${branchId}|${date}`) placed = new Map(); // (another list: nothing of the last one is held)
-    const keep = (key) => key === here || (mouseOn && placed.has(key));
-    const shown = rows.filter((r) => matches(r) || keep(`v:${r.id}`));
-    const shownChecks = shownCheckups(keep);
+    drawHeld = false;
     branchHead.hidden = !!branchId;
     mount(colgroup, columns());
     addPanel.hidden = !branchId || !search;
@@ -1133,62 +1191,29 @@ export async function renderSheet(root, params, signal) {
     checkupBtn.hidden = checkupsMissing || date > localISO() || !can('sheet.edit');
     // (a later day, such as the one "End the day" opens: patients added there are booked for that day, day-end.js)
     addHint.textContent = date > localISO() ? laterDayHint(date) : checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
-    warnBox.hidden = !checkupsWarn;
-    warnBox.textContent = checkupsWarn ? `Checkup patients could not be loaded: ${checkupsWarn}` : '';
+    drawWarning();
     const inUse = [filter && !checkupsOnly, doctorFilter, groupFilter, duesOnly, bracesOnly].filter(Boolean).length;
     filterBtn.textContent = inUse ? `Filters (${inUse})` : 'Filters';
     const saved = rememberFocus();
-    // Sorted like the sheet (listOrder) here only. A row never jumps away under the cursor: a save in one row (a status
-    // picked, say) draws that row alone in its place, with its number (redrawRow), and here the row with the cursor in it
-    // (and so any text typed in it and not saved yet) is sorted by the status and token it was drawn with last time. It
-    // moves to its new place at the first redraw after the cursor has left it: leaving it asks for a quiet reload, which
-    // waits until nobody is typing or clicking in the list (settle, at the top), and the live updates, the 20-second check
-    // and any other redraw move it too (a row put at the end as late, below, stays there with the cursor too). While the
-    // mouse is on the rows, every row is held that way, in the order drawn last time: a row that came meanwhile goes at
-    // the end (late), and a row that has gone (removed on another computer or by the Google Sheet sync, a checkup patient
-    // registered elsewhere) leaves an empty line in its place (gone), so the patient under the mouse stays under it; the
-    // rows are sorted once the mouse is done (orderHeld, see mouseOn). Every row is numbered 1..n in the order shown, like
-    // the sheet's row numbers (owner, 11 Oct 2026; COMPLETED_OWN_COUNT, at the top); that is not the token, which repeats
-    // from one kind of treatment to another.
-    const items = [...shown.map((row) => ({ row, checkup: false })), ...shownChecks.map((row) => ({ row, checkup: true }))].map((item) => {
-      const key = keyOf(item);
-      const held = keep(key) ? placed.get(key) : null;
-      return { ...item, key, rank: held ? held.rank : rankOf(item), token: held ? held.token : tokenOf(item), late: held ? held.late : mouseOn && placed.size ? 1 : 0 };
-    });
-    if (mouseOn && placed.size) {
-      const now = new Map(items.map((item) => [item.key, item]));
-      items.splice(0, items.length, ...[...placed].map(([key, was]) => now.get(key) || { ...was, key, gone: true }),
-        ...items.filter((item) => !placed.has(item.key)).sort(listOrder));
-    } else items.sort(listOrder);
-    placed = new Map(items.map((item) => [item.key, { rank: item.rank, token: item.token, late: item.late,
-      name: item.gone ? item.name : item.checkup ? item.row.patient_name : item.row.patient.full_name }]));
-    placedFor = `${branchId}|${date}`;
-    // (a row drawn where it was, not where it belongs now; the row with the cursor goes once the cursor has left it)
-    orderHeld = mouseOn && items.some((item) => item.gone || (item.key !== here
-      && (item.late || movedFrom(item, item) || !(item.checkup ? checkupMatches(item.row) : matches(item.row)))));
-    // The row under a mouse resting on the rows stays where it is on the screen when the rows are drawn in a new order (the
-    // mouse done: a key pressed, or MOUSE_IDLE_MS), as far as the list can scroll; not when the filters or the find box have
-    // just changed what the list shows (the list is then looked at from its top, as before).
-    const view = JSON.stringify([branchId, date, filter, checkupsOnly, doctorFilter, groupFilter, duesOnly, bracesOnly, textFilter]);
-    const under = view === drawnView && pointerAt && document.elementFromPoint(pointerAt.x, pointerAt.y)?.closest('tr[data-id]');
-    const anchor = under && tableBody.contains(under) ? { key: rowKey(under), top: under.getBoundingClientRect().top } : null;
-    drawnView = view;
+    const items = [...rows.filter(matches).map((row) => ({ row, checkup: false })), ...shownCheckups().map((row) => ({ row, checkup: true }))]
+      .map((item) => ({ ...item, rank: rankOf(item), token: tokenOf(item) })).sort(listOrder);
+    placed = new Map(items.map((item) => [keyOf(item), { rank: item.rank, token: item.token }]));
+    const wrap = tableBody.closest('.sheet-wrap');
+    const scrolled = [wrap?.scrollTop, wrap?.scrollLeft, window.scrollX, window.scrollY];
     let n = 0;
     let done = 0;
     const serial = (item) => (COMPLETED_OWN_COUNT && item.rank === STATUS_RANK.completed ? ++done : ++n);
-    mount(tableBody, items.length ? items.map((item) => (item.gone ? goneRowEl(item) : item.checkup ? checkupRowEl(item.row, serial(item)) : rowEl(item.row, serial(item))))
+    mount(tableBody, items.length ? items.map((item) => (item.checkup ? checkupRowEl(item.row, serial(item)) : rowEl(item.row, serial(item))))
       : h('tr', {}, h('td', { class: 'empty-cell', colspan: colgroup.children.length }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" to add them.` : 'No patients or checkups on any list for this day.'))));
     restoreFocus(saved);
+    noteNewRows(0);
     drawCounts();
     markInvalid();
     countHiddenPeople();
     fit();
-    const again = anchor && [...tableBody.children].find((tr) => rowKey(tr) === anchor.key);
-    if (again) tableBody.closest('.sheet-wrap').scrollTop += again.getBoundingClientRect().top - anchor.top;
+    if (wrap) { wrap.scrollTop = scrolled[0]; wrap.scrollLeft = scrolled[1]; }
+    if (window.scrollX !== scrolled[2] || window.scrollY !== scrolled[3]) window.scrollTo(scrolled[2], scrolled[3]);
   }
-  // The empty line of a row that has gone while the mouse holds the list (draw): no number, nothing to type in or click.
-  const goneRowEl = (item) => h('tr', { class: 'gone-row' },
-    h('td', { colspan: colgroup.children.length }, h('span', { class: 'gone-text' }, `${item.name || 'A patient'}: no longer on this list`)));
 
   // Arrow keys / Enter move between cells like a spreadsheet (Enter keeps what was typed: leaving the cell saves it), to the
   // nearest row above or below with a typing cell in this column: rows are sorted by status, so a checkup patient's name or
@@ -1351,21 +1376,24 @@ export async function renderSheet(root, params, signal) {
     checkupBtn,
     h('div', { class: 'add-panel-text' }, addHint)) : h('div', { hidden: true });
   const warnBox = h('div', { class: 'alert alert-warning', role: 'status', hidden: true });
-  // (Only typing holds it up, not the cursor sitting in a cell: after an Mr# and Enter the cursor waits in the new row's
-  //  Treatment cell, often with nothing to type, and the list must keep showing what the other computers do. A cell typed
-  //  in counts only while it has the cursor: one left with the text it had saves nothing and must not stop the reloads for
-  //  good. Another window taking the focus leaves the cursor in the cell, so its unsaved text still holds them up.)
-  const userIsBusy = () => q.pendingCount || (unsavedCell?.isConnected && unsavedCell === document.activeElement)
-    || Date.now() - lastTouch < 5000 || document.querySelector('.modal');
-  // A reload in the background (live updates, the 20-second check, a save the server refused) waits while this person is
-  // typing (unsaved text in the cell with the cursor, or a key or tap in the list in the last 5 seconds) or has a dialog open,
-  // and tries again every few seconds until they are done; a hidden tab reloads when it comes back. The cell with the
-  // cursor is drawn again with the rest, and the cursor stays in it.
-  let retryTimer = null;
+  function drawWarning() {
+    const text = checkupsWarn ? `Checkup patients could not be loaded: ${checkupsWarn}` : '';
+    if (warnBox.textContent === text && warnBox.hidden === !text) return;
+    warnBox.hidden = !text;
+    warnBox.textContent = text;
+    warnBox.title = text; // (one line: the whole text is in the tooltip, and read out)
+  }
+  // Rows another computer (or the Google Sheet) has put on the list while the person works in the table: they come in at
+  // their place in the order once the person is done ("When the rows move", at the top). Said quietly, in a few words.
+  const newRowsNote = h('span', { class: 'sheet-new-rows', role: 'status' });
+  function noteNewRows(n) {
+    const text = n ? `${n} new row${n === 1 ? ', it appears' : 's, they appear'} when you stop typing` : '';
+    if (newRowsNote.textContent !== text) newRowsNote.textContent = text;
+  }
+  // A reload in the background: live updates, the 20-second check, a save the server refused. What it brings waits to be
+  // drawn while the person is working in the table (load); a hidden tab reloads when it comes back.
   function reloadQuietly() {
-    clearTimeout(retryTimer);
     if (life.signal.aborted || document.hidden) return;
-    if (userIsBusy()) { retryTimer = setTimeout(reloadQuietly, 3000); return; }
     load({ quiet: true });
   }
   document.addEventListener('sheet-reload', reloadQuietly, { signal: life.signal });
@@ -1390,9 +1418,8 @@ export async function renderSheet(root, params, signal) {
     life.abort();
     clearInterval(poll);
     clearTimeout(liveTimer);
-    clearTimeout(retryTimer);
+    clearTimeout(freeTimer);
     clearTimeout(undoTimer);
-    clearTimeout(mouseTimer);
     stopLive?.();
     stopLive = null;
     stopLiveCheckups?.();
@@ -1414,7 +1441,7 @@ export async function renderSheet(root, params, signal) {
   const dayEnd = dayEndControls({
     getList: () => ({ branchId, date, pending: q.pendingCount || 0, failed: failedEdits().length,
       rows: [...rows.map((r) => ({ kind: 'patient', status: r.status })), ...dayListCheckups(checkups, rows).map((c) => ({ kind: 'checkup', status: c.day_status || null }))] }),
-    onEnded: async (next) => { date = next; dateInput.value = date; setURL(); await load(); dateInput.focus(); },
+    onEnded: async (next) => { date = next; dateInput.value = date; setURL(); await load(NEW_LIST); dateInput.focus(); },
   });
   // (small, as the other buttons of the page head)
   for (const el of [dayEnd.historyLink, dayEnd.button]) el.classList.add('btn-small');
@@ -1422,24 +1449,23 @@ export async function renderSheet(root, params, signal) {
     h('div', { class: 'sheet-head' },
       h('h1', {}, 'Aaj ki List'),
       h('div', { class: 'sheet-toolbar' }, branchSel, dateInput,
-        h('button', { type: 'button', class: 'btn btn-small', onclick: () => { date = localISO(); dateInput.value = date; setURL(); load(); } }, 'Today'),
+        h('button', { type: 'button', class: 'btn btn-small', onclick: () => { date = localISO(); dateInput.value = date; setURL(); load(NEW_LIST); } }, 'Today'),
         findBox, filterWrap),
       h('div', { class: 'sheet-tools' },
         h('a', { class: 'btn btn-small', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
         dayEnd.historyLink, dayEnd.button, dayEnd.hint,
         can('export.data') || can('finance.view') ? h('button', { type: 'button', class: 'btn btn-small', onclick: download }, 'Download') : null)),
-    // The bars that come and go (the changes not saved, the Undo of a removal, a warning) and the note of an ended day never
-    // move the rows under a mouse that has not moved: on a laptop, where the list has the window's height, the bars float at
-    // the right end of the counts line over the corner of the list, and the note is under the list, above the add line
-    // (app.css .sheet-bars); a bar in the page's flow above the list pushed every row down when it came, and up when it went.
-    h('div', { class: 'sheet-subhead' }, countsBox, saveStatus, h('div', { class: 'sheet-bars' }, failBox, undoBox, warnBox)),
+    // The bars that come and go (the changes not saved, the Undo of a removal, a warning) are in the page's flow, on a line
+    // under the counts and the save status, one line each (app.css .sheet-bars): they push the list down and never cover
+    // it or the save status. The note of an ended day is under the list on a laptop, above the add line.
+    h('div', { class: 'sheet-subhead' }, countsBox, newRowsNote, saveStatus, h('div', { class: 'sheet-bars' }, failBox, undoBox, warnBox)),
     dayEnd.note,
     statusHint,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
     h('datalist', { id: 'sheet-doctors' }, state.ref.clinicians.filter((c) => c.is_doctor).map((c) => h('option', { value: c.display_name }))),
     addPanel,
     h('div', { class: 'sheet-wrap', onkeydown: onKey },
-      h('table', { class: 'sheet' },
+      mount(sheetTable,
         colgroup,
         h('thead', {}, h('tr', {},
           branchHead,

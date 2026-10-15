@@ -143,13 +143,20 @@ export function patientSearch({ placeholder = 'Search name, Mr# or phone', label
  * Enter or leaving the control; a pick from the open list (mouse, touch) commits
  * at once; Escape undoes a provisional change. onCommit(value, previous) runs
  * once per real change; onPreview(value) runs whenever the shown value changes.
+ * Only a real leave commits on blur: Chrome also fires blur when the control is
+ * taken out of the page (a redraw) and when another window takes the focus, and
+ * neither saves a provisional change. (A select can have two options with one
+ * value, such as the Aaj ki List's group the sheet names and "No group": Escape
+ * goes back to the option that was chosen, not just to its value.)
  * Returns { set(value) } to move the committed value (e.g. revert after a failed save).
  */
 export function commitOnFinish(el, onCommit, onPreview) {
   let committed = el.value;
+  let committedAt = el.selectedIndex; // (undefined for a date input)
   let fromKey = false;
   const finish = () => {
     fromKey = false;
+    committedAt = el.selectedIndex;
     if (el.value === committed) return;
     const previous = committed;
     committed = el.value;
@@ -159,7 +166,12 @@ export function commitOnFinish(el, onCommit, onPreview) {
     // (Enter saves and nothing else: Chrome on Windows would also open a select's list, which then takes the next Tab and
     //  turns the letters typed next into a pick from it.)
     if (e.key === 'Enter') { e.preventDefault(); finish(); }
-    else if (e.key === 'Escape' && el.value !== committed) { e.preventDefault(); e.stopPropagation(); el.value = committed; onPreview?.(committed); }
+    else if (e.key === 'Escape' && (el.value !== committed || el.selectedIndex !== committedAt)) {
+      e.preventDefault(); e.stopPropagation();
+      el.value = committed;
+      if (committedAt !== undefined && el.value === committed) el.selectedIndex = committedAt;
+      onPreview?.(committed);
+    }
     else if (e.key.length === 1 || /^(Arrow|Page|Home|End|Backspace|Delete)/.test(e.key)) {
       // On Windows these change a closed select at once, firing `change` within this same task.
       // Backspace and Delete do the same to a date input (clearing a part empties it), so clearing
@@ -169,8 +181,9 @@ export function commitOnFinish(el, onCommit, onPreview) {
     }
   });
   el.addEventListener('change', () => { onPreview?.(el.value); if (!fromKey) finish(); });
-  el.addEventListener('blur', finish);
-  return { set: (value) => { committed = value; el.value = value; onPreview?.(value); } };
+  // (looked at once the blur is over: the control being removed is still in the page while its blur runs)
+  el.addEventListener('blur', () => queueMicrotask(() => { if (el.isConnected && document.activeElement !== el) finish(); }));
+  return { set: (value) => { committed = value; el.value = value; committedAt = el.selectedIndex; onPreview?.(value); } };
 }
 
 /** New patient form with branch dropdown and duplicate check. Resolves with the created patient. */
