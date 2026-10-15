@@ -818,7 +818,12 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .count-chip:hover { border-color: var(--aubergine); }
 .count-chip[aria-pressed="true"] { border-color: var(--aubergine); background: var(--aubergine-soft); color: var(--text-accent); box-shadow: inset 0 0 0 1px var(--aubergine); }
 .count-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .3); }
-.sheet-page > .alert { margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); }
+/* The bars that come and go (the changes not saved, the Undo of a removal, a warning) on a line of their own under the counts,
+   and the note of an ended day; on a laptop they never move the rows (below). */
+.sheet-bars { flex: 1 0 100%; display: grid; gap: var(--space-1); }
+.sheet-bars:not(:has(> :not([hidden]))) { display: none; }
+.sheet-bars > .alert, .sheet-page > .day-end-live > .alert { margin: 0; padding: var(--space-2) var(--space-3); }
+.sheet-page > .day-end-live:not(:empty) { margin: 0 0 var(--space-2); }
 
 /* scroll-padding keeps a focused cell clear of the sticky header row and the frozen columns. */
 .sheet-wrap {
@@ -882,6 +887,9 @@ table.sheet .mr-cell { position: sticky; left: var(--w-num); z-index: 1; }
 table.sheet .name-col { position: sticky; left: calc(var(--w-num) + var(--w-mr)); z-index: 1; box-shadow: 2px 0 0 var(--sheet-grid-strong); }
 table.sheet thead .rownum, table.sheet thead .mr-cell, table.sheet thead .name-col { z-index: 3; }
 table.sheet td.empty-cell { height: auto; white-space: normal; }
+/* The line a row leaves when it has gone while the mouse holds the list (sheet.js draw): as high as a row, its words at the left edge. */
+table.sheet tbody tr.gone-row > td { color: var(--sheet-rownum-text); font-style: italic; }
+.gone-text { position: sticky; left: 0; display: inline-block; padding: 0 var(--space-2); }
 
 /* The name: a click opens the row's actions (⋮), with the patient's flags (the list shows none, sheet.js SHOW_MEDICAL_ON_LIST). */
 .name-btn {
@@ -1079,6 +1087,14 @@ table.sheet td.pp { text-align: right; }
   .sheet-page > .sheet-wrap { flex: 0 1 auto; min-height: calc(var(--sheet-row) * 5); max-height: none; }
   .sheet-page > .add-panel { order: 1; margin: -1px 0 0; }
   .add-panel .suggestions { top: auto; bottom: calc(100% + var(--space-1)); }
+  /* The list has the window's height here, so whatever is shown or hidden above it moves every row under the mouse: the bars
+     float at the right end of the counts line, over the corner of the list (the Contact No and Reminder Status columns), and
+     the note of an ended day is under the list, above the add line, where it takes its room from the bottom of the list. */
+  .sheet-subhead { position: relative; }
+  .sheet-bars { position: absolute; top: 0; right: 0; z-index: 5; width: max-content; max-width: min(480px, 100%); max-height: 60vh; overflow: auto; }
+  .sheet-bars > .alert { box-shadow: var(--shadow-md); }
+  .sheet-page > .day-end-live { order: 1; }
+  .sheet-page > .day-end-live:not(:empty) { margin: var(--space-1) 0; }
 }
 /* A phone or a small tablet: the page scrolls; only the name stays at the left edge (the row number and Mr# scroll away). */
 @media (max-width: 899.98px) {
