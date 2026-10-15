@@ -2892,20 +2892,20 @@ await browserBars.close();
 // The pages change tabs without a new address (history.replaceState): a tab page on the top bar is marked from the address as it is
 // now, on the bar and in the phone drawer, the way a drop-down marks its links each time it opens.
 const pnTabs = await newPage();
-await step('Arrange my menu: with Reminders and Lab work on the top bar, changing tab inside the page moves the "current page" mark with it (bar and drawer)', async () => {
+await step('Arrange my menu: with Reminders, Low ratings and Lab work on the top bar, changing tab inside the page moves the "current page" mark with it, and Lab work (its own page now) is marked on its own address (bar and drawer)', async () => {
   await pnTabs.goto(BASE + '#/login/staff');
-  await pnTabs.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['coordinator?tab=reminders', 'coordinator?tab=lab', 'today', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator'])));
+  await pnTabs.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['coordinator?tab=reminders', 'coordinator?tab=ratings', 'lab', 'today', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator'])));
   await loginAs(pnTabs, 'Dr. Ali Rashid');
   const markedOn = (where) => pnTabs.waitForFunction(([sel, want]) => [...document.querySelectorAll(sel)].filter((a) => a.getAttribute('aria-current') === 'page' && a.classList.contains('current')).map((a) => a.textContent.trim()).join('|') === want
     && [...document.querySelectorAll(sel)].filter((a) => a.getAttribute('aria-current') === 'page' || a.classList.contains('current')).length === (want ? 1 : 0), where, { timeout: 3000 });
   await pnTabs.locator('.topnav > a:text-is("Reminders")').click();
   await pnTabs.waitForSelector('[role="tab"][aria-selected="true"]:has-text("Reminders")');
   await markedOn(['.topnav > a', 'Reminders']);
-  // A click on the Lab work tab inside the page.
-  await pnTabs.getByRole('tab', { name: /Lab work/ }).click();
-  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=lab');
-  await markedOn(['.topnav > a', 'Lab work']);
-  await markedOn(['#staff-drawer .drawer-links > a', 'Lab work']);
+  // A click on the Low ratings tab inside the page.
+  await pnTabs.getByRole('tab', { name: /Low ratings/ }).click();
+  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=ratings');
+  await markedOn(['.topnav > a', 'Low ratings']);
+  await markedOn(['#staff-drawer .drawer-links > a', 'Low ratings']);
   // The keyboard: the arrow keys move along the tabs, Enter chooses one. A tab that is not on the bar marks nothing there.
   await pnTabs.keyboard.press('ArrowLeft');
   await pnTabs.keyboard.press('Enter');
@@ -2914,12 +2914,15 @@ await step('Arrange my menu: with Reminders and Lab work on the top bar, changin
   await pnTabs.keyboard.press('ArrowLeft');
   await pnTabs.keyboard.press('Enter');
   await markedOn(['.topnav > a', 'Reminders']);
-  await pnTabs.keyboard.press('End'); // Low ratings, then back past Retainers to Lab work
-  await pnTabs.keyboard.press('ArrowLeft');
-  await pnTabs.keyboard.press('ArrowLeft');
+  await pnTabs.keyboard.press('End'); // back to Low ratings
   await pnTabs.keyboard.press('Enter');
-  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=lab');
+  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=ratings');
+  await markedOn(['.topnav > a', 'Low ratings']);
+  // Lab work is a page of its own (#/staff/lab): on the bar it is the page on screen there, and nothing else is.
+  await pnTabs.locator('.topnav > a:text-is("Lab work")').click();
+  await pnTabs.waitForFunction(() => location.hash === '#/staff/lab');
   await markedOn(['.topnav > a', 'Lab work']);
+  await markedOn(['#staff-drawer .drawer-links > a', 'Lab work']);
   // On a phone the drawer opens on Lab work, the page on screen, and a screen reader hears it as the current page.
   await pnTabs.setViewportSize({ width: 390, height: 844 });
   await pnTabs.locator('.menu-toggle').click();
@@ -3026,7 +3029,7 @@ await step('Arrange my menu on a phone: with the Coordinator drop-down under Mor
   await pnTouch.waitForSelector('#staff-drawer.open');
   const more = pnTouch.getByRole('group', { name: 'More', exact: true });
   const coordinator = more.getByRole('group', { name: 'Coordinator', exact: true });
-  assert.deepEqual((await coordinator.locator('a').allTextContents()).map((t) => t.trim()), ['Reminders', 'Drop-offs', 'Lab work', 'Retainers', 'Low ratings']);
+  assert.deepEqual((await coordinator.locator('a').allTextContents()).map((t) => t.trim()), ['Reminders', 'Drop-offs', 'Lab work', 'Retainer Record', 'Low ratings']);
   const stock = more.locator(':scope > a:text-is("Stock")');
   assert.equal(await stock.count(), 1, 'Stock is one of More\'s own pages');
   assert.equal(await coordinator.locator('a:text-is("Stock")').count(), 0, 'not a Coordinator page');
