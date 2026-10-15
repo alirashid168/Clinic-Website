@@ -1,5 +1,5 @@
-// Router: #/ (home), #/visitor, #/clinics and #/dr-ali (home, scrolled to that
-// section), #/login/staff, #/login/patient, #/patient (portal), #/patient/demo
+// Router: #/ (home, also while signed in), #/visitor, #/results, #/clinics and #/dr-ali (home, scrolled to that
+// section), #/join and #/feedback (the two public forms), #/login/staff, #/login/patient, #/patient (portal), #/patient/demo
 // (sample portal), #/staff/<page>. Hash routing keeps the site a set of static
 // files. Search engines index only "/", so index.html carries the description,
 // link-preview tags and clinic details; each view still gets its own title.
@@ -22,7 +22,7 @@ const CLINICS_DESC = "Clinic locations, opening hours and Dr. Ali Rashid's days 
 const STAFF_TITLES = {
   today: 'Today', sheet: 'Aaj ki List', 'day-history': 'History of Aaj ki List', queue: 'Queue board', checkups: 'Checkups', patients: 'Patients', patient: 'Patient record',
   billing: 'Billing', accounts: 'Accounts', reports: 'Reports', coordinator: 'Coordinator', stock: 'Stock',
-  complaints: 'Complaints', review: "Dr. Ali's list", log: 'Doctor log', admin: 'Admin',
+  complaints: 'Complaints', jobs: 'Job applications', review: "Dr. Ali's list", log: 'Doctor log', admin: 'Admin',
 };
 
 let routeGen = 0;
@@ -114,6 +114,20 @@ async function route() {
     if (parts[0] === 'dr-ali') {
       setMeta(`Dr. Ali's days at each clinic | ${SITE}`, CLINICS_DESC);
       return await show(gen, view, first, () => renderHome(view), 'dr-ali');
+    }
+
+    // The two forms behind the top bar's links. They need the clinic system to send anything (and its branch list), so
+    // without it the visitor gets the contact details instead of a form that cannot be sent.
+    if (parts[0] === 'join' || parts[0] === 'feedback') {
+      const join = parts[0] === 'join';
+      setMeta(join ? `Join our team | ${SITE}` : `Complaints and suggestions | ${SITE}`,
+        join ? "Apply for a job at Dr. Ali Rashid's Dental Clinic: dentists, assistants, front desk and more. Send your details and CV."
+          : "Tell Dr. Ali Rashid's Dental Clinic about a problem, an idea or a thank-you. You can stay anonymous.");
+      await state.ready;
+      if (!current() || unavailable(view)) return;
+      const forms = await import('./views/forms.js');
+      if (!current()) return;
+      return await show(gen, view, first, () => (join ? forms.renderJoin(view) : forms.renderFeedback(view)));
     }
 
     if (parts[0] === 'login') {

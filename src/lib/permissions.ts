@@ -68,6 +68,8 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: 'settings.manage', label: 'Treatments, templates and settings', category: 'Admin', defaults: [N, N, N, N, N] },
   { key: 'users.manage', label: 'Manage users and permissions', category: 'Admin', defaults: [N, N, N, N, N] },
   { key: 'audit.view', label: 'Audit log', category: 'Admin', defaults: [N, N, N, N, N] },
+  // Job applications from the website's "Join our team" form, with their CNIC, phone and CV (20261011000200): admin only by default.
+  { key: 'jobs.view', label: 'Job applications (CNIC, phone and CV)', category: 'Admin', defaults: [N, N, N, N, N] },
 ];
 
 export type PermissionKey = string;

@@ -1,25 +1,34 @@
 // Smaller staff screens: today dashboard, queue board, billing desk,
 // Dr. Ali review list, complaints inbox, doctor daily log.
-import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly, showFormErrors, capFirst } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, timeOf, toast, friendlyError, modal, field, select, empty, todayISO, localISO, srOnly, showFormErrors, capFirst, phoneLink } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName, myBranches, defaultBranchId, clinicianName } from '../../state.js';
 import { duesBadge, aliBadge, capNote, STATUS_LABELS } from './common.js';
 import { printReceipt } from './invoice.js';
+import { FEEDBACK_KIND_LABELS, FEEDBACK_TOPIC_LABELS, formatPhone } from '../../lib/public-forms.js';
 
 /** The Karachi calendar day of a timestamp (not the UTC day, which is a day behind before 5 AM). */
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 
 // ---------------------------------------------------------------- today
+// CVs no application uses (uploaded more than a day ago: never sent, or sent with a dropped form) are removed by themselves, once per
+// opening of the staff pages, when someone who sees job applications (Dr. Ali) opens Today: they take storage, and unsent ones count
+// toward the CV upload limits.
+let cvSweep = null;
+
 // The first page after login. Whoever keeps the Aaj ki List finds "+ Add checkup patient" (the checkup form, owner 11 Oct 2026) at the
 // top: the person goes on the Checkups page and on today's Aaj ki List of their branch.
 export async function renderDashboard(root) {
   const d = state.data;
   const s = state.session.staff;
   const day = todayISO();
-  const [rows, totalDues, review, complaints, todaysCheckups] = await Promise.all([
+  if (can('jobs.view')) cvSweep ??= import('./jobs.js').then((m) => m.removeUnsentCvs()).catch(() => 0);
+  const [rows, totalDues, review, complaints, newJobs, todaysCheckups] = await Promise.all([
     d.dashboard(day).catch(() => []),
     can('finance.view') ? d.totalDues().catch(() => null) : null,
     isAdmin() || can('complaints.view') ? d.reviewList().catch(() => []) : [],
     can('complaints.view') ? d.complaints().catch(() => []) : [],
+    // Job applications still marked New, for those who see them (none shown before the database update has been run).
+    can('jobs.view') ? d.newJobApplications().catch(() => 0) : 0,
     // today's checkups of every branch the person may see: how many there are, and whether the checkup list is switched on at all
     can('sheet.edit') && d.listDayCheckups ? d.listDayCheckups({ branchId: null, date: day }).catch(() => null) : Object.assign([], { missing: true }),
   ]);
@@ -56,13 +65,14 @@ export async function renderDashboard(root) {
       can('finance.view') || can('billing.view') ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum('received'))), h('span', {}, 'Received today')) : null,
       duesTotal !== null ? h('div', { class: 'stat' }, h('strong', {}, duesPartial ? `${rupees(duesTotal)}+` : rupees(duesTotal)), h('span', {}, duesPartial ? 'Total pending dues (incomplete: not every patient was counted)' : 'Total pending dues')) : null,
       review.length ? h('a', { class: 'stat', href: '#/staff/review', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, review.length), h('span', {}, 'On Dr. Ali\'s list')) : null,
-      complaints.filter((c) => c.status === 'new').length ? h('a', { class: 'stat', href: '#/staff/complaints', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, complaints.filter((c) => c.status === 'new').length), h('span', {}, 'New complaints')) : null),
+      complaints.filter((c) => c.status === 'new').length ? h('a', { class: 'stat', href: '#/staff/complaints', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, complaints.filter((c) => c.status === 'new').length), h('span', {}, 'New complaints & suggestions')) : null,
+      newJobs ? h('a', { class: 'stat', href: '#/staff/jobs?status=new', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, newJobs), h('span', {}, 'New job applications')) : null),
     h('section', { class: 'panel', style: { marginTop: '16px' } },
       h('h2', {}, 'Branches today'),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col', class: 'right' }, 'Patients'), h('th', { scope: 'col', class: 'right' }, 'Waiting'), h('th', { scope: 'col', class: 'right' }, 'Completed'),
           can('billing.view') ? h('th', { scope: 'col', class: 'right' }, 'Received') : null, can('dues.view') ? h('th', { scope: 'col', class: 'right' }, "Dues on today's list") : null,
-          can('complaints.view') ? h('th', { scope: 'col', class: 'right' }, 'New complaints') : null, h('th', { scope: 'col' }, 'Cash closing'), h('th', { scope: 'col' }, srOnly('Actions')))),
+          can('complaints.view') ? h('th', { scope: 'col', class: 'right' }, 'New complaints & suggestions') : null, h('th', { scope: 'col' }, 'Cash closing'), h('th', { scope: 'col' }, srOnly('Actions')))),
         h('tbody', {}, visible.map((r) => h('tr', {},
           h('td', {}, h('strong', {}, r.branch.name)), h('td', { class: 'right' }, r.patients), h('td', { class: 'right' }, r.waiting), h('td', { class: 'right' }, r.completed),
           can('billing.view') ? h('td', { class: 'right' }, rupees(r.received)) : null,
@@ -190,31 +200,71 @@ export async function renderReview(root) {
 }
 
 // ---------------------------------------------------------------- complaints
-export async function renderComplaints(root) {
+// Two kinds arrive here: a patient's complaint from their account (source 'portal'), and the website's "Complaints &
+// suggestions" form (source 'website', 20261011000200), which may be anonymous and has a type, a topic and optional contact
+// details. A website form has no account to reply to, so its dialog takes internal notes only. Visitors' words are text, never HTML.
+const isWebsite = (c) => c.source === 'website';
+const statusBadge = (c) => h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : c.status === 'new' ? 'badge-dues' : 'badge-warn'] }, c.status.replace('_', ' '));
+
+/** Who sent it, for the list: the patient, or the website form's name (or "Anonymous") with its number. */
+function senderCell(c) {
+  if (!isWebsite(c)) return c.patient?.full_name || '';
+  return [c.contact_name || h('span', { class: 'muted' }, c.contact_phone || c.contact_mr ? 'No name given' : 'Anonymous'),
+    c.contact_phone ? h('div', { class: 'muted nowrap' }, formatPhone(c.contact_phone)) : null,
+    c.contact_me ? h('div', {}, h('span', { class: 'badge badge-warn' }, 'Wants to be contacted')) : null];
+}
+
+export async function renderComplaints(root, params) {
   const d = state.data;
-  const rows = await d.complaints().catch((e) => { toast(friendlyError(e), 'error'); return []; });
+  let from = ['portal', 'website'].includes(params?.get('from')) ? params.get('from') : '';
+  const list = h('div', {});
+  let newest = 0;
+  // The list is asked again for the chosen source (the database filters it, so a flood of website forms cannot push a patient's
+  // complaint off "Patients' accounts"), and after every change.
+  async function load() {
+    const mine = ++newest; // a slow answer for the choice just left must not overwrite the one on screen
+    const rows = await d.complaints({ from }).catch((e) => { toast(friendlyError(e), 'error'); return []; });
+    if (mine !== newest) return;
+    drawTable(rows);
+  }
   const open = (c) => {
-    const reply = h('textarea', { placeholder: 'Reply to the patient, or write an internal note' });
+    const web = isWebsite(c);
+    const reply = h('textarea', { placeholder: web ? 'Write an internal note: what was done, who called back' : 'Reply to the patient, or write an internal note' });
     const internal = h('input', { type: 'checkbox' });
     const doctorSel = select([{ value: '', label: 'Not about a doctor' }, ...state.ref.clinicians.filter((x) => x.is_doctor).map((x) => ({ value: x.id, label: x.display_name }))], c.clinician_id || '', { 'aria-label': 'About which doctor' });
     doctorSel.onchange = async () => { try { await d.linkComplaintDoctor(c.id, doctorSel.value || null); c.clinician_id = doctorSel.value || null; toast('Saved.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); } };
+    const who = web
+      ? h('div', { class: 'complaint-contact' },
+        h('p', {}, h('span', { class: 'badge badge-photo' }, 'Website form'), ' ', [FEEDBACK_KIND_LABELS[c.kind], FEEDBACK_TOPIC_LABELS[c.topic]].filter(Boolean).join(' · ')),
+        c.contact_name || c.contact_phone || c.contact_mr
+          ? h('p', {}, c.contact_name ? h('strong', {}, c.contact_name) : 'No name given',
+            c.contact_phone ? [' · ', phoneLink(formatPhone(c.contact_phone))] : null,
+            c.contact_mr ? [' · Mr# given: ', can('patients.view') ? h('a', { href: `#/staff/patients?q=${encodeURIComponent(c.contact_mr)}` }, c.contact_mr) : c.contact_mr] : null)
+          : h('p', { class: 'muted' }, 'Sent without a name or number.'),
+        c.contact_me ? h('p', {}, h('span', { class: 'badge badge-warn' }, 'Wants to be contacted'), ' Please call or message them on the number above.') : null)
+      : h('p', {}, h('strong', {}, c.patient?.full_name), ` · Mr# ${c.patient?.mr_number || ''}${c.patient?.phone ? ' · ' + c.patient.phone : ''}`);
     const body = h('div', {},
-      h('p', {}, h('strong', {}, c.patient?.full_name), ` · Mr# ${c.patient?.mr_number || ''}${c.patient?.phone ? ' · ' + c.patient.phone : ''}`),
-      h('p', { class: 'muted' }, `${shortDate(dayOf(c.created_at))} · ${branchName(c.branch_id)}`),
-      h('div', { class: 'panel', style: { background: 'var(--porcelain)' } }, c.body),
+      who,
+      h('p', { class: 'muted' }, `${shortDate(dayOf(c.created_at))} · ${c.branch_id ? branchName(c.branch_id) : 'Not about one branch'}`),
+      h('div', { class: 'panel pre-wrap', style: { background: 'var(--porcelain)' } }, c.body),
       (c.messages || []).map((m) => h('div', { class: ['alert', m.internal_note ? 'alert-warning' : 'alert-info'], style: { marginTop: '8px' } },
-        h('strong', {}, m.internal_note ? 'Internal note' : 'Reply'), m.author ? ` · ${m.author}` : '', h('div', {}, m.body))),
-      h('div', { style: { marginTop: '12px' } }, field('Reply', reply, null, { required: true }), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)')),
-      h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.')));
+        h('strong', {}, m.internal_note ? 'Internal note' : 'Reply'), m.author ? ` · ${m.author}` : '', h('div', { class: 'pre-wrap' }, m.body))),
+      h('div', { style: { marginTop: '12px' } }, web
+        ? [field('Internal note', reply, 'This came from the website form: nobody outside the clinic sees what is written here.', { required: true })]
+        : [field('Reply', reply, null, { required: true }), h('label', { class: 'inline' }, internal, 'Internal note (patient does not see it)')]),
+      // Only a complaint is linked to a doctor: a website suggestion or thank-you is not a complaint about their work.
+      !web || c.kind === 'complaint' ? h('div', { style: { marginTop: '12px' } }, field('About which doctor?', doctorSel, 'Linked complaints count on that doctor\'s daily log and dashboard.')) : null);
     // Closing a complaint tells the patient it is done, so it asks first; the complaint dialog stays open underneath until that is confirmed.
     const confirmResolve = () => {
-      modal('Mark this complaint resolved?', h('p', {}, `${c.patient?.full_name || 'The patient'} will see it as resolved. You can reopen it afterwards.`), [
+      modal('Mark this complaint resolved?', h('p', {}, web
+        ? 'It came from the website form, so nobody is told by itself. You can reopen it afterwards.'
+        : `${c.patient?.full_name || 'The patient'} will see it as resolved. You can reopen it afterwards.`), [
         { label: 'Cancel' },
         { label: 'Mark resolved', primary: true, onClick: async () => {
           try { await d.setComplaintStatus(c.id, 'resolved'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
           toast('Marked resolved.', 'ok');
           dlg.close();
-          await renderComplaints(root); // the list is redrawn before this dialog closes, so focus can return to the page
+          await load(); // the list is redrawn before this dialog closes, so focus can return to the page
         } },
       ]);
       return false;
@@ -223,26 +273,52 @@ export async function renderComplaints(root) {
     const reopen = async () => {
       try { await d.setComplaintStatus(c.id, 'in_progress'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       toast('Reopened.', 'ok');
-      await renderComplaints(root);
+      await load();
+    };
+    // Anyone can send the website form, so junk can arrive: an admin may delete a website form. A patient's complaint is never deleted.
+    const confirmDelete = () => {
+      modal('Delete this website form?', h('p', {}, 'It is removed for good, with its notes. Use this only for junk or spam; mark a real complaint resolved instead.'), [
+        { label: 'Keep it' },
+        { label: 'Delete', danger: true, onClick: async () => {
+          try { await d.deleteComplaint(c.id); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+          toast('Deleted.', 'ok');
+          dlg.close();
+          await load();
+        } },
+      ], { destructive: true });
+      return false;
     };
     const dlg = modal(c.subject, body, [
+      web && isAdmin() ? { label: 'Delete', danger: true, onClick: confirmDelete } : null,
       c.status === 'resolved' ? { label: 'Reopen', onClick: reopen } : { label: 'Mark resolved', onClick: confirmResolve },
-      { label: 'Send', primary: true, onClick: async () => {
-        if (!reply.value.trim()) return showFormErrors(body, [{ input: reply, message: 'Write a reply first.' }]);
-        try { await d.replyComplaint(c.id, reply.value.trim(), internal.checked); toast('Saved.', 'ok'); await renderComplaints(root); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      { label: web ? 'Save note' : 'Send', primary: true, onClick: async () => {
+        if (!reply.value.trim()) return showFormErrors(body, [{ input: reply, message: web ? 'Write a note first.' : 'Write a reply first.' }]);
+        try { await d.replyComplaint(c.id, reply.value.trim(), web || internal.checked); toast('Saved.', 'ok'); await load(); } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ]);
+    ].filter(Boolean));
   };
-  mount(root,
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Complaints'), h('p', {}, 'Sent by patients from their accounts. Dr. Ali and the clinic coordinator both see these.'))),
-    h('section', { class: 'panel' }, capNote(rows, 'complaints'), rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Complaint'), h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Received'), h('th', { scope: 'col' }, 'Status'))),
-      h('tbody', {}, rows.map((c) => h('tr', {},
-        h('td', {}, h('button', { class: 'link-btn', onclick: () => open(c) }, c.subject), h('div', { class: 'muted' }, c.body.slice(0, 120))),
-        h('td', {}, c.patient?.full_name || ''),
-        h('td', {}, branchName(c.branch_id), c.clinician_id ? h('div', { class: 'muted' }, clinicianName(c.clinician_id)) : null),
+  const drawTable = (shown) => {
+    mount(list, capNote(shown, 'complaints (newest first)', 'older ones are not listed'), shown.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list complaints-table' },
+      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Complaint'), h('th', { scope: 'col' }, 'From'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Received'), h('th', { scope: 'col' }, 'Status'))),
+      h('tbody', {}, shown.map((c) => h('tr', {},
+        h('td', {}, h('button', { class: 'link-btn', onclick: () => open(c) }, c.subject),
+          isWebsite(c) ? h('div', {}, h('span', { class: 'badge badge-photo' }, 'Website form')) : null,
+          h('div', { class: 'muted' }, c.body.slice(0, 120))),
+        h('td', {}, senderCell(c)),
+        h('td', {}, c.branch_id ? branchName(c.branch_id) : (isWebsite(c) ? h('span', { class: 'muted' }, 'Not about one branch') : ''), c.clinician_id ? h('div', { class: 'muted' }, clinicianName(c.clinician_id)) : null),
         h('td', { class: 'nowrap' }, shortDate(dayOf(c.created_at))),
-        h('td', {}, h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : c.status === 'new' ? 'badge-dues' : 'badge-warn'] }, c.status.replace('_', ' ')))))))) : empty('No complaints.')));
+        h('td', {}, statusBadge(c)))))))
+      : empty(from ? 'Nothing from here yet.' : 'No complaints.'));
+  };
+  const fromSel = select([{ value: '', label: 'Everything' }, { value: 'portal', label: "Patients' accounts" }, { value: 'website', label: 'Website form' }], from, {
+    onchange: (e) => { from = e.target.value; history.replaceState(null, '', `#/staff/complaints${from ? '?from=' + from : ''}`); load(); },
+  });
+  mount(root,
+    h('div', { class: 'page-head' },
+      h('div', {}, h('h1', {}, 'Complaints'), h('p', {}, 'Sent by patients from their accounts, and by visitors with the "Complaints & suggestions" form on the website. Dr. Ali and the clinic coordinator both see these. Resolved ones stay listed for 90 days.')),
+      h('label', { class: 'inline complaints-from' }, 'Show ', fromSel)),
+    h('section', { class: 'panel' }, list));
+  await load();
 }
 
 // ---------------------------------------------------------------- doctor log
@@ -282,7 +358,7 @@ export async function renderDoctorLog(root, params) {
           h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
             h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Received'), h('th', { scope: 'col' }, 'Subject'), h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Status'))),
             h('tbody', {}, complaints.map((c) => h('tr', {},
-              h('td', { class: 'nowrap' }, shortDate(dayOf(c.created_at))), h('td', {}, c.subject), h('td', {}, c.patient_name ? `${c.patient_name} · Mr# ${c.mr_number || ''}` : ''),
+              h('td', { class: 'nowrap' }, shortDate(dayOf(c.created_at))), h('td', {}, c.subject), h('td', {}, c.patient_name ? `${c.patient_name} · Mr# ${c.mr_number || ''}` : c.source === 'website' ? 'Website form' : ''),
               h('td', {}, branchName(c.branch_id)),
               h('td', {}, h('span', { class: ['badge', c.status === 'resolved' ? 'badge-ok' : c.status === 'new' ? 'badge-dues' : 'badge-warn'] }, String(c.status).replace('_', ' '))))))))) : null,
         rows.length ? h('section', { class: 'panel' }, h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
