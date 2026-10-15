@@ -197,8 +197,8 @@ select pg_temp.check((select p.r - 'dry_run' = i.r - 'dry_run' from f31_res p, f
 -- skipped: 10 to 14
 select pg_temp.check((select array[(r->>'given')::int, (r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'already')::int, (r->>'same')::int, (r->>'skipped_count')::int,
                               (r->>'other_answers')::int, (r->>'other_name')::int, (r->>'follow_up_noted')::int]
-                        from f31_res where n = 'import') = array[16, 5, 4, 1, 0, 1, 5, 1, 0, 2],
-  'the counts: 5 new (1 of them a second answer that says otherwise), 4 onto the day''s checkup, 1 onto the old list''s row, 1 with nothing new, 5 skipped (given = the sum); 2 follow-up statuses kept in the notes (rows 3 and 4)');
+                        from f31_res where n = 'import') = array[16, 5, 4, 1, 0, 1, 5, 1, 0, 1],
+  'the counts: 5 new (1 of them a second answer that says otherwise), 4 onto the day''s checkup, 1 onto the old list''s row, 1 with nothing new, 5 skipped (given = the sum); 1 follow-up status kept in the notes (row 3; row 4 has its "Reminder: ..." already)');
 select pg_temp.check((select r->'skipped' from f31_res where n = 'import') = jsonb_build_array(
     jsonb_build_object('row', 10, 'reason', 'No patient name'), jsonb_build_object('row', 11, 'reason', 'The date could not be read'),
     jsonb_build_object('row', 12, 'reason', 'The date could not be read'),
@@ -221,9 +221,9 @@ begin
   c := pg_temp.one('Sample Import Archive');
   perform pg_temp.check(c.source = 'archive' and c.date_is_month and c.checkup_date = '2026-08-01' and c.branch_id = current_setting('test.nn')::smallint
     and c.doctors = 'Dr. Sample (sample)' and c.checkup_for = 'Scaling' and c.follow_up = 'Interested'
-    and c.notes = 'called once; Reminder: not on whatsapp; Reminder (Google Form): No Response; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)'
+    and c.notes = 'called once; Reminder: not on whatsapp; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)'
     and c.ali_recommended and c.pricing_understood = 'yes' and c.wants_treatment and c.treatment_plan = 'Next month' and c.form_submitted_at = '2026-08-20T11:00:00+05:00'::timestamptz,
-    'the old list''s row of that person and month (private.checkup_key): the answers and the reminder; it keeps its follow-up status, branch, doctor, treatment and month, and what the form said about those (the follow-up status too) is in its notes');
+    'the old list''s row of that person and month (private.checkup_key): the answers and the reminder; it keeps its follow-up status, branch, doctor, treatment and month, and what the form said about those is in its notes (what REMINDERS said once, as "Reminder: ...")');
   select * into c from public.checkups where patient_name = 'Sample  Import Nophone';
   perform pg_temp.check(c.phone = '0300-5553104' and not c.ali_recommended and c.pricing_understood = 'needs_explanation',
     'no phone on the website''s row: matched by name (spaces and case aside), the oldest of the two; the phone is filled in');
@@ -390,7 +390,8 @@ select pg_temp.check((select (r->>'same')::int = 2 and (r->>'inserted')::int = 0
 
 -- 3d. The follow-up status from REMINDERS is never lost (CF2-F1, 15 Oct 2026). A plain "done" (Follow-up Sent) or a status written as it is
 -- sends no "Reminder: ..." text; when the checkup does not take the status (the old list's row keeps its own, a checkup of the day has another
--- one) it goes into the notes as 'Reminder (Google Form): ...', once, and is counted. A checkup that has that status already gets no note.
+-- one) it goes into the notes as 'Reminder (Google Form): ...', once, and is counted. A checkup that has that status already gets no note,
+-- and neither does an answer whose notes have what REMINDERS said already ("Reminder: treatment started": REMINDERS in the notes once).
 do $$
 declare v_nn smallint := current_setting('test.nn')::smallint; r jsonb;
 begin
@@ -414,15 +415,15 @@ create temp table f31_remind as select jsonb_build_array(
 insert into f31_res select 'remind_preview', pg_temp.imp(rows, true) from f31_remind;
 insert into f31_res select 'remind', pg_temp.imp(rows) from f31_remind;
 select pg_temp.check((select array[(r->>'inserted')::int, (r->>'filled_day')::int, (r->>'filled_month')::int, (r->>'same')::int, (r->>'follow_up_noted')::int]
-                        from f31_res where n = 'remind') = array[0, 3, 1, 1, 2]
+                        from f31_res where n = 'remind') = array[0, 3, 1, 1, 1]
                      and (select p.r - 'dry_run' = i.r - 'dry_run' from f31_res p, f31_res i where p.n = 'remind_preview' and i.n = 'remind'),
-  'REMINDERS: 2 statuses not taken are counted (the preview says so too); 1 onto the old list''s row, 3 onto the day''s checkups, the second answer of the month is "same"');
+  'REMINDERS: the 1 status not taken that had no "Reminder: ..." is counted (the preview says so too); 1 onto the old list''s row, 3 onto the day''s checkups, the second answer of the month is "same"');
 select pg_temp.check((select array_agg(concat_ws('|', patient_name, follow_up, coalesce(notes, '-')) order by patient_name) from public.checkups where patient_name like 'Sample Reminder %')
                      = array['Sample Reminder Fresh|No Response|-',
                              'Sample Reminder Month|Interested|Reminder (Google Form): Follow-up Sent',
                              'Sample Reminder Same|Follow-up Sent|-',
-                             'Sample Reminder Scheduled|Scheduled|Reminder: treatment started; Reminder (Google Form): Started'],
-  'REMINDERS: the old list''s row keeps Interested and has "done" in its notes; Scheduled stays and Started is in the notes; the same status or Not Contacted: no note');
+                             'Sample Reminder Scheduled|Scheduled|Reminder: treatment started'],
+  'REMINDERS: the old list''s row keeps Interested and has "done" in its notes; Scheduled stays and "treatment started" is in the notes once; the same status or Not Contacted: no note');
 insert into f31_res select 'remind_again', pg_temp.imp(rows) from f31_remind;
 select pg_temp.check((select (r->>'already')::int = 5 and (r->>'follow_up_noted')::int = 0 and (r->>'filled_day')::int + (r->>'filled_month')::int = 0 from f31_res where n = 'remind_again')
                      and (select notes from public.checkups where patient_name = 'Sample Reminder Month') = 'Reminder (Google Form): Follow-up Sent',

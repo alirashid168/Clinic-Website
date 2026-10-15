@@ -691,8 +691,8 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   assert.deepEqual({ ...preview, dry_run: false }, r, 'the preview counts exactly what the import then does');
   // new: rows 5 (another branch), 6, 8 (the website's checkup of that day holds other answers) and 14; onto that day's checkup: rows 2, 4
   // and 7 (the first answer of row 6, which had no pricing answer); onto the old list's row: 3; nothing new: 15 (the website's checkup
-  // holds these very answers)
-  assert.deepEqual([r.given, r.inserted, r.filled_day, r.filled_month, r.already, r.same, r.skipped_count, r.other_answers, r.other_name, r.follow_up_noted], [14, 4, 3, 1, 0, 1, 5, 1, 0, 1]);
+  // holds these very answers); no "Reminder (Google Form)" note: row 3's notes have what REMINDERS said ("Reminder: not on whatsapp")
+  assert.deepEqual([r.given, r.inserted, r.filled_day, r.filled_month, r.already, r.same, r.skipped_count, r.other_answers, r.other_name, r.follow_up_noted], [14, 4, 3, 1, 0, 1, 5, 1, 0, 0]);
   assert.equal(r.given, r.inserted + r.filled_day + r.filled_month + r.already + r.same + r.skipped_count);
   assert.deepEqual(r.skipped, [
     { row: 9, reason: 'No patient name' }, { row: 10, reason: 'The date could not be read' }, { row: 11, reason: 'The date could not be read' },
@@ -709,8 +709,8 @@ test('demo: the import of the Google Form\'s answers follows the database - the 
   const arch = (await one('Sample Archive Person'))[0];
   assert.deepEqual([arch.source, arch.date_is_month, arch.checkup_date, arch.branch_id, arch.doctors, arch.checkup_for, arch.follow_up, arch.notes, arch.ali_recommended, arch.treatment_plan],
     ['archive', true, '2026-08-01', 2, 'Dr. Sample (sample)', 'Scaling', 'Interested',
-      'called once; Reminder: not on whatsapp; Reminder (Google Form): No Response; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)', true, 'Next month'],
-    'the old list\'s row of that month gets the answers and keeps its follow-up status, branch, doctor and treatment; what the form said about those (the follow-up status too) is in its notes');
+      'called once; Reminder: not on whatsapp; On the Google Form: "What was your checkup for?" Braces; On the Google Form: "Which branch did you visit?" Gulshan (RJ Mall)', true, 'Next month'],
+    'the old list\'s row of that month gets the answers and keeps its follow-up status, branch, doctor and treatment; what the form said about those is in its notes (what REMINDERS said once)');
   const np = (await one('No Phone'))[0];
   assert.deepEqual([np.id, np.phone, np.ali_recommended, np.pricing_understood], [noPhone.id, '0300-5550603', false, 'needs_explanation'], 'matched by name (the website\'s row had no phone), and the phone is filled in');
   const gul = (await one('Sample Day Person', 'google_form'))[0];
@@ -759,12 +759,12 @@ test('demo: a follow-up status from REMINDERS that a checkup does not take is ke
   const preview = await d.importCheckupForm(rows, { dryRun: true });
   const r = await d.importCheckupForm(rows);
   assert.deepEqual({ ...preview, dry_run: false }, r, 'the preview says the same');
-  assert.deepEqual([r.inserted, r.filled_day, r.filled_month, r.same, r.follow_up_noted], [0, 3, 1, 1, 2]);
+  assert.deepEqual([r.inserted, r.filled_day, r.filled_month, r.same, r.follow_up_noted], [0, 3, 1, 1, 1]);
   const all = await d.exportCheckups({});
   const by = (id: string) => all.find((c: any) => c.id === id);
   const month = all.find((c: any) => c.patient_name === 'Sample Reminder Month');
   assert.deepEqual([month.source, month.follow_up, month.notes], ['archive', 'Interested', 'Reminder (Google Form): Follow-up Sent'], 'the old list\'s row keeps its status; "done" is in its notes');
-  assert.deepEqual([by(sched.id).follow_up, by(sched.id).notes], ['Scheduled', 'Reminder: treatment started; Reminder (Google Form): Started'], 'Scheduled stays; Started is in the notes');
+  assert.deepEqual([by(sched.id).follow_up, by(sched.id).notes], ['Scheduled', 'Reminder: treatment started'], 'Scheduled stays; "treatment started" is in the notes once, not counted');
   assert.deepEqual([by(same.id).follow_up, by(same.id).notes], ['Follow-up Sent', null], 'the same status already: no note');
   assert.deepEqual([by(fresh.id).follow_up, by(fresh.id).notes], ['No Response', null], 'Not Contacted takes the status: no note');
   const again = await d.importCheckupForm(rows);

@@ -161,17 +161,18 @@ create index if not exists checkup_form_imports_checkup_idx on private.checkup_f
 -- plain "Checkup", in any spelling the sync reads as one ("Chek up", "Check-up", "Checkups"), is no answer to "What was your checkup for?"
 -- and is replaced). What the form says about the doctor, the checkup or the branch that the checkup keeps its own text for goes into its
 -- notes ('On the Google Form: "What was your checkup for?" Root canal'), so no answer is lost. The follow-up status from REMINDERS is taken
--- only while the checkup still says 'Not Contacted', and never for an old-list row (that row keeps its follow-up). A status that is not
--- taken goes into the notes as 'Reminder (Google Form): Follow-up Sent' (once; nothing when the checkup already has that status): a plain
--- "done" or a status written as it is sends no "Reminder: ..." text of its own (web/js/lib/checkup-form.js), so without it nothing would
--- show what REMINDERS said. The notes are added to the checkup's own. A checkup that already holds everything the answer says is "same"
--- (nothing to fill in, nothing to note). form_submitted_at is set on the checkup that changed.
+-- only while the checkup still says 'Not Contacted', and never for an old-list row (that row keeps its follow-up). A plain "done" or a
+-- status written as it is sends no "Reminder: ..." text of its own (web/js/lib/checkup-form.js): when such a status is not taken, it goes
+-- into the notes as 'Reminder (Google Form): Follow-up Sent' (once; nothing when the checkup already has that status), so the notes show what
+-- REMINDERS said. Any other REMINDERS text is in the answer's notes already ("Reminder: treatment started") and is not noted twice. The notes
+-- are added to the checkup's own. A checkup that already holds everything the answer says is "same" (nothing to fill in, nothing to note).
+-- form_submitted_at is set on the checkup that changed.
 -- p_dry_run (the preview): everything is done and then undone, so the counts are exactly what the import would do.
 -- Result: given / inserted / filled_day / filled_month / already / same / skipped (up to 100 listed as { row, reason }) / skipped_count
 -- / other_name / other_answers / follow_up_noted and dry_run. given = inserted + filled_day + filled_month + already + same + skipped_count
 -- (other_name is part of inserted + filled_month: the answers that share a phone with another person on that day's list; other_answers is
 -- part of inserted: the second answers of a person whose checkup holds other answers; follow_up_noted is part of filled_day + filled_month:
--- the answers whose follow-up status from REMINDERS went into the checkup's notes instead of its status).
+-- the answers whose follow-up status from REMINDERS went into the checkup's notes as 'Reminder (Google Form): ...' instead of its status).
 -- Do the answers a checkup already holds agree with an answer from the Google Form? Each of the four agrees when it is not given on one of
 -- the two sides, or is the same ("When / why not" without regard to case). The import fills an answer in only on a checkup that agrees.
 create or replace function private.checkup_form_agrees(x public.checkups, p_ali boolean, p_pricing text, p_wants boolean, p_plan text)
@@ -306,8 +307,10 @@ begin
         n_phone := coalesce(c.phone, v_phone);
         n_branch := coalesce(c.branch_id, v_branch);
         n_follow := case when v_kind = 'filled_day' and c.follow_up = 'Not Contacted' and v_follow is not null then v_follow else c.follow_up end;
-        -- the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes
-        v_remind := case when v_follow is not null and lower(coalesce(n_follow, '')) <> lower(v_follow) then format('Reminder (Google Form): %s', v_follow) end;
+        -- the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes,
+        -- unless the answer's notes already have what REMINDERS said ("Reminder: ...", web/js/lib/checkup-form.js)
+        v_remind := case when v_follow is not null and lower(coalesce(n_follow, '')) <> lower(v_follow) and coalesce(v_notes, '') !~ '(^|; )Reminder: '
+                         then format('Reminder (Google Form): %s', v_follow) end;
         -- the answer's notes, the reminder not taken, then what the form says that the checkup keeps its own text for; each added once
         n_notes := c.notes;
         foreach v_part in array array_remove(array[

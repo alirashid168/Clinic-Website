@@ -987,8 +987,10 @@ export function createDemoAdapter() {
           const nextDoctors = c.doctors ?? doctors;
           const nextBranch = c.branch_id ?? branch;
           const nextFollow = kind === 'filled_day' && c.follow_up === 'Not Contacted' && follow !== null ? follow : c.follow_up;
-          // the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes
-          const remind = follow !== null && String(nextFollow ?? '').toLowerCase() !== follow.toLowerCase() ? `Reminder (Google Form): ${follow}` : null;
+          // the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes,
+          // unless the answer's notes already have what REMINDERS said ("Reminder: ...", lib/checkup-form.js)
+          const remind = follow !== null && String(nextFollow ?? '').toLowerCase() !== follow.toLowerCase() && !/(^|; )Reminder: /.test(notes ?? '')
+            ? `Reminder (Google Form): ${follow}` : null;
           let nextNotes = c.notes ?? null;
           for (const part of [notes, remind,
             doctors !== null && nextDoctors.toLowerCase() !== doctors.toLowerCase() ? `On the Google Form: "Who did your checkup?" ${doctors}` : null,

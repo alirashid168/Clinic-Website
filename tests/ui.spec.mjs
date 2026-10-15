@@ -2462,6 +2462,9 @@ await step('Checkups page: a follow-up status and a note save, and are still the
   assert.doesNotMatch(await m.locator('.field-label', { hasText: 'If yes, then when?' }).innerText(), /required/, '"If yes, then when?" is not required either');
   await m.getByLabel(/Estimated fee/).fill('12000');
   for (const box of await doctorGroup(m).getByRole('checkbox', { checked: true }).all()) await box.uncheck();    // another doctor in place of the old one
+  // (the first old row can be at a branch of another city, e.g. Islamabad: then Dr. Hina of Karachi waits behind the button)
+  const moreDoctors = doctorGroup(m).getByRole('button', { name: /^Show doctors of other cities/ });
+  if (await moreDoctors.count()) await moreDoctors.click();
   await doctorGroup(m).getByLabel('Dr. Hina (sample)', { exact: true }).check();
   await m.getByRole('button', { name: 'Save' }).click();
   await pk.waitForSelector('.toast:has-text("saved")');
@@ -2801,7 +2804,7 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
     '8/21/2026 19:25:03,Form Test Alpha,RJ Mall - Karachi,0300-5550811,Dr. Hina (sample),Yes,General Checkup,Yes,Yes,Next month,done',
     '8\\27\\2026     16.05.9,Form Test Bravo,DHA Phase 6 - Karachi,3005550812,Someone (sample),No,"Braces, Scaling and Polishing",Needs More Clear Explanation,No,Too far from home,not on whatsapp',
     '9/2/2026 10:00:00,Form Test Charlie,Lahore - Gulberg,0300-5550813,,Yes,Crown/Bridge,Form Test Someone,Lahore - Gulberg,,',
-    '3/10/2026 11:00:00,Import Test Beta,Lahore - Gulberg,0300-5550202,,Yes,Braces,Yes,Yes,After Eid,treatment started',
+    '3/10/2026 11:00:00,Import Test Beta,Lahore - Gulberg,0300-5550202,,Yes,Braces,Yes,Yes,After Eid,Started',
     `${today},Form Test Today,RJ Mall - Karachi,0300-5550815,,Yes,Braces,Yes,Yes,Soon,`,
     '9/3/2026 11:00:00,,RJ Mall - Karachi,0300-5550816,,Yes,Braces,Yes,Yes,,',
     'soon,Form Test Bad Date,RJ Mall - Karachi,0300-5550817,,Yes,Braces,Yes,Yes,,', ''].join('\r\n');
@@ -2865,8 +2868,8 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
   const beta = rowsOf(pk).first();
   assert.equal(await beta.locator('select[aria-label^="Follow-up status"]').inputValue(), 'Interested', 'the old list\'s row keeps its follow-up status');
   assert.equal(await beta.locator('input[aria-label^="Notes for"]').inputValue(),
-    'Wants to think; Reminder: treatment started; Reminder (Google Form): Started; On the Google Form: "What was your checkup for?" Braces',
-    'its own treatment ("Braces consult") stays; what the form said is in the notes, the follow-up status it did not take too');
+    'Wants to think; Reminder (Google Form): Started; On the Google Form: "What was your checkup for?" Braces',
+    'its own treatment ("Braces consult") stays; what the form said is in the notes, the follow-up status it did not take too (once)');
   assert.match(await beta.innerText(), /Old list: Sample tab B, answers from the Google Form/);
   assert.match(await beta.innerText(), /After Eid/);
   // the Source filter
