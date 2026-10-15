@@ -1,6 +1,7 @@
-// The two forms behind the homepage buttons (owner, 11 Oct 2026): "Join our team" (#/join) and "Complaints & suggestions"
-// (#/feedback). Their own addresses, so the clinic can share the links. Most visitors are on a phone: one column, large
-// controls, the right keyboard for numbers. Every field is checked here first (lib/public-forms.js) and again by the database.
+// The two public forms (owner, 11 Oct 2026), linked from the top bar of every public page: "Join our team" (#/join) and
+// "Complaints & suggestions" (#/feedback). Their own addresses, so the clinic can share the links. Most visitors are on a
+// phone: one column, large controls, the right keyboard for numbers. Every field is checked here first (lib/public-forms.js)
+// and again by the database.
 //
 // An error is shown under its field and focus moves to the first one; a refusal from the database is shown the same way.
 // After sending, the form is replaced by a thank-you that repeats nothing the visitor typed. A hidden box catches bots

@@ -1,6 +1,6 @@
-// Public website: home (hero smile card + four doors with the two form buttons under them + Meet Dr. Ali + his week
-// and the clinics + a section on the two forms), our results and the visitor page. The parts that need no data render at
-// once; the schedule, results and clinic cards fill in when the database answers.
+// Public website: home (hero smile card + four doors + Meet Dr. Ali + his week and the clinics + a section on the two
+// forms), our results and the visitor page, each under the top bar with its links to the two forms. The parts that need no
+// data render at once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce, modal } from '../ui/dom.js';
 import { state } from '../state.js';
 import { VISITOR, HOME, CONTACT, BRACES_PRICING } from '../content.js';
@@ -60,14 +60,20 @@ function staffReturn() {
   return line;
 }
 
-/** The top bar of the public pages (also used by the two forms, views/forms.js). */
+/**
+ * The top bar of the public pages (also used by the two forms, views/forms.js). Its two links are the two forms (owner,
+ * 15 Oct 2026): the homepage doors already lead to the patient login and the treatments, so the bar does not repeat them.
+ * On a phone the links take their own line under the name. The link to the page on screen is marked aria-current="page".
+ */
 export function header(sub) {
+  const here = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
+  const link = (path, label) => h('a', { href: `#/${path}`, 'aria-current': here === path ? 'page' : null }, label);
   return h('header', { class: ['site-header', sub && 'subpage-header'] },
     staffReturn(),
     h('a', { href: '#/', class: 'wordmark' }, "Dr. Ali Rashid's", h('small', {}, 'Dental Clinic')),
     h('nav', { class: 'inline', 'aria-label': 'Main' },
-      h('a', { href: '#/visitor' }, 'Treatments'),
-      h('a', { href: '#/login/patient' }, 'Patient login')));
+      link('join', 'Join our team'),
+      link('feedback', 'Complaints & suggestions')));
 }
 
 /** wa.me link to the clinic: the number set in staff Settings, or CONTACT when settings could not load. Never a link without a recipient. */
@@ -159,8 +165,8 @@ function resultsSection(cases, { limit, reviews } = {}) {
 
 /**
  * The two forms the owner asked for (11 Oct 2026), "Join our team" and "Complaints & suggestions", once more after the clinics:
- * each opening its own page (#/join, #/feedback) with a line on what it is for, and one line on who sees what is sent. (Their
- * two buttons are under the doors at the top.)
+ * each opening its own page (#/join, #/feedback) with a line on what it is for, and one line on who sees what is sent. (At the
+ * top they are the two links of the top bar, header() above.)
  */
 function formsSection() {
   const card = (href, title, text, action) => h('a', { class: 'forms-card', href },
@@ -262,11 +268,6 @@ export async function renderHome(root) {
           h('a', { class: 'door', href: '#/visitor' }, h('strong', {}, 'Visitor'), h('span', {}, 'Braces options, treatments and how to start')),
           h('a', { class: 'door', href: '#/results' }, h('strong', {}, 'Our results'), h('span', {}, 'Smile makeovers, veneers, braces and more')),
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))),
-        // The two buttons the owner asked for (11 Oct 2026), right under the doors, so they are found on the first screen or just
-        // after it, without scrolling past Dr. Ali, his week and the clinics (12 Oct). The section after the clinics says more.
-        h('div', { class: 'hero-forms' },
-          h('a', { class: 'btn btn-lg hero-btn', href: '#/join' }, 'Join our team'),
-          h('a', { class: 'btn btn-lg hero-btn', href: '#/feedback' }, 'Complaints & suggestions')),
         h('p', { class: 'hero-demo' }, 'New here? ', h('a', { href: '#/patient/demo' }, 'See a sample patient account'), ' to find out what you get.'))),
     h('main', { id: 'main' },
       meet.el,
