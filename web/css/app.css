@@ -1251,6 +1251,10 @@ table.sheet td.pp { text-align: right; }
 .badge-checkup { background: var(--checkup-bg); color: var(--checkup-text); border-color: var(--checkup-line); }
 /* A left edge in the name cell: colour only repeats what "no Mr#" in the MR # cell says (and a screen reader hears). */
 table.sheet tbody tr.is-checkup > .name-col { box-shadow: inset 3px 0 0 var(--checkup-line), 2px 0 0 var(--sheet-grid-strong); }
+/* "Fill in form" on a checkup row (sheet.js checkupRowEl), in the Month cell a checkup leaves empty: framed like a button, and 12px on a
+   touch screen too, so the words fit the cell whole (a button's text does not make iOS zoom, as a field's would). */
+table.sheet .form-later { padding: 0 3px; background: var(--enamel); color: var(--text-accent); box-shadow: inset 0 0 0 1px var(--aubergine); font-size: 12px; font-weight: 600; }
+table.sheet .form-later:hover { background: var(--aubergine-soft); box-shadow: inset 0 0 0 1px var(--aubergine); }
 /* Follow-up status and the day status of a checkup: one colour family per group; the text always names the status. */
 .status-unset, .status-chip.tone-muted { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
 .status-chip.tone-ok { background: var(--status-ok-bg); color: var(--status-ok-text); }
