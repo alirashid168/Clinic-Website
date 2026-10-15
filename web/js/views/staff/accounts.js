@@ -194,10 +194,14 @@ async function cash(root) {
         h('button', { class: 'btn btn-primary', onclick: busy(async () => {
           clearFieldErrors(panel);
           if (counted.value === '') { showFormErrors(panel, [{ input: counted, message: 'Enter the cash you counted.' }]); return; }
-          if (closings.some((c) => c.branch_id === Number(branch.value) && c.closing_date === today)) {
-            showFormErrors(panel, [{ input: branch, message: `Today's cash at ${branchName(Number(branch.value))} is closed already.` }]); return;
+          const closedAlready = () => showFormErrors(panel, [{ input: branch, message: `Today's cash at ${branchName(Number(branch.value))} is closed already.` }]);
+          if (closings.some((c) => c.branch_id === Number(branch.value) && c.closing_date === today)) { closedAlready(); return; }
+          let c;
+          try { c = await d.closeCash(branch.value, today, Number(counted.value), notes.value); } catch (e) {
+            // Closed from another computer since this page was opened: the database keeps one closing per branch and day.
+            if (e?.code === '23505' || /duplicate key|already closed/i.test(e?.message || '')) { closedAlready(); return; }
+            throw e;
           }
-          const c = await d.closeCash(branch.value, today, Number(counted.value), notes.value);
           if (!seesCash || c.difference === null || c.difference === undefined) toast('Saved. Accounts will check it.', 'ok', 6000);
           else toast(Number(c.difference) === 0 ? 'Cash closed. It matches.' : `Cash closed. Difference ${rupees(c.difference)} sent to the accountant.`, Number(c.difference) === 0 ? 'ok' : 'error', 6000);
           await load();

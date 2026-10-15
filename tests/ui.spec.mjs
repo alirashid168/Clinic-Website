@@ -1193,8 +1193,8 @@ await step('money: the front desk sees today\'s payments of its branch one by on
   await pfin.locator('table.list tbody tr a:text("Mariam Akhtar")').click();
   const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
   await money.waitFor();
-  assert.match(await money.innerText(), /No dues[\s\S]*No invoices\./);
-  assert.doesNotMatch(await money.innerText(), /Rs|received/, 'no payment or amount of the patient on the profile');
+  assert.match(await money.innerText(), /No dues\s+Invoices and payments are with accounts\./);
+  assert.doesNotMatch(await money.innerText(), /Rs|received|No invoices|Installment plan/, 'no payment or amount of the patient on the profile, and no plan');
   // Reports: no "Highest dues" (every patient's dues added up by branch).
   await pfin.goto(BASE + '#/staff/reports?group=patients&tab=dues');
   await pfin.waitForSelector('.report-tabs .tab');
@@ -1245,6 +1245,13 @@ await step('money: the accountant and Dr. Ali still see everything: income, tota
   await pfin.goto(BASE + '#/staff/reports?group=patients');
   await pfin.waitForSelector('.report-tabs .tab');
   assert.ok((await pfin.locator('.report-tabs .tab').allInnerTexts()).some((t) => /Highest dues/.test(t)), 'Dr. Ali has "Highest dues"');
+  // Another doctor's log: what was billed, own patients paid and the share (finance.view).
+  await pfin.goto(BASE + '#/staff/log');
+  await pfin.locator('label:has-text("Doctor") select').selectOption({ label: 'Dr. Hina (sample)' });
+  await pfin.locator('table.list tbody tr:has-text("Areeba Siddiqui")').waitFor();
+  await pfin.locator('.stat:has-text("Billed from treated visits")').waitFor();
+  assert.match(await pfin.locator('.stat:has-text("Billed from treated visits") strong').innerText(), /^Rs [\d,]+$/);
+  assert.ok(await pfin.locator('.stat:has-text("Own patients paid")').count(), 'Dr. Ali sees what a doctor\'s own patients paid');
 });
 await step('money: the assistant and the doctor see no rupees but a patient\'s dues; the doctor\'s own log keeps their own share', async () => {
   for (const who of ['Assistant', 'Dr. Bushra']) {
@@ -1255,13 +1262,17 @@ await step('money: the assistant and the doctor see no rupees but a patient\'s d
     const head = await pfin.locator('h2:text("Branches today") + .table-scroll thead th').allInnerTexts();
     assert.ok(!head.includes('Received') && !head.includes('Cash closing') && head.includes('Patients with dues'), `${who}: ${head.join('|')}`);
     assert.equal(await pfin.locator('.day-payments-panel').count(), 0, `${who}: no list of payments`);
+    // The Aaj ki List of North Nazimabad: each patient's dues in P.P (the $$ flag), nothing added up.
+    await pfin.goto(BASE + '#/staff/sheet?branch=2');
+    await pfin.waitForSelector('table.sheet tbody tr');
+    assert.deepEqual(await rupeesShown(pfin, 'td.pp'), [], `${who}: Aaj ki List: no rupees but a patient's own dues`);
     // A braces patient who owes 15,000: the dues (the hold on treatment) show, the invoices and payments do not.
     await pfin.goto(BASE + '#/staff/patients?q=Hamza');
     await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
     const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
     await money.waitFor();
-    assert.match(await money.innerText(), /Rs 15,000 pending[\s\S]*No invoices\./, `${who}: the dues, and no invoices`);
-    assert.doesNotMatch(await money.innerText(), /payments ·|received/, `${who}: no payments`);
+    assert.match(await money.innerText(), /Rs 15,000 pending\s+Invoices and payments are with accounts\./, `${who}: the dues, and the invoices are with accounts`);
+    assert.doesNotMatch(await money.innerText(), /payments ·|received|Installment plan/, `${who}: no payments and no plan`);
   }
   await pfin.goto(BASE + '#/staff/log');
   await pfin.locator('.stat:has-text("Patients treated")').waitFor();
@@ -1294,6 +1305,10 @@ await step('money: with "Create invoices and take payments" ticked (still no "Vi
   const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
   await money.locator('table.list tbody tr').first().waitFor();
   assert.match(await money.innerText(), /INV-2026-\d+[\s\S]*Rs 15,000 unpaid/, 'the patient\'s own invoice, with what is unpaid');
+  // Making an invoice or a plan reads it back as it is saved, which needs "View invoices and payments": not offered, so the desk is
+  // never sent to ask Dr. Ali for a box that would show it the clinic's totals.
+  assert.equal(await pfin.getByRole('button', { name: 'New invoice' }).count(), 0, 'no New invoice');
+  assert.doesNotMatch(await money.innerText(), /Installment plan|Set up a plan/, 'no installment plans');
   await pfin.getByRole('button', { name: 'Take payment' }).click();
   const m = pfin.locator('.modal:has(h2:has-text("Take payment · Hamza Qureshi"))');
   await m.getByLabel('For invoice').waitFor();

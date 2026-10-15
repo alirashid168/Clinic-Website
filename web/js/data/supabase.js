@@ -813,7 +813,8 @@ export async function createSupabaseAdapter() {
 
   async function duesFor(ids) {
     if (!ids.length) return {};
-    const rows = check(await callRpc('dues_for', { p_patients: ids }));
+    // A hundred at a time: the database answers at most 500 patients a call for whoever does not see the totals (20261015000400).
+    const rows = await byIdChunks(ids, async (part) => check(await callRpc('dues_for', { p_patients: part })));
     return Object.fromEntries(rows.map((r) => [r.patient_id, Number(r.dues)]));
   }
   async function flagsFor(ids) {
@@ -1826,12 +1827,20 @@ export async function createSupabaseAdapter() {
     async cashClosings() { return capped(check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(201)), 200); },
     /**
      * The closings of the person's branches without any amount (cash_closings_blind, 20261015000400): for whoever closes the cash but
-     * does not see the money (a blind count). Rows { id, branch_id, closing_date, closed_at, closed_by_name, checked }; before the
-     * database update, an empty list marked missing.
+     * does not see the money (a blind count). Rows { id, branch_id, closing_date, closed_at, closed_by_name, checked }. Before the
+     * database update the closer still reads the table itself (the old "view closings" policy): the same rows from the columns
+     * without any amount, so Today still says Closed or Not closed and a second closing is still stopped. If that fails too, an
+     * empty list marked missing.
      */
     async cashClosingsBlind() {
       const r = await rpc('cash_closings_blind', { p_limit: 200 });
-      return r.missing ? Object.assign([], { missing: true }) : r.data || [];
+      if (!r.missing) return r.data || [];
+      try {
+        const rows = check(await sb.from('cash_closings').select('id,branch_id,closing_date,closed_at,verified_at,verified_by')
+          .order('closing_date', { ascending: false }).limit(200));
+        return rows.map((c) => ({ id: c.id, branch_id: c.branch_id, closing_date: c.closing_date, closed_at: c.closed_at, closed_by_name: null,
+          checked: !!(c.verified_at || c.verified_by) }));
+      } catch { return Object.assign([], { missing: true }); }
     },
     async verifyClosing(id) { check(await sb.from('cash_closings').update({ verified_by: await userId(), verified_at: new Date().toISOString() }).eq('id', id)); },
     // ---- report queries (Reports page): payments, invoices, advances, daily visits in a date range.

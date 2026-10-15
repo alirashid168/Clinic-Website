@@ -687,7 +687,7 @@ export function createDemoAdapter() {
         payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || (can('billing.create') && branchOk(x.branch_id))))),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
-        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || can('billing.create')))),
+        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view')))),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
         complaints: db.complaints.filter((c) => c.patient_id === id).map((c) => ({ ...clone(c), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id && (s?.kind === 'staff' || !m.internal_note))) })),
       };
@@ -1216,11 +1216,13 @@ export function createDemoAdapter() {
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
-      if (me() && !can('billing.view') && !can('billing.create')) return []; // row-level security: no plans for the rest of the staff
+      if (me() && !can('billing.view')) return []; // row-level security ("view plans"): plans are for "View invoices and payments"
       return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId));
     },
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
       need('billing.create');
+      // As the database: save_installment_plan runs as the person and reads the new plan back, which needs billing.view.
+      if (!can('billing.view')) fail('new row violates row-level security policy for table "payment_plans"');
       db.payment_plans ||= [];
       const key = opts.idempotencyKey || idempotencyKey;
       const sig = JSON.stringify([patient_id, braces_case_id, Number(total_fee), starts_on || todayISO(), notes, installments.map((i) => [i.due_date, Number(i.amount), i.note || null])]);

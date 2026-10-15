@@ -149,6 +149,9 @@ test('demo: a patient\'s invoices and payments: none for the assistant; one pati
   assert.ok((await d.paymentsToday()).some((r: any) => r.patient_name === 'Hamza Qureshi' && r.amount === 5000 && r.received_by_name === 'Front desk (North Nazimabad)'));
   await assert.rejects(() => d.createInvoice({ patient_id: hamza.id, branch_id: 2, items: [{ description: 'Sample', quantity: 1, unit_price: 100 }] }), /row-level security/,
     'a new invoice still needs "View invoices and payments" (as the database: save_invoice reads it back)');
+  await assert.rejects(() => d.savePaymentPlan({ patient_id: hamza.id, total_fee: 60000, starts_on: todayISO(), installments: [{ due_date: todayISO(), amount: 60000 }] }),
+    /row-level security/, 'so does a new installment plan (save_installment_plan reads it back)');
+  assert.deepEqual([(await d.getPatient(hamza.id)).plans.length, (await d.paymentPlans(hamza.id)).length], [0, 0], 'and the plans are not read ("view plans": billing.view)');
   await assert.rejects(() => d.totalDues(), /NOT_ALLOWED: money totals/, 'and still no totals');
 });
 
@@ -192,17 +195,38 @@ async function livePage(perms: string[], answer: (table: string, ops: any[]) => 
   return { f, data };
 }
 
-test('live: today\'s payments and the blind closings come from the database functions; before the update they say missing', async () => {
+test('live: today\'s payments and the blind closings come from the database functions; before the update the payments say missing and the closings come without amounts', async () => {
   const { f, data } = await livePage(['payments.day_list', 'cash.close']);
   f.rpcAnswer = (name: string) => ({ data: name === 'payments_today' ? [{ id: 'y1', patient_name: 'Sample Payer', amount: 2500 }] : [{ id: 'c1', checked: false }], error: null, status: 200 });
   assert.deepEqual(await data.paymentsToday(), [{ id: 'y1', patient_name: 'Sample Payer', amount: 2500 }]);
   await data.paymentsToday({ branchId: '2' });
   assert.deepEqual(await data.cashClosingsBlind(), [{ id: 'c1', checked: false }]);
   assert.deepEqual(f.rpcs, [{ name: 'payments_today', args: { p_branch: null } }, { name: 'payments_today', args: { p_branch: 2 } }, { name: 'cash_closings_blind', args: { p_limit: 200 } }]);
-  const old = await livePage(['payments.day_list', 'cash.close']);
+  // Before the database update: no payments list, and the closer reads the closings from the table (the old "view closings" policy
+  // lets them) asking only for the columns without any amount.
+  const closed = { id: 'c0', branch_id: 2, closing_date: '2026-10-14', closed_at: '2026-10-14T16:00:00Z', verified_at: null, verified_by: null };
+  const old = await livePage(['payments.day_list', 'cash.close'], (table: string) => ({ data: table === 'cash_closings' ? [closed] : [], error: null, status: 200 }));
   old.f.rpcAnswer = () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' }, status: 404 });
   assert.equal((await old.data.paymentsToday()).missing, true);
-  assert.equal((await old.data.cashClosingsBlind()).missing, true);
+  assert.deepEqual(await old.data.cashClosingsBlind(), [{ id: 'c0', branch_id: 2, closing_date: '2026-10-14', closed_at: '2026-10-14T16:00:00Z', closed_by_name: null, checked: false }]);
+  const asked = old.f.requests.find((r: any) => r.table === 'cash_closings').ops.find((o: any) => o[0] === 'select')[1];
+  assert.equal(asked, 'id,branch_id,closing_date,closed_at,verified_at,verified_by', 'no expected cash, counted cash, difference or notes');
+  const none = await livePage(['cash.close'], () => ({ data: null, error: { code: '42501', message: 'permission denied' }, status: 403 }));
+  none.f.rpcAnswer = old.f.rpcAnswer;
+  assert.equal((await none.data.cashClosingsBlind()).missing, true, 'if the table cannot be read either: an empty list marked missing');
+});
+
+test('live: before the database update the desk\'s Today still says the cash is closed; the dues are asked for 100 patients at a time', async () => {
+  const visits = Array.from({ length: 250 }, (_, i) => ({ branch_id: 2, status: 'waiting', patient_id: 'p' + i }));
+  const answer = (table: string) => ({ data: table === 'branches' ? [{ id: 2, name: 'North Nazimabad', active: true }] : table === 'visits' ? visits
+    : table === 'cash_closings' ? [{ id: 'c0', branch_id: 2, closing_date: todayISO(), closed_at: 'x', verified_at: null, verified_by: null }] : [], error: null, status: 200 });
+  const desk = await livePage(['cash.close', 'dues.view', 'payments.day_list'], answer);
+  desk.f.rpcAnswer = (name: string, args: any) => (name === 'dues_for' ? { data: args.p_patients.map((id: string) => ({ patient_id: id, dues: id === 'p7' ? 900 : 0 })), error: null, status: 200 }
+    : { data: null, error: { code: 'PGRST202', message: 'Could not find the function' }, status: 404 });
+  const [row] = await desk.data.dashboard(todayISO());
+  assert.deepEqual([row.closing?.id, row.closing?.expected_cash, row.closing?.difference, row.dues, row.dues_patients], ['c0', undefined, undefined, null, 1]);
+  assert.deepEqual(desk.f.rpcs.filter((r: any) => r.name === 'dues_for').map((r: any) => r.args.p_patients.length), [100, 100, 50],
+    'the database answers at most 500 a call to whoever does not see the totals');
 });
 
 test('live: the desk\'s Today asks for the closings without amounts and does not add up the dues; accounts read the closings themselves', async () => {

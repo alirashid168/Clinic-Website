@@ -21,7 +21,8 @@
 --      of being answered with zeros. A patient's own login still gets only their own rows, as before.
 --   4. doctor_summary(): the rupees (billed, own patients paid, the percentage rule, the share) only with finance.view, or on
 --      a doctor's own summary with "See own doctor percentage". Anyone else allowed to open it (the coordinator, a shared
---      login with "See every doctor's daily log") gets the counts and the complaints, with the money left out (null).
+--      doctors login with "See every doctor's daily log" and no doctor record of its own) gets the counts and the complaints,
+--      with the money left out (null).
 --   5. The daily cash closing is a blind count for someone who may close the cash but not see the money (cash.close without
 --      cash.verify, billing.view or finance.view): close_cash() answers them without the expected cash and the difference,
 --      they no longer read cash_closings directly (its "view closings" policy), and public.cash_closings_blind() lists the
@@ -29,17 +30,27 @@
 --   6. public.patient_billing(patient): one patient's own invoices and payments, for someone who may take payments
 --      (billing.create) without seeing invoices (billing.view), so the payment form can match the money to that
 --      patient's unpaid invoices. Nothing across patients.
+--   7. dues_for(patients): at most 500 patients a call for someone without finance.view or billing.view (the website asks
+--      for 100 at a time). It only slows down adding up everybody's dues; see "What this file does not stop" below.
 --
--- Additive where it can be: one policy is replaced (cash_closings "view closings": drop policy if exists + create), four
--- functions are replaced with the same arguments and answers (payments_summary, total_dues, doctor_summary, close_cash: the
--- changes are only the refusals and the money left out), and three are new. It needs
+-- Additive where it can be: one policy is replaced (cash_closings "view closings": drop policy if exists + create), five
+-- functions are replaced with the same arguments and answers (payments_summary, total_dues, doctor_summary, close_cash,
+-- dues_for: the changes are only the refusals and the money left out), and three are new. It needs
 -- 20261007002000 (payments_summary, total_dues) and 20261011000200 (doctor_summary) first. Safe to run more than once.
 --
--- HOW TO APPLY
---   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
---   With the Supabase CLI, keep the file name as it is (20261015000400 sorts after 20261015000100_staff_menu_prefs.sql).
---   Until it is run the website still works as before, except the front desk's "Payments today" on the Today page, which
---   says the database update is needed, and the blind cash count, which asks for it too.
+-- What this file does not stop (for Dr. Ali to decide)
+--   - Every role has "See $$ pending dues flag" and may look up patients, so anyone signed in can ask dues_for for every
+--     patient (500 at a time: a clinic of 10,000 patients is 20 requests) and add up the clinic's pending dues. Stopping
+--     that needs dues_for limited to the patients a person is working with (today's lists, a search), a larger change.
+--
+-- HOW TO APPLY (in this order)
+--   1. Put the website live first (the new pages work with the database as it is now: the front desk's cash closing and its
+--      "Closed" or "Not closed" on Today keep working; "Payments today" says the database update is needed).
+--   2. Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
+--      With the Supabase CLI, keep the file name as it is (20261015000400 sorts after 20261015000100_staff_menu_prefs.sql).
+--   3. Reload the website on every staff computer (Ctrl+Shift+R). A page left open from before step 1 would tell the front
+--      desk "It matches" after a cash count without checking, and a page opened between steps 1 and 2 keeps saying the
+--      database update is needed until it is reloaded.
 -- =============================================================================
 
 do $$
@@ -205,7 +216,10 @@ begin
   if auth.uid() is not null and not public.is_admin() and not public.has_perm('doctor_log.view_all') and (v_me is null or v_me <> p_clinician) then
     raise exception 'You can only see your own summary' using errcode = '42501';
   end if;
-  v_money := auth.uid() is null or public.has_perm('finance.view') or (v_me = p_clinician and public.has_perm('commission.view_own'));
+  -- coalesce and "v_me is not null": a login with no doctor record of its own (a shared doctors login) has v_me null, and
+  -- "null = p_clinician" is null, not false; "if not null" would skip the branch below and hand over the money.
+  v_money := coalesce(auth.uid() is null or public.has_perm('finance.view')
+                      or (v_me is not null and v_me = p_clinician and public.has_perm('commission.view_own')), false);
 
   select jsonb_build_object(
            'treated', count(*) filter (where vs.role = 'doctor'), 'checked', count(*) filter (where vs.role = 'checker'), 'assisted', count(*) filter (where vs.role = 'assistant'),
@@ -240,7 +254,7 @@ begin
     v_share := round(v_base * v_rule.percent / 100, 2);
   end if;
 
-  if not v_money then
+  if not coalesce(v_money, false) then
     -- The counts and the complaints only: no amount billed, paid or earned, and no percentage.
     return v_work || v_own || jsonb_build_object('billed', null, 'referred_paid', null, 'complaints', v_complaints, 'rule', null, 'share', null);
   end if;
@@ -344,5 +358,30 @@ end $$;
 
 revoke all on function public.patient_billing(uuid) from public, anon;
 grant execute on function public.patient_billing(uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- 7. Dues for the screens, at most 500 patients a call for whoever does not see the totals
+-- ---------------------------------------------------------------------------------------------------------------
+-- dues_for as 20261005000600 left it (each patient's dues, for the pending dues flag), with the cap first. The website asks
+-- for 100 patients at a time (a day's list, the Today page, a search of 51). Accounts and Dr. Ali may ask for any number.
+create or replace function public.dues_for(p_patients uuid[])
+returns table (patient_id uuid, dues numeric)
+language plpgsql stable security definer set search_path = public
+as $$
+begin
+  if coalesce(cardinality(p_patients), 0) > 500 and not (public.has_perm('finance.view') or public.has_perm('billing.view')) then
+    raise exception 'NOT_ALLOWED: at most 500 patients'' dues at a time.' using errcode = '42501';
+  end if;
+  return query
+    select p.id,
+           coalesce((select sum(i.total) from public.invoices i where i.patient_id = p.id and i.status = 'issued'), 0)
+         - coalesce((select sum(y.amount) from public.payments y where y.patient_id = p.id), 0)
+      from public.patients p
+     where p.id = any(p_patients)
+       and (public.has_perm('dues.view') or p.id = public.current_patient_id());
+end $$;
+
+revoke all on function public.dues_for(uuid[]) from public, anon;
+grant execute on function public.dues_for(uuid[]) to authenticated;
 
 notify pgrst, 'reload schema';

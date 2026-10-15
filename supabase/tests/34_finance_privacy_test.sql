@@ -5,14 +5,17 @@
 --      doctor_summary), and a second run leaves a choice made in the access list alone;
 --   1. the permission "Today's payments, one by one (no totals)" and its defaults;
 --   2. payments_today: the front desk gets today's payments of its own branch one by one (name, Mr#, amount, method, branch, who
---      took it), never another day or branch and never a total; the assistant, doctor and coordinator are refused;
+--      took it), never another day or branch and never a total; the assistant, doctor and coordinator are refused; a choice for
+--      one person in the access list (unticked for a desk, ticked for an assistant) is followed;
 --   3. money totals (payments_summary, total_dues, clinic_report) refuse everyone but accounts and Dr. Ali; a patient's own login
 --      still gets its own; the money tables and views give the others nothing;
---   4. doctor_summary: the counts for whoever may open it, the rupees only for accounts, Dr. Ali, or the doctor on their own;
+--   4. doctor_summary: the counts for whoever may open it, the rupees only for accounts, Dr. Ali, or the doctor on their own
+--      (not a shared doctors login with no doctor record of its own, not a coordinator with "See own doctor percentage");
 --   5. the cash closing is a blind count for the front desk: no expected cash, no difference, no amounts in its list;
 --   6. "Create invoices and take payments" without "View invoices and payments": one patient's own invoices and payments, a payment
 --      can be taken, and still no list across patients;
---   7. grants.
+--   7. dues_for: at most 500 patients a call for whoever does not see the totals;
+--   8. grants.
 \set ON_ERROR_STOP 1
 \set admin  '''00000000-0000-0000-0000-000000003400'''
 \set fd     '''00000000-0000-0000-0000-000000003401'''
@@ -23,6 +26,7 @@
 \set acct   '''00000000-0000-0000-0000-000000003406'''
 \set portal '''00000000-0000-0000-0000-000000003407'''
 \set taker  '''00000000-0000-0000-0000-000000003408'''
+\set shared '''00000000-0000-0000-0000-000000003409'''
 \set p1     '''00000000-0000-0000-0000-000000003411'''
 \set p2     '''00000000-0000-0000-0000-000000003412'''
 \set p3     '''00000000-0000-0000-0000-000000003413'''
@@ -62,6 +66,7 @@ begin;
 select set_config('test.admin', :admin, false), set_config('test.fd', :fd, false), set_config('test.fdall', :fdall, false),
        set_config('test.asst', :asst, false), set_config('test.doc', :doc, false), set_config('test.coord', :coord, false),
        set_config('test.acct', :acct, false), set_config('test.portal', :portal, false), set_config('test.taker', :taker, false),
+       set_config('test.shared', :shared, false),
        set_config('test.p1', :p1, false), set_config('test.p2', :p2, false), set_config('test.p3', :p3, false), set_config('test.p4', :p4, false),
        set_config('test.nn', (select id::text from public.branches where code = 'NN'), false),
        set_config('test.gul', (select id::text from public.branches where code = 'GUL'), false),
@@ -96,7 +101,7 @@ update public.role_permissions set allowed = false
 insert into auth.users (id, email) values
   (:admin, 'admin34@dralirashid.com'), (:fd, 'fd34@dralirashid.com'), (:fdall, 'fdall34@dralirashid.com'), (:asst, 'asst34@dralirashid.com'),
   (:doc, 'doc34@dralirashid.com'), (:coord, 'coord34@dralirashid.com'), (:acct, 'acct34@dralirashid.com'), (:portal, 'portal34@example.com'),
-  (:taker, 'taker34@dralirashid.com');
+  (:taker, 'taker34@dralirashid.com'), (:shared, 'doctors34@dralirashid.com');
 insert into public.staff (id, full_name, email, role) values
   (:admin, 'Admin Thirtyfour', 'admin34@dralirashid.com', 'admin'),
   (:fd,    'Desk Thirtyfour', 'fd34@dralirashid.com', 'front_desk'),
@@ -105,10 +110,14 @@ insert into public.staff (id, full_name, email, role) values
   (:doc,   'Dr. Sample Thirtyfour', 'doc34@dralirashid.com', 'doctor'),
   (:coord, 'Coordinator Thirtyfour', 'coord34@dralirashid.com', 'coordinator'),
   (:acct,  'Accountant Thirtyfour', 'acct34@dralirashid.com', 'accountant'),
-  (:taker, 'Desk Who Takes Payments', 'taker34@dralirashid.com', 'front_desk');
+  (:taker, 'Desk Who Takes Payments', 'taker34@dralirashid.com', 'front_desk'),
+  (:shared, 'Doctors Login Thirtyfour', 'doctors34@dralirashid.com', 'doctor');
 update public.staff set restrict_to_branches = true, branch_ids = array[current_setting('test.nn')::smallint] where id in (:fd, :taker);
 -- Dr. Ali ticks "Create invoices and take payments" for one desk only (a personal choice in the access list).
 insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:taker, 'billing.create', true);
+-- One doctors login for the clinic (no doctor record of its own: the doctor is picked per treatment), which may open every doctor's
+-- log. It is a doctor, so "See own doctor percentage" is on for it.
+insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:shared, 'doctor_log.view_all', true);
 
 insert into public.patients (id, mr_number, full_name, phone, first_branch_id, portal_user_id) values
   (:p1, '34001', 'Sample Payer One', '03005553401', current_setting('test.nn')::smallint, :portal),
@@ -184,6 +193,22 @@ begin
 end $$;
 reset role;
 select pg_temp.act_as('');
+-- A choice for one person in the access list: unticked for this desk, ticked for the assistant.
+insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:fd, 'payments.day_list', false), (:asst, 'payments.day_list', true);
+set role authenticated;
+do $$
+begin
+  perform pg_temp.act_as(current_setting('test.fd'));
+  perform pg_temp.expect_state('select * from public.payments_today()', '42501', 'NOT_ALLOWED: today''s payments need',
+    'payments_today: refused for a desk it is unticked for (a choice for that person in the access list)');
+  perform pg_temp.act_as(current_setting('test.asst'));
+  perform pg_temp.check((select count(*) from public.payments_today() x where pg_temp.mine(x.mr_number)) = 5,
+    'payments_today: an assistant it is ticked for gets the payments one by one');
+  perform pg_temp.expect_state('select public.payments_summary(null, null)', '42501', 'NOT_ALLOWED: money totals', 'payments_today ticked: still no totals');
+end $$;
+reset role;
+select pg_temp.act_as('');
+delete from public.staff_permission_overrides where staff_id in (:fd, :asst);
 
 do $$
 begin
@@ -272,6 +297,17 @@ begin
     'doctor_summary: the coordinator gets the treatments, days, own-patient count and complaints');
   perform pg_temp.check(s->'billed' = 'null'::jsonb and s->'referred_paid' = 'null'::jsonb and s->'share' = 'null'::jsonb and s->'rule' = 'null'::jsonb,
     'doctor_summary: the coordinator gets no amount billed, paid or earned and no percentage');
+  -- The shared doctors login (a doctor, so "See own doctor percentage" is on; "See every doctor's daily log" ticked for it; no doctor
+  -- record of its own): the counts for every doctor, never the rupees.
+  perform pg_temp.act_as(current_setting('test.shared'));
+  s := public.doctor_summary(current_setting('test.c1')::uuid, '2001-05-01', '2001-05-31');
+  perform pg_temp.check((s->>'treated')::int = 2 and jsonb_array_length(s->'complaints') = 1,
+    'doctor_summary: the shared doctors login gets the treatments and complaints');
+  perform pg_temp.check(s->'billed' = 'null'::jsonb and s->'referred_paid' = 'null'::jsonb and s->'share' = 'null'::jsonb and s->'rule' = 'null'::jsonb,
+    'doctor_summary: the shared doctors login (no doctor record of its own) gets no amount billed, paid or earned and no percentage');
+  s := public.doctor_summary(current_setting('test.c2')::uuid, '2001-05-01', '2001-05-31');
+  perform pg_temp.check(s->'billed' = 'null'::jsonb and s->'referred_paid' = 'null'::jsonb and s->'share' = 'null'::jsonb and s->'rule' = 'null'::jsonb,
+    'doctor_summary: nor for any other doctor');
   -- The accountant (finance.view) and Dr. Ali: everything, for any doctor.
   perform pg_temp.act_as(current_setting('test.acct'));
   perform pg_temp.check((public.doctor_summary(current_setting('test.c1')::uuid, '2001-05-01', '2001-05-31')->>'share')::numeric = 1200, 'doctor_summary: the accountant sees the share');
@@ -297,6 +333,20 @@ end $$;
 reset role;
 select pg_temp.act_as('');
 delete from public.staff_permission_overrides where staff_id = :doc;
+-- "See own doctor percentage" ticked for the coordinator, who has no doctor record: still no rupees for any doctor.
+insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:coord, 'commission.view_own', true);
+set role authenticated;
+do $$
+declare s jsonb;
+begin
+  perform pg_temp.act_as(current_setting('test.coord'));
+  s := public.doctor_summary(current_setting('test.c1')::uuid, '2001-05-01', '2001-05-31');
+  perform pg_temp.check((s->>'treated')::int = 2 and s->'billed' = 'null'::jsonb and s->'referred_paid' = 'null'::jsonb and s->'share' = 'null'::jsonb and s->'rule' = 'null'::jsonb,
+    'doctor_summary: a coordinator with "See own doctor percentage" ticked (no doctor record of their own) still gets no money');
+end $$;
+reset role;
+select pg_temp.act_as('');
+delete from public.staff_permission_overrides where staff_id = :coord;
 
 -- 5. The cash closing. On 10 Apr 2001 (no other test uses it) North Nazimabad took 4,000 in cash and 1,000 by card.
 insert into public.payments (patient_id, branch_id, amount, method, received_at) values
@@ -306,6 +356,7 @@ do $$
 declare
   c public.cash_closings;
   v_nn smallint := current_setting('test.nn')::smallint;
+  who text;
 begin
   perform pg_temp.act_as(current_setting('test.fd'));
   c := public.close_cash(v_nn, '2001-04-10', 3900, 'Counted twice');
@@ -329,8 +380,11 @@ begin
   perform pg_temp.act_as(current_setting('test.admin'));
   c := public.close_cash(current_setting('test.gul')::smallint, '2001-04-10', 50);
   perform pg_temp.check(c.expected_cash = 0 and c.difference = 50, 'close_cash: Dr. Ali is told the expected cash and the difference');
-  perform pg_temp.act_as(current_setting('test.asst'));
-  perform pg_temp.expect_state('select * from public.cash_closings_blind()', '42501', 'NOT_ALLOWED: the cash closings need', 'cash_closings_blind: refused for the assistant');
+  foreach who in array array['asst', 'doc', 'coord'] loop
+    perform pg_temp.act_as(current_setting('test.' || who));
+    perform pg_temp.expect_state('select * from public.cash_closings_blind()', '42501', 'NOT_ALLOWED: the cash closings need',
+      'cash_closings_blind: refused for the ' || case who when 'asst' then 'assistant' when 'doc' then 'doctor' else 'coordinator' end);
+  end loop;
 end $$;
 reset role;
 select pg_temp.act_as('');
@@ -398,13 +452,35 @@ end $$;
 reset role;
 select pg_temp.act_as('');
 
--- 7. Grants
+-- 7. dues_for (each patient's dues, for the pending dues flag): at most 500 patients a call for whoever does not see the totals, so the
+-- clinic's pending dues cannot be added up from one request.
+set role authenticated;
+do $$
+declare
+  ids uuid[] := array(select gen_random_uuid() from generate_series(1, 501));
+  who text;
+begin
+  foreach who in array array['asst', 'fd', 'coord'] loop
+    perform pg_temp.act_as(current_setting('test.' || who));
+    perform pg_temp.expect_state(format('select * from public.dues_for(%L::uuid[])', ids), '42501', 'at most 500 patients',
+      'dues_for: 501 patients in one call refused for the ' || who);
+  end loop;
+  perform pg_temp.act_as(current_setting('test.asst'));
+  perform pg_temp.check((select d.dues from public.dues_for(ids[1:499] || array[current_setting('test.p1')::uuid]) d) = 2500,
+    'dues_for: 500 in one call still answer the assistant (a patient''s own dues for the pending dues flag)');
+  perform pg_temp.act_as(current_setting('test.acct'));
+  perform pg_temp.check((select count(*) from public.dues_for(ids || array[current_setting('test.p1')::uuid])) = 1, 'dues_for: the accountant may ask for any number');
+end $$;
+reset role;
+select pg_temp.act_as('');
+
+-- 8. Grants
 do $$
 declare f text;
 begin
   foreach f in array array['public.payments_today(smallint)', 'public.cash_closings_blind(integer)', 'public.patient_billing(uuid)',
                            'public.payments_summary(date, date, bigint, text)', 'public.total_dues()', 'public.doctor_summary(uuid, date, date)',
-                           'public.close_cash(smallint, date, numeric, text)'] loop
+                           'public.close_cash(smallint, date, numeric, text)', 'public.dues_for(uuid[])'] loop
     perform pg_temp.check(not has_function_privilege('anon', f, 'execute') and has_function_privilege('authenticated', f, 'execute'),
       'grants: ' || f || ' is for signed-in users only');
   end loop;
