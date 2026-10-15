@@ -116,7 +116,7 @@ async function route() {
       return await show(gen, view, first, () => renderHome(view), 'dr-ali');
     }
 
-    // The two forms behind the homepage buttons. They need the clinic system to send anything (and its branch list), so
+    // The two forms behind the top bar's links. They need the clinic system to send anything (and its branch list), so
     // without it the visitor gets the contact details instead of a form that cannot be sent.
     if (parts[0] === 'join' || parts[0] === 'feedback') {
       const join = parts[0] === 'join';

@@ -91,6 +91,34 @@ await step('visitor page lists benefits, braces options and WhatsApp button', as
   assert.ok(await page.locator('a:has-text("Message on WhatsApp")').count());
   await shot(page, '02-visitor');
 });
+// The owner (15 Oct 2026): the doors already lead to the patient login and the treatments, so the top bar links to the two forms
+// instead, and the two buttons that were under the doors are gone. [text, href, aria-current] of each top bar link:
+const barLinks = (pg) => pg.locator('.site-header nav a').evaluateAll((as) => as.map((a) => [a.textContent, a.getAttribute('href'), a.getAttribute('aria-current')]));
+const BAR = [['Join our team', '#/join', null], ['Complaints & suggestions', '#/feedback', null]];
+await step('top bar: "Join our team" and "Complaints & suggestions" on every public page, the form on screen marked; the doors still lead to the patient login and the treatments', async () => {
+  assert.deepEqual(await barLinks(page), BAR, 'on the visitor page');
+  await page.locator('.site-header nav a', { hasText: 'Complaints & suggestions' }).click();
+  await page.waitForSelector('h1:has-text("Complaints & suggestions")');
+  assert.deepEqual(await barLinks(page), [BAR[0], ['Complaints & suggestions', '#/feedback', 'page']], 'on the feedback form');
+  await page.locator('.site-header nav a', { hasText: 'Join our team' }).click();
+  await page.waitForSelector('h1:has-text("Join our team")');
+  assert.deepEqual(await barLinks(page), [['Join our team', '#/join', 'page'], BAR[1]], 'on the job form');
+  await page.goto(BASE + '#/results');
+  await page.waitForSelector('h1:has-text("Our results")');
+  assert.deepEqual(await barLinks(page), BAR, 'on Our results');
+  await page.goto(BASE + '#/clinics');
+  await page.waitForSelector('#branches');
+  assert.deepEqual(await barLinks(page), BAR, 'on the clinics (the homepage, scrolled)');
+  await page.locator('.wordmark').click();
+  await page.waitForSelector('.door');
+  assert.deepEqual(await barLinks(page), BAR, 'on the homepage');
+  assert.equal(await page.locator('.site-header a[href="#/login/patient"], .site-header a[href="#/visitor"]').count(), 0, 'the top bar does not repeat the doors');
+  assert.equal(await page.locator('.hero-forms, .hero-body .btn').count(), 0, 'no form buttons under the doors');
+  const doors = await page.locator('.door-row a.door').evaluateAll((as) => as.map((a) => [a.querySelector('strong').textContent, a.getAttribute('href')]));
+  assert.deepEqual(doors, [['Patient', '#/login/patient'], ['Visitor', '#/visitor'], ['Our results', '#/results'], ['Employee', '#/login/staff']], 'the four doors are unchanged');
+  await page.locator('.door', { hasText: 'Patient' }).click();
+  await page.waitForSelector('h1:has-text("Patient login")');
+});
 
 // ------------------------------------------------------------- front desk
 await step('front desk sees only their branch and the Aaj ki List', async () => {
@@ -3845,39 +3873,40 @@ await step('Register needs both "Register new patients" and list editing: with l
 // website forms in the Complaints inbox; the clinic coordinator (no jobs.view) sees no application at all.
 const pf = await newPage({ width: 390, height: 844 });
 const docWidth = (pg) => pg.evaluate(() => document.documentElement.scrollWidth);
-// Where the two hero buttons sit: [top, bottom] of each (page y), the bottom of the doors, and each button's look.
-const heroButtons = (pg) => pg.evaluate(() => {
-  const y = (el) => { const r = el.getBoundingClientRect(); return [Math.round(r.top + scrollY), Math.round(r.bottom + scrollY)]; };
+// Where the parts of the top bar sit, as [left, top, right, bottom]: the name, the nav and each link. Plus the doors and the
+// sample-account line under them (page y), for the hero without the old buttons.
+const barLayout = (pg) => pg.evaluate(() => {
+  const r = (el) => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top + scrollY), Math.round(b.right), Math.round(b.bottom + scrollY)]; };
+  const bar = document.querySelector('.site-header');
   return {
-    doorsEnd: y(document.querySelector('.door-row'))[1],
-    buttons: [...document.querySelectorAll('.hero .hero-forms a')].map((a) => {
-      const s = getComputedStyle(a);
-      return { text: a.textContent, href: a.getAttribute('href'), isBtn: a.classList.contains('btn'), y: y(a), height: a.getBoundingClientRect().height,
-        border: parseFloat(s.borderTopWidth), underline: s.textDecorationLine.includes('underline') };
-    }),
+    name: r(bar.querySelector('.wordmark')), nav: r(bar.querySelector('nav')), links: [...bar.querySelectorAll('nav a')].map((a) => ({ text: a.textContent, box: r(a) })),
+    doors: r(document.querySelector('.door-row')), demo: r(document.querySelector('.hero-demo')),
   };
 });
-await step('homepage: two buttons right under the four doors, "Join our team" and "Complaints & suggestions", on or just after the first screen; a section further down says more; the footer links to both', async () => {
+await step('homepage: the top bar links to "Join our team" and "Complaints & suggestions" (on a phone on one line under the name, inside the screen); no buttons under the doors; a section further down says more; the footer links to both', async () => {
   await pf.goto(BASE);
-  // The owner (11 Oct) asked for two buttons; on 12 Oct he looked for them: they sit right under the doors, styled as buttons (not
-  // underlined text), found without scrolling past Dr. Ali, the week and the clinics.
-  await pf.locator('.hero .hero-forms a').first().waitFor();
-  const phone = await heroButtons(pf);
-  assert.deepEqual(phone.buttons.map((b) => [b.text, b.href]), [['Join our team', '#/join'], ['Complaints & suggestions', '#/feedback']]);
-  for (const b of phone.buttons) {
-    assert.ok(b.isBtn && b.border >= 1 && !b.underline && b.height >= 48, `"${b.text}" looks like a button (48 px or taller, with a border): ${JSON.stringify(b)}`);
-    assert.ok(b.y[0] - phone.doorsEnd <= 40, `"${b.text}" sits right under the doors (doors end at y=${phone.doorsEnd}, the button starts at y=${b.y[0]})`);
-    assert.ok(b.y[1] <= 844 + 120, `"${b.text}" at 390x844 is on the first screen or just after it (it ends at y=${b.y[1]})`);
+  await pf.locator('.site-header nav a').first().waitFor();
+  assert.deepEqual(await barLinks(pf), BAR);
+  assert.equal(await pf.locator('.hero-forms').count(), 0, 'no buttons under the doors');
+  // The two links do not fit beside the name on a phone: they take their own line under it, side by side, the hit areas
+  // inside the screen and 44 px tall, and the page does not scroll sideways.
+  for (const [w, ht] of [[390, 844], [360, 740]]) {
+    await pf.setViewportSize({ width: w, height: ht });
+    const bar = await barLayout(pf);
+    assert.ok(bar.nav[1] >= bar.name[3], `at ${w} px the links are under the name, not over it: ${JSON.stringify(bar)}`);
+    assert.equal(bar.links[0].box[1], bar.links[1].box[1], `at ${w} px both links are on one line`);
+    for (const l of bar.links) assert.ok(l.box[0] >= 0 && l.box[2] <= w && l.box[3] - l.box[1] >= 44, `at ${w} px "${l.text}" is inside the screen and 44 px tall: ${JSON.stringify(l.box)}`);
+    assert.ok(await docWidth(pf) <= w, `no sideways scrolling at ${w} px`);
+    assert.ok(bar.demo[1] - bar.doors[3] <= 40, `at ${w} px the sample-account line follows the doors: ${JSON.stringify(bar)}`);
+    await shot(pf, `39-home-header-${w}`);
   }
-  assert.equal(phone.buttons[0].y[0], phone.buttons[1].y[0], 'side by side');
-  await pf.locator('.hero .hero-forms').scrollIntoViewIfNeeded();
-  await shot(pf, '39-home-hero-forms-390');
-  // On a laptop (1366x768) both are on the first screen.
+  // On a laptop (1366x768) they sit at the top right, beside the name, and the whole hero fits the first screen.
   await pf.setViewportSize({ width: 1366, height: 768 });
-  const laptop = await heroButtons(pf);
-  for (const b of laptop.buttons) assert.ok(b.y[1] <= 768 && b.y[0] - laptop.doorsEnd <= 40, `"${b.text}" at 1366x768 is on the first screen, under the doors: ${JSON.stringify(b.y)}`);
-  await pf.evaluate(() => window.scrollTo(0, 0));
-  await shot(pf, '39b-home-hero-forms-1366');
+  const laptop = await barLayout(pf);
+  assert.ok(laptop.nav[0] > laptop.name[2] && laptop.links.every((l) => l.box[1] < laptop.name[3] && l.box[3] > laptop.name[1]), `beside the name: ${JSON.stringify(laptop)}`);
+  assert.ok(1366 - laptop.nav[2] <= 64, `at the right: ${JSON.stringify(laptop.nav)}`);
+  assert.ok(laptop.demo[3] <= 768 && laptop.demo[1] - laptop.doors[3] <= 40, `the doors and the sample-account line are on the first screen: ${JSON.stringify(laptop)}`);
+  await shot(pf, '39b-home-header-1366');
   await pf.setViewportSize({ width: 390, height: 844 });
   const section = pf.locator('#work-with-us');
   await section.scrollIntoViewIfNeeded();
@@ -3892,6 +3921,10 @@ await step('homepage: two buttons right under the four doors, "Join our team" an
   await section.getByRole('link', { name: /Join our team/ }).click();
   await pf.waitForSelector('h1:has-text("Join our team")');
   assert.equal(await pf.title(), "Join our team | Dr. Ali Rashid's Dental Clinic");
+  // The form's own top bar on a phone: the same two links on their own line, "Join our team" marked as the page on screen.
+  assert.deepEqual(await barLinks(pf), [['Join our team', '#/join', 'page'], BAR[1]]);
+  const bar = await pf.locator('.site-header nav a').evaluateAll((as) => as.map((a) => { const b = a.getBoundingClientRect(); return [b.left, b.right]; }));
+  assert.ok(bar.every(([l, r]) => l >= 0 && r <= 390), `the links are inside the screen: ${JSON.stringify(bar)}`);
 });
 await step('join form on a phone: every field has a label; sent empty, each required field says what is missing, focus goes to the first, the error is linked to its field', async () => {
   const form = pf.locator('form.public-form');
@@ -4334,7 +4367,7 @@ await step('staff: "View the website" in the account menu opens the public homep
   assert.equal(new URL(pf.url()).hash, '#/');
   assert.equal(await pf.locator('.topbar').count(), 0, 'the public homepage, not a staff page');
   for (const t of ['Patient', 'Visitor', 'Our results', 'Employee']) assert.equal(await pf.locator('.door', { hasText: t }).count(), 1, `door ${t}`);
-  assert.equal(await pf.locator('.hero .hero-forms a.btn').count(), 2, 'with the two form buttons under the doors');
+  assert.deepEqual(await barLinks(pf), BAR, 'with the two forms in the top bar');
   assert.equal(await pf.locator('#work-with-us a.forms-card').count(), 2, '... and the section on them further down');
   const back = pf.locator('.staff-return');
   await back.waitFor();

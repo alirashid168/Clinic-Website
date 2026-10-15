@@ -483,12 +483,16 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   color: var(--on-dark-strong); position: relative; z-index: 2;
 }
 .site-header a { color: var(--on-dark-strong); text-decoration: none; font-weight: 700; }
+/* "Join our team" and "Complaints & suggestions" (views/public.js). Where they do not fit beside the name (phones; flex-wrap
+   decides, no breakpoint) the bar wraps them onto their own line under it, at the same size, lined up with the logo. */
 .site-header nav { gap: var(--space-3); }
 .site-header nav a { /* 44px tall hit areas that touch but never overlap */
   display: inline-flex; align-items: center; min-height: var(--target);
   padding: 0 6px; margin: 0 -6px; border-radius: var(--radius-s);
 }
 .site-header nav a:hover { background: var(--on-dark-hover); }
+/* The form on screen: a gold line under its link, as in the staff top bar. */
+.site-header nav a[aria-current="page"] { box-shadow: inset 0 -3px 0 var(--gold); border-radius: var(--radius-s) var(--radius-s) 0 0; }
 /* Signed-in staff looking at the website (views/public.js): one line back to their pages, above the name and the links. */
 .staff-return { flex-basis: 100%; margin: 0; font-size: var(--fs-sm); color: var(--on-dark-soft); }
 .site-header .staff-return a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
@@ -625,7 +629,7 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 /* The section on the two homepage forms ("Join our team", "Complaints & suggestions") after the clinics, and the forms
    (views/forms.js). Phone first: one column, full-width controls and send button, 44px targets; two columns of cards from
    600px. The band has its own space below the clinics (a different background) and a shorter gap to the footer than a whole
-   public section. (The two buttons under the doors are .hero-forms.) */
+   public section. (At the top of every public page the two forms are the links of the top bar, .site-header nav.) */
 .forms-band-wrap { padding-top: var(--space-7); padding-bottom: var(--space-7); }
 .forms-band { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: clamp(var(--space-5), 4vw, var(--space-7)); }
 .forms-band h2 { font-size: var(--fs-section); letter-spacing: -.02em; margin-bottom: var(--space-4); }
@@ -691,14 +695,6 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 .login-demo p { font-size: var(--fs-sm); margin: 0 0 var(--space-3); }
 .hero-demo { font-size: var(--fs-ui); color: var(--on-dark-soft); margin: var(--space-4) 0 0; }
 .hero-demo a { color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
-/* The two form buttons right under the doors ("Join our team", "Complaints & suggestions"): side by side and the same size
-   (on a phone too, where the longer one takes two lines), outlined in the gold a door shows when hovered. */
-.hero-forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); width: min(560px, 100%); margin: var(--space-4) 0 0; }
-.hero-btn {
-  border-color: var(--gold); background: var(--glass); color: var(--on-dark-strong); line-height: 1.25;
-  backdrop-filter: blur(6px); transition: background-color .2s, border-color .2s;
-}
-.hero-btn:hover { background: var(--glass-hover); border-color: var(--gold-300); }
 .sample-banner { position: sticky; top: 0; z-index: var(--z-sticky); border-radius: 0; }
 @media (max-width: 720px), (max-height: 500px) { .sample-banner { position: static; } }
 
@@ -1650,7 +1646,7 @@ table.invoice-lines input { min-width: 0; }
 @media (forced-colors: active) {
   .tab, [role="tab"] { border-bottom-color: Canvas; }
   .tab[aria-selected="true"], [role="tab"][aria-selected="true"] { border-bottom-color: Highlight; }
-  .nav-link[aria-current="page"], .nav-link.current, .menu-list a[aria-current="page"], [role="option"][aria-selected="true"] {
+  .nav-link[aria-current="page"], .nav-link.current, .menu-list a[aria-current="page"], .site-header nav a[aria-current="page"], [role="option"][aria-selected="true"] {
     outline: 2px solid Highlight; outline-offset: -2px;
   }
   .sx-day { border: 1px solid CanvasText; }
