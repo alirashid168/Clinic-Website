@@ -174,7 +174,7 @@ test('a name kept by an earlier page holds only within the idle logout time; wor
   delete g.sessionStorage;
 });
 
-test('no idle logout (0 = never, coming with never-logout; missing or broken the same): a name holds 12 hours without use', () => {
+test('no idle logout (0 = never, 20261015000700_never_logout.sql; missing or broken the same): a name holds 12 hours without use', () => {
   const HOUR = 60 * 60 * 1000;
   assert.equal(DESK_NAME_UNUSED_MS, 12 * HOUR);
   for (const [setting, on, ms] of [[720, true, 12 * HOUR], [30, true, HOUR / 2], ['45', true, 45 * 60 * 1000], [0, false, 12 * HOUR], ['0', false, 12 * HOUR],

@@ -68,7 +68,7 @@ const TOUCH_EVERY_MS = 60 * 1000; // how often the time of last use is written w
 let inMemory = null; // { staffId, name, at }
 
 // How long a name holds without use. With an idle logout (Admin -> Settings, in minutes) that time: the logout ends the name
-// anyway. Without one (0 = never log out, coming with 20261015000600_never_logout.sql; a missing or broken setting is the same)
+// anyway. Without one (0 = never log out, 20261015000700_never_logout.sql; a missing or broken setting is the same)
 // 12 hours: the next shift is asked again, while a reload or the next page within the shift never asks.
 export const DESK_NAME_UNUSED_MS = 12 * 60 * 60 * 1000;
 const positive = (n) => Number.isFinite(n) && n > 0;

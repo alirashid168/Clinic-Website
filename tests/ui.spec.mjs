@@ -8597,6 +8597,100 @@ await step('shared login in two tabs: "Change name" in one tab makes the other a
 });
 await twoTabs.close();
 
+// ------------------------------------------------------------- logging out after no activity
+// The owner (15 Oct): "please remove force log out. the google sheet stays logged in for days and days". session_timeout_minutes 0
+// (or no value) = never; 5 to 720 = after that many minutes. The demo never logs out for no activity (its login lives in the page), so
+// these steps make the page act as the live site does (state.data.mode) and move the page's clock forward instead of waiting.
+const liveLike = (pg, minutes) => pg.evaluate(async (m) => {
+  const { state } = await import('/js/state.js');
+  state.data.mode = 'idle-test';
+  const settings = { ...state.ref.settings };
+  if (m === null) delete settings.session_timeout_minutes; else settings.session_timeout_minutes = m;
+  state.ref.settings = settings;
+  document.dispatchEvent(new Event('app:activity'));
+}, minutes);
+const stillThere = (pg) => pg.locator('.modal', { hasText: 'Are you still there?' });
+const pset = await newPage();
+await step('Settings: "Log staff out after no activity" shows Never when nothing is set, saves Never as 0 and "After N minutes" as N', async () => {
+  await loginAs(pset, 'Dr. Ali Rashid');
+  await pset.goto(BASE + '#/staff/admin?tab=settings');
+  const group = pset.getByRole('group', { name: 'Log staff out after no activity' });
+  await group.waitFor();
+  const never = group.getByLabel('Never (stay signed in, like the Google Sheet)');
+  const after = group.getByLabel('After', { exact: true });
+  const minutes = group.getByLabel('Minutes of no activity before staff are logged out');
+  assert.equal(await never.isChecked(), true, 'Never is chosen when no time is set');
+  assert.equal(await minutes.isDisabled(), true, 'the minutes box is for "After" only');
+  assert.match(await pset.locator('#idle-logout-hint').innerText(), /staff can still press Log out in the name menu/);
+  const saved = () => pset.evaluate(async () => { const { state } = await import('/js/state.js'); return (await state.data.settings()).session_timeout_minutes; });
+  // Save, then wait until the (demo) database has the value: a "Settings saved." toast from the save before may still be on screen.
+  const save = async (want) => {
+    await pset.getByRole('button', { name: 'Save settings' }).click();
+    for (let i = 0; i < 50 && (await saved()) !== want; i += 1) await pset.waitForTimeout(100);
+  };
+  await save(0);
+  assert.equal(await saved(), 0, 'Never is saved as 0');
+  await after.check();
+  assert.equal(await minutes.isEnabled(), true, '"After" opens the minutes box');
+  await minutes.fill('3');
+  await pset.getByRole('button', { name: 'Save settings' }).click();
+  await pset.locator('.field-error', { hasText: 'Enter a whole number of minutes from 5 to 720, or choose Never.' }).waitFor();
+  assert.equal(await saved(), 0, 'nothing saved while the minutes are wrong');
+  await minutes.fill('45');
+  await save(45);
+  assert.equal(await saved(), 45);
+  await pset.goto(BASE + '#/staff/admin?tab=staff');
+  await pset.goto(BASE + '#/staff/admin?tab=settings');
+  await group.waitFor();
+  assert.equal(await after.isChecked(), true, 'a saved time opens as "After"');
+  assert.equal(await minutes.inputValue(), '45');
+  await never.check();
+  assert.equal(await minutes.isDisabled(), true);
+  await save(0);
+  assert.equal(await saved(), 0, 'back to Never: 0');
+});
+await pset.close();
+const pidle = await newPage();
+await pidle.clock.install();
+await step('No activity with a time set (5 minutes): "Are you still there?" a minute before, then logged out, saying why', async () => {
+  await loginAs(pidle, 'Front desk \\(Gulshan\\)');
+  await liveLike(pidle, 5);
+  await pidle.clock.fastForward(4 * 60 * 1000 + 5000);
+  await stillThere(pidle).waitFor();
+  await pidle.clock.fastForward(60 * 1000);
+  await pidle.locator('#toasts .toast', { hasText: 'You were logged out because there was no activity for 5 minutes.' }).waitFor();
+  assert.equal(await pidle.locator('.topbar').count(), 0, 'the staff screen is gone');
+});
+await pidle.close();
+const pnever = await newPage();
+await pnever.clock.install();
+await step('No activity with Never (0, or no value): days later still signed in, no warning; a time set later counts from the last activity', async () => {
+  await loginAs(pnever, 'Front desk \\(Gulshan\\)');
+  const twoDays = 2 * 24 * 60 * 60 * 1000;
+  for (const minutes of [0, null]) {
+    await liveLike(pnever, minutes);
+    await pnever.clock.fastForward(twoDays);
+    await pnever.keyboard.press('Shift'); // activity after the long quiet spell
+    await pnever.waitForTimeout(300);
+    assert.equal(await stillThere(pnever).count(), 0, `${minutes ?? 'no value'}: no warning`);
+    assert.equal(await pnever.locator('.topbar').count(), 1, `${minutes ?? 'no value'}: still signed in`);
+    assert.equal(await pnever.locator('#toasts .toast', { hasText: 'logged out' }).count(), 0, `${minutes ?? 'no value'}: no logout notice`);
+    // The activity is still shared with the other tabs, so a tab running an older copy of the website (0 read as 30 minutes) does not end the login.
+    const sharedAgo = await pnever.evaluate(() => Date.now() - Number(localStorage.getItem('staff-last-active')));
+    assert.ok(sharedAgo >= 0 && sharedAgo < 5000, `${minutes ?? 'no value'}: the key press is shared with other tabs (${sharedAgo} ms ago)`);
+  }
+  // Four days after the login, a limit set now starts from the last activity (the key press above), not from the login.
+  await liveLike(pnever, 5);
+  await pnever.waitForTimeout(300);
+  assert.equal(await pnever.locator('.topbar').count(), 1, 'a limit set later does not log out at once');
+  await pnever.clock.fastForward(4 * 60 * 1000 + 5000);
+  await stillThere(pnever).waitFor();
+  await stillThere(pnever).getByRole('button', { name: 'Stay signed in' }).click();
+  await stillThere(pnever).waitFor({ state: 'detached' });
+  assert.equal(await pnever.locator('.topbar').count(), 1, '"Stay signed in" keeps the login');
+});
+await pnever.close();
+
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }
 console.log(`${passed} checks passed`);
