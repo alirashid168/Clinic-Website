@@ -36,6 +36,7 @@ const PAGES = {
   coordinator: { render: lazy(() => import('./coordinator.js'), 'renderCoordinator'), show: () => can('reminders.manage') || can('lab.manage') || can('retainers.manage') },
   stock: { render: lazy(() => import('./inventory.js'), 'renderInventory'), show: () => can('inventory.manage') },
   complaints: { render: lazy(pagesModule, 'renderComplaints'), show: () => can('complaints.view') },
+  jobs: { render: lazy(() => import('./jobs.js'), 'renderJobs'), show: () => can('jobs.view') },
   review: { render: lazy(pagesModule, 'renderReview'), show: () => isAdmin() || can('complaints.view') || can('flags.clear') },
   log: { render: lazy(pagesModule, 'renderDoctorLog'), show: () => state.session.staff.role === 'doctor' || can('doctor_log.view_all') },
   admin: { render: lazy(() => import('./admin.js'), 'renderAdmin'), show: () => can('users.manage') || can('export.data') || can('audit.view') || can('schedule.manage') || isAdmin() },
@@ -70,7 +71,7 @@ function menu() {
       { ...link('Low ratings', 'coordinator?tab=ratings'), show: () => can('reminders.manage') },
     ] },
     { label: 'More', key: 'more', show: () => true, items: [
-      link('Stock', 'stock'), link('Complaints', 'complaints'), link("Dr. Ali's list", 'review'), link('Doctor log', 'log'),
+      link('Stock', 'stock'), link('Complaints', 'complaints'), link('Job applications', 'jobs'), link("Dr. Ali's list", 'review'), link('Doctor log', 'log'),
       { divider: true, show: () => show('admin') },
       { ...link('Access list', 'admin?tab=access'), show: () => can('users.manage') },
       { ...link('Staff accounts', 'admin?tab=staff'), show: () => can('users.manage') },
@@ -208,6 +209,8 @@ export async function renderStaff(root, path, params, signOut) {
   const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },
     h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
     h('hr', {}),
+    // The public homepage, as visitors see it (owner, 12 Oct 2026); it has a "Back to staff pages" link while signed in (views/public.js).
+    h('a', { href: '#/', onclick: () => closeAll() }, 'View the website'),
     // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
     h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
@@ -233,6 +236,8 @@ export async function renderStaff(root, path, params, signOut) {
     h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('div', { class: 'sidebar-foot' },
       h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
+      // On its own line: Change password and Log out keep their row, well apart.
+      h('a', { class: 'link-btn', href: '#/', onclick: () => closeDrawer(false) }, 'View the website'),
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); openChangePassword({ who: 'staff', username: s.email }); } }, 'Change password'),
         h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); signOut(); } }, 'Log out'))));

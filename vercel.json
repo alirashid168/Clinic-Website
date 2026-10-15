@@ -125,6 +125,16 @@
       "permanent": true
     },
     {
+      "source": "/(join|careers|jobs){/}?",
+      "destination": "/#/join",
+      "permanent": false
+    },
+    {
+      "source": "/(feedback|complaints|suggestions){/}?",
+      "destination": "/#/feedback",
+      "permanent": false
+    },
+    {
       "source": "/(wp-admin|wp-login\\.php|wp-content|wp-includes|category|tag|author|feed)(.*)",
       "destination": "/",
       "permanent": false
