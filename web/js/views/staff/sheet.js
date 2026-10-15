@@ -13,6 +13,8 @@ import { dayListCheckups } from '../../lib/checkups.js';
 import { personTones, personTone } from '../../lib/tones.js';
 import { splitPeople, matchClinician } from '../../lib/legacy.js';
 import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
+import { dayEndControls, laterDayHint, bookedFor } from './day-end.js';
+import { FIRST_DAY } from '../../lib/day-list.js';
 
 const QUEUE_KEY = 'aaj-ki-list-pending-v1';
 const FIELD_NAMES = {
@@ -380,7 +382,8 @@ export async function renderSheet(root, params, signal) {
   const branchSel = select([...(allBranches ? [{ value: 0, label: 'All branches' }] : []), ...branches.map((b) => ({ value: b.id, label: b.name }))], branchId, {
     'aria-label': 'Branch', onchange: (e) => { branchId = Number(e.target.value); setURL(); draw(); load(); },
   });
-  const dateInput = h('input', { type: 'date', value: date, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
+  // (the date picker starts at FIRST_DAY, the first day that can be ended: day-end.js)
+  const dateInput = h('input', { type: 'date', value: date, min: FIRST_DAY, 'aria-label': 'Date', onchange: (e) => { date = e.target.value; setURL(); load(); } });
   const filterSel = select([{ value: '', label: 'All statuses' }, ...Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))], '', {
     'aria-label': 'Filter by status', onchange: (e) => { filter = e.target.value; checkupsOnly = false; draw(); },
   });
@@ -488,6 +491,7 @@ export async function renderSheet(root, params, signal) {
   // way to the server are put on the rows that come back.
   let loadSeq = 0;
   async function load(how) {
+    dayEnd.refresh(); // "End the day" for this branch and day, and the note when it was ended (day-end.js)
     const quiet = how?.quiet === true;
     const seq = ++loadSeq;
     const version = listVersion;
@@ -1107,7 +1111,8 @@ export async function renderSheet(root, params, signal) {
     addPanel.hidden = !branchId || !search;
     // "+ Checkup patient" only where checkups exist (the database update has been run) and for today or an earlier day.
     checkupBtn.hidden = checkupsMissing || date > localISO() || !can('sheet.edit');
-    addHint.textContent = checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
+    // (a later day, such as the one "End the day" opens: patients added there are booked for that day, day-end.js)
+    addHint.textContent = date > localISO() ? laterDayHint(date) : checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
     warnBox.hidden = !checkupsWarn;
     warnBox.textContent = checkupsWarn ? `Checkup patients could not be loaded: ${checkupsWarn}` : '';
     const inUse = [filter && !checkupsOnly, doctorFilter, groupFilter, duesOnly, bracesOnly].filter(Boolean).length;
@@ -1215,7 +1220,7 @@ export async function renderSheet(root, params, signal) {
       rows.push(row);
       listVersion++;
       draw();
-      toast(`${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
+      toast(row.visit_date > localISO() ? bookedFor(p.full_name, row.visit_date) : `${p.full_name} added${row.token_no ? ` with token ${row.token_no}` : ''}.`, 'ok');
       if (!fast && row.braces_month) openRow(row);
       return row;
     } catch (e) { toast(notSaved(e, `${p.full_name} was not added to the list.`), 'error', 8000); return null; }
@@ -1364,6 +1369,15 @@ export async function renderSheet(root, params, signal) {
   const heading = (label, props = {}) => h('th', { scope: 'col', ...props }, label);
   const filterHeading = (label, control, what, props = {}) => h('th', { scope: 'col', ...props }, h('span', { class: 'th-label' }, label),
     h('button', { type: 'button', class: 'th-filter', 'aria-label': what, title: what, onclick: () => showFilters(true, control) }, h('span', { 'aria-hidden': 'true' }, '▾')));
+  // "End the day" (owner, 12 Oct 2026): a copy of the whole day's list (whatever the filters show) goes to the History of
+  // Aaj ki List, then the next day's list opens (today's, when an earlier day was ended). Nothing on this day's list is changed or locked.
+  const dayEnd = dayEndControls({
+    getList: () => ({ branchId, date, pending: q.pendingCount || 0, failed: failedEdits().length,
+      rows: [...rows.map((r) => ({ kind: 'patient', status: r.status })), ...dayListCheckups(checkups, rows).map((c) => ({ kind: 'checkup', status: c.day_status || null }))] }),
+    onEnded: async (next) => { date = next; dateInput.value = date; setURL(); await load(); dateInput.focus(); },
+  });
+  // (small, as the other buttons of the page head)
+  for (const el of [dayEnd.historyLink, dayEnd.button]) el.classList.add('btn-small');
   const page = h('div', { class: 'sheet-page' },
     h('div', { class: 'sheet-head' },
       h('h1', {}, 'Aaj ki List'),
@@ -1372,11 +1386,13 @@ export async function renderSheet(root, params, signal) {
         findBox, filterWrap),
       h('div', { class: 'sheet-tools' },
         h('a', { class: 'btn btn-small', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
+        dayEnd.historyLink, dayEnd.button, dayEnd.hint,
         can('export.data') || can('finance.view') ? h('button', { type: 'button', class: 'btn btn-small', onclick: download }, 'Download') : null)),
     h('div', { class: 'sheet-subhead' }, countsBox, saveStatus),
     failBox,
     undoBox,
     warnBox,
+    dayEnd.note,
     statusHint,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
     h('datalist', { id: 'sheet-doctors' }, state.ref.clinicians.filter((c) => c.is_doctor).map((c) => h('option', { value: c.display_name }))),
