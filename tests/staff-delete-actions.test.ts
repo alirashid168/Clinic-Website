@@ -6,6 +6,8 @@
 //     and the login is removed for good (the staff row and its ticks go with it, the doctor stays);
 //   - records: the account stays, switched off and marked deleted (deleted_at, deleted_by), audited as ARCHIVE_LOGIN;
 //   - the login cannot be removed (deleteUser fails): it falls back to the deleted mark, puts the doctor link back and says so;
+//   - a later step that fails (the lock, the count, the mark) says the account is switched off and nothing was deleted, with a
+//     database timeout in plain words (the page would turn "statement timeout" into advice about date ranges);
 //   - it refuses the caller's own account, an admin account, an unknown one, a caller without users.manage (403), and a database
 //     without the update (before anything is changed);
 //   - restore_staff takes the mark off, leaves the account switched off and audits RESTORE_LOGIN;
@@ -24,7 +26,9 @@ function fakeWorld(seed: { staff?: Row[]; clinicians?: Row[]; overrides?: Row[];
     users: new Map<string, Row>((seed.staff ?? []).map((s) => [s.id, { id: s.id, email: s.email }])),
     records: seed.records ?? {},
     calls: [] as Array<[string, any]>,
-    fail: {} as Record<string, string>, // 'update staff', 'insert audit_log', 'deleteUser', 'staff_records', 'updateUserById' ... -> message
+    // 'update staff', 'insert audit_log', 'deleteUser', 'staff_records', 'updateUserById' ... -> message; 'update staff.deleted_at'
+    // fails only an update that sets that column first (the deleted mark), not the one that switches the account off.
+    fail: {} as Record<string, string>,
     seenAtCount: null as Row | null,    // the staff row as it was when staff_records was asked
   };
   const err = (key: string) => (w.fail[key] ? { message: w.fail[key] } : null);
@@ -37,7 +41,7 @@ function fakeWorld(seed: { staff?: Row[]; clinicians?: Row[]; overrides?: Row[];
       const run = async () => {
         if (patch) {
           w.calls.push([`update ${table}`, patch]);
-          const e = err(`update ${table}`);
+          const e = err(`update ${table}`) ?? err(`update ${table}.${Object.keys(patch)[0]}`);
           if (e) return { data: null, error: e };
           for (const r of hits()) Object.assign(r, patch);
           return { data: null, error: null };
@@ -194,6 +198,37 @@ test('delete: the records cannot be counted: the account stays switched off, not
   assert.ok(!names(w).includes('deleteUser'));
 });
 
+test('delete: the records took the database too long to count: plain words, so the page shows the whole sentence (switched off, nothing deleted)', async () => {
+  const w = fakeWorld({ staff: people() });
+  w.fail.staff_records = 'canceling statement due to statement timeout';
+  const res = await deleteStaff(deps(w), { user_id: 'unused-1' });
+  assert.equal(res.body.error, "The account's records could not be counted (the database took too long). Weekend Desk's account is switched off; nothing was deleted.");
+  assert.doesNotMatch(String(res.body.error), /statement timeout|canceling statement/, 'no text the page would turn into advice about date ranges');
+  assert.equal(staff(w, 'unused-1').active, false);
+  assert.ok(!names(w).includes('deleteUser'));
+});
+
+test('delete: the login cannot be locked: the answer says the account is switched off, and nothing is counted or removed', async () => {
+  const w = fakeWorld({ staff: people() });
+  w.fail.updateUserById = 'User not found';
+  const res = await deleteStaff(deps(w), { user_id: 'unused-1' });
+  assert.deepEqual(res, { status: 200, body: { error: "Weekend Desk's account is switched off, but the login could not be locked: User not found" } });
+  assert.deepEqual(names(w), ['update staff', 'updateUserById']);
+  assert.equal(staff(w, 'unused-1').active, false, 'switched off');
+  assert.equal(staff(w, 'unused-1').deleted_at, null, 'not marked deleted');
+  assert.ok(w.users.has('unused-1'));
+});
+
+test('delete: an account with records that cannot be marked deleted stays switched off, and the answer says so', async () => {
+  const w = fakeWorld({ staff: people(), records: { 'busy-1': { total: 2, parts: [{ label: 'visits', one: 'visit', count: 2 }] } } });
+  w.fail['update staff.deleted_at'] = 'permission denied for table staff';
+  const res = await deleteStaff(deps(w), { user_id: 'busy-1' });
+  assert.deepEqual(res.body, { error: "It could not be moved to Deleted accounts (permission denied for table staff). Busy Desk's account is switched off; nothing was deleted." });
+  assert.equal(staff(w, 'busy-1').active, false);
+  assert.equal(staff(w, 'busy-1').deleted_at, null);
+  assert.deepEqual(w.tables.audit_log, [], 'no ARCHIVE_LOGIN for a mark that was not set');
+});
+
 // ---------------------------------------------------------------- refusals
 test('delete: the caller\'s own account is refused, and nothing is touched', async () => {
   const w = fakeWorld({ staff: [...people(), staffRow({ id: 'mgr-1', full_name: 'User Manager', email: 'mgr@dralirashid.com', role: 'coordinator' })] });
@@ -257,6 +292,15 @@ test('restore: refused without users.manage (403), for an unknown account, and f
   assert.deepEqual((await restoreStaff(deps(w), { user_id: 'busy-1' })).body, { error: 'Busy Desk is not in Deleted accounts.' });
   assert.deepEqual(names(w), []);
   assert.equal(staff(w, 'arch-1').deleted_at, NOW);
+});
+
+test('restore: when the mark cannot be taken off, the answer says nothing was changed, and nothing is audited', async () => {
+  const w = fakeWorld({ staff: [...people(), staffRow({ id: 'arch-1', full_name: 'Gone Desk', active: false, deleted_at: NOW, deleted_by: 'admin-1' })] });
+  w.fail['update staff.deleted_at'] = 'canceling statement due to statement timeout';
+  const res = await restoreStaff(deps(w), { user_id: 'arch-1' });
+  assert.deepEqual(res.body, { error: 'Gone Desk could not be brought back (the database took too long). Nothing was changed.' });
+  assert.equal(staff(w, 'arch-1').deleted_at, NOW);
+  assert.deepEqual(w.tables.audit_log, []);
 });
 
 // ---------------------------------------------------------------- the email of a deleted account

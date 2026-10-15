@@ -1505,11 +1505,26 @@ await step('Staff accounts: Delete is on every row but the admin\'s and your own
     assert.equal(await pdl.getByRole('button', { name: 'Delete Front desk (Gulshan)' }).count(), 1, "on other people's rows");
     const own = await pdl.evaluate(async () => { const { state } = await import('/js/state.js'); try { await state.data.deleteStaff('s-coord'); return 'deleted'; } catch (e) { return e.message; } });
     assert.match(own, /cannot delete your own account/, 'the data layer refuses it too');
+    // The dialog says whether the account was ever used for a user manager too (it comes with the count; the login list is Dr. Ali's).
+    await pdl.getByRole('button', { name: 'Delete Weekend reception (sample)' }).click();
+    const dm = pdl.getByRole('dialog', { name: "Delete Weekend reception (sample)'s account?" });
+    await dm.waitFor();
+    assert.match(await dm.innerText(), /Weekend reception \(sample\) has no records on the website \(never logged in\)/, 'a user manager sees "never logged in" too');
+    await dm.getByRole('button', { name: 'Cancel' }).click();
+    await dm.waitFor({ state: 'detached' });
   } finally {
     if (await pdl.getByRole('button', { name: 'Try another role' }).count()) await tryAnotherRole(pdl);
     await loginAs(pdl, 'Dr. Ali Rashid');
     await setManage(null);
   }
+  // The coordinator has logged in now (and saved nothing): the dialog says when.
+  await pdl.goto(BASE + '#/staff/admin?tab=staff');
+  await pdl.getByRole('button', { name: 'Delete Clinic coordinator (sample)' }).click();
+  const cm = pdl.getByRole('dialog', { name: "Delete Clinic coordinator (sample)'s account?" });
+  await cm.waitFor();
+  assert.match(await cm.innerText(), /Clinic coordinator \(sample\) has no records on the website \(last logged in [^)]+\)/);
+  await cm.getByRole('button', { name: 'Cancel' }).click();
+  await cm.waitFor({ state: 'detached' });
 });
 await step('Delete an account nobody used: the dialog says it has no records and the email can be reused; it is removed for good', async () => {
   await pdl.goto(BASE + '#/staff/admin?tab=staff');
@@ -1524,6 +1539,34 @@ await step('Delete an account nobody used: the dialog says it has no records and
   await m.waitFor({ state: 'detached' });
   assert.equal(await pdl.locator('tr', { hasText: 'Weekend reception (sample)' }).count(), 0, 'gone from the list');
   assert.equal(await pdl.locator('summary', { hasText: 'Deleted accounts' }).count(), 0, 'and not under Deleted accounts: it is gone for good');
+});
+await step('A login made for a doctor and never used: Delete says the doctor stays; afterwards "New staff account" offers that doctor again', async () => {
+  await pdl.goto(BASE + '#/staff/admin?tab=staff');
+  await pdl.getByRole('button', { name: 'New staff account' }).click();
+  const nm = pdl.locator('.modal');
+  await nm.getByPlaceholder('Full name').fill('Hina login (sample)');
+  await nm.locator('input[type=email]').fill('hina.login@dralirashid.com');
+  await nm.getByLabel('Link to doctor/assistant name').selectOption({ label: 'Dr. Hina (sample)' });
+  await nm.getByRole('button', { name: 'Create account' }).click();
+  await pdl.waitForSelector('td:text("hina.login@dralirashid.com")');
+  await nm.waitFor({ state: 'detached' });
+  // Linked a moment ago, in this same visit to the page: the dialog knows it without a reload.
+  await pdl.getByRole('button', { name: 'Delete Hina login (sample)' }).click();
+  const m = pdl.getByRole('dialog', { name: "Delete Hina login (sample)'s account?" });
+  await m.waitFor();
+  const text = await m.innerText();
+  assert.match(text, /Hina login \(sample\) has no records on the website \(never logged in\)/);
+  assert.match(text, /Dr\. Hina \(sample\) stays in the doctors list for visits; only the login goes\./, 'the linked doctor is named');
+  await m.getByRole('button', { name: 'Delete Hina login (sample)' }).click();
+  await pdl.waitForSelector(".toast:has-text(\"Hina login (sample)'s login was removed for good\")");
+  await m.waitFor({ state: 'detached' });
+  // The doctor is free again: offered in "New staff account" without a reload.
+  await pdl.getByRole('button', { name: 'New staff account' }).click();
+  const again = pdl.locator('.modal');
+  const offered = await again.getByLabel('Link to doctor/assistant name').locator('option').allTextContents();
+  assert.ok(offered.includes('Dr. Hina (sample)'), `Dr. Hina is offered again (${offered.join(', ')})`);
+  await again.getByRole('button', { name: 'Cancel' }).click();
+  await again.waitFor({ state: 'detached' });
 });
 await step('Delete an account with records: the dialog counts them, the account moves to "Deleted accounts (1)" and leaves the Login picker; Bring back returns it switched off', async () => {
   // Before: Dr. Saba (sample) is offered as a doctor's login in Clinic setup.
@@ -1560,6 +1603,34 @@ await step('Delete an account with records: the dialog counts them, the account 
   assert.equal(await back.getByRole('button', { name: 'Delete Dr. Saba (sample)' }).count(), 1, 'and Delete again');
   assert.equal(await pdl.locator('summary', { hasText: 'Deleted accounts' }).count(), 0, 'no deleted accounts left');
   assert.ok(!(await loginOptions(pdl, 'Dr. Amna (sample)')).options.includes('Dr. Saba (sample)'), 'still not offered while switched off');
+});
+await step('A Delete that fails after the server switched the account off: the message says so, the dialog closes, and the row shows it switched off', async () => {
+  await pdl.goto(BASE + '#/staff/admin?tab=staff');
+  // What delete_staff answers when the count fails: it switched the account off first, then stopped.
+  await pdl.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    window.__realDeleteStaff = state.data.deleteStaff;
+    state.data.deleteStaff = async (id) => {
+      await state.data.deactivateStaff(id);
+      throw new Error("The account's records could not be counted (the database took too long). Accountant (sample)'s account is switched off; nothing was deleted.");
+    };
+  });
+  try {
+    const row = mainRows(pdl).filter({ hasText: 'Accountant (sample)' });
+    assert.equal(await row.locator('.badge-inactive').count(), 0, 'switched on before');
+    await row.getByRole('button', { name: 'Delete Accountant (sample)' }).click();
+    const m = pdl.getByRole('dialog', { name: "Delete Accountant (sample)'s account?" });
+    await m.getByRole('button', { name: 'Delete Accountant (sample)' }).click();
+    await pdl.waitForSelector('.toast:has-text("switched off; nothing was deleted")');
+    assert.match(await pdl.locator('.toast', { hasText: 'nothing was deleted' }).innerText(), /could not be counted \(the database took too long\)/, 'the whole sentence, not advice about date ranges');
+    await m.waitFor({ state: 'detached' });
+    const after = mainRows(pdl).filter({ hasText: 'Accountant (sample)' });
+    await after.locator('.badge-inactive', { hasText: 'Switched off' }).waitFor();
+    assert.equal(await after.getByRole('button', { name: 'Switch on Accountant (sample)' }).count(), 1, 'the row shows the account as it is now');
+  } finally {
+    await pdl.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.deleteStaff = window.__realDeleteStaff; });
+  }
+  expectErrors(/could not be counted/);
 });
 
 // ------------------------------------------------------------- portal login made at the clinic

@@ -20,17 +20,22 @@
 --      supabase/tests/33_staff_delete_test.sql checks that every uuid column that has a foreign key to public.staff or
 --      auth.users, or whose name looks like a staff reference, is either in this list or excluded there with a reason:
 --      a NEW TABLE OR COLUMN THAT STORES A STAFF ID MUST BE ADDED HERE (create or replace this function in its migration).
---   3. public.staff_records(staff): what the website has with that id on it, counted per column ({ total, parts }). Only for
---      people who may manage staff accounts (users.manage).
+--   3. public.staff_records(staff): what the website has with that id on it, counted per column ({ total, parts }), and when
+--      the account last logged in (the dialog says "never logged in"). Only for people who may manage staff accounts
+--      (users.manage).
 --   4. The staff guard (a trigger): nobody but admin marks or unmarks an account as deleted by hand, not even their own; the
 --      admin-users function (the service role) does it after its own checks.
---   5. public.staff_logins(): also gives deleted_at for each account (the HR login list says "Deleted"), and names the
+--   5. The staff delete guard (a trigger): nobody but admin removes a staff row by hand. A login is removed by delete_staff
+--      (after it counted the records) or by the admin; before this, anyone with users.manage could delete a used account's
+--      row directly and skip the count.
+--   6. public.staff_logins(): also gives deleted_at for each account (the HR login list says "Deleted"), and names the
 --      sign-ins of a login removed for good from its DELETE_LOGIN audit row.
---   6. An index on audit_log (actor), so the count of an account's changes does not read the whole audit log.
+--   7. An index on audit_log (actor), so the count of an account's changes does not read the whole audit log.
 --
 -- Not counted (the reasons are in the test's exclusion list): staff.id itself, clinicians.staff_id (a doctor's login link,
--- unlinked by delete_staff), staff_permission_overrides.staff_id (personal access ticks, removed with the account),
--- patients.portal_user_id (a patient's login), login_events.user_id (signing in is not work), idempotency_keys.created_by
+-- unlinked by delete_staff), staff_permission_overrides.staff_id and staff_menu_prefs.staff_id (the account's own access ticks
+-- and menu order, removed with it), private.checkup_form_imports.imported_by (the Google Form import is Dr. Ali's only, and an
+-- admin account is never deleted), patients.portal_user_id (a patient's login), login_events.user_id (signing in is not work), idempotency_keys.created_by
 -- (a retry key; the invoice or plan it made is counted), audit_log.row_id (the row a change was about), and the columns that
 -- name a doctor or a retainer team member (visits.checked_by, patients.referred_by_clinician, retainer_cases.made_by and
 -- model_check_by), which are not logins.
@@ -39,7 +44,7 @@
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run. Then redeploy the admin-users function
 --   (supabase functions deploy admin-users, all four files). Until both are done the Delete button says what is missing and
 --   changes nothing. Safe to run more than once. With the Supabase CLI keep the file name: 20261015000200 sorts after
---   20261012000300_checkup_form_day_lists.sql (20261015000100 is used by another change).
+--   20261015000100_staff_menu_prefs.sql (Arrange my menu).
 --   The index on audit_log is built while the file runs: changes saved in those few seconds wait for it.
 -- =============================================================================
 
@@ -113,7 +118,9 @@ revoke all on function private.staff_record_columns() from public, anon, authent
 -- ---------------------------------------------------------------------------------------------------------------
 -- 3. What the website has with a staff id on it
 -- ---------------------------------------------------------------------------------------------------------------
--- { "total": n, "parts": [{ "label": "visits", "one": "visit", "count": 12 }, ...] }: only the columns with rows, most first.
+-- { "total": n, "parts": [{ "label": "visits", "one": "visit", "count": 12 }, ...], "last_sign_in_at": time or null }: only the
+-- columns with rows, most first, except that the audit log (sort 90 and up) always comes last: every saved change also writes an
+-- audit row, so by its count it would lead almost every list. last_sign_in_at is null for a login that was never used.
 -- Each table is read once (one count per column of it). A table or column that is not there yet has no rows, so it is skipped.
 create or replace function public.staff_records(p_staff uuid)
 returns jsonb
@@ -125,6 +132,7 @@ declare
   v_counts bigint[];
   v_parts jsonb := '[]'::jsonb;
   v_total bigint := 0;
+  v_seen timestamptz;
   i integer;
 begin
   if not public.has_perm('users.manage') then
@@ -150,10 +158,11 @@ begin
       end if;
     end loop;
   end loop;
-  select coalesce(jsonb_agg(p - 'sort' order by (p ->> 'count')::bigint desc, (p ->> 'sort')::integer), '[]'::jsonb)
+  select coalesce(jsonb_agg(p - 'sort' order by (p ->> 'sort')::integer >= 90, (p ->> 'count')::bigint desc, (p ->> 'sort')::integer), '[]'::jsonb)
     into v_parts
     from jsonb_array_elements(v_parts) as p;
-  return jsonb_build_object('total', v_total, 'parts', v_parts);
+  select u.last_sign_in_at into v_seen from auth.users u where u.id = p_staff;
+  return jsonb_build_object('total', v_total, 'parts', v_parts, 'last_sign_in_at', v_seen);
 end $$;
 
 revoke all on function public.staff_records(uuid) from public, anon;
@@ -189,7 +198,23 @@ end $$;
 revoke execute on function public.guard_staff_row() from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 5. The login log: as in 20261007001900_login_log.sql, plus deleted_at, and the name of a login removed for good
+-- 5. Removing a staff row by hand: admin only (was: anyone with users.manage, but not the admin's row nor their own)
+-- ---------------------------------------------------------------------------------------------------------------
+-- A staff row goes with its login: delete_staff removes the login (the service role, after it counted the records) or the admin
+-- does it. A user manager deleting a row directly would skip the count: the records of a used account would lose its name, or the
+-- row could be put back switched on and without the deleted mark. No page deletes a staff row; they only update it.
+create or replace function public.guard_staff_delete() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is not null and not public.is_admin() then
+    raise exception 'Only admin can delete this account. Use Delete on Admin -> Staff accounts';
+  end if;
+  return old;
+end $$;
+revoke execute on function public.guard_staff_delete() from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- 6. The login log: as in 20261007001900_login_log.sql, plus deleted_at, and the name of a login removed for good
 -- ---------------------------------------------------------------------------------------------------------------
 create or replace function public.staff_logins(p_limit int default 200)
 returns jsonb

@@ -2,7 +2,7 @@
 // clinic setup (branches, doctors, treatments), Dr. Ali's calendar, data
 // export, import from Healthwire, audit log.
 import { h, mount, toast, friendlyError, modal, field, select, empty, downloadCSV, todayISO, shortDate, timeOf, busy, srOnly, localISO, showFormErrors, clearFieldErrors } from '../../ui/dom.js';
-import { state, can, isAdmin, branchName } from '../../state.js';
+import { state, can, isAdmin, branchName, loadStaffRef } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { DAY_ORDER, branchHoursFrom } from '../../lib/hours.js';
 import { WEEKDAYS } from '../../content.js';
@@ -168,7 +168,10 @@ async function staff(root, redraw) {
         if (errors.length) { showFormErrors(body, errors); return false; }
         try {
           await d.createStaff({ full_name: name.value.trim(), email: login, role: role.value, branch_ids, restrict_to_branches: branch_ids.length > 0, home_branch_id: branch_ids[0] || null, clinician_id: doctor.value || null, ...(password ? { password } : {}) });
-          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000); await redraw();
+          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000);
+          // The doctor is linked now: the next "New staff account" no longer offers it, and Delete knows the link.
+          if (doctor.value) await loadStaffRef().catch(() => {});
+          await redraw();
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
@@ -276,10 +279,16 @@ async function staff(root, redraw) {
   // is switched off and kept under "Deleted accounts", so the names on its records stay.
   const counted = (parts) => parts.map((p) => `${Number(p.count).toLocaleString('en-US')} ${Number(p.count) === 1 ? p.one || p.label : p.label}`).join(', ');
   const remove = async (s) => {
-    const rec = await d.staffRecords(s.id);
+    let rec;
+    try { rec = await d.staffRecords(s.id); } catch (e) {
+      // A count that took the database too long: friendlyError's usual advice (a shorter date range) does not fit here.
+      if (e?.code === '57014' || /statement timeout|canceling statement/i.test(String(e?.message))) throw new Error(`The database took too long counting ${s.full_name}'s records. Nothing was changed. Try again in a minute.`);
+      throw e;
+    }
     const total = Number(rec?.total) || 0;
     const doctors = state.ref.clinicians.filter((c) => c.staff_id === s.id).map((c) => c.display_name);
-    const seen = !logins ? '' : logins.staff?.find((x) => x.id === s.id)?.last_sign_in_at ? ` (last logged in ${lastLogin(s.id)})` : ' (never logged in)';
+    // When the account last logged in comes with the count, so a user manager sees it too (the login list is Dr. Ali's only).
+    const seen = rec?.last_sign_in_at ? ` (last logged in ${when(rec.last_sign_in_at)})` : rec && 'last_sign_in_at' in rec ? ' (never logged in)' : '';
     const body = total === 0
       ? h('div', {},
         h('p', {}, `${s.full_name} has no records on the website${seen}. Delete removes the login for good, and ${s.email} can then be given to someone else.`),
@@ -295,8 +304,15 @@ async function staff(root, redraw) {
           toast(res?.result === 'removed' ? `${s.full_name}'s login was removed for good.`
             : res?.fallback ? `The login could not be removed for good, so ${s.full_name} was switched off and moved to Deleted accounts.`
               : `${s.full_name} was switched off and moved to Deleted accounts.`, 'ok', 6000);
+          // The server took the doctor link off: "New staff account" offers that doctor again.
+          if (res?.result === 'removed' && doctors.length) await loadStaffRef().catch(() => {});
           await redraw();
-        } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        } catch (e) {
+          // The server switches the account off before anything else, so a later failure leaves it switched off: the dialog closes
+          // and the list is drawn again, so the row shows how the account is now (the message says what happened).
+          toast(friendlyError(e), 'error', 10000);
+          await redraw();
+        }
       } },
     ], { destructive: true });
   };

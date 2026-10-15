@@ -1632,6 +1632,9 @@ export function createDemoAdapter() {
       if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
       const s = { id: uid(), active: true, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...rest };
       db.staff.push(s); audit('staff', 'INSERT', s);
+      // As the admin-users function does: the doctor or assistant chosen gets this login.
+      const linked = row.clinician_id && db.clinicians.find((c) => c.id === row.clinician_id);
+      if (linked) linked.staff_id = s.id;
       return clone(s);
     },
     async deactivateStaff(id) {
@@ -1645,10 +1648,12 @@ export function createDemoAdapter() {
       const s = db.staff.find((x) => x.id === id);
       // The demo keeps some who-columns as the person's name (payments, cash closings, the audit log), so the name counts too.
       const mine = (v) => v != null && (v === id || (s && v === s.full_name));
+      // Most first, but the audit log (the last column) always last, as the database does: every saved change writes an audit row too.
+      const last = STAFF_RECORD_COLUMNS.length - 1;
       const parts = STAFF_RECORD_COLUMNS.map(([table, col, label, one], sort) => ({ label, one, sort,
         count: (db[table] || []).filter((r) => mine(r[col]) && !(table === 'staff' && r.id === id)).length }))
-        .filter((p) => p.count > 0).sort((a, b) => b.count - a.count || a.sort - b.sort).map(({ sort, ...p }) => p);
-      return { total: parts.reduce((t, p) => t + p.count, 0), parts };
+        .filter((p) => p.count > 0).sort((a, b) => (a.sort === last) - (b.sort === last) || b.count - a.count || a.sort - b.sort).map(({ sort, ...p }) => p);
+      return { total: parts.reduce((t, p) => t + p.count, 0), parts, last_sign_in_at: s?.last_sign_in_at || null };
     },
     async deleteStaff(id) {
       if (!can('users.manage')) fail('Only Dr. Ali can delete staff accounts.');
@@ -1668,7 +1673,9 @@ export function createDemoAdapter() {
       for (const c of db.clinicians) if (c.staff_id === id) c.staff_id = null;
       audit('staff', 'DELETE_LOGIN', s);
       db.staff = db.staff.filter((x) => x.id !== id);
+      // Its personal ticks and its menu order go with it (on delete cascade in the database).
       delete db.overrides[id];
+      delete db.menu_prefs[id];
       return { ok: true, result: 'removed', total: 0 };
     },
     async restoreStaff(id) {

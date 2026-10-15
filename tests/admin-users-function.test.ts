@@ -251,6 +251,12 @@ test('create_staff and update_login: the email of a deleted account says whose i
   assert.deepEqual(made.body, { error: 'That login email belongs to a deleted account (Busy Desk). Bring it back from Deleted accounts, or pick another email.' });
   assert.ok(!names().includes('createUser'), 'no login was made');
   assert.equal(world.tables.staff.length, 1);
+  // update_login: another account given that email gets the same answer, and its login is left as it was.
+  world.tables.staff.push(deskRow({ id: 'desk-2', full_name: 'New Desk', email: 'new@dralirashid.com' }));
+  const moved = await call({ action: 'update_login', user_id: 'desk-2', email: 'busy@dralirashid.com' });
+  assert.deepEqual(moved.body, { error: 'That login email belongs to a deleted account (Busy Desk). Bring it back from Deleted accounts, or pick another email.' });
+  assert.ok(!names().includes('updateUserById'), 'the login was not changed');
+  assert.equal(world.tables.staff[1].email, 'new@dralirashid.com');
 });
 
 test('unban_user (Switch on) refuses a deleted account: it is brought back first', async () => {

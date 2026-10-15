@@ -802,8 +802,12 @@ export async function createSupabaseAdapter() {
     const { data, error } = await sb.functions.invoke('admin-users', { body });
     if (error) {
       let message = error.message;
+      // No answer at all (the connection dropped, maybe after the request went out): the browser's own words ("Failed to fetch"),
+      // which friendlyError turns into plain advice, instead of the library's "Failed to send a request to the Edge Function".
+      if (error.name === 'FunctionsFetchError') message = error.context?.message || 'Failed to fetch';
       try { const sent = await error.context?.json?.(); if (sent?.error) message = sent.error; } catch { /* keep the generic text */ }
-      throw new Error(oldFunction(message));
+      // The status goes with it, so a gateway's 502/503/504 reads as "did not answer in time" (friendlyError checks e.status).
+      throw Object.assign(new Error(oldFunction(message)), { status: error.context?.status });
     }
     if (data?.error) throw new Error(oldFunction(data.error));
     return data;

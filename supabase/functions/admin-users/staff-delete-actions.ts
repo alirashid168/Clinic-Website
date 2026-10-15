@@ -30,6 +30,11 @@ const ok = (body: Record<string, unknown>): ActionResult => ({ status: 200, body
 
 const NEEDS_UPDATE = 'Deleting staff accounts needs the database update 20261015000200_staff_delete.sql first. Nothing was changed.';
 
+// A database message inside one of our sentences. A timeout is put in plain words: the page turns any text with "statement
+// timeout" in it into advice about date ranges, and the person would never read that the account was switched off.
+const said = (e: { code?: string; message?: string } | null | undefined) =>
+  (e?.code === '57014' || /statement timeout|lock timeout|canceling statement/i.test(e?.message ?? '') ? 'the database took too long' : e?.message ?? 'no answer');
+
 /** What create_staff and update_login say when the email is taken: by a deleted account, they say which and what to do. */
 export function emailTakenMessage(owner: { full_name?: string | null; deleted_at?: string | null } | null | undefined): string {
   if (owner?.deleted_at) return `That login email belongs to a deleted account (${owner.full_name || 'no name'}). Bring it back from Deleted accounts, or pick another email.`;
@@ -70,9 +75,9 @@ export async function deleteStaff(deps: StaffActionDeps, body: Record<string, un
     ? { active: false, deactivated_at: stamp, deactivated_by: caller }
     : { active: false, deactivated_at: row.deactivated_at ?? stamp, deactivated_by: row.deactivated_by ?? caller };
   const { error: offErr } = await admin.from('staff').update(off).eq('id', userId);
-  if (offErr) return refuse(offErr.message);
+  if (offErr) return refuse(`${row.full_name}'s account could not be switched off (${said(offErr)}). Nothing was changed.`);
   const { error: banErr } = await admin.auth.admin.updateUserById(userId, { ban_duration: '876000h' });
-  if (banErr) return refuse(`${row.full_name}'s account is switched off, but the login could not be locked: ${banErr.message}`);
+  if (banErr) return refuse(`${row.full_name}'s account is switched off, but the login could not be locked: ${said(banErr)}`);
   await admin.auth.admin.signOut(userId).catch(() => {});
 
   // 2. What the website has with this id on it, asked as the caller (staff_records checks users.manage itself).
@@ -80,14 +85,14 @@ export async function deleteStaff(deps: StaffActionDeps, body: Record<string, un
   const total = Number(records?.total);
   if (countErr || !Number.isFinite(total)) {
     const missing = /PGRST202|42883|staff_records|could not find the function/i.test(`${countErr?.code ?? ''} ${countErr?.message ?? ''}`);
-    return refuse(`${missing ? NEEDS_UPDATE.replace(' Nothing was changed.', '') : `The account's records could not be counted (${countErr?.message ?? 'no answer'}).`} ${row.full_name}'s account is switched off; nothing was deleted.`);
+    return refuse(`${missing ? NEEDS_UPDATE.replace(' Nothing was changed.', '') : `The account's records could not be counted (${said(countErr)}).`} ${row.full_name}'s account is switched off; nothing was deleted.`);
   }
   const before = { ...row, ...off };
 
   // 3. Records: they keep this person's name, so the account stays, switched off and marked deleted.
   if (total > 0) {
     const err = await archive(deps, before, stamp, { total, parts: records.parts ?? [] });
-    if (err) return refuse(`${err.message} ${row.full_name}'s account is switched off; nothing was deleted.`);
+    if (err) return refuse(`It could not be moved to Deleted accounts (${said(err)}). ${row.full_name}'s account is switched off; nothing was deleted.`);
     return ok({ result: 'archived', total });
   }
 
@@ -96,7 +101,7 @@ export async function deleteStaff(deps: StaffActionDeps, body: Record<string, un
   const fallback = async (why: string, unlinked: string[]) => {
     if (unlinked.length) await admin.from('clinicians').update({ staff_id: userId }).in('id', unlinked);
     const err = await archive(deps, before, stamp, { total: 0, remove_failed: why });
-    if (err) return refuse(`${err.message} ${row.full_name}'s account is switched off; nothing was deleted.`);
+    if (err) return refuse(`It could not be moved to Deleted accounts (${said(err)}). ${row.full_name}'s account is switched off; nothing was deleted.`);
     return ok({ result: 'archived', total: 0, fallback: true });
   };
   const { data: linked, error: linkedErr } = await admin.from('clinicians').select('id').eq('staff_id', userId);
@@ -121,7 +126,7 @@ export async function restoreStaff({ admin, can, caller }: StaffActionDeps, body
   if (!row.deleted_at) return refuse(`${row.full_name} is not in Deleted accounts.`);
   // Only the mark goes: the account stays switched off until someone presses Switch on.
   const { error } = await admin.from('staff').update({ deleted_at: null, deleted_by: null }).eq('id', row.id);
-  if (error) return refuse(error.message);
+  if (error) return refuse(`${row.full_name} could not be brought back (${said(error)}). Nothing was changed.`);
   await admin.from('audit_log').insert({ table_name: 'staff', row_id: row.id, action: 'RESTORE_LOGIN', actor: caller,
     old_data: { deleted_at: row.deleted_at, deleted_by: row.deleted_by ?? null }, new_data: { deleted_at: null, deleted_by: null } });
   return ok({});
