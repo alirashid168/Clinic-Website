@@ -10,6 +10,7 @@
 import { CONFIG } from '../config.js';
 import { todayISO, addDaysISO } from '../ui/dom.js';
 import { PERMISSIONS } from '../lib/permissions.js';
+import { cleanDeskName, encodeDeskName, withDeskName, DESK_NAME_HEADER } from '../lib/desk-name.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { isPatientLoginName } from '../lib/portal-login.js';
 import { checkupPhone } from '../lib/checkups.js';
@@ -63,6 +64,16 @@ function capped(rows, cap) {
 
 // The table of "Arrange my menu" is not there yet (20261015000100 not run): the codes PostgREST and Postgres answer with.
 const MENU_PREFS_MISSING_CODES = new Set(['PGRST205', '42P01']);
+
+// ------------------------------------------------------------ shared logins: the name of the person at the desk (20261015000300_desk_names.sql)
+// The name goes with every request to the database's REST API (tables and functions: /rest/v1/) in the x-desk-name header, where
+// audit_row() picks it up. It is added in the client's own fetch (createSupabaseAdapter), so it is on every such request supabase-js
+// makes, read at the moment the request goes out (supabase-js 2.117.2 sends every PostgREST and RPC request through global.fetch).
+// Never to the login server, Storage or the Edge Functions: their CORS rules do not list the header, and nothing there is audited.
+const REST_URL = /\/rest\/v1\//;
+const DESK_PROBE_TIMEOUT_MS = 5000;
+const DESK_NAMES_CAP = 500; // "Names used": rows listed at most
+const SHARED_MISSING_TEXT = 'SHARED_LOGIN_MISSING: Shared logins need a database update (20261015000300_desk_names.sql). Nothing was changed. Run the update first, then try again.';
 
 // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
 // They live in public.checkups and are read through the view checkup_list (migrations 20261009000250 and ...260). While those are
@@ -475,10 +486,17 @@ export async function createSupabaseAdapter() {
   const hungLogouts = new Set(); // gives up each logout request still in flight (see logoutFetch, endSession)
   let askedAfterRefusalAt = 0;
   let startChecked = false; // getSession() looks for what this page's start-up found out only the first time
+  let desk = null; // the name typed at a shared login's desk (setDeskName): { staffId, value } with value percent-encoded, or null
+  // Whether the server takes the x-desk-name header. A browser asks the server first (CORS) whether a request may carry a header of
+  // its own; if it were refused, every request of a shared login would fail. So the first request that would carry it waits for one
+  // small read that tries it (probeDeskHeader): true = it is taken; false = refused (then it is left off for this page, and the name
+  // is only in desk_names); null = not known yet (no connection: asked again with the next request).
+  let deskHeaderOk = null;
+  let deskProbe = null;
   const sb = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true },
     global: {
-      fetch: (input, init) => timedFetch(input, init, {
+      fetch: (input, init) => withDeskHeader(input, init, (next) => timedFetch(input, next, {
         storedUser: storedUserId,
         // An answer about the login that was stored when the request went out. If that login is not the stored one any more (it
         // was ended, and somebody else signed in), the answer is nobody's business: it must not label the next person's logout.
@@ -486,11 +504,50 @@ export async function createSupabaseAdapter() {
         onNotFound: (asked) => { if (asked === storedUserId()) askAfterRefusal(); },
         logout: logoutFetch,
         vetUser,
-      }),
+      })),
     },
   });
   // The person whose login was stored when this page opened, i.e. the one its start-up refresh and first look are about.
   const startUid = storedUserId();
+
+  // ---- the name typed at a shared login's desk (desk, deskHeaderOk and deskProbe are declared above the client, which uses them)
+  async function probeDeskHeader(value) {
+    const url = `${String(CONFIG.SUPABASE_URL).replace(/\/+$/, '')}/rest/v1/branches?select=id&limit=1`;
+    const key = CONFIG.SUPABASE_ANON_KEY;
+    const ask = (withName) => fetchWithin(url, { headers: { apikey: key, Authorization: `Bearer ${key}`, ...(withName ? { [DESK_NAME_HEADER]: value } : {}) } }, DESK_PROBE_TIMEOUT_MS)
+      .then(() => true, () => false); // any answer at all (even a refusal) means the request was let through
+    if (await ask(true)) return true;
+    if (!(await ask(false))) return null; // no connection at all
+    return (await ask(true)) ? true : false; // asked twice, so one dropped request does not leave the header off
+  }
+  /**
+   * Sends the request with send(init). A REST request while a name is set gets the x-desk-name header first (deskInit); every other
+   * request is sent at once, as before (the token refresh reads who is stored at the very moment it goes out).
+   */
+  function withDeskHeader(input, init, send) {
+    if (!desk || !REST_URL.test(String(input?.url ?? input))) return send(init);
+    return deskInit(init).then(send);
+  }
+  /** init with the x-desk-name header, when the request is sent with the token of the login the name was given for. Never fails. */
+  async function deskInit(init) {
+    try {
+      if (!desk) return init;
+      const headers = new Headers(init?.headers);
+      const sub = () => claimsOf(String(headers.get('authorization') || '').replace(/^Bearer /i, ''))?.sub;
+      if (sub() !== desk.staffId) return init;
+      if (deskHeaderOk === null) {
+        deskProbe ||= probeDeskHeader(desk.value).then((ok) => {
+          deskHeaderOk = ok;
+          deskProbe = null;
+          if (ok === false) console.warn('The clinic server does not accept the x-desk-name header: changes are not marked with the desk name on this page.');
+        });
+        await deskProbe;
+      }
+      if (!deskHeaderOk || !desk || sub() !== desk.staffId) return init; // (the name may have changed or ended while it waited)
+      headers.set(DESK_NAME_HEADER, desk.value);
+      return { ...init, headers };
+    } catch { return init; }
+  }
 
   /** Who the stored login belongs to, read from the stored session itself (best effort: null when there is none or it cannot be read). */
   function storedUserId() {
@@ -1061,6 +1118,35 @@ export async function createSupabaseAdapter() {
     async saveMyMenuArrangement(list) {
       const r = await rpc('save_my_menu', { p_arrangement: list });
       if (r.missing) throw plainError('MENU_PREFS_MISSING: the menu cannot be saved in the database until its update is run.', 'MENU_PREFS_MISSING');
+    },
+
+    // ------------------------------------------------------------ shared logins: the name of the person at the desk (20261015000300_desk_names.sql)
+    // Until that file is run no staff row has shared_login, so nobody is asked for a name; the list of names answers { missing: true }
+    // and marking an account shared fails with SHARED_LOGIN_MISSING.
+    /** From now on every database request of the login staffId carries this name (null: none). Not async. */
+    setDeskName(staffId, name) { desk = staffId && name ? { staffId, value: encodeDeskName(name) } : null; },
+    /** Adds the name to the signed-in shared login's list of names (public.desk_names) -> { missing }. */
+    async saveDeskName(name) {
+      const { name: clean, error } = cleanDeskName(name);
+      if (error) throw plainError(error, 'DESK_NAME');
+      const res = await sb.from('desk_names').insert({ staff_id: await userId(), name: clean });
+      if (res.error && (CHECKUPS_MISSING_CODES.has(res.error.code) || res.status === 404)) return { missing: true };
+      check(res);
+      return { missing: false };
+    },
+    /** The names typed on one shared login in the last `days` days, newest first (capped: .truncated / .cap), or [] with .missing. */
+    async deskNamesOf(staffId, { days = 60 } = {}) {
+      const since = new Date(Date.now() - days * 86400000).toISOString();
+      const res = await sb.from('desk_names').select('id,name,entered_at').eq('staff_id', staffId).gte('entered_at', since)
+        .order('entered_at', { ascending: false }).order('id', { ascending: false }).limit(DESK_NAMES_CAP + 1);
+      if (res.error && (CHECKUPS_MISSING_CODES.has(res.error.code) || res.status === 404)) return Object.assign([], { missing: true });
+      return capped(check(res), DESK_NAMES_CAP);
+    },
+    /** Marks a staff account as a shared login, or a personal one again. A plain update: row-level security (users.manage) and the staff guards decide. */
+    async setStaffShared(id, on) {
+      const res = await sb.from('staff').update({ shared_login: !!on }).eq('id', id).select('id');
+      if (res.error && (res.error.code === 'PGRST204' || res.error.code === '42703')) throw plainError(SHARED_MISSING_TEXT, 'SHARED_LOGIN_MISSING');
+      if (!check(res)?.length) throw new Error('The change was not saved. Reload the page and try again.');
     },
 
     // ------------------------------------------------------------ reference
@@ -1944,7 +2030,9 @@ export async function createSupabaseAdapter() {
       const [rows, names] = await Promise.all([sb.from('audit_log').select('*').order('at', { ascending: false }).limit(201).then(check), staffNames()]);
       const list = capped(rows, 200);
       // 00000000-...-0000000aa500 is the Google Sheet sync (private.aaj_sync_actor() in 20261009000300_aaj_two_way_sync.sql)
-      return keepFlags(list, list.map((r) => ({ ...r, actor_name: names[r.actor] || (r.actor === '00000000-0000-0000-0000-0000000aa500' ? 'Google Sheet sync' : null) })));
+      // A shared login's change carries the name typed at the desk: "Front desk Islamabad (Ayesha)".
+      const who = (r) => names[r.actor] || (r.actor === '00000000-0000-0000-0000-0000000aa500' ? 'Google Sheet sync' : null);
+      return keepFlags(list, list.map((r) => ({ ...r, actor_name: who(r) ? withDeskName(who(r), r.desk_name) : null })));
     },
     async dashboard(date) {
       const day = date || todayISO();

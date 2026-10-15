@@ -5708,6 +5708,157 @@ await step('End the day after midnight: a page opened before midnight says what 
 });
 await pmid.close();
 
+// ------------------------------------------------------------- shared logins: "Please enter your name" (the owner, 15 Oct 2026)
+// "instead of name picker, just give a popup saying please enter your name". The demo's "Front desk Islamabad" is a shared login.
+// The demo keeps its data in the page's memory, so the shared desk and Dr. Ali share one page (hash changes only). A demo login does
+// not survive a reload either, so moving to another page stands in for a reload; the name is checked in this tab's sessionStorage.
+const pdn = await newPage();
+const nameDialog = (pg) => pg.getByRole('dialog', { name: 'Please enter your name' });
+const nameBox = (pg) => nameDialog(pg).getByLabel(/^Your name/);
+const accountLabel = (pg) => pg.locator('.user-menu > button .user-name').innerText();
+await step('shared login: signing in asks "Please enter your name" before anything else; no ×, no Cancel, Escape and a click outside do nothing; a too-short or too-long name is refused', async () => {
+  await loginAs(pdn, 'Front desk Islamabad');
+  const dlg = nameDialog(pdn);
+  await dlg.waitFor();
+  assert.equal(await dlg.getByRole('button', { name: 'Close' }).count(), 0, 'no × button');
+  assert.equal(await dlg.getByRole('button', { name: 'Cancel' }).count(), 0, 'no Cancel');
+  assert.deepEqual((await dlg.locator('.modal-actions button').allInnerTexts()).map((t) => t.trim()), ['Log out', 'Continue'], 'Continue, and Log out for the wrong login');
+  assert.equal(await pdn.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.labels?.[0]?.textContent), 'Your name (required)', 'it starts in the name box');
+  assert.equal(await pdn.locator('#app').evaluate((el) => el.inert), true, 'the page behind cannot be clicked or typed into');
+  assert.equal((await pdn.locator('#main').innerText()).trim(), '', 'nor is the page drawn (or its data read) before the name is given');
+  await pdn.keyboard.press('Escape');
+  await pdn.mouse.click(8, 400); // on the dimmed page, outside the dialog
+  await pdn.waitForTimeout(200);
+  assert.ok(await dlg.isVisible(), 'Escape and a click outside leave it open');
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  assert.equal((await dlg.locator('.field-error').innerText()).trim(), 'Write your name (at least 2 letters).');
+  await nameBox(pdn).fill('  S  ');
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  assert.equal((await dlg.locator('.field-error').innerText()).trim(), 'Write your name (at least 2 letters).', 'one letter (spaces do not count) is too short');
+  await nameBox(pdn).fill('a'.repeat(61));
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  assert.equal((await dlg.locator('.field-error').innerText()).trim(), 'Write at most 60 letters.');
+  assert.ok(await dlg.isVisible(), 'still asking');
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad', 'no name next to the login yet');
+  await shot(pdn, '31-shared-login-name-popup');
+});
+await step('shared login: Continue (or Enter) puts the name next to the login in the name menu; it stays for the tab, so another page does not ask again', async () => {
+  await nameBox(pdn).fill('  Sadia   ');
+  await nameBox(pdn).press('Enter');
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · Sadia');
+  assert.equal(await pdn.locator('.user-menu > button').getAttribute('aria-label'), 'Account menu, Front desk Islamabad · Sadia');
+  assert.equal(await pdn.locator('#app').evaluate((el) => el.inert), false, 'the page can be used now');
+  await pdn.locator('h1', { hasText: /^Good (morning|afternoon|evening), Sadia$/ }).waitFor(); // Today greets the person, not "Front"
+  assert.deepEqual(await pdn.evaluate(() => JSON.parse(sessionStorage.getItem('desk-name'))), { staffId: 's-fd-isb', name: 'Sadia' }, 'kept for this tab (a reload keeps it)');
+  await pdn.locator('.user-menu > button').click();
+  assert.equal((await pdn.locator('#user-menu-list .menu-note > span').innerText()).trim(), 'Front desk Islamabad · Sadia');
+  assert.equal(await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).count(), 1, 'Change name is in the name menu');
+  await pdn.keyboard.press('Escape');
+  await pdn.goto(BASE + '#/staff/patients');
+  await pdn.waitForSelector('h1:has-text("Patients")');
+  await pdn.waitForTimeout(300);
+  assert.equal(await nameDialog(pdn).count(), 0, 'another page does not ask again');
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · Sadia');
+});
+await step('shared login: "Change name" asks again at once (the old name stops), offers the names used on this computer, and takes an Urdu name', async () => {
+  await pdn.locator('.user-menu > button').click();
+  await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).click();
+  const dlg = nameDialog(pdn);
+  await dlg.waitFor();
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad', 'the old name stops straight away');
+  assert.equal(await pdn.evaluate(() => sessionStorage.getItem('desk-name')), null);
+  assert.equal(await nameBox(pdn).inputValue(), '', 'the box starts empty (the next person writes their own name)');
+  assert.deepEqual(await dlg.locator('datalist option').evaluateAll((os) => os.map((o) => o.value)), ['Sadia'], 'names typed before on this computer are offered');
+  assert.equal(await nameBox(pdn).getAttribute('list'), await dlg.locator('datalist').getAttribute('id'));
+  await pdn.keyboard.press('Escape');
+  assert.ok(await dlg.isVisible(), 'it cannot be closed without a name here either');
+  await nameBox(pdn).fill('عائشہ');
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  await dlg.waitFor({ state: 'detached' });
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · عائشہ');
+});
+await step('shared login: End the day is put down to the name at the desk ("ended by Front desk Islamabad (name)"); a new sign-in asks again, and Log out in the popup logs out', async () => {
+  await pdn.goto(BASE + '#/staff/sheet');
+  await pdn.getByRole('button', { name: 'End the day' }).click();
+  await pdn.locator('.modal').getByRole('button', { name: 'End the day' }).click();
+  await pdn.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
+  await pdn.goto(BASE + '#/staff/day-history');
+  await pdn.waitForSelector('.day-history-list a');
+  const today = await dayInfo(pdn, 0);
+  const lines = await historyLines(pdn);
+  assert.match(lines[0], new RegExp(`^${today.label} – Islamabad – .* Ended \\d{2}:\\d{2} by Front desk Islamabad \\(عائشہ\\)$`), lines[0]);
+  // The same login signing in again (another person, later): asked again.
+  await tryAnotherRole(pdn);
+  assert.equal(await pdn.evaluate(() => sessionStorage.getItem('desk-name')), null, 'the name ends with the login');
+  await loginAs(pdn, 'Front desk Islamabad');
+  const dlg = nameDialog(pdn);
+  await dlg.waitFor();
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad');
+  assert.deepEqual(await dlg.locator('datalist option').evaluateAll((os) => os.map((o) => o.value)), ['عائشہ', 'Sadia'], 'the latest name first');
+  await dlg.getByRole('button', { name: 'Log out' }).click();
+  await pdn.waitForSelector('.door');
+  assert.equal(await nameDialog(pdn).count(), 0);
+});
+await step('a personal login never sees the popup, nor "Change name"', async () => {
+  await loginAs(pdn, 'Front desk \\(Gulshan\\)');
+  await pdn.waitForTimeout(400);
+  assert.equal(await nameDialog(pdn).count(), 0, 'no popup');
+  assert.equal(await accountLabel(pdn), 'Front desk (Gulshan)');
+  await pdn.locator('.user-menu > button').click();
+  assert.equal(await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).count(), 0, 'no Change name');
+  await pdn.keyboard.press('Escape');
+  await tryAnotherRole(pdn);
+});
+await step('Dr. Ali: Staff accounts shows "Shared" and "Names used" (newest first); he marks another account shared, makes a new shared account, and the audit log names the person at the desk', async () => {
+  await loginAs(pdn, 'Dr. Ali Rashid');
+  assert.equal(await nameDialog(pdn).count(), 0, 'Dr. Ali is not asked');
+  await pdn.goto(BASE + '#/staff/admin?tab=staff');
+  const isb = pdn.locator('tr', { hasText: 'demo.frontdesk.isb@example.com' });
+  await isb.waitFor();
+  assert.equal(await isb.locator('.badge', { hasText: 'Shared' }).count(), 1, 'the shared login says so');
+  assert.equal(await pdn.locator('tr', { hasText: 'demo.frontdesk2@example.com' }).locator('.badge', { hasText: 'Shared' }).count(), 0, 'a personal login does not');
+  assert.equal(await pdn.locator('tr', { hasText: 'demo.admin@example.com' }).getByRole('button', { name: /^Shared login/ }).count(), 0, 'no Shared login button on the admin row');
+  await isb.getByRole('button', { name: 'Names used, Front desk Islamabad' }).click();
+  const names = pdn.getByRole('dialog', { name: 'Names used · Front desk Islamabad' });
+  await names.waitFor();
+  assert.deepEqual((await names.locator('tbody tr td:nth-child(2)').allInnerTexts()).map((t) => t.trim()),
+    ['عائشہ', 'Sadia', 'Hina (sample)', 'Sadia (sample)', 'Mehak (sample)', 'Sadia (sample)'], 'newest first, the two typed today on top');
+  assert.match(await names.locator('p').first().innerText(), /^5 names in the last 60 days: /);
+  assert.match(await names.locator('tbody tr').first().locator('td').first().innerText(), /\d{2}:\d{2}$/, 'with the date and time');
+  await shot(pdn, '32-names-used');
+  await names.getByRole('button', { name: 'Done' }).click();
+  // Mark Front desk (Gulshan) as a shared login from its row.
+  const gul = pdn.locator('tr', { hasText: 'demo.frontdesk2@example.com' });
+  assert.equal(await gul.getByRole('button', { name: /^Names used/ }).count(), 0, 'no Names used on a personal login');
+  await gul.getByRole('button', { name: 'Shared login, Front desk (Gulshan)' }).click();
+  const sm = pdn.getByRole('dialog', { name: 'Shared login · Front desk (Gulshan)' });
+  await sm.getByLabel('Shared login — several people use it; it asks for their name when they sign in').check();
+  await sm.getByRole('button', { name: 'Save' }).click();
+  await pdn.waitForSelector('.toast:has-text("Saved. Front desk (Gulshan) asks for a name at every sign-in.")');
+  await gul.locator('.badge', { hasText: 'Shared' }).waitFor();
+  await gul.getByRole('button', { name: 'Names used, Front desk (Gulshan)' }).click();
+  await pdn.getByRole('dialog', { name: 'Names used · Front desk (Gulshan)' }).getByText('Nobody has entered a name on this login in the last 60 days.').waitFor();
+  await pdn.getByRole('dialog', { name: 'Names used · Front desk (Gulshan)' }).getByRole('button', { name: 'Done' }).click();
+  // A new account made as a shared login.
+  await pdn.getByRole('button', { name: 'New staff account' }).click();
+  const m = pdn.getByRole('dialog', { name: 'New staff account' });
+  await m.getByPlaceholder('Full name').fill('Assistants Sample Branch');
+  await m.locator('input[type=email]').fill('assistants.sample@dralirashid.com');
+  await m.getByLabel('Shared login — several people use it; it asks for their name when they sign in').check();
+  await m.getByRole('button', { name: 'Create account' }).click();
+  await pdn.locator('tr', { hasText: 'assistants.sample@dralirashid.com' }).locator('.badge', { hasText: 'Shared' }).waitFor();
+  // The audit log: End the day from the shared desk, put down to the name typed there.
+  await pdn.goto(BASE + '#/staff/admin?tab=audit');
+  await pdn.waitForSelector('h2:text("Recent changes")');
+  await pdn.locator('table.list tr', { hasText: 'end_day' }).filter({ hasText: 'Front desk Islamabad (عائشہ)' }).first().waitFor();
+  // Front desk (Gulshan) is asked for a name now.
+  await tryAnotherRole(pdn);
+  await loginAs(pdn, 'Front desk \\(Gulshan\\)');
+  await nameDialog(pdn).waitFor();
+});
+await pdn.close();
+
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }
 console.log(`${passed} checks passed`);

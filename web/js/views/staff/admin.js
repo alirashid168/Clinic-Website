@@ -145,11 +145,13 @@ async function staff(root, redraw) {
     const pwWrap = field('Password', pw.row, 'Write this down for them. They log in with the email above and this password.');
     how.addEventListener('change', () => { pwWrap.style.display = how.value === 'password' ? '' : 'none'; });
     const doctor = select([{ value: '', label: 'Not a doctor on visits' }, ...state.ref.clinicians.filter((c) => !c.staff_id).map((c) => ({ value: c.id, label: c.display_name }))], '');
+    const shared = list.some((x) => 'shared_login' in x) ? h('input', { type: 'checkbox' }) : null; // (20261015000300_desk_names.sql run)
     const body = h('div', {},
       h('div', { class: 'form-grid' }, field('Name', name, null, { required: true }), field('Login email', email, 'Used only as their login name. It does not need a real inbox. If they forget their password, you set a new one with "Login and password".', { required: true }), field('Role', role), field('Link to doctor/assistant name', doctor, 'So their visits count in their daily log')),
       h('div', { class: 'form-grid', style: { marginTop: '10px' } }, field('How will they log in?', how), pwWrap),
       h('fieldset', { class: 'fieldset-plain' }, h('legend', {}, 'Limit to branches (leave empty for all branches)'),
-        h('div', { class: 'inline' }, branchBoxes.map(({ b, box }) => h('label', { class: 'inline' }, box, b.name)))));
+        h('div', { class: 'inline' }, branchBoxes.map(({ b, box }) => h('label', { class: 'inline' }, box, b.name)))),
+      shared ? h('label', { class: 'inline', style: { marginTop: '10px' } }, shared, 'Shared login — several people use it; it asks for their name when they sign in') : null);
     modal('New staff account', body, [
       { label: 'Cancel' },
       { label: 'Create account', primary: true, onClick: async () => {
@@ -163,8 +165,13 @@ async function staff(root, redraw) {
         if (password !== null && password.length < 8) errors.push({ input: pw.input, message: 'The password needs at least 8 characters.' });
         if (errors.length) { showFormErrors(body, errors); return false; }
         try {
-          await d.createStaff({ full_name: name.value.trim(), email: login, role: role.value, branch_ids, restrict_to_branches: branch_ids.length > 0, home_branch_id: branch_ids[0] || null, clinician_id: doctor.value || null, ...(password ? { password } : {}) });
-          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000); await redraw();
+          const made = await d.createStaff({ full_name: name.value.trim(), email: login, role: role.value, branch_ids, restrict_to_branches: branch_ids.length > 0, home_branch_id: branch_ids[0] || null, clinician_id: doctor.value || null, ...(password ? { password } : {}) });
+          // A shared login is a plain change of the new row (row-level security), after the account exists.
+          let sharedFailed = null;
+          if (shared?.checked) { try { await d.setStaffShared(made.id, true); } catch (e) { sharedFailed = e; } }
+          toast(password ? `Account created. Login: ${login} · Password: ${password}` : 'Account created. They will get an email to set a password.', 'ok', password ? 15000 : 4000);
+          if (sharedFailed) toast(`The account was made, but not as a shared login: ${friendlyError(sharedFailed)} Use "Shared login" on its row.`, 'error', 10000);
+          await redraw();
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
     ]);
@@ -274,7 +281,7 @@ async function staff(root, redraw) {
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Name'), h('th', { scope: 'col' }, 'Email'), h('th', { scope: 'col' }, 'Role'), h('th', { scope: 'col' }, 'Branches'), logins ? h('th', { scope: 'col' }, 'Last login') : null, h('th', { scope: 'col' }, 'Access'), h('th', { scope: 'col' }, srOnly('Actions')))),
       h('tbody', {}, list.map((s) => h('tr', { class: s.active ? null : 'is-inactive' },
         // Switched-off accounts say so in words; they are not dimmed, so they stay readable.
-        h('td', {}, s.full_name, s.active ? null : [' ', h('span', { class: 'badge badge-inactive' }, 'Switched off')]),
+        h('td', {}, s.full_name, s.active ? null : [' ', h('span', { class: 'badge badge-inactive' }, 'Switched off')], s.shared_login ? [' ', h('span', { class: 'badge badge-muted' }, 'Shared')] : null),
         h('td', {}, s.email), h('td', {}, ROLE_LABELS[s.role]),
         h('td', {}, !s.restrict_to_branches ? 'All' : s.branch_ids?.length ? branchList(s.branch_ids.map(Number)) : 'None (locked out)'),
         logins ? h('td', { class: 'nowrap muted' }, lastLogin(s.id)) : null,
@@ -286,6 +293,10 @@ async function staff(root, redraw) {
             h('button', { class: 'btn btn-small', 'aria-label': `Branches, ${s.full_name}`, onclick: () => branchAccess(s) }, 'Branches'), ' ',
             h('button', { class: 'btn btn-small', 'aria-label': `Role, ${s.full_name}`, onclick: () => changeRole(s) }, 'Role'),
           ] : null, ' ',
+          // Shared logins (20261015000300_desk_names.sql): not on an admin row (never shared) nor your own (the database refuses that).
+          'shared_login' in s && s.role !== 'admin' && s.id !== state.session?.staff?.id
+            ? [h('button', { class: 'btn btn-small', 'aria-label': `Shared login, ${s.full_name}`, onclick: () => import('./desk-name.js').then((m) => m.openSharedLogin(s, { onSaved: redraw })) }, 'Shared login'), ' '] : null,
+          s.shared_login ? [h('button', { class: 'btn btn-small', 'aria-label': `Names used, ${s.full_name}`, onclick: busy(async () => (await import('./desk-name.js')).openNamesUsed(s)) }, 'Names used'), ' '] : null,
           s.active && (s.role !== 'admin' || isAdmin()) ? h('button', { class: 'btn btn-small', 'aria-label': `Login and password, ${s.full_name}`, onclick: () => loginDetails(s) }, 'Login and password') : null, ' ',
           s.role === 'admin' ? null : s.active
             ? h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Switch off ${s.full_name}`, onclick: () => switchOff(s) }, 'Switch off')

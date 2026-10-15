@@ -10,6 +10,7 @@ import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMess
 import { state } from './state.js';
 import { authChangeHandler, endedNotice, startRecheck, RECHECK_EVENT } from './auth-watch.js';
 import { CONFIG } from './config.js';
+import { forgetDeskName } from './lib/desk-name.js';
 import * as content from './content.js';
 import { renderHome, renderVisitor, renderResults } from './views/public.js';
 
@@ -238,6 +239,8 @@ function onSignedIn() {
   const mine = !returnTo?.staffId || returnTo.staffId === state.session?.staff?.id;
   const back = mine && returnTo?.hash.startsWith(area) ? returnTo.hash : null;
   returnTo = null;
+  // A shared login asks "Please enter your name" after every sign-in, even when the same login signs in again in this tab.
+  forgetDeskName();
   startIdle();
   recheck?.poke();
   location.hash = back || (kind === 'staff' ? '#/staff/today' : '#/patient');
@@ -289,6 +292,9 @@ async function signOut({ remote = false, local = false, notice = '', reason = ''
     try { confirmed = (await state.data?.signOut(local ? { scope: 'local', reason } : undefined)) !== false; } catch (e) { console.error(e); confirmed = false; }
   }
   state.session = null;
+  // The name given at a shared login's desk ends with the login (after the waiting edits above went out with it).
+  forgetDeskName();
+  state.data?.setDeskName?.(null, null);
   recheck?.poke();
   clearMessages(); // anything that arrived while the edits were being sent
   const notices = [{ message: waitingMessage(left), ms: 12000 }, { message: notice, ms: 10000 }].filter((n) => n.message);

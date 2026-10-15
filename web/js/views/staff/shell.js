@@ -2,12 +2,15 @@
 // a patient search box that finds by name, Mr# or phone from any screen, the signed-in person's menu,
 // and page routing. Below 73.75em (1180px at the default text size: phones, tablets, small laptops and
 // larger text settings) the same menu opens as a side drawer.
+// A shared login (several people at one branch's desk) first asks the person's name (desk-name.js).
 // Each page's module is loaded the first time it is opened, so the heavy ones (reports, admin with
 // its importers) are only downloaded by the people who use them.
 import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from '../../ui/dom.js';
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
+import { askDeskName, changeDeskName, needsDeskName, syncDeskName } from './desk-name.js';
+import { deskNameFor, deskLabel } from '../../lib/desk-name.js';
 import { arrangeNav, loadArrangement, openArrangeMenu } from './nav-arrange.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
@@ -212,11 +215,25 @@ export async function renderStaff(root, path, params, signOut) {
     return wrap;
   })() : null;
 
-  const userBtn = h('button', { type: 'button', class: 'nav-link', 'aria-expanded': 'false', 'aria-controls': 'user-menu-list', 'aria-label': `Account menu, ${s.full_name}` },
-    h('span', { class: 'user-name' }, s.full_name), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
+  // A shared login shows the name of the person at the desk with it ("Front desk Islamabad · Ayesha"); "Change name" is for the next person.
+  syncDeskName(s);
+  const nameLabels = [];
+  // (the name in <bdi>, so an Urdu name and the login around it each keep their own direction)
+  const labelParts = (desk) => [s.full_name, desk ? [' · ', h('bdi', {}, desk)] : null];
+  const nameLabel = (props) => { const el = h('span', props, labelParts(deskNameFor(s.id))); nameLabels.push(el); return el; };
+  const showDeskName = (desk) => {
+    for (const el of nameLabels) mount(el, labelParts(desk));
+    userBtn.setAttribute('aria-label', `Account menu, ${deskLabel(s.full_name, desk)}`);
+  };
+  // Resolves true once a name is given, false when the popup closed without one (the person moved on, or logged out).
+  const askName = () => new Promise((resolve) => askDeskName({ staff: s, signOut, onName: (desk) => { showDeskName(desk); resolve(true); }, onGone: () => resolve(false) }));
+  const changeName = () => changeDeskName({ staff: s, signOut, onName: showDeskName });
+  const userBtn = h('button', { type: 'button', class: 'nav-link', 'aria-expanded': 'false', 'aria-controls': 'user-menu-list', 'aria-label': `Account menu, ${deskLabel(s.full_name, deskNameFor(s.id))}` },
+    nameLabel({ class: ['user-name', s.shared_login ? 'has-desk-name' : ''] }), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
   const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },
-    h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
+    h('div', { class: 'menu-note' }, nameLabel({}), h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
     h('hr', {}),
+    s.shared_login ? h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); changeName(); } }, 'Change name') : null,
     // The public homepage, as visitors see it (owner, 12 Oct 2026); it has a "Back to staff pages" link while signed in (views/public.js).
     h('a', { href: '#/', onclick: () => closeAll() }, 'View the website'),
     // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
@@ -250,7 +267,8 @@ export async function renderStaff(root, path, params, signOut) {
     // Right after the menu it arranges, so the foot that stays on a phone's screen keeps its size.
     h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
     h('div', { class: 'sidebar-foot' },
-      h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
+      h('div', {}, nameLabel({})), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
+      s.shared_login ? h('div', { class: 'desk-change' }, h('button', { type: 'button', class: 'link-btn', onclick: () => { closeDrawer(false); toggle.focus(); changeName(); } }, 'Change name')) : null,
       // On its own line: Change password and Log out keep their row, well apart.
       h('a', { class: 'link-btn', href: '#/', onclick: () => closeDrawer(false) }, 'View the website'),
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
@@ -313,6 +331,9 @@ export async function renderStaff(root, path, params, signOut) {
     topbar,
     h('div', { class: 'app topnav-layout' }, drawer, content),
     scrim);
+  // Before the person can use anything: a shared login says who is at the desk, and only then is the page drawn (and its data read).
+  if (needsDeskName(s) && !(await askName())) return;
+  if (signal.aborted) return;
 
   try {
     if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);
