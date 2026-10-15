@@ -252,9 +252,13 @@ export async function renderCheckups(root, params, signal) {
         h('summary', {}, 'More'),
         h('div', { class: 'form-grid' }, field('City', city), field('Treatment details', details), field('Estimated fee (Rs)', fee, 'Optional.'))));
     let saved = false;
-    modal(`Edit ${c.patient_name}`, body, [
+    // Remove asks on top of this dialog, which stays open: "Keep it" goes back to the answers as they were typed, and only a removal closes it.
+    const editDialog = modal(`Edit ${c.patient_name}`, body, [
       { label: 'Cancel', dismiss: true },
-      ...(canRemoveCheckup(c) ? [{ label: 'Remove', danger: true, onClick: () => { removeCheckupModal(c, { onDone: () => load() }); } }] : []),
+      ...(canRemoveCheckup(c) ? [{ label: 'Remove', danger: true, onClick: () => {
+        removeCheckupModal(c, { onDone: () => { saved = true; editDialog.close(); load(); } });
+        return false;
+      } }] : []),
       { label: 'Save', primary: true, onClick: async () => {
         const errors = q.errors();
         const feeNumber = fee.value === '' ? null : Number(fee.value);

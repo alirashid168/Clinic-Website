@@ -2867,7 +2867,7 @@ await step('Edit on an old-list row tells Dr. Ali (and only Dr. Ali) that import
   await pk.keyboard.press('Escape');
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
-await step('Front desk (North Nazimabad) on the Checkups page sees the imported North Nazimabad row and the no-branch row, never the RJ Mall or Lahore rows, and cannot remove an old-list row', async () => {
+await step('Front desk (North Nazimabad) on the Checkups page sees the imported North Nazimabad row and the no-branch row, never the RJ Mall or Lahore rows, and cannot remove an old-list row; Remove in Edit asks on top of it and "Keep it" keeps the changed answers', async () => {
   await tryAnotherRole(pk);
   await pk.goto(BASE + '#/login/staff');
   await pk.getByRole('button', { name: /Front desk \(North Nazimabad\)/ }).click();
@@ -2892,9 +2892,24 @@ await step('Front desk (North Nazimabad) on the Checkups page sees the imported 
   const mine = pk.locator('table.checkup-table tbody tr[data-id]', { hasText: 'Remove Me Person' });
   await mine.waitFor();
   await mine.getByRole('button', { name: /^Edit / }).click();
-  await pk.locator('.modal').getByRole('button', { name: 'Remove' }).click();
-  await pk.locator('.modal').getByRole('button', { name: 'Remove', exact: true }).click();
+  // Remove asks on top of Edit: "Keep it" goes back to Edit with the changed answers still there, and nothing asked to discard them.
+  const edit = pk.locator('.modal', { hasText: 'Edit Remove Me Person' });
+  const sure = pk.locator('.modal', { hasText: 'Remove Remove Me Person?' });
+  await edit.getByRole('group', { name: /^Would you like to start the treatment/ }).getByLabel('No', { exact: true }).check();
+  await edit.getByLabel(/^If yes, then when/).fill('After her exams (changed)');
+  await edit.getByRole('button', { name: 'Remove', exact: true }).click();
+  await sure.waitFor();
+  assert.equal(await edit.count(), 1, 'the Edit dialog stays open while the removal is asked');
+  await sure.getByRole('button', { name: 'Keep it' }).click();
+  await sure.waitFor({ state: 'detached' });
+  assert.equal(await pk.locator('.modal').count(), 1, 'only the Edit dialog is open, nothing asked to discard the answers');
+  assert.equal(await edit.getByLabel(/^If yes, then when/).inputValue(), 'After her exams (changed)', '"Keep it": the typed answer is still there');
+  assert.equal(await edit.getByRole('group', { name: /^Would you like to start the treatment/ }).getByLabel('No', { exact: true }).isChecked(), true, '"Keep it": the changed choice is still there');
+  assert.equal(await pk.evaluate(() => document.activeElement?.textContent), 'Remove', '"Keep it": focus is back on Remove');
+  await edit.getByRole('button', { name: 'Remove', exact: true }).click();
+  await sure.getByRole('button', { name: 'Remove', exact: true }).click();
   await mine.waitFor({ state: 'detached' });
+  await pk.waitForSelector('.modal', { state: 'detached' });   // (removed: both dialogs close, nothing asked to discard the answers)
 });
 
 
