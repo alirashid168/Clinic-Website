@@ -9306,6 +9306,16 @@ await step('An advance: paid more than the invoice, the rest goes towards the ne
   await plive.waitForSelector('.modal', { state: 'detached' });
   await openMoney(plive, '9824', 'Mariam Akhtar');
   assert.match(await moneyOf(plive).locator('table.list').first().locator('tbody tr', { hasText: second }).innerText(), /Rs 500 unpaid/, 'the advance counted on the second invoice');
+  // The bill the patient opens in their account (View as patient) counts the advance the same way: not "Not paid yet" with the whole
+  // amount due.
+  await plive.getByRole('link', { name: 'View as patient' }).click();
+  await plive.waitForSelector('.alert:has-text("Patient view")');
+  await plive.getByRole('button', { name: `View invoice ${second}` }).click();
+  const pbill = plive.locator('.modal', { has: plive.locator('h2', { hasText: `Invoice ${second}` }) });
+  const ptext = await pbill.locator('.bill-sheet').innerText();
+  for (const re of [/Paid Amount\s+Rs\. 1,000/, /Due Amount\s+Rs\. 500/, /Payment Mode: Advance paid earlier/]) assert.match(ptext, re, 'the patient\'s bill: ' + re);
+  await pbill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await plive.waitForSelector('.modal', { state: 'detached' });
 });
 await step('A checkup patient registered from the list: Bill in the register dialog, and Bill beside their name on the row', async () => {
   await plive.goto(BASE + '#/staff/sheet');

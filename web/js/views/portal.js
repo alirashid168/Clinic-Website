@@ -296,8 +296,14 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
   const issued = p.invoices.filter((i) => i.status === 'issued');
   const today = localISO();
   const next = p.visits.filter((v) => v.status === 'scheduled' && v.visit_date >= today).sort((a, b) => a.visit_date.localeCompare(b.visit_date))[0];
+  // The bill as the staff print it: money paid ahead (an advance, or more than an earlier invoice) that goes towards this invoice shows
+  // as paid on it (invoiceBalances' credit_used, as on the patient's record), so an invoice covered by an advance never reads as unpaid.
   const viewInvoice = async (i) => {
-    try { (await invoiceModule()).printInvoice(i, p, { patientView: true }); } catch (e) { toast(patientError(e), 'error'); }
+    try {
+      const bills = await invoiceModule();
+      const credit = bills.invoiceBalances(p.invoices, p.payments).find((x) => x.id === i.id)?.credit_used || 0;
+      bills.printInvoice(i, p, { patientView: true, credit });
+    } catch (e) { toast(patientError(e), 'error'); }
   };
   mount(root,
     preview === true ? h('div', { class: 'alert alert-info inline', style: { justifyContent: 'space-between', margin: '0 0 8px' } },

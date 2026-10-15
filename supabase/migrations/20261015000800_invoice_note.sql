@@ -9,11 +9,21 @@
 -- of them, so a retry with another note is refused like one with another price), the discount rules and row-level security all
 -- stay as they were. Until this runs the website still saves invoices; only the note is not kept.
 --
--- Additive and safe to run more than once.
+-- Additive and safe to run more than once, also after 20261015000900_billing_desk.sql: that file writes save_invoice again with the
+-- note and each line's discount, price-list item and doctor, and once it is in this file changes nothing (it says so and stops), so
+-- pasting this file a second time never takes those back. Order on live: this file, then 20261015000900_billing_desk.sql.
 -- HOW TO APPLY: Supabase dashboard -> SQL Editor -> paste this whole file -> Run.
 -- =============================================================================
 begin;
 
+do $guard$
+begin
+  -- 20261015000900_billing_desk.sql is in already (its save_invoice writes each line's doctor, clinician_id): leave it alone.
+  if position('clinician_id' in coalesce((select p.prosrc from pg_proc p where p.oid = to_regprocedure('public.save_invoice(uuid, jsonb, jsonb)')), '')) > 0 then
+    raise notice 'save_invoice is already the billing desk''s (20261015000900_billing_desk.sql), which keeps the note too: nothing to change.';
+    return;
+  end if;
+  execute $create$
 create or replace function public.save_invoice(p_idempotency_key uuid, p_invoice jsonb, p_items jsonb)
 returns jsonb
 language plpgsql
@@ -90,9 +100,12 @@ begin
     from public.invoices inv where inv.id = v_inv.id;
   return v_out;
 end;
-$$;
-revoke all on function public.save_invoice(uuid, jsonb, jsonb) from public, anon;
-grant execute on function public.save_invoice(uuid, jsonb, jsonb) to authenticated;
+$$
+$create$;
+  execute 'revoke all on function public.save_invoice(uuid, jsonb, jsonb) from public, anon';
+  execute 'grant execute on function public.save_invoice(uuid, jsonb, jsonb) to authenticated';
+end
+$guard$;
 
 commit;
 

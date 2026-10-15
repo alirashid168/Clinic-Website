@@ -41,8 +41,13 @@ grant execute on all functions in schema pg_temp to authenticated, anon;
 -- Run the migration again first: it must be safe to run twice (it commits, so it runs before the transaction below). It also puts back
 -- its save_invoice after 36_invoice_note_test.sql ran 20261015000800 again.
 \ir ../migrations/20261015000900_billing_desk.sql
+-- Then 20261015000800_invoice_note.sql pasted again after this one (it says it is safe to run more than once): it leaves the billing
+-- desk's save_invoice alone, so every save_invoice below (line discounts, items, doctors, the lines' discount rule) runs on this file's.
+\ir ../migrations/20261015000800_invoice_note.sql
 
 begin;
+select pg_temp.check(position('clinician_id' in (select prosrc from pg_proc where oid = 'public.save_invoice(uuid, jsonb, jsonb)'::regprocedure)) > 0,
+  '20261015000800 run again after this file changes nothing: save_invoice still writes the lines'' discount, item and doctor');
 -- The columns, the grid and the policies.
 select pg_temp.check((select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'invoice_items'
                        and column_name in ('discount_amount', 'clinician_id')) = 2, 'invoice_items has discount_amount and clinician_id');
