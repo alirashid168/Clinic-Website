@@ -489,6 +489,9 @@ body:has(> .modal-backdrop) { overflow: hidden; }
   padding: 0 6px; margin: 0 -6px; border-radius: var(--radius-s);
 }
 .site-header nav a:hover { background: var(--on-dark-hover); }
+/* Signed-in staff looking at the website (views/public.js): one line back to their pages, above the name and the links. */
+.staff-return { flex-basis: 100%; margin: 0; font-size: var(--fs-sm); color: var(--on-dark-soft); }
+.site-header .staff-return a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
 .wordmark { font-weight: 800; letter-spacing: -.01em; font-size: var(--fs-lg); }
 .wordmark small { display: block; font-weight: 500; font-size: var(--fs-xs); color: var(--on-dark-muted); letter-spacing: .02em; }
 /* The clinic's logo (white, logo-mark.svg) before the name, in every dark header (site, staff top bar, sidebar).
@@ -619,6 +622,59 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .public-fallback .inline { gap: var(--space-3); }
 .public-main.public-fallback { margin: clamp(var(--space-6), 8vh, var(--space-8)) auto; width: calc(100% - 2 * var(--space-4)); padding: var(--space-6); }
 
+/* The section on the two homepage forms ("Join our team", "Complaints & suggestions") after the clinics, and the forms
+   (views/forms.js). Phone first: one column, full-width controls and send button, 44px targets; two columns of cards from
+   600px. The band has its own space below the clinics (a different background) and a shorter gap to the footer than a whole
+   public section. (The two buttons under the doors are .hero-forms.) */
+.forms-band-wrap { padding-top: var(--space-7); padding-bottom: var(--space-7); }
+.forms-band { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: clamp(var(--space-5), 4vw, var(--space-7)); }
+.forms-band h2 { font-size: var(--fs-section); letter-spacing: -.02em; margin-bottom: var(--space-4); }
+.forms-cards { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); margin-bottom: var(--space-4); }
+.forms-card {
+  --ring: var(--focus-ring); display: grid; grid-template-rows: auto auto 1fr; gap: var(--space-1); padding: var(--space-5); border-radius: var(--radius-m);
+  background: var(--aubergine); color: var(--on-dark-strong); text-decoration: none; transition: background-color .15s;
+}
+.forms-card + .forms-card { background: var(--aubergine-deep); }
+.forms-card:hover { background: var(--aubergine-light); }
+.forms-card:focus-visible { outline-offset: 3px; }
+.forms-card strong { font-size: var(--fs-xl); letter-spacing: -.01em; }
+.forms-card span { font-size: var(--fs-sm); color: var(--on-dark-soft); }
+/* Side by side, "Apply" and "Write to us" line up at the bottom. */
+.forms-card .forms-card-go { align-self: end; margin-top: var(--space-2); font-size: var(--fs-ui); font-weight: 700; color: var(--gold-300); }
+.forms-band-note { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); }
+
+.form-page { padding-top: var(--space-5); }
+.form-wrap { max-width: 40rem; margin: 0 auto; }
+.form-back { margin: 0 0 var(--space-2); }
+.form-back a { display: inline-flex; align-items: center; min-height: var(--target); font-weight: 600; }
+.form-intro { font-size: var(--fs-md); }
+.form-privacy { font-size: var(--fs-sm); background: var(--gold-soft); border-left: 3px solid var(--champagne); padding: var(--space-3); border-radius: 0 var(--radius-s) var(--radius-s) 0; margin-bottom: var(--space-5); }
+.public-form { display: grid; gap: var(--space-4); }
+fieldset.form-group { margin: 0; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); min-width: 0; }
+fieldset.form-group > legend { padding: 0 var(--space-2); font-size: var(--fs-md); font-weight: 700; color: var(--text); }
+.public-form .field-label { color: var(--text); }
+.form-group-note { font-size: var(--fs-sm); margin-bottom: var(--space-3); }
+.check-line { display: flex; gap: var(--space-3); align-items: flex-start; min-height: var(--target); padding: var(--space-2) 0; cursor: pointer; }
+.check-line input { flex: none; margin-top: .125rem; }
+fieldset.choice-group { margin: 0; padding: 0; border: 0; min-width: 0; display: grid; gap: var(--space-2); }
+fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
+.choice { display: flex; gap: var(--space-3); align-items: center; min-height: var(--target); padding: var(--space-3); border: 1px solid var(--control-border); border-radius: var(--radius-m); background: var(--surface); cursor: pointer; }
+.choice:has(input:checked) { border-color: var(--aubergine); box-shadow: inset 0 0 0 1px var(--aubergine); background: var(--aubergine-soft); }
+.choice input { flex: none; }
+.choice > span { display: grid; }
+.choice small { font-size: var(--fs-sm); color: var(--text-muted); }
+.form-actions .form-send { width: 100%; }
+@media (min-width: 600px) { .form-actions .form-send { width: auto; min-width: 16rem; } }
+.form-alert { margin: 0; }
+.form-alert-action { display: block; margin-top: var(--space-3); } /* the WhatsApp button under "try again later" */
+.form-cv-whatsapp { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--fs-sm); } /* under a CV the form cannot take */
+/* The box only bots fill in: off screen, out of the tab order (tabindex -1) and hidden from screen readers (aria-hidden). */
+.hp-field { position: absolute !important; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+.form-thanks { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: var(--space-7) var(--space-5); }
+.form-thanks-mark { display: inline-grid; place-items: center; width: 56px; height: 56px; margin-bottom: var(--space-3); border-radius: 50%; background: var(--ok-soft); color: var(--ok); font-size: var(--fs-2xl); font-weight: 800; }
+.form-thanks-actions { display: flex; gap: var(--space-2); justify-content: center; flex-wrap: wrap; margin: var(--space-5) 0 0; }
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* ============================================================ LOGIN */
 .login-wrap { min-height: 100svh; display: grid; place-items: center; padding: var(--space-6) var(--space-4); background: linear-gradient(180deg, var(--aubergine-deep), var(--aubergine)); }
 .login-card { background: var(--surface); border-radius: var(--radius-l); padding: var(--space-6); width: min(440px, 100%); box-shadow: 0 30px 80px rgba(var(--shadow-base), .35); }
@@ -635,6 +691,14 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .login-demo p { font-size: var(--fs-sm); margin: 0 0 var(--space-3); }
 .hero-demo { font-size: var(--fs-ui); color: var(--on-dark-soft); margin: var(--space-4) 0 0; }
 .hero-demo a { color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
+/* The two form buttons right under the doors ("Join our team", "Complaints & suggestions"): side by side and the same size
+   (on a phone too, where the longer one takes two lines), outlined in the gold a door shows when hovered. */
+.hero-forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); width: min(560px, 100%); margin: var(--space-4) 0 0; }
+.hero-btn {
+  border-color: var(--gold); background: var(--glass); color: var(--on-dark-strong); line-height: 1.25;
+  backdrop-filter: blur(6px); transition: background-color .2s, border-color .2s;
+}
+.hero-btn:hover { background: var(--glass-hover); border-color: var(--gold-300); }
 .sample-banner { position: sticky; top: 0; z-index: var(--z-sticky); border-radius: 0; }
 @media (max-width: 720px), (max-height: 500px) { .sample-banner { position: static; } }
 
@@ -653,6 +717,7 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .nav-group { font-size: var(--fs-xs); color: var(--on-dark-subtle); padding: var(--space-3) var(--space-2) var(--space-1); }
 .sidebar-foot { margin-top: auto; padding: var(--space-3) var(--space-2) 0; border-top: 1px solid var(--on-dark-line); font-size: var(--fs-sm); }
 .sidebar-foot .link-btn { color: var(--on-dark-strong); }
+.sidebar-foot a.link-btn { display: inline-flex; align-items: center; margin-top: var(--space-2); } /* "View the website": centred in its touch height like the buttons */
 .main { padding: var(--space-6) max(clamp(14px, 3vw, 32px), env(safe-area-inset-right)) calc(var(--space-8) + var(--space-4)) max(clamp(14px, 3vw, 32px), env(safe-area-inset-left)); min-width: 0; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-4); }
 .page-head h1 { margin: 0; }
@@ -749,7 +814,7 @@ body:has(> .modal-backdrop) { overflow: hidden; }
     transition: transform .2s ease, visibility 0s linear .2s;
   }
   .sidebar.open, body.drawer-open .sidebar { transform: none; visibility: visible; box-shadow: var(--shadow-lg); transition: transform .2s ease, visibility 0s; }
-  /* Change password and Log out stay on screen at the bottom of the drawer while the links above them scroll (a phone is too short for all of them). */
+  /* View the website, Change password and Log out stay on screen at the bottom of the drawer while the links above them scroll (a phone is too short for all of them). */
   .sidebar-foot { position: sticky; bottom: 0; background: var(--surface-inverse); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
   body.drawer-open .drawer-scrim, .sidebar.open ~ .drawer-scrim { display: block; }
   body.drawer-open { overflow: hidden; }
@@ -1517,6 +1582,19 @@ table.invoice-lines input { min-width: 0; }
 .phone-link a { display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; text-decoration: none; font-size: var(--fs-ui); opacity: .8; }
 .phone-link a:hover { opacity: 1; }
 
+/* Job applications (views/staff/jobs.js) */
+.jobs-filters select, .complaints-from select { width: auto; max-width: 220px; }
+.jobs-cleanup .btn { margin-left: var(--space-2); }
+.job-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-4); margin: 0 0 var(--space-3); }
+.job-detail { display: contents; }
+.job-details dt { font-size: var(--fs-sm); color: var(--text-muted); }
+.job-details dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .job-details { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .job-details dd { margin-bottom: var(--space-2); }
+}
+.job-history { margin: 0; padding-left: var(--space-5); display: grid; gap: var(--space-2); font-size: var(--fs-ui); }
+
 /* ============================================================ TOUCH
    Phones and tablets: 44px targets and 16px form text (no iOS focus zoom). */
 @media (pointer: coarse), (hover: none) {
@@ -1578,7 +1656,8 @@ table.invoice-lines input { min-width: 0; }
   .cx-cal-day.is-visit { forced-color-adjust: none; background: Highlight; color: HighlightText; }
   .cx-cal-day.is-visit.is-past { background: Canvas; color: CanvasText; border: 2px dashed Highlight; }
   .badge, .status-chip, .chip, .count-chip, .person, .cx-status, .sx-chip, .sx-today { border: 1px solid CanvasText; }
-  .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn { border: 1px solid ButtonText; }
+  .cx-btn, .cx-icon-btn, .wa-float, .door, .mx-btn, .forms-card { border: 1px solid ButtonText; }
+  .choice:has(input:checked) { outline: 2px solid Highlight; outline-offset: -2px; }
   .modal, .menu-list, .search-results, .suggestions, .combobox [role="listbox"], .toast { border: 1px solid CanvasText; }
   .sidebar.open, body.drawer-open .sidebar { border-right: 1px solid CanvasText; }
   .stars [aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; }

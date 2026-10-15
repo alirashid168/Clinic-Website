@@ -3664,6 +3664,536 @@ await step('Register needs both "Register new patients" and list editing: with l
   assert.match(answer, /NOT_ALLOWED: registering a patient needs "Register new patients" and "Add and edit Aaj ki List entries"/);
 });
 
+// ------------------------------------------------------------- the homepage forms: "Join our team" and "Complaints & suggestions"
+// (owner, 11 Oct 2026). A visitor on a phone sends both forms; then Dr. Ali finds the application on the Job applications page and the
+// website forms in the Complaints inbox; the clinic coordinator (no jobs.view) sees no application at all.
+const pf = await newPage({ width: 390, height: 844 });
+const docWidth = (pg) => pg.evaluate(() => document.documentElement.scrollWidth);
+// Where the two hero buttons sit: [top, bottom] of each (page y), the bottom of the doors, and each button's look.
+const heroButtons = (pg) => pg.evaluate(() => {
+  const y = (el) => { const r = el.getBoundingClientRect(); return [Math.round(r.top + scrollY), Math.round(r.bottom + scrollY)]; };
+  return {
+    doorsEnd: y(document.querySelector('.door-row'))[1],
+    buttons: [...document.querySelectorAll('.hero .hero-forms a')].map((a) => {
+      const s = getComputedStyle(a);
+      return { text: a.textContent, href: a.getAttribute('href'), isBtn: a.classList.contains('btn'), y: y(a), height: a.getBoundingClientRect().height,
+        border: parseFloat(s.borderTopWidth), underline: s.textDecorationLine.includes('underline') };
+    }),
+  };
+});
+await step('homepage: two buttons right under the four doors, "Join our team" and "Complaints & suggestions", on or just after the first screen; a section further down says more; the footer links to both', async () => {
+  await pf.goto(BASE);
+  // The owner (11 Oct) asked for two buttons; on 12 Oct he looked for them: they sit right under the doors, styled as buttons (not
+  // underlined text), found without scrolling past Dr. Ali, the week and the clinics.
+  await pf.locator('.hero .hero-forms a').first().waitFor();
+  const phone = await heroButtons(pf);
+  assert.deepEqual(phone.buttons.map((b) => [b.text, b.href]), [['Join our team', '#/join'], ['Complaints & suggestions', '#/feedback']]);
+  for (const b of phone.buttons) {
+    assert.ok(b.isBtn && b.border >= 1 && !b.underline && b.height >= 48, `"${b.text}" looks like a button (48 px or taller, with a border): ${JSON.stringify(b)}`);
+    assert.ok(b.y[0] - phone.doorsEnd <= 40, `"${b.text}" sits right under the doors (doors end at y=${phone.doorsEnd}, the button starts at y=${b.y[0]})`);
+    assert.ok(b.y[1] <= 844 + 120, `"${b.text}" at 390x844 is on the first screen or just after it (it ends at y=${b.y[1]})`);
+  }
+  assert.equal(phone.buttons[0].y[0], phone.buttons[1].y[0], 'side by side');
+  await pf.locator('.hero .hero-forms').scrollIntoViewIfNeeded();
+  await shot(pf, '39-home-hero-forms-390');
+  // On a laptop (1366x768) both are on the first screen.
+  await pf.setViewportSize({ width: 1366, height: 768 });
+  const laptop = await heroButtons(pf);
+  for (const b of laptop.buttons) assert.ok(b.y[1] <= 768 && b.y[0] - laptop.doorsEnd <= 40, `"${b.text}" at 1366x768 is on the first screen, under the doors: ${JSON.stringify(b.y)}`);
+  await pf.evaluate(() => window.scrollTo(0, 0));
+  await shot(pf, '39b-home-hero-forms-1366');
+  await pf.setViewportSize({ width: 390, height: 844 });
+  const section = pf.locator('#work-with-us');
+  await section.scrollIntoViewIfNeeded();
+  assert.equal(await section.locator('a.forms-card').count(), 2);
+  assert.equal(await section.getByRole('link', { name: /Join our team/ }).getAttribute('href'), '#/join');
+  assert.equal(await section.getByRole('link', { name: /Complaints & suggestions/ }).getAttribute('href'), '#/feedback');
+  assert.match(await section.locator('.forms-band-note').innerText(), /only to Dr\. Ali Rashid and the clinic's management/);
+  assert.equal(await pf.locator('.site-footer a[href="#/join"]').count(), 1, 'footer link to the job form');
+  assert.equal(await pf.locator('.site-footer a[href="#/feedback"]').count(), 1, 'footer link to the feedback form');
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  await shot(pf, '40-home-forms-390');
+  await section.getByRole('link', { name: /Join our team/ }).click();
+  await pf.waitForSelector('h1:has-text("Join our team")');
+  assert.equal(await pf.title(), "Join our team | Dr. Ali Rashid's Dental Clinic");
+});
+await step('join form on a phone: every field has a label; sent empty, each required field says what is missing, focus goes to the first, the error is linked to its field', async () => {
+  const form = pf.locator('form.public-form');
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  for (const label of ['Full name', 'Mobile number', 'Email', 'CNIC number', 'Job you are applying for', 'Degree or qualification', 'Graduation year', 'Experience', 'Preferred branch', 'CV file', 'Message']) {
+    assert.equal(await form.getByLabel(new RegExp('^' + label)).count(), 1, 'label: ' + label);
+  }
+  const yearHint = (await form.getByLabel(/^Graduation year/).getAttribute('aria-describedby')).split(' ').find((id) => id.endsWith('-hint'));
+  assert.equal(await pf.locator('#' + yearHint).innerText(), 'Optional. The year you finished, or expect to finish.');
+  // The degree is a list; "Other" opens a box for the degree itself (the word "Other" is never sent).
+  assert.deepEqual((await form.getByLabel(/^Degree or qualification/).locator('option').allTextContents()).slice(1), ['BDS', 'BDS + FCPS / MDS', 'Diploma', 'Intermediate', 'Other']);
+  assert.equal(await form.getByLabel(/^Your degree or qualification/).isVisible(), false, 'no box for another degree until "Other" is chosen');
+  assert.equal(await form.getByLabel(/^Mobile number/).getAttribute('inputmode'), 'tel', 'the phone keyboard for the number');
+  assert.equal(await form.getByLabel(/^CNIC number/).getAttribute('inputmode'), 'numeric');
+  await form.getByRole('button', { name: 'Send my application' }).click();
+  assert.equal(await form.locator('.field-error').count(), 8, 'name, phone, CNIC, job, qualification, branch, CV and consent');
+  const name = form.getByLabel(/^Full name/);
+  assert.equal(await pf.evaluate(() => document.activeElement?.getAttribute('autocomplete')), 'name', 'focus is on the first field with an error');
+  assert.equal(await name.getAttribute('aria-invalid'), 'true');
+  const errorId = (await name.getAttribute('aria-describedby')).split(' ').find((id) => id.endsWith('-error'));
+  assert.equal(await pf.locator('#' + errorId).innerText(), 'Please enter your full name.');
+  assert.match(await form.innerText(), /Please tick this box, so the clinic may keep your details and contact you\./);
+  await shot(pf, '41-join-errors-390');
+});
+await step('join form: a wrong phone, CNIC, email, CV type, "Other" without the degree and a CV over 5 MB are explained in plain words', async () => {
+  const form = pf.locator('form.public-form');
+  await form.getByLabel(/^Full name/).fill('Sample Applicant UI');
+  await form.getByLabel(/^Mobile number/).fill('021 3456');
+  await form.getByLabel(/^CNIC number/).fill('12345-123');
+  await form.getByLabel(/^Email/).fill('sample.ui@example.com?subject=hello');
+  await form.getByLabel(/^Degree or qualification/).selectOption('Other');
+  const otherDegree = form.getByLabel(/^Your degree or qualification/);
+  assert.equal(await otherDegree.isVisible(), true, '"Other" opens the box for the degree');
+  await form.getByLabel(/^CV file/).setInputFiles({ name: 'cv.exe', mimeType: 'application/x-msdownload', buffer: Buffer.from('MZ') });
+  assert.match(await form.innerText(), /Your CV must be a PDF, Word \(\.doc or \.docx\), JPG or PNG file\./, 'said as soon as the file is chosen');
+  assert.equal(await form.locator('.form-cv-whatsapp').isVisible(), true, 'a CV the form cannot take: the WhatsApp way is offered');
+  await form.getByRole('button', { name: 'Send my application' }).click();
+  const text = await form.innerText();
+  assert.match(text, /Please enter a Pakistani mobile number, for example 0300 1234567\./);
+  assert.match(text, /A CNIC has 13 digits, for example 12345-1234567-1\./);
+  assert.match(text, /Please check your email address, for example name@gmail\.com, or leave it empty\./, 'an address with ?subject= is no plain address');
+  assert.match(text, /Your CV must be a PDF, Word/);
+  assert.equal(await otherDegree.getAttribute('aria-invalid'), 'true', 'the error is on the box for the degree');
+  const otherError = (await otherDegree.getAttribute('aria-describedby')).split(' ').find((id) => id.endsWith('-error'));
+  assert.equal(await pf.locator('#' + otherError).innerText(), 'Please type your degree or qualification, for example BA or BSc.');
+  await shot(pf, '41b-join-other-degree-390');
+  await form.getByLabel(/^CV file/).setInputFiles({ name: 'cv.pdf', mimeType: 'application/pdf', buffer: Buffer.alloc(5 * 1024 * 1024 + 1) });
+  assert.match(await form.innerText(), /Your CV is larger than 5 MB/);
+  // A phone photo of a printed CV over 5 MB (the hint says a photo is fine): a phone cannot make it smaller or turn it into a
+  // PDF, so the WhatsApp way is right under the error, as for the busy messages.
+  await form.getByLabel(/^CV file/).setInputFiles({ name: 'IMG_0042.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(6000000) });
+  assert.match(await form.innerText(), /Your CV is larger than 5 MB\. Please choose a smaller file, or a PDF\./);
+  const wa = form.locator('.form-cv-whatsapp');
+  assert.equal(await wa.isVisible(), true, 'a 6 MB photo: the WhatsApp way is offered');
+  assert.match(await wa.getByRole('link', { name: /^Send your CV on WhatsApp/ }).getAttribute('href'), /^https:\/\/wa\.me\/92\d+\?text=.*CV/);
+  assert.deepEqual(await form.getByLabel(/^CV file/).evaluate((input) => {
+    const next = input.nextElementSibling;
+    return [next?.classList.contains('field-error'), next?.nextElementSibling?.classList.contains('form-cv-whatsapp')];
+  }), [true, true], 'right under the error');
+  await shot(pf, '41c-join-cv-too-large-390');
+});
+await step('join form: a complete application is sent; the thank-you takes focus and repeats nothing that was typed', async () => {
+  const form = pf.locator('form.public-form');
+  await form.getByLabel(/^Mobile number/).fill('+92 300 555 7788');
+  await form.getByLabel(/^CNIC number/).fill('1234500077881');
+  await form.getByLabel(/^CNIC number/).blur();
+  assert.equal(await form.getByLabel(/^CNIC number/).inputValue(), '12345-0007788-1', 'the CNIC is shown in its usual shape');
+  await form.getByLabel(/^Email/).fill('sample.ui+jobs@example.com');
+  await form.getByLabel(/^Job you are applying for/).selectOption({ label: 'Dental hygienist' });
+  await form.getByLabel(/^Your degree or qualification/).fill('BSc Dental Hygiene');
+  await form.getByLabel(/^Graduation year/).fill('2021');
+  await form.getByLabel(/^Preferred branch/).selectOption({ label: 'Gulberg Lahore' });
+  await form.getByLabel(/^CV file/).setInputFiles({ name: 'sample-cv.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made-up CV for the test') });
+  assert.equal(await form.locator('.form-cv-whatsapp').isVisible(), false, 'a CV the form takes: no WhatsApp way under it');
+  await form.getByLabel(/^Message/).fill('<b>Hello</b> I can start next month.');
+  await form.getByLabel(/may keep these details/).check();
+  await form.getByRole('button', { name: 'Send my application' }).click();
+  await pf.waitForSelector('.form-thanks h1');
+  assert.equal(await pf.evaluate(() => document.activeElement?.tagName), 'H1', 'focus moves to the thank-you heading');
+  const text = await pf.locator('main').innerText();
+  for (const typed of ['Sample Applicant UI', '7788', '12345', 'Hello', 'hygienist']) assert.ok(!text.includes(typed), 'the thank-you does not repeat ' + typed);
+  assert.equal(await pf.locator('main form').count(), 0, 'the form is gone');
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  await shot(pf, '42-join-thanks-390');
+});
+await step('feedback form on a phone: type, topic, branch and message are required; "please contact me" needs a phone number', async () => {
+  await pf.goto(BASE + '#/feedback');
+  await pf.waitForSelector('h1:has-text("Complaints & suggestions")');
+  assert.equal(await pf.title(), "Complaints and suggestions | Dr. Ali Rashid's Dental Clinic");
+  const form = pf.locator('form.public-form');
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  await form.getByRole('button', { name: 'Send', exact: true }).click();
+  assert.equal(await form.locator('.field-error').count(), 4, 'type, topic, branch and message');
+  assert.equal(await pf.evaluate(() => document.activeElement?.type), 'radio', 'focus is on the type choice');
+  await form.getByRole('radio', { name: /Complaint/ }).check();
+  assert.equal(await form.locator('.field-error').count(), 3, 'choosing a type clears its error');
+  assert.deepEqual((await form.getByLabel(/^What is it about/).locator('option').allTextContents()).slice(1),
+    ['Treatment', 'Doctor', 'Front desk & staff behaviour', 'Waiting time', 'Appointments & timings', 'Clinic cleanliness', 'Fees & billing',
+      'Facilities (AC, seating, washroom, parking)', 'Website & online services', 'Other']);
+  await form.getByLabel(/^What is it about/).selectOption({ label: 'Waiting time' });
+  await form.getByLabel(/^Branch/).selectOption({ label: 'North Nazimabad' });
+  await form.getByLabel(/^Message/).fill('Too short');
+  await form.getByLabel(/Please contact me/).check();
+  await form.getByRole('button', { name: 'Send', exact: true }).click();
+  const text = await form.innerText();
+  assert.match(text, /Please write a little more \(at least 10 characters\)\./);
+  assert.match(text, /Please give your mobile number, so we can contact you about this\./);
+  await shot(pf, '43-feedback-errors-390');
+});
+await step('feedback form: sent with contact details; the thank-you says the clinic will contact them and repeats nothing typed', async () => {
+  const form = pf.locator('form.public-form');
+  await form.getByLabel(/^Message/).fill('Waited two hours <img src=x onerror="window.__xss=1"> please add more chairs.');
+  await form.getByLabel(/^Name/).fill('Sample Visitor UI');
+  await form.getByLabel(/^Mobile number/).fill('0301 5557788');
+  await form.getByLabel(/^Mr#/).fill('Mr# 9812');
+  await form.getByRole('button', { name: 'Send', exact: true }).click();
+  await pf.waitForSelector('.form-thanks h1:has-text("Thank you for telling us")');
+  assert.equal(await pf.evaluate(() => document.activeElement?.tagName), 'H1');
+  const text = await pf.locator('main').innerText();
+  assert.match(text, /will call or message you on the number you gave/);
+  for (const typed of ['Sample Visitor UI', '7788', 'chairs', '9812']) assert.ok(!text.includes(typed), 'the thank-you does not repeat ' + typed);
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  await shot(pf, '44-feedback-thanks-390');
+});
+await step('feedback form: "Send another message" gives an empty form with focus on its heading, and an anonymous suggestion about no single branch goes through', async () => {
+  await pf.getByRole('button', { name: 'Send another message' }).press('Enter');
+  await pf.waitForSelector('main form.public-form');
+  assert.deepEqual(await pf.evaluate(() => [document.activeElement?.tagName, document.activeElement?.textContent]), ['H1', 'Complaints & suggestions'],
+    'focus moves to the heading of the new form (not lost to the page)');
+  const form = pf.locator('form.public-form');
+  assert.equal(await form.getByLabel(/^Message/).inputValue(), '');
+  await form.getByRole('radio', { name: /Suggestion/ }).check();
+  await form.getByLabel(/^What is it about/).selectOption({ label: 'Clinic cleanliness' });
+  await form.getByLabel(/^Branch/).selectOption({ label: 'Not about one branch' });
+  await form.getByLabel(/^Message/).fill('Please keep the waiting area cleaner (sample UI).');
+  await form.getByRole('button', { name: 'Send', exact: true }).click();
+  await pf.waitForSelector('.form-thanks h1');
+  assert.match(await pf.locator('main').innerText(), /Messages are read every working day\./);
+});
+await step('the hidden honeypot box: out of the tab order and hidden from screen readers; a form with it filled is thanked and not stored', async () => {
+  await pf.goto(BASE + '#/');
+  await pf.waitForSelector('.door');
+  await pf.goto(BASE + '#/feedback');
+  await pf.waitForSelector('main form.public-form');
+  // Its name and id are ones no browser or password manager fills in by itself (not "website", "url" or "homepage").
+  const trap = pf.locator('.hp-field input[name="pf_trap"]');
+  assert.equal(await trap.getAttribute('tabindex'), '-1');
+  assert.equal(await trap.getAttribute('autocomplete'), 'off');
+  assert.equal(await trap.getAttribute('aria-hidden'), 'true');
+  assert.doesNotMatch(await trap.getAttribute('id'), /web|site|url|home/i);
+  assert.equal(await pf.locator('.hp-field').getAttribute('aria-hidden'), 'true');
+  assert.equal(await pf.locator('form.public-form input[name="website"], form.public-form input[name="url"]').count(), 0);
+  const form = pf.locator('form.public-form');
+  await form.getByRole('radio', { name: /Appreciation/ }).check();
+  await form.getByLabel(/^What is it about/).selectOption({ label: 'Doctor' });
+  await form.getByLabel(/^Branch/).selectOption({ label: 'DHA Karachi' });
+  await form.getByLabel(/^Message/).fill('Honeypot sample message from a bot.');
+  await trap.evaluate((el) => { el.value = 'http://spam.example'; });
+  await form.getByRole('button', { name: 'Send', exact: true }).click();
+  await pf.waitForSelector('.form-thanks h1');
+});
+await step('a full day of applications: the form says "try again tomorrow" in plain words, with a WhatsApp link to send the CV instead', async () => {
+  await pf.goto(BASE + '#/join');
+  await pf.waitForSelector('main form.public-form');
+  // The database's answer once the day's 200 applications are in (FORM_BUSY_DAY), given by the data layer for this one step.
+  await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    window.__submitJob = state.data.submitJobApplication;
+    state.data.submitJobApplication = async () => { throw new Error('FORM_BUSY_DAY: the clinic has received many job applications today. Please try again tomorrow.'); };
+  });
+  try {
+    const form = pf.locator('form.public-form');
+    await form.getByLabel(/^Full name/).fill('Sample Applicant Busy');
+    await form.getByLabel(/^Mobile number/).fill('0300 5557799');
+    await form.getByLabel(/^CNIC number/).fill('12345-0007799-1');
+    await form.getByLabel(/^Job you are applying for/).selectOption({ label: 'Dental assistant' });
+    await form.getByLabel(/^Degree or qualification/).selectOption('Diploma');
+    await form.getByLabel(/^Preferred branch/).selectOption({ label: 'Any branch' });
+    await form.getByLabel(/^CV file/).setInputFiles({ name: 'busy-cv.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made-up CV for the test') });
+    await form.getByLabel(/may keep these details/).check();
+    await form.getByRole('button', { name: 'Send my application' }).click();
+    const alert = form.locator('.form-alert');
+    await alert.waitFor();
+    assert.match(await alert.innerText(), /^The clinic has received a lot of applications today\. Please try again tomorrow, or send your CV on WhatsApp\./);
+    assert.match(await alert.getByRole('link', { name: /Send your CV on WhatsApp/ }).getAttribute('href'), /^https:\/\/wa\.me\/92\d{10}\?text=/, "the clinic's WhatsApp chat");
+    assert.equal(await pf.evaluate(() => document.activeElement?.classList.contains('form-alert')), true, 'focus moves to the message');
+    assert.equal(await form.locator('.field-error').count(), 0, 'no field is marked wrong');
+    assert.equal(await form.getByRole('button', { name: 'Send my application' }).isEnabled(), true, 'the form stays, to send again tomorrow');
+    await shot(pf, '44b-join-day-full-390');
+  } finally {
+    await pf.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.submitJobApplication = window.__submitJob; });
+  }
+});
+await step('staff: Today shows Dr. Ali "New job applications" (2), which opens Job applications filtered to New', async () => {
+  await pf.setViewportSize({ width: 1366, height: 860 });
+  await loginAs(pf, 'Dr. Ali Rashid');
+  const stat = pf.locator('a.stat', { hasText: 'New job applications' });
+  await stat.waitFor();
+  assert.equal(await stat.locator('strong').innerText(), '2', 'the made-up New application and the one just sent');
+  assert.equal(await stat.getAttribute('href'), '#/staff/jobs?status=new');
+  await stat.click();
+  await pf.waitForSelector('table.jobs-table tbody tr');
+  assert.equal(await pf.locator('.jobs-filters select').first().inputValue(), 'new', 'the status filter says New');
+  await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 2);
+  await pf.goto(BASE + '#/staff/today');
+  await pf.waitForSelector('.stat-row');
+});
+await step('staff: Dr. Ali opens "Job applications" from the More menu: the new application is on top; status, job and branch filters work', async () => {
+  await pf.setViewportSize({ width: 1366, height: 860 });
+  await pf.locator('.topnav .menu:has-text("More") > button').click();
+  await pf.locator('.topnav .menu-list a:has-text("Job applications")').click();
+  await pf.waitForSelector('table.jobs-table tbody tr');
+  const rows = pf.locator('table.jobs-table tbody tr');
+  assert.equal(await rows.count(), 3, 'two made-up applications and the one just sent');
+  assert.match(await rows.first().innerText(), /Sample Applicant UI[\s\S]*Dental hygienist[\s\S]*0300 5557788[\s\S]*BSc Dental Hygiene[\s\S]*Gulberg Lahore[\s\S]*New/,
+    'the degree typed after choosing "Other" (not the word "Other")');
+  const [statusSel, jobSel, branchSel] = [0, 1, 2].map((i) => pf.locator('.jobs-filters select').nth(i));
+  await statusSel.selectOption('contacted');
+  await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 1);
+  assert.match(await rows.first().innerText(), /Omar Sample/);
+  assert.match(pf.url(), /#\/staff\/jobs\?status=contacted$/, 'the filter is kept in the address');
+  await statusSel.selectOption('');
+  await jobSel.selectOption('dental_hygienist');
+  await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 1);
+  assert.match(await rows.first().innerText(), /Sample Applicant UI/);
+  await jobSel.selectOption('');
+  await branchSel.selectOption('any');
+  await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 1);
+  assert.match(await rows.first().innerText(), /Omar Sample[\s\S]*Any branch/);
+  await branchSel.selectOption('');
+  await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 3);
+  // The made-up CV that was never sent (four days old) is removed by itself (Today or this page, whichever came first): no button to press.
+  await pf.waitForFunction(async () => { const { state } = await import('/js/state.js'); return (await state.data.jobCvOrphans()).length === 0; });
+  assert.equal(await pf.getByRole('button', { name: 'Remove them' }).count(), 0);
+  await shot(pf, '45-staff-jobs');
+});
+await step('staff: the application dialog shows the CNIC and phone, the message as text, opens the CV through a short link, and saves status and a note with who and when', async () => {
+  await pf.getByRole('button', { name: 'Open the application of Sample Applicant UI' }).click();
+  const m = pf.locator('.modal');
+  await m.waitFor();
+  const text = await m.innerText();
+  assert.match(text, /12345-0007788-1/);
+  assert.match(text, /0300 5557788/);
+  assert.match(text, /<b>Hello<\/b> I can start next month\./, 'the message is shown as typed');
+  assert.equal(await m.locator('.job-details b').count(), 0, 'nothing the applicant typed becomes HTML');
+  assert.equal(await m.getByRole('link', { name: 'sample.ui+jobs@example.com' }).getAttribute('href'), 'mailto:sample.ui%2Bjobs@example.com',
+    'the email link: the address encoded, nothing added');
+  const [popup] = await Promise.all([pf.waitForEvent('popup'), m.getByRole('button', { name: /^Open CV \(PDF/ }).click()]);
+  await popup.waitForURL(/^blob:/);
+  await popup.close();
+  await m.getByLabel('Status', { exact: true }).selectOption('interview');
+  await m.getByLabel(/^Internal note/).fill('Interview on Saturday (sample).');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pf.waitForSelector('.toast:has-text("Saved.")');
+  await m.waitFor({ state: 'detached' });
+  assert.match(await pf.locator('table.jobs-table tbody tr').first().innerText(), /Interview/);
+  await pf.getByRole('button', { name: 'Open the application of Sample Applicant UI' }).click();
+  await m.waitFor();
+  const history = await m.locator('.job-history').innerText();
+  assert.match(history, /Dr\. Ali Rashid[\s\S]*Status changed to Interview/);
+  assert.match(history, /Dr\. Ali Rashid[\s\S]*Interview on Saturday \(sample\)\./);
+  await shot(pf, '46-staff-job-dialog');
+  await pf.keyboard.press('Escape');
+  await m.waitFor({ state: 'detached' });
+});
+await step('staff on a phone: an application opens on its top (job, qualification, mobile), not scrolled down to the Status list', async () => {
+  await pf.setViewportSize({ width: 390, height: 664 }); // what a 390x844 phone shows inside the browser
+  try {
+    for (const name of ['Sana Example', 'Sample Applicant UI']) {
+      await pf.getByRole('button', { name: `Open the application of ${name}` }).click();
+      const m = pf.locator('.modal');
+      await m.waitFor();
+      const seen = await m.evaluate((el) => {
+        const body = el.querySelector('.modal-body');
+        const job = [...el.querySelectorAll('.job-details dt')].find((dt) => dt.textContent === 'Job');
+        const b = body.getBoundingClientRect(), j = job.getBoundingClientRect();
+        return { scrolls: body.scrollHeight > body.clientHeight, scrollTop: body.scrollTop, jobInView: j.top >= b.top && j.bottom <= b.bottom,
+          onTitle: document.activeElement === el.querySelector('h2') };
+      });
+      assert.deepEqual(seen, { scrolls: true, scrollTop: 0, jobInView: true, onTitle: true }, name);
+      if (name === 'Sana Example') await shot(pf, '46b-staff-job-dialog-390x664');
+      await pf.keyboard.press('Escape');
+      await m.waitFor({ state: 'detached' });
+    }
+  } finally {
+    await pf.setViewportSize({ width: 1366, height: 860 });
+  }
+});
+await step('staff: website forms are in the Complaints inbox marked "Website form" with type, topic, branch and contact details, shown as text, with internal notes only', async () => {
+  await pf.goto(BASE + '#/staff/complaints');
+  await pf.waitForSelector('table.complaints-table');
+  const row = pf.locator('table.complaints-table tbody tr', { hasText: 'Complaint: Waiting time' });
+  assert.match(await row.innerText(), /Website form[\s\S]*Sample Visitor UI[\s\S]*0301 5557788[\s\S]*Wants to be contacted[\s\S]*North Nazimabad/);
+  assert.match(await pf.locator('table.complaints-table tbody tr', { hasText: 'Suggestion: Clinic cleanliness' }).filter({ hasText: 'sample UI' }).innerText(),
+    /Anonymous[\s\S]*Not about one branch/);
+  assert.equal(await pf.locator('table.complaints-table tbody tr', { hasText: 'Honeypot sample message' }).count(), 0, 'the honeypot form was not stored');
+  await pf.locator('.complaints-from select').selectOption('website');
+  const shown = pf.locator('table.complaints-table tbody tr');
+  // the list is asked again for the website forms only (the database filters it)
+  await pf.waitForFunction(() => document.querySelectorAll('table.complaints-table tbody tr').length === 4);
+  assert.equal(await shown.count(), 4, 'two made-up website forms and the two just sent');
+  assert.match(pf.url(), /#\/staff\/complaints\?from=website$/, 'the choice is kept in the address');
+  assert.equal(await shown.filter({ hasText: 'Website form' }).count(), 4);
+  await row.getByRole('button', { name: 'Complaint: Waiting time' }).click();
+  const m = pf.locator('.modal');
+  await m.waitFor();
+  const text = await m.innerText();
+  assert.match(text, /Website form Complaint · Waiting time/);
+  assert.match(text, /Mr# given: 9812/);
+  assert.match(text, /Waited two hours <img src=x onerror="window.__xss=1"> please add more chairs\./, 'the message is shown as typed');
+  assert.equal(await m.locator('img').count(), 0, 'no image element from the visitor\'s text');
+  assert.equal(await pf.evaluate(() => window.__xss), undefined, 'nothing the visitor typed ran');
+  assert.equal(await m.getByText('Internal note (patient does not see it)').count(), 0, 'no reply to a website form: notes only');
+  await m.getByLabel(/^Internal note/).fill('Called back, sorry about the wait (sample).');
+  await m.getByRole('button', { name: 'Save note' }).click();
+  await pf.waitForSelector('.toast:has-text("Saved.")');
+  await shot(pf, '47-staff-complaints-website');
+});
+await step('staff: Dr. Ali deletes a junk website form after a warning; a patient\'s complaint has no Delete', async () => {
+  await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.submitFeedback({ kind: 'complaint', topic: 'other', branch: 'none', message: 'Junk sample text for the delete step.', contact_me: false, pf_trap: '' });
+  });
+  await pf.goto(BASE + '#/staff/today');
+  await pf.goto(BASE + '#/staff/complaints?from=website');
+  const junk = pf.locator('table.complaints-table tbody tr', { hasText: 'Junk sample text' });
+  await junk.waitFor();
+  await junk.getByRole('button', { name: 'Complaint: Other' }).click();
+  const dlg = pf.locator('.modal', { hasText: 'Junk sample text' });
+  await dlg.waitFor();
+  await dlg.getByRole('button', { name: 'Delete', exact: true }).click();
+  const confirm = pf.locator('.modal', { hasText: 'Delete this website form?' });
+  await confirm.waitFor();
+  assert.match(await confirm.innerText(), /removed for good, with its notes\. Use this only for junk or spam/);
+  await shot(pf, '47b-staff-complaint-delete');
+  await confirm.getByRole('button', { name: 'Delete', exact: true }).click();
+  await pf.waitForSelector('.toast:has-text("Deleted.")');
+  await junk.waitFor({ state: 'detached' });
+  assert.equal(await pf.locator('.modal').count(), 0, 'both dialogs are closed');
+  assert.equal(await pf.locator('table.complaints-table tbody tr').count(), 4, 'the other website forms stay');
+  await pf.locator('.complaints-from select').selectOption('portal');
+  await pf.waitForFunction(() => { const rows = [...document.querySelectorAll('table.complaints-table tbody tr')]; return rows.length > 0 && rows.every((r) => !r.textContent.includes('Website form')); });
+  await pf.locator('table.complaints-table tbody tr').first().locator('button.link-btn').click();
+  const portal = pf.locator('.modal');
+  await portal.waitFor();
+  assert.equal(await portal.getByRole('button', { name: 'Delete', exact: true }).count(), 0, "a patient's complaint is never deleted");
+  await pf.keyboard.press('Escape');
+  await portal.waitFor({ state: 'detached' });
+});
+// A thank-you or a suggestion is not a complaint about a doctor's work: its dialog has no "About which doctor?", and even when linked
+// (as the inbox allowed before) it does not count on that doctor's daily log. Today counts everything new under the inbox's full name.
+await step('staff: a website thank-you about a doctor has no "About which doctor?" and never counts as a complaint about that doctor', async () => {
+  const docId = await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.submitFeedback({ kind: 'appreciation', topic: 'doctor', branch: '1', message: 'Thank you Dr. Bushra for the very gentle treatment (sample UI).', contact_me: false, pf_trap: '' });
+    return state.ref.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').id;
+  });
+  await pf.goto(BASE + '#/staff/today');
+  await pf.locator('a.stat', { hasText: 'New complaints & suggestions' }).waitFor();
+  assert.equal(await pf.locator('table.list th', { hasText: 'New complaints & suggestions' }).count(), 1, 'the branch table says the same');
+  await pf.goto(BASE + '#/staff/complaints?from=website');
+  const thanks = pf.locator('table.complaints-table tbody tr', { hasText: 'very gentle treatment' });
+  await thanks.waitFor();
+  await thanks.getByRole('button', { name: 'Appreciation: Doctor' }).click();
+  const dlg = pf.locator('.modal', { hasText: 'very gentle treatment' });
+  await dlg.waitFor();
+  assert.equal(await dlg.locator('select[aria-label="About which doctor"]').count(), 0, 'a thank-you is not linked to a doctor as a complaint');
+  await shot(pf, '47c-staff-thanks-no-doctor');
+  await pf.keyboard.press('Escape');
+  await dlg.waitFor({ state: 'detached' });
+  await pf.locator('table.complaints-table tbody tr', { hasText: 'Complaint: Waiting time' }).getByRole('button', { name: 'Complaint: Waiting time' }).click();
+  const complaint = pf.locator('.modal', { hasText: 'Complaint · Waiting time' });
+  await complaint.waitFor();
+  assert.equal(await complaint.locator('select[aria-label="About which doctor"]').count(), 1, 'a website complaint still is');
+  await pf.keyboard.press('Escape');
+  await complaint.waitFor({ state: 'detached' });
+  const counts = await pf.evaluate(async (doc) => {
+    const { state } = await import('/js/state.js');
+    const count = async () => (await state.data.doctorSummary(doc, '2000-01-01', '2100-12-31')).complaints.length;
+    const before = await count();
+    const thanksRow = (await state.data.complaints({ from: 'website' })).find((c) => c.body.includes('very gentle treatment'));
+    await state.data.linkComplaintDoctor(thanksRow.id, doc);
+    return [before, await count()];
+  }, docId);
+  assert.equal(counts[1], counts[0], 'linked anyway, the thank-you adds nothing to the doctor\'s complaints');
+  await pf.goto(BASE + `#/staff/log?doctor=${docId}`);
+  await pf.locator('.stat', { hasText: 'Complaints about your work' }).waitFor();
+  assert.ok(!(await pf.locator('main').innerText()).includes('Appreciation'), 'the doctor\'s log does not list the thank-you');
+});
+await step('a role without "Job applications" (the clinic coordinator): no menu entry, "Page not available", and the data layer refuses; website forms still reach their inbox', async () => {
+  await tryAnotherRole(pf);
+  await loginAs(pf, 'Clinic coordinator');
+  await pf.locator('a.stat', { hasText: 'New complaints & suggestions' }).waitFor();
+  assert.equal(await pf.locator('a.stat', { hasText: 'New job applications' }).count(), 0, 'Today: no number of job applications');
+  await pf.locator('.topnav .menu:has-text("More") > button').click();
+  const nav = (await pf.locator('.topnav .menu-list a').allTextContents()).map((t) => t.trim());
+  assert.ok(nav.includes('Complaints') && !nav.includes('Job applications'), 'Complaints yes, Job applications no');
+  await pf.keyboard.press('Escape');
+  await pf.goto(BASE + '#/staff/jobs');
+  await pf.waitForSelector('h1:has-text("Page not available")');
+  const answer = await pf.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const out = [];
+    for (const call of [() => state.data.jobApplications(), () => state.data.jobCvOrphans(), () => state.data.jobCvUrl('incoming/00000000-0000-4000-8000-000000000001.pdf')]) {
+      try { await call(); out.push('allowed'); } catch (e) { out.push(/row-level security/.test(e.message) ? 'refused' : e.message); }
+    }
+    return out;
+  });
+  assert.deepEqual(answer, ['refused', 'refused', 'refused']);
+  await pf.goto(BASE + '#/staff/complaints');
+  await pf.waitForSelector('table.complaints-table');
+  assert.ok(await pf.locator('table.complaints-table .badge:has-text("Website form")').count() >= 4, 'the coordinator handles the website forms');
+  await pf.locator('table.complaints-table tbody tr', { hasText: 'Website form' }).first().locator('button.link-btn').click();
+  const m = pf.locator('.modal');
+  await m.waitFor();
+  assert.equal(await m.getByRole('button', { name: 'Save note' }).count(), 1);
+  assert.equal(await m.getByRole('button', { name: 'Delete', exact: true }).count(), 0, '... but only an admin deletes one');
+  await pf.keyboard.press('Escape');
+  await m.waitFor({ state: 'detached' });
+});
+await step('access list: a "Job applications (CNIC, phone and CV)" row, ticked for nobody but admin by default', async () => {
+  await tryAnotherRole(pf);
+  await loginAs(pf, 'Dr. Ali Rashid');
+  await pf.goto(BASE + '#/staff/admin?tab=access');
+  await pf.waitForSelector('table.perm-grid');
+  for (const role of ['Front desk', 'Assistant', 'Doctor', 'Clinic coordinator', 'Accountant']) {
+    assert.equal(await pf.getByLabel(`${role}: Job applications (CNIC, phone and CV)`).isChecked(), false, role);
+  }
+});
+// The owner (12 Oct 2026): "there's no way to go back to the homepage from here". The account menu and the phone drawer have
+// "View the website"; the homepage stays the public one while signed in, with a line back to the staff pages (and the Employee door).
+await step('staff: "View the website" in the account menu opens the public homepage; "Back to staff pages" and the Employee door lead back', async () => {
+  await pf.goto(BASE + '#/staff/today');
+  await pf.waitForSelector('.topbar');
+  await pf.locator('.user-menu > button').click();
+  const link = pf.locator('#user-menu-list a', { hasText: 'View the website' });
+  assert.equal(await link.getAttribute('href'), '#/');
+  await link.click();
+  await pf.waitForSelector('.door:has-text("Employee")');
+  assert.equal(new URL(pf.url()).hash, '#/');
+  assert.equal(await pf.locator('.topbar').count(), 0, 'the public homepage, not a staff page');
+  for (const t of ['Patient', 'Visitor', 'Our results', 'Employee']) assert.equal(await pf.locator('.door', { hasText: t }).count(), 1, `door ${t}`);
+  assert.equal(await pf.locator('.hero .hero-forms a.btn').count(), 2, 'with the two form buttons under the doors');
+  assert.equal(await pf.locator('#work-with-us a.forms-card').count(), 2, '... and the section on them further down');
+  const back = pf.locator('.staff-return');
+  await back.waitFor();
+  assert.match(await back.innerText(), /You are signed in to the clinic system\. Back to staff pages/);
+  await shot(pf, '48-home-signed-in');
+  await back.getByRole('link', { name: 'Back to staff pages' }).click();
+  await pf.waitForSelector('.topbar');
+  assert.match(pf.url(), /#\/staff\/today$/);
+  await pf.evaluate(() => { location.hash = '#/'; });
+  await pf.locator('.door:has-text("Employee")').click();
+  await pf.waitForSelector('.topbar');
+  assert.match(pf.url(), /#\/staff\/today$/, 'the Employee door goes straight to the staff pages while signed in');
+});
+await step('staff on a phone: "View the website" is at the foot of the drawer; a visitor (nobody signed in) sees no "Back to staff pages"', async () => {
+  await pf.setViewportSize({ width: 390, height: 844 });
+  await pf.locator('.menu-toggle').click();
+  await pf.waitForSelector('#staff-drawer.open');
+  const link = pf.locator('#staff-drawer .sidebar-foot a', { hasText: 'View the website' });
+  await link.waitFor();
+  assert.equal(await link.getAttribute('href'), '#/');
+  await pf.waitForTimeout(300); // the drawer slides in
+  await shot(pf, '49-drawer-view-website');
+  await link.click();
+  await pf.waitForSelector('.door:has-text("Employee")');
+  assert.equal(await pf.evaluate(() => document.body.classList.contains('drawer-open')), false, 'the drawer is closed');
+  await pf.locator('.staff-return').waitFor();
+  assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
+  const visitor = await newPage({ width: 390, height: 844 });
+  await visitor.goto(BASE);
+  await visitor.waitForSelector('.sx-day');
+  assert.equal(await visitor.locator('.staff-return:not([hidden])').count(), 0);
+  await visitor.close();
+  await pf.setViewportSize({ width: 1366, height: 860 });
+});
+
 // ------------------------------------------------------------- "End the day" and the History of Aaj ki List (owner, 12 Oct 2026)
 // (The demo has one day ended already: North Nazimabad five days ago, at 21:05, by its front desk. Made-up names only.)
 const pd = await newPage();

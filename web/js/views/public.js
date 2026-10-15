@@ -1,5 +1,5 @@
-// Public website: home (hero smile card + three doors + Meet Dr. Ali + his week
-// and the clinics) and the visitor page. The parts that need no data render at
+// Public website: home (hero smile card + four doors with the two form buttons under them + Meet Dr. Ali + his week
+// and the clinics + a section on the two forms), our results and the visitor page. The parts that need no data render at
 // once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce, modal } from '../ui/dom.js';
 import { state } from '../state.js';
@@ -46,8 +46,24 @@ export function smile3d() {
 }
 
 // ---------------------------------------------------------------- pieces
-function header(sub) {
+/**
+ * Staff who opened the website from their account menu ("View the website", owner 12 Oct 2026) get a line back to
+ * their pages above the top bar. Who is signed in is known once the app has started, so the line appears then.
+ */
+function staffReturn() {
+  const line = h('p', { class: 'staff-return', hidden: true });
+  state.ready.then(() => {
+    if (state.session?.kind !== 'staff') return;
+    mount(line, 'You are signed in to the clinic system. ', h('a', { href: '#/staff/today' }, 'Back to staff pages'));
+    line.hidden = false;
+  });
+  return line;
+}
+
+/** The top bar of the public pages (also used by the two forms, views/forms.js). */
+export function header(sub) {
   return h('header', { class: ['site-header', sub && 'subpage-header'] },
+    staffReturn(),
     h('a', { href: '#/', class: 'wordmark' }, "Dr. Ali Rashid's", h('small', {}, 'Dental Clinic')),
     h('nav', { class: 'inline', 'aria-label': 'Main' },
       h('a', { href: '#/visitor' }, 'Treatments'),
@@ -61,7 +77,8 @@ function whatsappLink(text) {
   return `https://wa.me/${number}?text=${encodeURIComponent(text)}`;
 }
 
-function waLink(text, label, cls) {
+/** A link that opens a WhatsApp chat with the clinic, its first message filled in (also used by the two forms, views/forms.js). */
+export function waLink(text, label, cls) {
   return h('a', { class: cls, href: whatsappLink(text), target: '_blank', rel: 'noopener' }, label, srOnly(' (opens WhatsApp)'));
 }
 
@@ -70,9 +87,11 @@ function waFloat() {
     h('span', { 'aria-hidden': 'true' }, '💬'), 'WhatsApp');
 }
 
-function footer() {
+export function footer() {
   return h('footer', { class: 'site-footer' },
     h('div', { class: 'footer-links' },
+      h('a', { href: '#/join' }, 'Join our team'),
+      h('a', { href: '#/feedback' }, 'Complaints & suggestions'),
       HOME.social.map((s) => extLink(s.url, s.name)),
       extLink(HOME.reviewsUrl, 'Google reviews'),
       h('a', { href: `tel:${CONTACT.tel}` }, `Call ${CONTACT.phone}`)),
@@ -136,6 +155,23 @@ function resultsSection(cases, { limit, reviews } = {}) {
     // url is a resized rendition when the data layer can make one; srcset/sizes let phones pick a smaller file.
     h('div', { class: 'cases' }, shown.map((c, i) => h('img', { src: c.url, srcset: c.srcset || null, sizes: c.srcset ? '(max-width: 560px) 100vw, 360px' : null, alt: caseAlt(c, i), loading: 'lazy', decoding: 'async' }))),
     cases.length > shown.length ? h('p', {}, h('a', { href: '#/visitor' }, `See all ${cases.length} results`)) : null);
+}
+
+/**
+ * The two forms the owner asked for (11 Oct 2026), "Join our team" and "Complaints & suggestions", once more after the clinics:
+ * each opening its own page (#/join, #/feedback) with a line on what it is for, and one line on who sees what is sent. (Their
+ * two buttons are under the doors at the top.)
+ */
+function formsSection() {
+  const card = (href, title, text, action) => h('a', { class: 'forms-card', href },
+    h('strong', {}, title), h('span', {}, text), h('span', { class: 'forms-card-go', 'aria-hidden': 'true' }, action, ' →'));
+  return h('div', { class: 'public-main forms-band-wrap' },
+    h('section', { class: 'forms-band', id: 'work-with-us', 'aria-labelledby': 'forms-band-title' },
+      h('h2', { id: 'forms-band-title' }, 'Work with us, or help us improve'),
+      h('div', { class: 'forms-cards' },
+        card('#/join', 'Join our team', 'Dentists, assistants, front desk and more: send your details and CV.', 'Apply'),
+        card('#/feedback', 'Complaints & suggestions', 'Tell us what went wrong or what we could do better. You can stay anonymous.', 'Write to us')),
+      h('p', { class: 'forms-band-note' }, "What you send goes only to Dr. Ali Rashid and the clinic's management. It is never shared.")));
 }
 
 // ---------------------------------------------------------------- data
@@ -226,11 +262,17 @@ export async function renderHome(root) {
           h('a', { class: 'door', href: '#/visitor' }, h('strong', {}, 'Visitor'), h('span', {}, 'Braces options, treatments and how to start')),
           h('a', { class: 'door', href: '#/results' }, h('strong', {}, 'Our results'), h('span', {}, 'Smile makeovers, veneers, braces and more')),
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))),
+        // The two buttons the owner asked for (11 Oct 2026), right under the doors, so they are found on the first screen or just
+        // after it, without scrolling past Dr. Ali, his week and the clinics (12 Oct). The section after the clinics says more.
+        h('div', { class: 'hero-forms' },
+          h('a', { class: 'btn btn-lg hero-btn', href: '#/join' }, 'Join our team'),
+          h('a', { class: 'btn btn-lg hero-btn', href: '#/feedback' }, 'Complaints & suggestions')),
         h('p', { class: 'hero-demo' }, 'New here? ', h('a', { href: '#/patient/demo' }, 'See a sample patient account'), ' to find out what you get.'))),
     h('main', { id: 'main' },
       meet.el,
       results.node,
-      dataSlot),
+      dataSlot,
+      formsSection()),
     footer(),
     waFloat());
 
