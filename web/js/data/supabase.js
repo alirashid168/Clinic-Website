@@ -13,6 +13,7 @@ import { PERMISSIONS } from '../lib/permissions.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { isPatientLoginName } from '../lib/portal-login.js';
 import { checkupPhone } from '../lib/checkups.js';
+import { recordsLive } from './supabase-records.js';
 import { cvFileInfo } from '../lib/public-forms.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
@@ -30,7 +31,7 @@ const SIGNED_URL_TTL = 3600; // seconds
 const PAGE = 1000; // Supabase's default "max rows" per request
 const ID_CHUNK = 100; // ids per ".in()" request, so URLs stay short
 const CACHE_MS = 5 * 60 * 1000; // public schedule and gallery
-const FINISHED_LISTED_DAYS = 90; // coordinator lists: finished lab cases stay listed this long after their last change (resolved complaints too)
+const FINISHED_LISTED_DAYS = 90; // the Complaints inbox: resolved complaints stay listed this long
 const COMPLAINTS_OPEN_CAP = 500; // the Complaints inbox: open complaints listed at most
 const COMPLAINTS_RESOLVED_CAP = 200; // ... and resolved ones (of the last 90 days)
 
@@ -1598,6 +1599,9 @@ export async function createSupabaseAdapter() {
     },
     async linkComplaintDoctor(id, clinicianId) { check(await sb.from('complaints').update({ clinician_id: clinicianId || null }).eq('id', id)); },
 
+    // ------------------------------------------------------------ Retainer Record and Lab Work (data/supabase-records.js)
+    ...recordsLive({ sb, check, fetchPaged, attachPatients, plainError }),
+
     // ------------------------------------------------------------ the homepage forms (visitors, no login: role anon)
     /** Uploads the CV as a new file incoming/<random uuid>.<ext> of the private bucket job-cvs; resolves its path. Never overwrites. */
     async uploadJobCv(file) {
@@ -1677,23 +1681,7 @@ export async function createSupabaseAdapter() {
     },
 
     // ------------------------------------------------------------ coordinator (capped lists: .truncated / .cap)
-    // The three lists below leave out what is finished (old ones), so the cap is rarely reached.
-    // Lab work: open statuses (sent, received, returned to the lab) always; fitted or cancelled only while recently changed.
-    async labCases() {
-      const since = addDaysISO(todayISO(), -FINISHED_LISTED_DAYS);
-      return attachPatients(capped(check(await sb.from('lab_cases').select('*').or(`status.in.(sent,received,returned),updated_at.gte.${since}`).order('sent_date', { ascending: false }).limit(301)), 300));
-    },
-    async saveLabCase(row) {
-      const { patient, ...data } = row;
-      if (data.id) check(await sb.from('lab_cases').update(data).eq('id', data.id));
-      else check(await sb.from('lab_cases').insert({ ...data, created_by: await userId() }));
-    },
-    async retainerCases() { return attachPatients(capped(check(await sb.from('retainer_cases').select('*').neq('stage', 'closed').order('created_at', { ascending: false }).limit(301)), 300)); },
-    async saveRetainerCase(row) {
-      const { patient, ...data } = row;
-      if (data.id) check(await sb.from('retainer_cases').update(data).eq('id', data.id));
-      else check(await sb.from('retainer_cases').insert({ ...data, created_by: await userId() }));
-    },
+    // The lists below leave out what is finished (old ones), so the cap is rarely reached.
     async reminders() { return attachPatients(capped(check(await sb.from('reminders').select('*').not('status', 'in', '(done,cancelled)').order('due_date').limit(501)), 500)); },
     async saveReminder(row) {
       const { patient, ...data } = row;

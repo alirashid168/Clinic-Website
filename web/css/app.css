@@ -955,6 +955,211 @@ input.input-readonly { background: var(--surface-sunken); color: var(--text-mute
 }
 .pager-info { font-size: var(--fs-ui); font-weight: 600; }
 
+/* ------------------------------------------------------------ Retainer Record and Lab Work (laid out like the clinic's Google Sheet) */
+/* Chip colours, one class per key of js/lib/records.js PALETTE. The dark ones carry white text, the light ones dark text
+   (every pair >= 6:1); a light chip's edge is >= 3.5:1 on white, so a drop-down chip still shows where it is. */
+.c-purple { --pill-bg: #5a2d82; --pill-fg: #fff; --pill-line: #5a2d82; }
+.c-black { --pill-bg: #1f1a2b; --pill-fg: #fff; --pill-line: #1f1a2b; }
+.c-navy { --pill-bg: #1d3b6e; --pill-fg: #fff; --pill-line: #1d3b6e; }
+.c-red { --pill-bg: #b0262c; --pill-fg: #fff; --pill-line: #b0262c; }
+.c-forest { --pill-bg: #1f6e48; --pill-fg: #fff; --pill-line: #1f6e48; }
+.c-ocean { --pill-bg: #0b5f68; --pill-fg: #fff; --pill-line: #0b5f68; }
+.c-plum { --pill-bg: #7a2152; --pill-fg: #fff; --pill-line: #7a2152; }
+.c-brown { --pill-bg: #6b4423; --pill-fg: #fff; --pill-line: #6b4423; }
+.c-lavender { --pill-bg: #e6dcf5; --pill-fg: #3e2464; --pill-line: #796497; }
+.c-grey { --pill-bg: #e7e5ec; --pill-fg: #37323f; --pill-line: #75717c; }
+.c-green { --pill-bg: #d5efdf; --pill-fg: #155c37; --pill-line: #588f72; }
+.c-blue { --pill-bg: #dce7fb; --pill-fg: #1f3f7a; --pill-line: #617aa7; }
+.c-amber { --pill-bg: #fbe7bf; --pill-fg: #6b4300; --pill-line: #9d7c43; }
+.c-rose { --pill-bg: #fbdde7; --pill-fg: #8a1f45; --pill-line: #b2627e; }
+.c-teal { --pill-bg: #d2eef0; --pill-fg: #0f5560; --pill-line: #538b92; }
+.c-peach { --pill-bg: #fde2cf; --pill-fg: #8a3b00; --pill-line: #b27548; }
+.c-sky { --pill-bg: #d9f0fb; --pill-fg: #0b4f6c; --pill-line: #53879e; }
+.c-lime { --pill-bg: #e8f3c9; --pill-fg: #3f5a00; --pill-line: #7a9046; }
+.pill {
+  display: inline-flex; align-items: center; gap: var(--space-1); max-width: 13rem; min-height: 26px; padding: 2px var(--space-3);
+  border: 1px solid var(--pill-line, var(--control-border)); border-radius: var(--radius-pill);
+  background: var(--pill-bg, var(--status-neutral-bg)); color: var(--pill-fg, var(--text));
+  font: 700 var(--fs-xs)/1.4 var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
+}
+select.pill { width: auto; min-width: 6rem; min-height: 28px; padding-left: 10px; padding-right: var(--space-1); cursor: pointer; }
+/* (in the sheet a chip is a little tighter, so the patient's name gets the room; record-sheet.js) */
+.rs-table select.pill { padding-left: var(--space-2); padding-right: 2px; }
+select.pill option { background: var(--surface); color: var(--text); font-weight: 600; } /* the open list stays plain and readable */
+.pill-dot { width: .7em; height: .7em; border-radius: 50%; background: var(--pill-bg); border: 1px solid var(--pill-line); flex: none; }
+
+/* The page: the sheet's own purple for retainers, teal for lab work. */
+.rs-page { --rs-accent: #5a2d82; --rs-accent-soft: #f1ebf8; --rs-accent-text: #3e2464; --rs-grid: #e3e1e8; }
+.rs-sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-4); }
+.rs-sub .save-status { margin-top: var(--space-1); }
+.rs-page.rs-teal { --rs-accent: #0b5f68; --rs-accent-soft: #e3f3f4; --rs-accent-text: #0f5560; }
+.rs-toolbar {
+  display: grid; gap: var(--space-2) var(--space-3); align-items: end; margin-bottom: var(--space-3); padding: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
+  border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface);
+}
+.rs-toolbar .filter-wide { grid-column: 1 / -1; }
+/* A filter set to a team member or a status takes its colour, as on the chips. */
+.rs-toolbar select.pill-filter { background: var(--pill-bg); color: var(--pill-fg); border-color: var(--pill-line); font-weight: 700; }
+.rs-toolbar select.pill-filter option { background: var(--surface); color: var(--text); }
+/* The less-used filters: in the same line on a wider screen; on a phone behind "More filters" (record-sheet.js), so a row of the sheet is
+   on the first screen. "Clear filters" goes to the end of the line, and on a phone shows only once something is filtered. */
+.rs-more-filters { display: contents; }
+.rs-more-btn { display: none; }
+@media (min-width: 721px) { .rs-toolbar { padding-inline: var(--space-4); } .rs-toolbar .filter-wide { grid-column: span 2; } .rs-toolbar .filter-clear { order: 1; } }
+@media (max-width: 720px) {
+  .rs-more-btn { display: inline-flex; }
+  .rs-more-filters:not(.is-open) { display: none; }
+  .rs-toolbar .filter-clear:has(button:disabled) { display: none; }
+}
+/* Tabs like the sheet's tabs (Karachi, Lahore ... or the branches): flat, the open one white with the accent along its top. */
+.rs-tabs { gap: 2px; margin-bottom: 0; border-bottom: 0; padding: 0 var(--space-1); }
+.rs-tabs .tab { min-height: 40px; padding: var(--space-2) var(--space-4); border: 1px solid var(--border-strong); border-bottom: 0; border-top: 3px solid transparent;
+  border-radius: var(--radius-s) var(--radius-s) 0 0; background: var(--neutral-soft); color: var(--text-muted); }
+.rs-tabs .tab[aria-selected="true"] { background: var(--surface); color: var(--rs-accent-text); border-top-color: var(--rs-accent); border-bottom-color: transparent; }
+/* (on a laptop or bigger, record-sheet.js sets the frame's height to the window under the top bar and the tabs) */
+.rs-wrap { position: relative; overflow: auto; max-height: calc(100svh - 230px); min-height: 240px; border: 1px solid var(--border-strong);
+  border-radius: 0 var(--radius-m) var(--radius-m) var(--radius-m); background: var(--surface); scroll-padding: 44px 0 52px calc(15.5rem + 10px); }
+.rs-wrap :focus-visible { outline-offset: -3px; }
+/* A chip's ring goes around it, with a white edge in between, so it shows on the dark chips too (purple, black, navy ...: 1.3:1 inside). */
+.rs-table select.pill:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; box-shadow: 0 0 0 2px #fff; }
+table.rs-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: var(--fs-sm); }
+.rs-table thead th {
+  position: sticky; top: 0; z-index: 2; padding: var(--space-2) var(--space-3); background: var(--rs-accent); color: #fff;
+  font-size: var(--fs-xs); font-weight: 700; text-align: left; white-space: nowrap; border-right: 1px solid rgba(255, 255, 255, .2);
+}
+.rs-table td, .rs-table tbody th {
+  height: 40px; padding: 2px var(--space-1); border-bottom: 1px solid var(--rs-grid); border-right: 1px solid var(--rs-grid);
+  background: var(--surface); white-space: nowrap; vertical-align: middle; text-align: left; font-weight: 400; color: var(--text);
+}
+.rs-table tbody tr:hover td, .rs-table tbody tr:hover th { background: var(--surface-hover); }
+/* The row number and the patient stay at the left edge while the other columns scroll sideways. On a laptop (1366 wide) the name gets room
+   for about 22 characters (a longer one ends in "…" and shows whole in its tooltip), and the sheet's nine columns still fit beside it. */
+.rs-table .rs-who { position: sticky; left: 0; z-index: 1; min-width: 15.5rem; max-width: 18rem; box-shadow: 1px 0 0 var(--border-strong); }
+.rs-table thead .rs-who { z-index: 3; }
+@media (max-width: 720px) { .rs-table .rs-who { min-width: 168px; max-width: 190px; } .rs-wrap { scroll-padding-left: 190px; } }
+.rs-who-cell { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
+.rs-num { flex: none; min-width: 1.75rem; padding-right: var(--space-1); text-align: right; color: var(--text-muted); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rs-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.rs-name a { color: var(--text); text-decoration: none; }
+.rs-name a:hover, .rs-name a:focus-visible { text-decoration: underline; }
+.rs-name .mr { margin-left: var(--space-1); font-size: var(--fs-xs); font-weight: 600; color: var(--text-muted); }
+.rs-note { flex: none; font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+.rs-who-cell .cell-input { flex: 1 1 auto; min-width: 0; min-height: 32px; padding: 2px var(--space-1); font-weight: 600; }
+.rs-more { flex: none; display: inline-grid; place-items: center; min-width: 28px; min-height: 30px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-s);
+  background: none; color: var(--text-muted); font: 700 var(--fs-md)/1 var(--font); letter-spacing: .05em; cursor: pointer; }
+.rs-more:hover { background: var(--rs-accent-soft); color: var(--rs-accent-text); border-color: var(--rs-grid); }
+.rs-table .cell-input { min-height: 32px; padding: 2px var(--space-2); font-size: var(--fs-sm); }
+.rs-table .rs-who-cell .cell-input { padding-inline: var(--space-1); text-overflow: ellipsis; }
+/* Wide enough for the longest short date Windows gives Chrome (dd-MMM-yyyy: "04-Dec-2024", in the web font and in its fallback) with the
+   whole year beside the calendar button, and no wider: the room goes to the patient's name, and the sheet's nine columns (and Lab work's
+   first eight) still fit a laptop. */
+.rs-table input[type="date"].cell-input { width: 7.5rem; padding-inline: var(--space-1); }
+/* An empty date is blank, as on the sheet (the calendar button stays); the format shows again while it is being typed in. */
+.rs-table input[type="date"].is-empty:not(:focus)::-webkit-datetime-edit { color: transparent; }
+.rs-table input[type="number"].cell-input { width: 7rem; text-align: right; }
+.rs-col-text { min-width: 9rem; }
+.rs-col-wide { min-width: 15rem; }
+.rs-col-short { min-width: 4rem; }
+.rs-col-short .cell-input { width: 4rem; }
+.rs-typed { margin-left: var(--space-1); }
+/* The text typed on the sheet for a date it could not read sits inside the empty date (the column keeps its width) and steps aside
+   while a date is being chosen. */
+.rs-date { position: relative; display: inline-block; vertical-align: middle; }
+.rs-date .rs-typed { position: absolute; left: var(--space-1); top: 50%; transform: translateY(-50%); max-width: calc(100% - 1.75rem); margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.rs-date:focus-within .rs-typed, .rs-date input:not(.is-empty) + .rs-typed { visibility: hidden; }
+.rs-mr { font-weight: 700; font-variant-numeric: tabular-nums; }
+.rs-ro { display: inline-block; padding: 0 var(--space-1); max-width: 18rem; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.rs-saved { margin-left: var(--space-1); }
+tr.rs-late > .rs-who { box-shadow: inset 4px 0 0 #b0262c, 1px 0 0 var(--border-strong); } /* repeats the "Overdue" chip, never alone */
+tr.rs-fresh > td, tr.rs-fresh > th { animation: rs-fresh 2.6s ease-out; }
+@keyframes rs-fresh { from { background: #fff1bf; } to { background: var(--surface); } }
+.rs-add td { position: sticky; bottom: 0; left: 0; z-index: 1; height: 46px; padding: var(--space-1) var(--space-2); background: var(--rs-accent-soft); border-bottom: 0; }
+.rs-add .btn { border-style: dashed; border-color: var(--rs-accent); color: var(--rs-accent-text); background: var(--surface); }
+.rs-more-rows { display: flex; justify-content: center; margin-top: var(--space-3); }
+/* On a laptop the frame fills the window once the page is scrolled down to it (record-sheet.js), so the page keeps only a little room
+   under it: every row it gives back is a row of the sheet in sight. */
+@media (min-width: 721px) { .main:has(> .rs-page) { padding-bottom: var(--space-4); } }
+.rs-empty td { height: auto; white-space: normal; }
+/* Overdue retainer checks (retainers.js): a line of its own under the title; on a phone without the names, so it stays one line and the
+   first rows of the sheet stay on the first screen. */
+.rs-page .page-head p.rs-notice { flex-basis: 100%; margin: var(--space-1) 0 0; color: var(--text); font-size: var(--fs-sm); }
+.rs-notice strong { color: var(--status-bad-text); }
+@media (max-width: 720px) { .rs-notice-names { display: none; } }
+
+/* "Retainer Lab": the banner for the people who make the retainers. */
+/* The purple stays dark behind every word (the lightest spot behind the counts is >= 4.5:1 for #efe8f8, also on a pressed chip). */
+.rl-banner {
+  --ring: var(--gold-300);
+  display: grid; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-l); color: #fff; box-shadow: var(--shadow-card);
+  background: radial-gradient(circle at 92% 12%, rgba(226, 196, 143, .1), transparent 42%), linear-gradient(120deg, #3e2464 0%, #5a2d82 100%);
+}
+.rl-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4); justify-content: space-between; }
+.rl-head > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-4); } /* the friendly line beside the title */
+.rl-title { display: flex; align-items: center; gap: var(--space-3); margin: 0; font-size: var(--fs-xl); letter-spacing: -.01em; color: #fff; }
+.rl-title svg { flex: none; width: 1.9rem; height: 1.9rem; align-self: center; }
+.rl-line { margin: 0; color: #efe8f8; font-size: var(--fs-ui); }
+.rl-month { margin: 0; text-align: right; color: #efe8f8; font-size: var(--fs-sm); }
+.rl-month strong { display: block; color: #fff; font-size: var(--fs-lg); font-variant-numeric: tabular-nums; }
+.rl-all { display: block; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.rl-team { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.rl-chip {
+  display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--target); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1);
+  border: 1px solid rgba(255, 255, 255, .28); border-radius: var(--radius-pill); background: rgba(255, 255, 255, .1); color: #fff;
+  font: 600 var(--fs-ui)/1.2 var(--font); white-space: nowrap; cursor: pointer;
+}
+/* Hover and pressed darken the chip (a white fill over the purple took the counts below 4.5:1); the gold ring says "pressed". */
+.rl-chip:hover { background: rgba(0, 0, 0, .14); }
+.rl-chip[aria-pressed="true"] { border-color: var(--gold-300); box-shadow: 0 0 0 2px var(--gold-300); background: rgba(0, 0, 0, .22); }
+/* On a phone: one line for the title and this month's numbers (the friendly line and the month's name are left out of sight), and the
+   team two side by side (three on a wider phone), each chip with "This month" and "All time" on a line of their own, so everybody in
+   the banner is in sight at 360px and the sheet's first row is still on the first screen. */
+@media (max-width: 720px) {
+  .rl-banner { padding: var(--space-3); }
+  .rl-head { flex-wrap: nowrap; }
+  .rl-title { font-size: var(--fs-lg); gap: var(--space-2); }
+  .rl-title svg { width: 1.5rem; height: 1.5rem; }
+  .rl-line { display: none; }
+  .rl-month strong { font-size: var(--fs-md); }
+  .rl-month-label, .rl-all, .rl-sep { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .rl-team { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 1fr)); gap: var(--space-2); }
+  .rl-chip { width: 100%; height: 100%; gap: 6px; padding-right: var(--space-2); border-radius: var(--radius-l); white-space: normal; }
+  .rl-chip .rl-initials { width: 1.75rem; height: 1.75rem; }
+  .rl-chip .rl-name { overflow-wrap: anywhere; }
+  .rl-chip .rl-counts { font-size: var(--fs-xs); line-height: 1.25; }
+  .rl-part { display: block; }
+}
+.rl-initials { display: inline-grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .85);
+  background: var(--pill-bg); color: var(--pill-fg); font-size: var(--fs-xs); font-weight: 800; flex: none; }
+/* A person's chip: the name, and under it this month's numbers and all time's (so it never shows only zeros). */
+.rl-who { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; text-align: left; }
+.rl-name { font-weight: 700; }
+.rl-counts { color: #efe8f8; font-weight: 500; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.rl-counts b { color: #fff; font-weight: 800; }
+.rl-when { font-weight: 700; }
+.rl-note { margin: 0; color: #efe8f8; font-size: var(--fs-sm); }
+
+/* The "Delivered!" moment: a green toast with a check mark that pops in (still with reduced motion, just without the pop). */
+.toast-delivered { background: #1f6e48; align-items: center; }
+.toast-delivered .rl-tick { display: inline-grid; place-items: center; flex: none; width: 1.75rem; height: 1.75rem; border-radius: 50%; background: #fff; color: #1f6e48;
+  font-weight: 900; animation: rl-tick .55s cubic-bezier(.2, .9, .3, 1.35); }
+.toast-delivered strong { margin-right: var(--space-1); }
+@keyframes rl-tick { from { transform: scale(.3) rotate(-20deg); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Admin -> Import, the Retainer Record: the cities copied, each with its "Undo the copy" button; the colours a copy gives. */
+.rt-copies { list-style: none; margin: 0 0 var(--space-3); padding: 0; }
+.rt-copies li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.rt-colours { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin: var(--space-2) 0; }
+
+/* Clinic setup: a colour as a chip in the team tables. */
+.swatch-row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+@media (forced-colors: active) {
+  .pill, .rl-chip, .rl-initials { border: 1px solid CanvasText; }
+  .rl-chip[aria-pressed="true"] { outline: 3px solid Highlight; }
+}
+
 /* the History of Aaj ki List: one line per day and branch (the whole line is the link), and one day's list read only */
 .day-history-list { list-style: none; margin: 0; padding: 0; }
 .day-history-list > li + li { border-top: 1px solid var(--border); }

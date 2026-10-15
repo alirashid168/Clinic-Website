@@ -1932,11 +1932,12 @@ await step('installment plan: set up on the patient page, overdue shows for the 
   await shot(p7, '15-installments-due');
 });
 
-await step('braces off → retainer case with a next check date', async () => {
+await step('braces off → retainer case with a next check date, on the patient file and on the Retainer Record of the city', async () => {
   await p7.goto(BASE + '#/staff/patients');
   await p7.waitForSelector('table.list tbody tr');
   await p7.click('table.list tbody tr:has(.badge:has-text("Braces")) a');
   await p7.waitForSelector('h2:has-text("Braces")');
+  const who = (await p7.locator('h1').first().innerText()).trim();
   await p7.getByRole('button', { name: 'Edit case' }).click();
   await p7.locator('.modal').getByLabel('Case status').selectOption('debonded');
   await p7.locator('.modal').getByRole('button', { name: 'Save' }).click();
@@ -1944,9 +1945,41 @@ await step('braces off → retainer case with a next check date', async () => {
   await p7.locator('.modal').getByRole('button', { name: 'Start retainer case' }).click();
   await p7.waitForSelector('.toast:has-text("Retainer case started")');
   await p7.waitForSelector('h2:text("Retainers")');
+  assert.ok(await p7.locator('th:text("Next check")').count(), 'the patient file shows the next check');
+  // The patient is on the Retainer Record of their city, linked to the file.
+  await p7.getByRole('link', { name: 'Open the Retainer Record' }).click();
+  await p7.locator('table.rs-table tbody a', { hasText: who }).first().waitFor();
+  // The old Coordinator tab sends people to the new page.
   await p7.goto(BASE + '#/staff/coordinator?tab=retainers');
-  await p7.waitForSelector('th:text("Next check")');
-  assert.ok(await p7.locator('input[aria-label^="Next check"]').count());
+  await p7.waitForURL(/#\/staff\/retainers/);
+  await p7.waitForSelector('table.rs-table');
+});
+
+await step('braces off, by a doctor who works at one branch only: the retainer case of a patient first registered at another branch is started at the doctor\'s branch', async () => {
+  const pb = await newPage();
+  await loginAs(pb, 'Dr. Ali Rashid');
+  // Dr. Bushra works at North Nazimabad only; Areeba Siddiqui (braces) was first registered at Gulshan.
+  const pid = await pb.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.updateStaffBranches('s-doc', [2]);
+    return (await state.data.searchPatients('Areeba Siddiqui')).find((x) => x.full_name === 'Areeba Siddiqui').id;
+  });
+  await tryAnotherRole(pb);
+  await loginAs(pb, 'Dr. Bushra');
+  await pb.goto(BASE + `#/staff/patient/${pid}`);
+  await pb.waitForSelector('h2:has-text("Braces")');
+  await pb.getByRole('button', { name: 'Edit case' }).click();
+  await pb.locator('.modal').getByLabel('Case status').selectOption('debonded');
+  await pb.locator('.modal').getByRole('button', { name: 'Save' }).click();
+  await pb.locator('.modal').getByRole('button', { name: 'Start retainer case' }).click();
+  await pb.waitForSelector('.toast:has-text("Retainer case started")');
+  const row = await pb.evaluate(async (id) => {
+    const { state } = await import('/js/state.js');
+    const r = (await state.data.retainerRecords({ cityId: 1 })).find((x) => x.patient_id === id && x.source === 'website');
+    return r && [r.branch_id, r.city_id, r.status];
+  }, pid);
+  assert.deepEqual(row, [2, 1, 'Impression taken'], 'on the Karachi tab, at North Nazimabad (not refused at Gulshan)');
+  await pb.close();
 });
 
 await step('medical history is saved and shown on the patient page', async () => {
@@ -3167,6 +3200,800 @@ await step('Checkups page for a person who may only view: no add, edit or regist
   assert.equal(await pa.locator('table.checkup-table').getByRole('button', { name: /^(Register|Edit) / }).count(), 0);
   assert.ok(await pa.locator('table.checkup-table tbody tr[data-id]').first().locator('select[aria-label^="Follow-up status for"]').isDisabled());
   assert.ok(await pa.locator('table.checkup-table tbody tr[data-id]').first().locator('input[aria-label^="Notes for"]').isDisabled());
+});
+
+// ------------------------------------------------------------- Retainer Record and Lab work (owner, 12 Oct 2026)
+// Dr. Ali's own page (its own in-memory demo data). Every name is the demo's made-up one.
+const pr = await newPage();
+const chipCounts = async (name) => (await pr.locator('.rl-chip', { hasText: name }).locator('.rl-counts').innerText()).replace(/\s+/g, ' ').trim();
+await step('Retainer Record: the Coordinator menu opens it, laid out like the sheet: city tabs, the purple header row in the sheet\'s order, the Retainer Lab banner', async () => {
+  await loginAs(pr, 'Dr. Ali Rashid');
+  await pr.locator('.topnav .menu:has-text("Coordinator") > button').click();
+  await pr.locator('.topnav .menu-list a', { hasText: 'Retainer Record' }).click();
+  await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  assert.equal(await pr.locator('h1').innerText(), 'Retainer Record');
+  assert.deepEqual((await pr.locator('.rs-tabs [role="tab"]').allInnerTexts()).map((t) => t.trim()), ['Karachi', 'Lahore', 'Islamabad'], 'one tab per city with branches');
+  assert.deepEqual((await pr.locator('table.rs-table thead th').allInnerTexts()).map((t) => t.trim()),
+    ['# · Patient name', 'Mr#', 'Impression date', 'Model check by', 'Retainer made by', 'Retainer date', 'Status', 'Retainer sheet', 'Payments', 'Next check', 'Contact', 'Notes']);
+  const head = await pr.locator('table.rs-table thead th').first().evaluate((el) => getComputedStyle(el).backgroundColor);
+  assert.equal(head, 'rgb(90, 45, 130)', 'the sheet\'s purple header');
+  // On a laptop (1366 wide) the sheet's own nine columns are in sight; with the page scrolled down to the sheet, the tabs sit under the
+  // top bar and the frame ends on the screen (its sideways scrollbar too). (Measured once the fonts are in.)
+  await pr.evaluate(() => document.fonts.ready);
+  const fit = await pr.evaluate(() => {
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    const w = document.querySelector('.rs-wrap').getBoundingClientRect();
+    const cut = [...document.querySelectorAll('table.rs-table thead th')].slice(0, 9).filter((th) => th.getBoundingClientRect().right > w.right + 1).map((th) => th.textContent);
+    const out = { cut, tabs: Math.round(document.querySelector('.rs-tabs').getBoundingClientRect().top), bar: Math.round(document.querySelector('.topbar').getBoundingClientRect().bottom), bottom: Math.round(w.bottom), height: innerHeight };
+    window.scrollTo(0, 0);
+    return out;
+  });
+  assert.deepEqual(fit.cut, [], 'the nine columns of the sheet fit');
+  assert.ok(fit.bottom <= fit.height, `the frame ends at ${fit.bottom}px of a ${fit.height}px window`);
+  assert.ok(fit.tabs >= fit.bar, `the tabs (${fit.tabs}px) are not under the top bar (${fit.bar}px)`);
+  // ... and beside them the patient's name has room for 22 characters ("Muhammad Abdullah Khan" in the cell's own font); a longer name ends
+  // in "…", and its tooltip has it whole.
+  const nameRoom = await pr.evaluate(() => {
+    const input = document.querySelector('table.rs-table tbody .rs-who-cell input');
+    const cs = getComputedStyle(input);
+    const c = document.createElement('canvas').getContext('2d');
+    c.font = cs.font;
+    return { room: input.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), need: c.measureText('Muhammad Abdullah Khan').width, overflow: cs.textOverflow, title: input.title, value: input.value };
+  });
+  assert.ok(nameRoom.room >= nameRoom.need, `the name has room for 22 characters (${Math.round(nameRoom.room)}px for ${Math.round(nameRoom.need)}px)`);
+  assert.equal(nameRoom.overflow, 'ellipsis', 'a longer name ends in "…"');
+  assert.ok(nameRoom.value && nameRoom.title === nameRoom.value, 'the tooltip has the whole name');
+  assert.ok((await pr.locator('table.rs-table tbody .rs-name[title]').count()) > 0, 'a linked name has its tooltip too');
+  // The keyboard ring of a dark chip goes around it (inside, it did not show on the deep purple or the black).
+  await pr.locator('table.rs-table select[aria-label^="Retainer made by"]').first().focus();
+  await pr.keyboard.press('Shift+Tab');
+  assert.deepEqual(await pr.evaluate(() => { const s = getComputedStyle(document.activeElement); return [document.activeElement.dataset.field, s.outlineWidth, s.outlineOffset]; }),
+    ['model_check_by', '3px', '2px']);
+  assert.match(await pr.locator('.page-head p').first().innerText(), /^Karachi: 56 retainers$/);
+  assert.match(await pr.locator('.rl-banner h2').innerText(), /Retainer Lab/);
+  assert.deepEqual((await pr.locator('.rl-chip .rl-name').allInnerTexts()).map((t) => t.trim()), ['Hassan (sample)', 'Kamran (sample)', 'Rizwan (sample)', 'Dr. Hina (sample)'],
+    'the people marked "In the banner" for Karachi: the makers first, then the model checker');
+  assert.match(await chipCounts('Dr. Hina (sample)'), /^This month \d+ checked · All time [1-9]\d* checked$/, 'a model checker\'s chip counts the models checked, this month and all time');
+  // Every chip says this month's numbers and all time's, so the banner never shows only zeros (right after the copy of a tab, or on the
+  // first of a month); the tab's numbers too.
+  for (const t of await pr.locator('.rl-chip').filter({ hasNotText: 'Dr. Hina' }).locator('.rl-counts').allInnerTexts()) {
+    assert.match(t.replace(/\s+/g, ' ').trim(), /^This month \d+ made, \d+ delivered(, \d+ checked)? · All time [1-9]\d* made$/, t);
+  }
+  assert.match(await pr.locator('.rl-banner .rl-all').innerText(), /^All time: [1-9][\d,]* made · [1-9][\d,]* delivered$/);
+  // Each maker's own colour, on the banner and on every chip in the table.
+  assert.ok(await pr.locator('.rl-chip.c-black', { hasText: 'Hassan' }).count());
+  const hassanChips = await pr.locator('table.rs-table select[aria-label^="Retainer made by"]').evaluateAll((els) => els.filter((s) => s.selectedOptions[0]?.textContent === 'Hassan (sample)').map((s) => s.className));
+  assert.ok(hassanChips.length && hassanChips.every((c) => c === 'pill c-black'), 'Hassan is black wherever he is chosen');
+  assert.ok(await pr.locator('table.rs-table select.pill.c-purple[aria-label^="Model check by"]').count(), 'model checkers: the deep purple chip');
+  await shot(pr, '40-retainer-record');
+});
+await step('Retainer Record: + New retainer adds a row at the top, an edit saves at once, and Delivered shows the "Delivered!" moment and moves the banner', async () => {
+  const before = await chipCounts('Hassan (sample)');
+  const [made, delivered, allMade] = before.match(/\d+/g).map(Number);
+  await pr.locator('.page-head').getByRole('button', { name: '+ New retainer' }).click();
+  const m = pr.locator('.modal');
+  await m.getByLabel('Patient name').fill('Sample Retainer Test');
+  await m.getByLabel('Contact').fill('0300-5559001');
+  await m.getByLabel('Retainer made by').selectOption({ label: 'Hassan (sample)' });
+  await m.getByRole('button', { name: 'Add retainer' }).click();
+  await pr.waitForSelector('.toast:has-text("Sample Retainer Test added")');
+  const first = pr.locator('table.rs-table tbody tr[data-id]').first();
+  assert.equal(await first.locator('input[aria-label="Patient name, row 1"]').inputValue(), 'Sample Retainer Test', 'newest first: the new row is row 1');
+  assert.equal(await first.locator('select[aria-label="Status for Sample Retainer Test"]').inputValue(), 'Impression taken');
+  // A chip saves at once.
+  await first.locator('select[aria-label="Retainer sheet for Sample Retainer Test"]').selectOption('Re-purchase needed');
+  await pr.waitForSelector('table.rs-table tbody tr[data-id] select.pill.c-red[aria-label="Retainer sheet for Sample Retainer Test"]');
+  // Delivered: the toast with a check mark, the dates filled in, the banner moves.
+  await pr.locator('select[aria-label="Status for Sample Retainer Test"]').selectOption('Delivered to patient');
+  await pr.waitForSelector('.toast.toast-delivered:has-text("Delivered!")');
+  assert.ok(await pr.locator('.toast.toast-delivered .rl-tick').count(), 'with a check mark');
+  assert.match(await pr.locator('.toast.toast-delivered').innerText(), /Sample Retainer Test has the retainer\. Well done, Hassan\. First check: \d{1,2} [A-Z][a-z]{2,3} \d{4}\./);
+  assert.ok((await pr.locator('input[aria-label="Retainer date for Sample Retainer Test"]').inputValue()).length === 10, 'the retainer date is filled in');
+  // The first retainer check: a calendar month after the day it was delivered (the rule of the old Coordinator -> Retainers list).
+  const firstCheck = await pr.evaluate(async () => { const { localISO, addMonthsISO } = await import('/js/ui/dom.js'); return addMonthsISO(localISO(), 1); });
+  assert.equal(await pr.locator('input[aria-label="Next check for Sample Retainer Test"]').inputValue(), firstCheck, 'the next check is a month later');
+  assert.equal(await chipCounts('Hassan (sample)'), `This month ${made + 1} made, ${delivered + 1} delivered · All time ${allMade + 1} made`);
+  assert.equal(await pr.locator('select[aria-label="Status for Sample Retainer Test"]').evaluate((s) => s.className), 'pill c-green', 'Delivered is the light green chip');
+  await shot(pr, '41-retainer-delivered');
+});
+await step('Retainer Record: typed cells save by themselves and stay after leaving the page', async () => {
+  await pr.locator('input[aria-label="Notes for Sample Retainer Test"]').fill('Upper and lower, clear');
+  await pr.locator('input[aria-label="Contact for Sample Retainer Test"]').fill('0300-5559002');
+  await pr.locator('input[aria-label="Impression date for Sample Retainer Test"]').fill('2026-10-01');
+  // The typed cells go through the offline queue (a moment later); the date is saved at once.
+  await pr.waitForFunction(async () => {
+    const { state } = await import('/js/state.js');
+    const row = (await state.data.retainerRecords({ cityId: 1 })).find((r) => r.patient_name === 'Sample Retainer Test');
+    return row?.notes === 'Upper and lower, clear' && row?.contact === '0300-5559002' && row?.impression_date === '2026-10-01';
+  });
+  await pr.waitForSelector('.save-status[data-state="saved"]');
+  await pr.goto(BASE + '#/staff/today');
+  await pr.goto(BASE + '#/staff/retainers');
+  await pr.waitForSelector('input[aria-label="Notes for Sample Retainer Test"]');
+  assert.equal(await pr.locator('input[aria-label="Notes for Sample Retainer Test"]').inputValue(), 'Upper and lower, clear');
+  assert.equal(await pr.locator('input[aria-label="Contact for Sample Retainer Test"]').inputValue(), '0300-5559002');
+  assert.equal(await pr.locator('input[aria-label="Impression date for Sample Retainer Test"]').inputValue(), '2026-10-01');
+  assert.equal(await pr.locator('select[aria-label="Retainer sheet for Sample Retainer Test"]').inputValue(), 'Re-purchase needed');
+});
+await step('Retainer Record: a chip chosen while a typed note is still on its way (a slow line) never empties the note on screen', async () => {
+  await pr.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const orig = state.data.updateRetainerRecord;
+    state.data.updateRetainerRecord = async (id, ch) => { if ('notes' in ch) await new Promise((r) => setTimeout(r, 1500)); return orig.call(state.data, id, ch); };
+    window.__retainerSaveBack = () => { state.data.updateRetainerRecord = orig; };
+  });
+  const notes = pr.locator('input[aria-label="Notes for Sample Retainer Test"]');
+  await notes.fill('Lower retainer remade');
+  await pr.waitForTimeout(600); // the note is on its way now
+  await pr.locator('select[aria-label="Payments for Sample Retainer Test"]').selectOption('Pending');
+  await pr.waitForSelector('select.pill.c-amber[aria-label="Payments for Sample Retainer Test"]');
+  assert.equal(await notes.inputValue(), 'Lower retainer remade', 'the note is still there after the chip saved');
+  await pr.waitForFunction(async () => {
+    const { state } = await import('/js/state.js');
+    return (await state.data.retainerRecords({ cityId: 1 })).some((r) => r.patient_name === 'Sample Retainer Test' && r.notes === 'Lower retainer remade');
+  });
+  await pr.waitForSelector('.save-status[data-state="saved"]');
+  assert.equal(await notes.inputValue(), 'Lower retainer remade', 'and after the note saved');
+  await pr.evaluate(() => window.__retainerSaveBack());
+});
+await step('Retainer Record: filters by status, by maker (also from a banner name), by month, a search, and the sheet\'s own order', async () => {
+  const rows = pr.locator('table.rs-table tbody tr[data-id]');
+  await pr.locator('.rs-toolbar select[aria-label="Status"]').selectOption('Model checked');
+  await pr.waitForFunction(() => document.querySelectorAll('table.rs-table tbody tr[data-id]').length < 20);
+  const statuses = await rows.locator('select[aria-label^="Status for"]').evaluateAll((els) => els.map((s) => s.value));
+  assert.ok(statuses.length && statuses.every((v) => v === 'Model checked'), 'only "Model checked" rows');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  await pr.locator('.rl-chip', { hasText: 'Kamran (sample)' }).click();
+  assert.equal(await pr.locator('.rl-chip', { hasText: 'Kamran (sample)' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await pr.locator('.rs-toolbar select[aria-label="Retainer made by"]').inputValue(), 'rt-kamran', 'the banner name sets the filter');
+  assert.match(await pr.locator('.rs-toolbar select[aria-label="Retainer made by"]').evaluate((s) => s.className), /c-lavender/, 'and the filter takes his colour');
+  const makers = await rows.locator('select[aria-label^="Retainer made by for"]').evaluateAll((els) => els.map((s) => s.value));
+  assert.ok(makers.length && makers.every((v) => v === 'rt-kamran'), 'only Kamran\'s retainers');
+  await pr.locator('.rl-chip', { hasText: 'Kamran (sample)' }).click();
+  assert.equal(await pr.locator('.rs-toolbar select[aria-label="Retainer made by"]').inputValue(), '', 'pressed again: everyone');
+  const monthOpt = (await pr.locator('.rs-toolbar select[aria-label="Month"] option').allInnerTexts())[1];
+  const n = Number(monthOpt.match(/\((\d+)\)/)[1]);
+  await pr.locator('.rs-toolbar select[aria-label="Month"]').selectOption({ index: 1 });
+  await pr.waitForFunction((want) => document.querySelectorAll('table.rs-table tbody tr[data-id]').length === want, n);
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  await pr.locator('.rs-toolbar input[type=search]').fill('0300-5559002');
+  await pr.waitForFunction(() => document.querySelectorAll('table.rs-table tbody tr[data-id]').length === 1);
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  await pr.locator('.rs-toolbar select[aria-label="Order"]').selectOption('sheet');
+  assert.match(pr.url(), /#\/staff\/retainers\?city=1&order=sheet$/, 'the order is kept in the address');
+  await rows.first().getByRole('button', { name: /^More for / }).click();
+  await pr.locator('.modal:has-text("Copied from the Google Sheet, Karachi tab, row 2.")').waitFor();
+  await pr.keyboard.press('Escape');
+  await pr.locator('.rs-toolbar select[aria-label="Order"]').selectOption('newest');
+});
+await step('Retainer Record: a name in the banner follows "Clear filters" and the drop-down; another tab takes off a name it does not have', async () => {
+  const rows = pr.locator('table.rs-table tbody tr[data-id]');
+  const live = pr.locator('.page-head [role="status"]');
+  const chip = (name) => pr.locator('.rl-chip', { hasText: name });
+  const madeBy = pr.locator('.rs-toolbar select[aria-label="Retainer made by"]');
+  const all = await live.innerText();
+  assert.match(all, /^Karachi: \d+ retainers$/, 'no filter to start with');
+  await chip('Hassan (sample)').click();
+  assert.equal(await chip('Hassan (sample)').getAttribute('aria-pressed'), 'true');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  assert.equal(await live.innerText(), all, 'Clear filters: everyone again');
+  assert.equal(await chip('Hassan (sample)').getAttribute('aria-pressed'), 'false', 'and his name in the banner is not pressed any more');
+  await chip('Hassan (sample)').click();
+  assert.equal(await chip('Hassan (sample)').getAttribute('aria-pressed'), 'true');
+  assert.equal(await madeBy.inputValue(), 'rt-hassan', 'one tap on his name again filters his retainers');
+  const makers = await rows.locator('select[aria-label^="Retainer made by for"]').evaluateAll((els) => els.map((x) => x.value));
+  assert.ok(makers.length && makers.every((v) => v === 'rt-hassan'), 'only Hassan\'s retainers');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  await madeBy.selectOption('rt-kamran');
+  assert.equal(await chip('Kamran (sample)').getAttribute('aria-pressed'), 'true', 'Kamran chosen in the drop-down: his name in the banner is pressed');
+  assert.equal(await chip('Hassan (sample)').getAttribute('aria-pressed'), 'false');
+  await chip('Kamran (sample)').click();
+  assert.equal(await madeBy.inputValue(), '', 'one tap on his name shows everyone again');
+  assert.equal(await live.innerText(), all);
+  // A name of the Karachi team, then the Lahore tab: Lahore opens with all its rows and no filter, in the address too.
+  await chip('Hassan (sample)').click();
+  await pr.locator('.rs-tabs [role="tab"]', { hasText: 'Lahore' }).click();
+  await pr.waitForFunction(() => /^Lahore: 14 retainers$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+  assert.equal(await madeBy.inputValue(), '', 'the Karachi name is taken off');
+  assert.doesNotMatch(pr.url(), /who=/, 'and the address drops it');
+  // An address with a name the tab does not have: the filter says the name, never the code.
+  await pr.goto(BASE + '#/staff/today');
+  await pr.goto(BASE + '#/staff/retainers?city=2&who=rt-hassan');
+  await pr.waitForFunction(() => /^Lahore: 0 retainers of 14 match these filters$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+  assert.equal(await madeBy.evaluate((x) => x.selectedOptions[0]?.textContent), 'Hassan (sample)');
+  await pr.goto(BASE + '#/staff/today');
+  await pr.goto(BASE + '#/staff/retainers?city=1');
+  await pr.waitForFunction(() => /^Karachi: \d+ retainers$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+});
+await step('Retainer Record: the count is a polite live region; a search, the order, a name in the banner and a tab are read out, also when the count stays the same', async () => {
+  const live = pr.locator('.page-head [role="status"]');
+  assert.equal(await live.count(), 1, 'one live region holds the count');
+  assert.equal(await live.getAttribute('aria-live'), 'polite');
+  // Every write to a live region, with whether that region is shown.
+  await pr.evaluate(() => {
+    window.liveWrites = [];
+    new MutationObserver((list) => {
+      for (const m of list) {
+        const region = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('[role="status"], [role="alert"], [aria-live]');
+        if (region?.textContent.trim()) window.liveWrites.push({ text: region.textContent.trim(), shown: region.checkVisibility({ visibilityProperty: true }) });
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  const heard = async (what, change) => {
+    await pr.evaluate(() => { window.liveWrites = []; });
+    const was = await live.innerText();
+    await change();
+    await pr.waitForTimeout(400); // (the search waits a moment for the typing to stop)
+    const count = await live.innerText();
+    await pr.waitForFunction((c) => window.liveWrites.some((w) => w.shown && w.text === c), count, { timeout: 3000 }).catch(() => {});
+    const writes = await pr.evaluate(() => window.liveWrites);
+    assert.ok(writes.some((w) => w.shown && w.text === count), `${what}: "${count}" is written to a live region that is shown: ${JSON.stringify(writes)}`);
+    return { was, count };
+  };
+  const search = await heard('a search', () => pr.locator('.rs-toolbar input[type=search]').fill('Sample Retainer Test'));
+  assert.match(search.count, /^Karachi: 1 retainer of \d+ match these filters$/);
+  const order = await heard('the sheet\'s order', () => pr.locator('.rs-toolbar select[aria-label="Order"]').selectOption('sheet'));
+  assert.equal(order.count, order.was, 'the order gives the same count, and it is read out again');
+  await pr.locator('.rs-toolbar select[aria-label="Order"]').selectOption('newest');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  await heard('a name in the banner', () => pr.locator('.rl-chip', { hasText: 'Kamran (sample)' }).click());
+  await pr.locator('.rl-chip', { hasText: 'Kamran (sample)' }).click();
+  const lahore = await heard('the Lahore tab', () => pr.locator('.rs-tabs [role="tab"]', { hasText: 'Lahore' }).click());
+  assert.match(lahore.count, /^Lahore: \d+ retainers$/);
+  await heard('the Karachi tab', () => pr.locator('.rs-tabs [role="tab"]', { hasText: 'Karachi' }).click());
+});
+await step('Retainer Record: the Mr# column (the file\'s Mr# on a linked row, the typed one on the others, saved by itself), a search by Mr#, a model checker\'s chip, Model poured', async () => {
+  const rows = pr.locator('table.rs-table tbody tr[data-id]');
+  // A sheet row linked to its patient file by Mr#: the name opens the file and the Mr# column shows the file's Mr#.
+  const linked = rows.filter({ has: pr.locator('a', { hasText: 'Talha Saeed' }) });
+  assert.equal(await linked.locator('.rs-mr').innerText(), '9823');
+  // Unlinked rows keep the Mr# typed on the sheet, leading 0 and all; a search finds it with or without the 0.
+  const typed = await pr.locator('input[aria-label^="Mr# for"]').evaluateAll((els) => els.map((e) => e.value).filter(Boolean));
+  assert.ok(typed.includes('0303') && typed.includes('4111'), 'the typed Mr#s are on their rows (' + typed.join(', ') + ')');
+  await pr.locator('.rs-toolbar input[type=search]').fill('303');
+  await pr.waitForFunction(() => document.querySelectorAll('table.rs-table tbody tr[data-id]').length === 1);
+  assert.equal(await rows.first().locator('input[aria-label^="Mr# for"]').inputValue(), '0303');
+  const who = (await rows.first().locator('input[aria-label^="Mr# for"]').getAttribute('aria-label')).replace(/^Mr# for /, '');
+  await pr.locator('input[aria-label="Mr# for ' + who + '"]').fill('0304');
+  await pr.waitForFunction(async (name) => {
+    const { state } = await import('/js/state.js');
+    return (await state.data.retainerRecords({ cityId: 1 })).some((r) => r.patient_name === name && r.mr_text === '0304');
+  }, who);
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  // The model checker's chip filters "Model check by".
+  await pr.locator('.rl-chip', { hasText: 'Dr. Hina (sample)' }).click();
+  assert.equal(await pr.locator('.rs-toolbar select[aria-label="Model check by"]').inputValue(), 'rt-hina');
+  const checkers = await rows.locator('select[aria-label^="Model check by for"]').evaluateAll((els) => els.map((s) => s.value));
+  assert.ok(checkers.length && checkers.every((v) => v === 'rt-hina'), 'only the models Dr. Hina checked');
+  await pr.locator('.rl-chip', { hasText: 'Dr. Hina (sample)' }).click();
+  assert.equal(await pr.locator('.rs-toolbar select[aria-label="Model check by"]').inputValue(), '');
+  // "Model poured" (from the Karachi tab) is on the Status list, in its own peach chip.
+  const options = await rows.first().locator('select[aria-label^="Status for"] option').allInnerTexts();
+  assert.deepEqual(options.slice(1, 5), ['Impression taken', 'Model checked', 'Model poured', 'Retainer made']);
+  await pr.locator('.rs-toolbar select[aria-label="Status"]').selectOption('Model poured');
+  await pr.waitForFunction(() => document.querySelectorAll('table.rs-table tbody tr[data-id]').length > 0
+    && [...document.querySelectorAll('table.rs-table tbody select[aria-label^="Status for"]')].every((s) => s.value === 'Model poured'));
+  assert.equal(await rows.first().locator('select[aria-label^="Status for"]').evaluate((s) => s.className), 'pill c-peach');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+});
+await step('Retainer Record: the Lahore tab, a date the sheet\'s reader could not read, linking a patient file, and the CSV download', async () => {
+  assert.ok(await pr.locator('.rs-typed', { hasText: 'soon' }).count(), 'the typed text of an unreadable date shows on its row');
+  await pr.locator('.rs-tabs [role="tab"]', { hasText: 'Lahore' }).click();
+  await pr.waitForFunction(() => /^Lahore: 14 retainers$/.test(document.querySelector('.page-head p')?.textContent || ''));
+  assert.match(pr.url(), /city=2/);
+  assert.deepEqual((await pr.locator('.rl-chip .rl-name').allInnerTexts()).map((t) => t.trim()), ['Rizwan (sample)', 'Saima (sample)'], 'the Lahore team (and Rizwan, who works in every city)');
+  await pr.locator('.rs-tabs [role="tab"]', { hasText: 'Karachi' }).click();
+  await pr.waitForSelector('input[aria-label="Notes for Sample Retainer Test"]');
+  await pr.getByRole('button', { name: /^More for Sample Retainer Test/ }).click();
+  const m = pr.locator('.modal');
+  await m.getByRole('combobox', { name: /to a patient file/ }).fill('Zainab');
+  await m.locator('.suggestions button', { hasText: 'Zainab Rizvi' }).click();
+  await pr.waitForSelector('.toast:has-text("linked to Mr#")');
+  await pr.locator('table.rs-table tbody a', { hasText: 'Zainab Rizvi' }).waitFor();
+  assert.equal(await pr.locator('table.rs-table tbody tr[data-id]').filter({ has: pr.locator('a', { hasText: 'Zainab Rizvi' }) }).locator('.rs-mr').innerText(), '9814',
+    'the Mr# column shows the Mr# of the linked file');
+  const [dl] = await Promise.all([pr.waitForEvent('download'), pr.getByRole('button', { name: 'Download CSV' }).click()]);
+  assert.match(dl.suggestedFilename(), /^retainer-record_karachi_\d{4}-\d{2}-\d{2}\.csv$/);
+  const text = fs.readFileSync(await dl.path(), 'utf8').replace(/^﻿/, '');
+  assert.match(text.split('\n')[0], /^#,Patient name,Mr#,Contact,Impression date,Model check by,Retainer made by,Retainer date,Status,Retainer sheet,Payments,Notes/);
+  assert.match(text, /Zainab Rizvi,9814,0300-5559002,2026-10-01,,Hassan \(sample\)/);
+});
+await step('Retainer Record: overdue retainer checks: an "Overdue" chip in the Next check column, the warning naming them (a name opens its row), "Checks due" and "Overdue" in the Status filter, the Coordinator page; the rows copied from the sheet are never overdue', async () => {
+  await pr.goto(BASE + '#/staff/today');
+  await pr.goto(BASE + '#/staff/retainers?city=1');
+  await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  const rows = pr.locator('table.rs-table tbody tr[data-id]');
+  const notice = pr.locator('.rs-notice');
+  const status = pr.locator('.rs-toolbar select[aria-label="Status"]');
+  const live = pr.locator('.page-head [role="status"]');
+  // The demo has two checks that have passed (Shayan Ali's, linked to his patient file, the earliest) and one in three days.
+  assert.equal(await notice.innerText(), '2 retainer checks are overdue: Shayan Ali, Ifrah Durrani. Call them for a follow-up. Show only them');
+  assert.ok(await pr.locator('.page-head .rs-notice').isVisible(), 'a line under the title (a box over the sheet would push the sheet off a laptop\'s first screen)');
+  assert.equal(await rows.locator('.pill.c-red', { hasText: 'Overdue' }).count(), 2, 'the two rows whose check has passed say "Overdue"');
+  assert.equal(await rows.locator('td:has(input[aria-label^="Next check for"]) .pill', { hasText: 'Overdue' }).count(), 2, 'in their Next check cell');
+  assert.equal(await pr.locator('table.rs-table tbody tr.rs-late').count(), 2, 'with the red edge at the name');
+  assert.equal(await pr.locator('tr.rs-late input[aria-label="Next check for Ifrah Durrani"]').count(), 1);
+  // The rows copied from the sheet: many delivered long ago, none with a check date, none overdue.
+  const sheet = await pr.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const all = (await state.data.retainerRecords({ cityId: 1 })).filter((r) => r.source === 'sheet_import');
+    return { delivered: all.filter((r) => r.status === 'Delivered to patient').length, dated: all.filter((r) => r.next_check_date).length };
+  });
+  assert.ok(sheet.delivered >= 30 && sheet.dated === 0, `${sheet.delivered} delivered rows from the sheet, ${sheet.dated} with a check date`);
+  // "Checks due": the overdue ones and the one in three days; "Overdue": the two. Both stay in the address.
+  await status.selectOption('__due');
+  await pr.waitForFunction(() => /^Karachi: 3 retainers of \d+ match these filters$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+  assert.deepEqual((await rows.locator('input[aria-label^="Next check for"]').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')))).sort(),
+    ['Next check for Ifrah Durrani', 'Next check for Saim Abbasi', 'Next check for Shayan Ali']);
+  assert.match(pr.url(), /status=__due/);
+  assert.equal(await status.evaluate((s) => s.selectedOptions[0].textContent), 'Checks due');
+  await status.selectOption('__overdue');
+  await pr.waitForFunction(() => /^Karachi: 2 retainers of \d+ match these filters$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+  assert.match(await status.evaluate((s) => s.className), /c-red/, 'the filter takes the red of the chip');
+  assert.equal(await status.evaluate((s) => s.selectedOptions[0].textContent), 'Overdue');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  // "Show only them" in the warning does the same.
+  await notice.getByRole('button', { name: 'Show only them' }).click();
+  await pr.waitForFunction(() => /^Karachi: 2 retainers of \d+ match these filters$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+  assert.equal(await status.inputValue(), '__overdue');
+  assert.equal(await notice.innerText(), '2 retainer checks are overdue: Shayan Ali, Ifrah Durrani. Call them for a follow-up. They are the rows below.');
+  assert.equal(await pr.evaluate(() => document.activeElement?.classList.contains('rs-notice')), true, 'the focus stays on the line when its button goes');
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  // The Coordinator page names them too (as its old Retainers tab did): the linked one opens the patient file, each city's link its tab.
+  await pr.goto(BASE + '#/staff/coordinator');
+  const warn = pr.locator('.alert-warning', { hasText: 'retainer check' });
+  await warn.waitFor();
+  assert.equal(await warn.innerText(), '2 retainer checks are overdue: Shayan Ali, Ifrah Durrani. Call them for a follow-up. On the Retainer Record: Karachi (2).');
+  assert.match(await warn.getByRole('link', { name: 'Shayan Ali' }).getAttribute('href'), /^#\/staff\/patient\//);
+  await warn.getByRole('link', { name: 'Karachi (2)' }).click();
+  await pr.waitForFunction(() => /^Karachi: 2 retainers of \d+ match these filters$/.test(document.querySelector('.page-head [role="status"]')?.textContent || ''));
+  assert.equal(await status.inputValue(), '__overdue', 'the Retainer Record opens with only the overdue checks');
+  // A name in the warning opens its row: the phone, "Overdue", and the check date, which a call moves on.
+  await notice.getByRole('button', { name: 'Ifrah Durrani' }).click();
+  const m = pr.locator('.modal');
+  await m.getByText('Phone: 0300-5552301').waitFor();
+  assert.match(await m.innerText(), /Overdue The retainer check was due on/);
+  const later = await pr.evaluate(async () => { const { localISO, addDaysISO } = await import('/js/ui/dom.js'); return addDaysISO(localISO(), 60); });
+  await m.getByLabel('Next retainer check').fill(later);
+  await pr.waitForFunction(() => /^1 retainer check is overdue: Shayan Ali\. Call them/.test(document.querySelector('.rs-notice')?.textContent || ''));
+  assert.equal(await m.getByText('The retainer check was due on').count(), 0, 'the dialog drops "Overdue" too');
+  await m.getByRole('button', { name: 'Done' }).click();
+  // (the row stays on screen until the list is drawn again, so a change never makes a row vanish under the hand; it is not overdue now)
+  assert.equal(await pr.locator('table.rs-table tbody tr.rs-late').count(), 1);
+  assert.equal(await rows.filter({ has: pr.locator('input[aria-label="Next check for Ifrah Durrani"]') }).locator('.pill', { hasText: 'Overdue' }).count(), 0);
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+  assert.match(await live.innerText(), /^Karachi: \d+ retainers$/, 'everyone again');
+  await shot(pr, '41b-retainer-checks');
+});
+await step('Lab work: its own teal page with branch tabs, an "Overdue" chip, + New lab case, and a status edit that takes the chip away', async () => {
+  await pr.locator('.topnav .menu:has-text("Coordinator") > button').click();
+  await pr.locator('.topnav .menu-list a', { hasText: 'Lab work' }).click();
+  await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  assert.equal(await pr.locator('h1').innerText(), 'Lab work');
+  assert.deepEqual((await pr.locator('.rs-tabs [role="tab"]').allInnerTexts()).map((t) => t.trim()), ['All branches', 'Gulshan (RJ Mall)', 'North Nazimabad', 'DHA Karachi', 'Gulberg Lahore', 'Islamabad']);
+  assert.deepEqual((await pr.locator('table.rs-table thead th').allInnerTexts()).map((t) => t.trim()),
+    ['# · Patient', 'Work', 'Lab', 'Sent', 'Due', 'Received', 'Fitted', 'Status', 'Teeth', 'Shade', 'Handled by', 'Cost (Rs)', 'Payment', 'Contact', 'Notes']);
+  assert.equal(await pr.locator('table.rs-table thead th').first().evaluate((el) => getComputedStyle(el).backgroundColor), 'rgb(11, 95, 104)', 'teal instead of purple');
+  await pr.evaluate(() => document.fonts.ready);
+  assert.deepEqual(await pr.evaluate(() => {
+    const w = document.querySelector('.rs-wrap').getBoundingClientRect();
+    return [...document.querySelectorAll('table.rs-table thead th')].slice(0, 8).filter((th) => th.getBoundingClientRect().right > w.right + 1).map((th) => th.textContent);
+  }), [], 'on a laptop the work, the lab, the four dates and the status are in sight');
+  assert.equal(await pr.locator('table.rs-table tbody .pill.c-red', { hasText: 'Overdue' }).count(), 2, 'two Gulshan cases are past due and not back');
+  assert.equal(await pr.locator('table.rs-table tbody tr.rs-late').count(), 2);
+  const yesterday = await pr.evaluate(async () => { const { localISO, addDaysISO } = await import('/js/ui/dom.js'); return addDaysISO(localISO(), -1); });
+  await pr.locator('.page-head').getByRole('button', { name: '+ New lab case' }).click();
+  const m = pr.locator('.modal');
+  await m.getByLabel('Patient name').fill('Sample Lab Test');
+  await m.getByLabel('Work').selectOption('Crown');
+  await m.getByLabel('Teeth').fill('UL6');
+  await m.getByLabel('Due back').fill(yesterday);
+  await m.getByRole('button', { name: 'Add lab case' }).click();
+  await pr.waitForSelector('.toast:has-text("Sample Lab Test added")');
+  const row = pr.locator('table.rs-table tbody tr[data-id]').filter({ has: pr.locator('input[aria-label="Patient name, row 1"]') });
+  assert.equal(await row.locator('input[aria-label="Patient name, row 1"]').inputValue(), 'Sample Lab Test');
+  assert.ok(await row.locator('.pill.c-red', { hasText: 'Overdue' }).count(), 'due yesterday and not back: Overdue');
+  await row.locator('select[aria-label="Status for Sample Lab Test"]').selectOption('received');
+  await pr.waitForFunction(() => document.querySelector('input[aria-label="Received for Sample Lab Test"]')?.value?.length === 10);
+  assert.equal(await pr.locator('table.rs-table tbody tr[data-id]').first().locator('.pill.c-red').count(), 0, 'back from the lab: no Overdue chip');
+  await pr.locator('input[aria-label="Shade for Sample Lab Test"]').fill('A3');
+  await pr.waitForFunction(async () => {
+    const { state } = await import('/js/state.js');
+    return (await state.data.labRecords({})).some((r) => r.patient_name === 'Sample Lab Test' && r.shade === 'A3');
+  });
+  await pr.locator('.rs-tabs [role="tab"]', { hasText: 'All branches' }).click();
+  await pr.waitForFunction(() => /^All branches: 12 lab cases$/.test(document.querySelector('.page-head p')?.textContent || ''));
+  assert.ok(await pr.locator('table.rs-table tbody .rs-note', { hasText: 'GUL' }).count(), 'all branches: each row says its branch');
+  await shot(pr, '42-lab-work');
+});
+await step('Clinic setup: a team member\'s colour changes every chip and the banner; a new member marked "In the banner" shows there; a new status reaches the drop-down', async () => {
+  await pr.goto(BASE + '#/staff/admin?tab=setup');
+  await pr.waitForSelector('h2:text("Retainer team")');
+  const team = pr.locator('section', { has: pr.locator('h2:text("Retainer team")') });
+  await team.getByRole('button', { name: 'Edit Hassan (sample)' }).click();
+  await pr.locator('.modal').getByLabel('Colour').selectOption('ocean');
+  await pr.locator('.modal').getByRole('button', { name: 'Save' }).click();
+  await pr.waitForSelector('.toast:has-text("Saved")');
+  await pr.locator('section', { has: pr.locator('h2:text("Retainer team")') }).getByRole('button', { name: 'New team member' }).click();
+  const m = pr.locator('.modal');
+  await m.getByLabel('Name').fill('Sample New Maker');
+  await m.getByLabel('Colour').selectOption('rose');
+  await m.getByLabel('City').selectOption({ label: 'Karachi' });
+  await m.getByLabel('In the banner').check();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pr.waitForSelector('td:text("Sample New Maker")');
+  await pr.locator('section', { has: pr.locator('h2:text("Retainer statuses")') }).getByRole('button', { name: 'New status' }).click();
+  await pr.locator('.modal').getByRole('textbox').fill('Waiting for sheet');
+  await pr.locator('.modal').getByLabel('Colour').selectOption('peach');
+  await pr.locator('.modal').getByRole('button', { name: 'Save' }).click();
+  await pr.waitForSelector('td:text("Waiting for sheet")');
+  await shot(pr, '43-clinic-setup-team');
+  await pr.goto(BASE + '#/staff/retainers');
+  await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  assert.ok(await pr.locator('.rl-chip.c-ocean', { hasText: 'Hassan (sample)' }).count(), 'the banner chip is ocean now');
+  const hassan = await pr.locator('table.rs-table select[aria-label^="Retainer made by"]').evaluateAll((els) => els.filter((s) => s.selectedOptions[0]?.textContent === 'Hassan (sample)').map((s) => s.className));
+  assert.ok(hassan.length && hassan.every((c) => c === 'pill c-ocean'), 'and so is every chip with his name');
+  assert.ok(await pr.locator('.rl-chip.c-rose', { hasText: 'Sample New Maker' }).count(), 'the new maker is in the banner, in rose');
+  const options = await pr.locator('table.rs-table select[aria-label^="Status for"]').first().locator('option').allInnerTexts();
+  assert.ok(options.includes('Waiting for sheet'), 'the new status is on the drop-down');
+});
+await step('Clinic setup: a status written in new words keeps its rows: they say the new words, stay green and keep counting as delivered', async () => {
+  const deliveredRows = () => pr.locator('table.rs-table select[aria-label^="Status for"]').evaluateAll((els, want) => els.filter((s) => s.value === want && s.className === 'pill c-green').length, 'Delivered');
+  const banner = async () => (await pr.locator('.rl-month strong').innerText()).trim();
+  const counts = await banner();
+  const had = await pr.locator('table.rs-table select[aria-label^="Status for"]').evaluateAll((els) => els.filter((s) => s.value === 'Delivered to patient').length);
+  const rename = async (from, to) => {
+    await pr.goto(BASE + '#/staff/admin?tab=setup');
+    await pr.locator('section', { has: pr.locator('h2:text("Retainer statuses")') }).getByRole('button', { name: `Edit ${from}` }).click();
+    await pr.locator('.modal').getByRole('textbox').fill(to);
+    await pr.locator('.modal').getByRole('button', { name: 'Save' }).click();
+    await pr.waitForSelector(`.toast:has-text("rows now say \\"${to}\\"")`);
+    await pr.goto(BASE + '#/staff/retainers');
+    await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  };
+  assert.ok(had > 0);
+  await rename('Delivered to patient', 'Delivered');
+  assert.equal(await deliveredRows(), had, 'every delivered row says "Delivered", in the green chip');
+  assert.equal(await pr.locator('table.rs-table select[aria-label^="Status for"] option:checked', { hasText: 'Delivered to patient' }).count(), 0, 'no row is left with the old words');
+  assert.equal(await banner(), counts, 'the banner still counts them as delivered');
+  await rename('Delivered', 'Delivered to patient'); // (back, for the steps after this one)
+  assert.equal(await banner(), counts);
+});
+await step('Clinic setup: a team member or a lab whose name is on the list already gets a plain message at the name, never the database\'s words', async () => {
+  await pr.goto(BASE + '#/staff/admin?tab=setup');
+  await pr.waitForSelector('h2:text("Retainer team")');
+  const team = pr.locator('section', { has: pr.locator('h2:text("Retainer team")') });
+  const m = pr.locator('.modal');
+  await team.getByRole('button', { name: 'New team member' }).click();
+  assert.equal(await m.getByLabel('Colour').inputValue(), 'navy', 'a new member starts with a strong colour nobody has, never light grey');
+  await m.getByLabel('Name').fill('  hassan   (SAMPLE) ');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.getByText('hassan (SAMPLE) is already on the team.').waitFor();
+  assert.ok(await m.isVisible(), 'the dialog stays open to correct the name');
+  assert.equal(await pr.getByText(/duplicate key|_name_idx|violates/).count(), 0, 'no database words anywhere');
+  await pr.keyboard.press('Escape');
+  // The same name saved a moment ago by somebody else (the list on this page does not have it yet): the database refuses it, and the page
+  // says so in the same words.
+  await team.getByRole('button', { name: 'New team member' }).click();
+  await pr.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.saveRetainerTeamMember({ name: 'Sample Just Added', role: 'maker', colour: 'teal' }); });
+  await m.getByLabel('Name').fill('Sample Just Added');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.getByText('Sample Just Added is already on the team.').waitFor();
+  assert.equal(await pr.getByText(/duplicate key|_name_idx|violates/).count(), 0, 'no database words anywhere');
+  await pr.keyboard.press('Escape');
+  // A lab whose name is on the list of labs already (a person may share a lab's name: they are two lists).
+  const labs = pr.locator('section', { has: pr.locator('h2:text("Lab team and labs")') });
+  await labs.getByRole('button', { name: 'New person or lab' }).click();
+  await m.getByLabel('Name').fill('in-house LAB');
+  await m.getByLabel(/^Is\b/).selectOption('lab');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.getByText('in-house LAB is already on the list of labs.').waitFor();
+  assert.equal(await m.getByLabel('Name').getAttribute('aria-invalid'), 'true', 'the message is at the name');
+  await m.getByLabel(/^Is\b/).selectOption('person');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pr.waitForSelector('.toast:has-text("Saved")');
+  const people = await pr.evaluate(async () => { const { state } = await import('/js/state.js'); return (await state.data.labTeam()).filter((x) => x.name === 'in-house LAB').map((x) => x.kind); });
+  assert.deepEqual(people, ['person'], 'as a person the name is free (people and labs are two lists)');
+});
+await step('Import: a Retainer Record tab is copied once per city: a second copy is refused in plain words, "Undo the copy" takes back what nobody changed, then the corrected tab goes in whole', async () => {
+  await pr.goto(BASE + '#/staff/admin?tab=import');
+  const sec = pr.locator('section', { has: pr.locator('h2', { hasText: '7. Retainer Record' }) });
+  await sec.waitFor();
+  // The demo's tabs are copied already: each city with the day, the size and its "Undo the copy" button.
+  await sec.locator('.rt-copies li', { hasText: 'Lahore' }).waitFor();
+  assert.match(await sec.locator('.rt-copies li', { hasText: 'Lahore' }).innerText(), /^Lahore: copied on .+, 14 retainers\.\s*Undo the copy for Lahore$/);
+  await sec.getByLabel('City of this tab').selectOption({ label: 'Lahore' });
+  const csv = 'Contact #,Patient Name,Impression Date,Model Check By,Retainer Made By,Retainer Date,Status\n'
+    + '0300-5559101,Sample Import One,20- November,Dr. Ali Rashid,Saima (sample),28 november,Delivered to Patient\n'
+    + '0300-5559102,Sample Import Two,23rd december,Dr. Ali Rashid,maker   imported,2 jan,Retainer Made\n'
+    + '0300-5559103,Sample Import Three,soon,,,,\n';
+  const drop = () => sec.locator('input[type=file]').setInputFiles({ name: 'Retainer Record - Lahore.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await drop();
+  await sec.locator('.stat', { hasText: 'ready to copy' }).waitFor();
+  assert.equal(await sec.locator('.stat', { hasText: 'ready to copy' }).locator('strong').innerText(), '3');
+  assert.equal(await sec.locator('.stat', { hasText: 'dates that could not be read' }).locator('strong').innerText(), '1');
+  assert.match(await sec.locator('.alert-info', { hasText: 'not on the retainer team yet' }).innerText(), /will be added: Maker Imported\./);
+  // Lahore is copied already: refused in plain words before anything is sent, and the button stays off.
+  const stop = sec.locator('.alert-stop', { hasText: 'already copied' });
+  await stop.waitFor();
+  assert.match(await stop.innerText(), /^Lahore was already copied on \d{1,2} [A-Z][a-z]{2} \d{4} \(14 retainers\)\. The website is now the Retainer Record: add or change retainers there\./);
+  assert.ok(await sec.getByRole('button', { name: 'Copy 3 retainers into Lahore' }).isDisabled(), 'a second copy cannot be started');
+  // "Undo the copy for Lahore": it asks first, with the numbers (nobody changed a Lahore row on the website, so all 14 go).
+  await stop.getByRole('button', { name: 'Undo the copy for Lahore' }).click();
+  const ask = pr.locator('.modal', { hasText: 'Undo the copy for Lahore?' });
+  await ask.waitFor();
+  assert.match(await ask.innerText(), /14 copied retainers that nobody changed on the website will be taken off the Lahore tab of the Retainer Record\./);
+  await ask.getByRole('button', { name: 'Undo the copy for Lahore' }).click();
+  await pr.waitForSelector('.toast:has-text("The copy for Lahore is undone: 14 retainers taken off.")');
+  // The file is checked again: now the copy can be made; the page says what it will do and the colours it gives.
+  await sec.locator('.import-check').waitFor();
+  assert.equal(await sec.locator('.import-check').innerText(), 'If you copy now: 3 retainers added to the Lahore tab.');
+  assert.ok(await sec.locator('.rt-colours .pill.c-navy', { hasText: 'Maker Imported' }).count(), 'the most active new maker gets the strongest colour nobody has (navy), never light grey');
+  await shot(pr, '46-retainer-import-copy');
+  await sec.getByRole('button', { name: 'Copy 3 retainers into Lahore' }).click();
+  const done = sec.locator('.alert-info', { hasText: 'Lahore: 3 retainers copied' });
+  await done.waitFor();
+  assert.match(await done.innerText(), /The website is the Retainer Record of Lahore from now on\.[\s\S]*Added to the retainer team: Maker Imported\./);
+  assert.ok(await sec.getByRole('button', { name: 'Copy 3 retainers into Lahore' }).isDisabled(), 'copied: the button stays off');
+  await sec.locator('.rt-copies li', { hasText: 'Lahore: copied on' }).filter({ hasText: '3 retainers' }).waitFor();
+  // The same file again (a second drop, or an answer lost on the way): refused, nothing twice.
+  await drop();
+  await sec.locator('.alert-stop', { hasText: 'Lahore was already copied on' }).filter({ hasText: '(3 retainers)' }).waitFor();
+  await pr.goto(BASE + '#/staff/retainers?city=2');
+  await pr.locator('input[aria-label^="Patient name"]').first().waitFor();
+  assert.match(await pr.locator('.page-head p').first().innerText(), /^Lahore: 3 retainers$/, 'the 14 rows nobody changed were taken back; the 3 of the corrected tab are in, once');
+  const names = await pr.locator('input[aria-label^="Patient name"]').evaluateAll((els) => els.map((e) => e.value));
+  assert.ok(names.includes('Sample Import One') && names.includes('Sample Import Three'));
+  assert.ok(await pr.locator('.rs-typed', { hasText: 'soon' }).count(), 'the unreadable date keeps its typed text');
+  // No year on the tab: the dates end on or before today, so 23 December is the last one that has passed.
+  const now = new Date();
+  const decYear = now >= new Date(now.getFullYear(), 11, 23) ? now.getFullYear() : now.getFullYear() - 1;
+  assert.equal(await pr.locator('input[aria-label="Impression date for Sample Import Two"]').inputValue(), `${decYear}-12-23`, '"23rd december" after a November row, in the year it last came');
+  assert.ok(await pr.locator('.rl-chip.c-navy', { hasText: 'Maker Imported' }).count() === 0, 'Saima was in the banner already: the copy put nobody else there');
+});
+await step('Import: the Karachi tab as the sheet gives it (no headings for the Mr# and the name), copied after an undo that keeps the row changed on the website: Mr# linked only when the name fits, Model Poured, Payment Done / Dues, Status text in the notes', async () => {
+  await pr.goto(BASE + '#/staff/admin?tab=import');
+  const sec = pr.locator('section', { has: pr.locator('h2', { hasText: '7. Retainer Record' }) });
+  await sec.waitFor();
+  await sec.getByLabel('City of this tab').selectOption({ label: 'Karachi' });
+  // (blank lines first: the row the undo keeps sits at row 5) Column A is headed with a first name, column B "Column 2".
+  const csv = 'Sample,Column 2,Impression Date,Model Check By,Retainer Made By,Retainer Date ,Status,retainer sheet,Payments\n' + ',,,,,,,,\n'.repeat(60)
+    + '09816,Usman Tariq,02-09-2026,dr. hina (sample),hassan (sample),09-09-2026,Delivered to Patient,,Payment Done\n'
+    + '9815,Sample Other Name,03-09-2026,Dr. Hina (sample),Kamran (sample),,Model Poured,,Dues\n'
+    + '7777,Sample Karachi Import,04-09-2026,,maker alpha,,"Upper wire changed, lower bonded on 14/9",,\n'
+    + '123-4,Sample Karachi Four,05-09-2026,,,,Impression Repeat,Re-purchase needed,\n'
+    + ',Sample Karachi Five,06-09-2026,,,,,,\n';
+  await sec.locator('input[type=file]').setInputFiles({ name: 'Retainer Record - Karachi.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await sec.locator('.stat', { hasText: 'ready to copy' }).waitFor();
+  assert.match(await sec.locator('.alert-info', { hasText: 'no headings' }).innerText(), /column A is read as the Mr# and column B as the patient name/);
+  assert.equal(await sec.locator('.stat', { hasText: 'ready to copy' }).locator('strong').innerText(), '5');
+  assert.equal(await sec.locator('.stat', { hasText: 'Mr# that link to their patient file' }).locator('strong').innerText(), '1 of 4', 'one Mr# links (its name fits), three do not');
+  assert.match(await sec.locator('details summary', { hasText: 'unlinked' }).innerText(),
+    /3 rows with an Mr# stay unlinked: 1 the name does not fit that patient file, 1 no patient file has this Mr#, 1 not an Mr#/);
+  assert.match(await sec.locator('details summary', { hasText: 'like a note' }).innerText(), /1 Status cell reads like a note, not a status/);
+  assert.match(await sec.locator('.alert-info', { hasText: 'not on the retainer team yet' }).innerText(), /will be added: Maker Alpha\./, '"hassan (sample)" and "dr. hina (sample)" are the team members already there');
+  assert.equal(await sec.locator('.alert-warning', { hasText: 'not in the Status list' }).count(), 0, 'Model Poured and Impression Repeat are on the list');
+  // Karachi is copied (the demo's tab). One of its rows was changed on the website (its Mr#, above): the undo keeps it.
+  const stop = sec.locator('.alert-stop', { hasText: 'Karachi was already copied on' });
+  await stop.waitFor();
+  assert.match(await stop.innerText(), /\(46 retainers\)\. The website is now the Retainer Record: add or change retainers there\./);
+  await stop.getByRole('button', { name: 'Undo the copy for Karachi' }).click();
+  const ask = pr.locator('.modal', { hasText: 'Undo the copy for Karachi?' });
+  await ask.waitFor();
+  assert.match(await ask.innerText(), /45 copied retainers that nobody changed on the website will be taken off the Karachi tab/);
+  assert.match(await ask.innerText(), /1 retainer was changed on the website \(edited, linked to a patient file, a payment set …\): it stays, and a new copy leaves out its row of the sheet\./);
+  await ask.getByRole('button', { name: 'Undo the copy for Karachi' }).click();
+  await pr.waitForSelector('.toast:has-text("The copy for Karachi is undone: 45 retainers taken off. 1 retainer stayed because it was changed on the website.")');
+  await sec.locator('.import-check').waitFor();
+  await shot(pr, '45-retainer-import-karachi');
+  await sec.getByRole('button', { name: 'Copy 5 retainers into Karachi' }).click();
+  const done = sec.locator('.alert-info', { hasText: 'Karachi: 5 retainers copied' });
+  await done.waitFor();
+  assert.match(await done.innerText(), /Mr#: 1 row linked to the patient file, 3 with an Mr# not linked/);
+  await pr.goto(BASE + '#/staff/retainers?city=1');
+  await pr.locator('table.rs-table tbody tr[data-id]').first().waitFor();
+  const row = (name) => pr.locator('table.rs-table tbody tr[data-id]').filter({ has: pr.locator(`select[aria-label="Status for ${name}"]`) });
+  assert.equal(await row('Usman Tariq').locator('.rs-mr').innerText(), '9816', '"09816" with the name of Mr# 9816: linked to that file');
+  assert.equal(await row('Usman Tariq').locator('select[aria-label="Payments for Usman Tariq"]').inputValue(), 'Paid', 'Payment Done is Paid');
+  assert.equal(await row('Sample Other Name').locator('input[aria-label="Mr# for Sample Other Name"]').inputValue(), '9815', 'another name: not linked, the Mr# kept');
+  assert.equal(await row('Sample Other Name').locator('select[aria-label="Status for Sample Other Name"]').inputValue(), 'Model poured');
+  assert.equal(await row('Sample Other Name').locator('select[aria-label="Payments for Sample Other Name"]').inputValue(), 'Pending', 'Dues is Pending');
+  assert.equal(await row('Sample Karachi Import').locator('select[aria-label="Status for Sample Karachi Import"]').inputValue(), '', 'no status');
+  assert.equal(await row('Sample Karachi Import').locator('input[aria-label="Notes for Sample Karachi Import"]').inputValue(), 'Upper wire changed, lower bonded on 14/9', 'the Status text is in the notes');
+  assert.equal(await row('Sample Karachi Four').locator('input[aria-label="Mr# for Sample Karachi Four"]').inputValue(), '123-4');
+  // The row the undo kept is there with its change, and says where it came from.
+  const kept = await pr.locator('input[aria-label^="Mr# for"]').evaluateAll((els) => els.filter((e) => e.value === '0304').map((e) => e.getAttribute('aria-label').replace(/^Mr# for /, '')));
+  assert.equal(kept.length, 1, 'the row changed on the website stayed');
+  await pr.getByRole('button', { name: `More for ${kept[0]} (row`, exact: false }).click();
+  await pr.locator('.modal', { hasText: 'it stayed as the website\'s own row when that copy was undone' }).waitFor();
+  await pr.keyboard.press('Escape');
+});
+await step('Import: the city comes from the file\'s name, and another city stops the copy', async () => {
+  await pr.goto(BASE + '#/staff/admin?tab=import');
+  const sec = pr.locator('section', { has: pr.locator('h2', { hasText: '7. Retainer Record' }) });
+  await sec.waitFor();
+  await sec.getByLabel('City of this tab').selectOption({ label: 'Karachi' });
+  const csv = 'Contact #,Patient Name,Impression Date,Model Check By,Retainer Made By,Retainer Date,Status\n'
+    + ',Sample City One,,,Saima (sample),,Delivered to Patient\n,Sample City Two,,,,,Retainer Made\n,Sample City Three,,,,,\n';
+  await sec.locator('input[type=file]').setInputFiles({ name: 'Retainer Record - Lahore.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await sec.locator('.alert-stop', { hasText: 'Lahore was already copied' }).waitFor();
+  assert.equal(await sec.getByLabel('City of this tab').inputValue(), '2', 'Karachi was chosen, the file is the Lahore tab: Lahore is chosen');
+  assert.match(await sec.locator('p.muted', { hasText: 'City: Lahore' }).innerText(), /because its name says Lahore/);
+  // Karachi chosen by hand for the Lahore file: stop.
+  await sec.getByLabel('City of this tab').selectOption({ label: 'Karachi' });
+  await sec.locator('.alert-stop', { hasText: 'looks like the Lahore tab' }).waitFor();
+  assert.ok(await sec.getByRole('button', { name: 'Copy 3 retainers into Karachi' }).isDisabled(), 'another city: no copy');
+  await shot(pr, '47-retainer-import-city');
+});
+await step('Import: a Lahore-style tab (no years) whose last row is typed a day after today keeps its years, and that row is pointed out', async () => {
+  await pr.goto(BASE + '#/staff/admin?tab=import');
+  const sec = pr.locator('section', { has: pr.locator('h2', { hasText: '7. Retainer Record' }) });
+  await sec.waitFor();
+  // A row every two weeks up to three days ago (the clinic's day), then one typed for tomorrow; only the day and the month, as on the Lahore tab.
+  const t = await pr.evaluate(async () => {
+    const { localISO, addDaysISO } = await import('/js/ui/dom.js');
+    const { monthName } = await import('/js/lib/records.js');
+    const words = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+    const typed = (iso) => `${Number(iso.slice(8, 10))} ${words[Number(iso.slice(5, 7)) - 1]}`;
+    const today = localISO();
+    const dates = Array.from({ length: 24 }, (_, i) => addDaysISO(today, -(14 * (23 - i) + 3)));
+    const csv = 'Contact #,Patient Name,Impression Date,Model Check By,Retainer Made By,Retainer Date,Status\n'
+      + [...dates, addDaysISO(today, 1)].map((d, i) => `,Sample Slip ${i + 1},${typed(d)},Dr. Ali Rashid,Saima (sample),,Retainer Made\n`).join('');
+    return { csv, months: `${monthName(dates[0])} to ${monthName(dates[23])}` };
+  });
+  await sec.locator('input[type=file]').setInputFiles({ name: 'Retainer Record - Lahore.csv', mimeType: 'text/csv', buffer: Buffer.from(t.csv) });
+  await sec.locator('.stat', { hasText: 'months on the tab' }).waitFor();
+  assert.equal(await sec.locator('.stat', { hasText: 'months on the tab' }).locator('strong').innerText(), t.months, 'not a year early');
+  const late = sec.locator('.alert-warning', { hasText: 'after today' });
+  assert.match(await late.innerText(), /^1 date is after today: row 26 \(/);
+  await late.scrollIntoViewIfNeeded();
+  await shot(pr, '49-retainer-import-slip');
+});
+await step('Retainer Record: "Show 100 more" adds the next rows under the ones on screen without drawing those again; the focus stays on the button, then goes to the first row added', async () => {
+  // A big Islamabad tab (made-up rows), copied through the data layer after its small demo copy is undone.
+  const total = await pr.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.data.undoRetainerCopy(3);
+    const rows = Array.from({ length: 230 }, (_, i) => ({ row: i + 2, name: `Sample Bulk ${i + 1}`, impression_date: `2025-${String(1 + (i % 12)).padStart(2, '0')}-${String(1 + (i % 28)).padStart(2, '0')}` }));
+    await state.data.importRetainerRecords(3, rows);
+    return (await state.data.retainerRecords({ cityId: 3 })).length;
+  });
+  assert.ok(total >= 230, `Islamabad has ${total} rows`);
+  await pr.goto(BASE + '#/staff/retainers?city=3');
+  await pr.locator('.page-head p', { hasText: `Islamabad: ${total} retainers` }).waitFor();
+  const trs = pr.locator('table.rs-table tbody tr[data-id]');
+  assert.equal(await trs.count(), 100);
+  await trs.first().evaluate((tr) => { tr.dataset.probe = 'kept'; });
+  await pr.getByRole('button', { name: `Show 100 more (${total - 100} not shown yet)` }).click();
+  const next = `Show ${Math.min(100, total - 200)} more (${total - 200} not shown yet)`;
+  await pr.waitForFunction((n) => document.querySelectorAll('table.rs-table tbody tr[data-id]').length === n, 200);
+  assert.equal(await trs.first().getAttribute('data-probe'), 'kept', 'the rows on screen stay as they are (not drawn again)');
+  assert.equal((await trs.nth(100).locator('.rs-num').textContent()).replace(/\D/g, ''), '101', 'the rows added go on with the numbers');
+  assert.equal(new Set(await trs.evaluateAll((els) => els.map((e) => e.dataset.id))).size, 200, 'no row twice');
+  assert.equal(await pr.evaluate(() => document.activeElement?.textContent), next, 'the button keeps the focus and says what is left');
+  await pr.keyboard.press('Enter');
+  await pr.waitForFunction((n) => document.querySelectorAll('table.rs-table tbody tr[data-id]').length === n, total);
+  assert.equal(await pr.locator('.rs-more-rows button').count(), 0, 'everything shown: no button');
+  assert.equal(await pr.evaluate(() => [...document.querySelectorAll('table.rs-table tbody tr[data-id]')].indexOf(document.activeElement?.closest('tr'))), 200,
+    'the first row added has the focus');
+  // A search draws the list again from its top.
+  await pr.getByLabel('Search by name, Mr# or phone').fill('Sample Bulk 2');
+  await pr.locator('.page-head p', { hasText: 'match these filters' }).waitFor();
+  assert.equal(await trs.first().getAttribute('data-probe'), null);
+  await pr.getByRole('button', { name: 'Clear filters' }).click();
+});
+await step('Read only: the front desk (no "Manage retainer cases", no "Lab work entries") sees both pages without anything to change', async () => {
+  await tryAnotherRole(pr);
+  await loginAs(pr, 'Front desk \\(North Nazimabad\\)');
+  await pr.goto(BASE + '#/staff/retainers');
+  await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  assert.equal(await pr.locator('.rs-tabs').count(), 0, 'one city (Karachi) for a desk limited to North Nazimabad: no tabs');
+  assert.match(await pr.locator('.page-head p').first().innerText(), /^Karachi: \d+ retainers$/);
+  assert.equal(await pr.getByRole('button', { name: '+ New retainer' }).count(), 0, 'no add button');
+  assert.equal(await pr.locator('table.rs-table select, table.rs-table input').count(), 0, 'no drop-downs or typing cells');
+  assert.ok(await pr.locator('table.rs-table tbody td .rs-ro', { hasText: /^030[34]$/ }).count(), 'a typed Mr# is plain text');
+  assert.ok(await pr.locator('table.rs-table .pill.c-purple').count(), 'the coloured chips are still there, as plain chips');
+  await pr.getByRole('button', { name: /^More for / }).first().click();
+  assert.equal(await pr.locator('.modal').getByRole('button', { name: 'Remove this row' }).count(), 0, 'and nothing to remove');
+  await pr.keyboard.press('Escape');
+  await pr.goto(BASE + '#/staff/lab');
+  await pr.waitForSelector('table.rs-table tbody tr[data-id]');
+  assert.match(await pr.locator('.page-head p').first().innerText(), /^North Nazimabad: \d+ lab cases$/);
+  assert.equal(await pr.getByRole('button', { name: '+ New lab case' }).count(), 0);
+  assert.equal(await pr.locator('table.rs-table select, table.rs-table input').count(), 0);
+  // The data layer says no too.
+  const answer = await pr.evaluate(async () => { const { state } = await import('/js/state.js'); try { await state.data.addRetainerRecord({ city_id: 1, patient_name: 'Sample Desk Try' }); return 'added'; } catch (e) { return e.message; } });
+  assert.match(answer, /row-level security/);
+  await pr.goto(BASE + '#/staff/coordinator?tab=lab');
+  await pr.waitForURL(/#\/staff\/lab/);
+});
+// A 1366x768 laptop: Chrome's own bars leave a 1366x657 window.
+const prl = await newPage({ width: 1366, height: 657 });
+await step('laptop (1366x657 window): the wheel over the Retainer Record brings the sheet up to fill the window, then scrolls its rows; at least 10 rows in sight', async () => {
+  await loginAs(prl, 'Dr. Ali Rashid');
+  await prl.goto(BASE + '#/staff/retainers');
+  await prl.waitForSelector('table.rs-table tbody tr[data-id]');
+  const where = () => prl.evaluate(() => {
+    const w = document.querySelector('.rs-wrap');
+    const b = w.getBoundingClientRect();
+    const top = Math.max(b.top, document.querySelector('.rs-table thead').getBoundingClientRect().bottom);
+    const foot = document.querySelector('.rs-table tfoot')?.getBoundingClientRect().top ?? b.bottom;
+    const bottom = Math.min(b.bottom, foot, innerHeight);
+    const rows = [...w.querySelectorAll('tbody tr[data-id]')].filter((tr) => { const r = tr.getBoundingClientRect(); return r.top >= top - 1 && r.bottom <= bottom + 1; }).length;
+    return { page: Math.round(scrollY), inside: Math.round(w.scrollTop), tabs: Math.round(document.querySelector('.rs-tabs').getBoundingClientRect().top), bar: Math.round(document.querySelector('.topbar').getBoundingClientRect().bottom), frameTop: Math.round(b.top), rows };
+  });
+  const start = await where();
+  assert.equal(start.page, 0);
+  // The wheel turned down over the part of the sheet in sight: the page moves first, the rows stay where they are.
+  await prl.mouse.move(683, Math.round((start.frameTop + 657) / 2));
+  let up = start;
+  for (let i = 0; i < 12 && Math.abs(up.tabs - up.bar) > 1; i++) {
+    assert.equal(up.inside, 0, 'the rows stay where they are while the page moves');
+    await prl.mouse.wheel(0, 120);
+    await prl.waitForTimeout(80);
+    up = await where();
+  }
+  assert.ok(up.page > 0, 'the page scrolled');
+  assert.ok(Math.abs(up.tabs - up.bar) <= 1, `the tabs sit under the top bar (${up.tabs}px, ${up.bar}px)`);
+  assert.ok(up.rows >= 10, `${up.rows} rows in sight (2 to 5 before)`);
+  await shot(prl, '48-retainer-record-laptop-657');
+  // Then the rows scroll, and the page stays. (The wheel over the middle of the sheet, which now fills the window: the spot it was turned at
+  // before can be under the sheet now, when a line above it, the overdue retainer checks, made the sheet start lower on the first screen.)
+  const inside = up.inside;
+  await prl.mouse.move(683, await prl.evaluate(() => { const b = document.querySelector('.rs-wrap').getBoundingClientRect(); return Math.round((b.top + Math.min(b.bottom, innerHeight)) / 2); }));
+  for (let i = 0; i < 3; i++) { await prl.mouse.wheel(0, 120); await prl.waitForTimeout(60); }
+  await prl.waitForFunction((was) => document.querySelector('.rs-wrap').scrollTop > was, inside);
+  assert.equal((await where()).page, up.page, 'the page did not move');
+  await prl.close();
+});
+const prm = await newPage({ width: 390, height: 844 });
+await step('phone: the Retainer Record and Lab work fit the screen; the table scrolls inside its frame, the patient column stays at the left', async () => {
+  await loginAs(prm, 'Clinic coordinator');
+  for (const path of ['#/staff/retainers', '#/staff/lab']) {
+    await prm.goto(BASE + path);
+    await prm.waitForSelector('table.rs-table tbody tr[data-id]');
+    const fit = await prm.evaluate(() => ({ page: document.documentElement.scrollWidth - document.documentElement.clientWidth, wrap: (() => { const w = document.querySelector('.rs-wrap'); return w.scrollWidth > w.clientWidth; })() }));
+    assert.equal(fit.page, 0, `${path}: no sideways scroll of the page`);
+    assert.ok(fit.wrap, `${path}: the table scrolls inside its frame`);
+    await prm.locator('.rs-wrap').evaluate((w) => { w.scrollLeft = 400; });
+    const left = await prm.locator('table.rs-table tbody th.rs-who').first().evaluate((el) => Math.round(el.getBoundingClientRect().left - el.closest('.rs-wrap').getBoundingClientRect().left));
+    assert.ok(Math.abs(left) <= 1, `${path}: the patient column stays at the left edge (${left}px)`);
+  }
+  await shot(prm, '44-lab-work-phone');
+});
+await step('phone: the Retainer Record shows everybody in the banner, two side by side, and still has rows on the first screen ("More filters" is closed, Status stays in sight)', async () => {
+  await prm.goto(BASE + '#/staff/retainers');
+  await prm.waitForSelector('table.rs-table tbody tr[data-id]');
+  const more = prm.locator('.rs-toolbar .rs-more-btn');
+  assert.equal(await more.getAttribute('aria-expanded'), 'false');
+  assert.ok(await prm.locator('.rs-toolbar select[aria-label="Status"]').isVisible(), 'Status is in sight');
+  // The overdue retainer checks: one line under the title, without the names on a phone (so the rows stay on the first screen).
+  assert.equal(await prm.locator('.rs-notice').innerText(), '2 retainer checks are overdue. Show only them');
+  assert.ok(await prm.locator('.rs-notice').evaluate((p) => p.getBoundingClientRect().height < 32), 'one line');
+  assert.equal(await prm.locator('.rs-toolbar select[aria-label="Retainer made by"]').isVisible(), false, 'the other filters are behind "More filters"');
+  // Every chip whole on the screen (no strip to swipe, no name or number cut off at the edge), two on a line; the demo's four people
+  // take two lines.
+  const team = await prm.locator('.rl-team').evaluate((ul) => {
+    const vw = document.documentElement.clientWidth;
+    const chips = [...ul.querySelectorAll('.rl-chip')].map((c) => c.getBoundingClientRect());
+    const cut = [...ul.querySelectorAll('.rl-chip .rl-who')].filter((w) => w.scrollWidth > w.clientWidth + 1).length;
+    return { n: chips.length, inView: chips.every((b) => b.left >= 0 && b.right <= vw), lines: new Set(chips.map((b) => Math.round(b.top))).size, sideways: ul.scrollWidth > ul.clientWidth + 1, cut };
+  });
+  assert.deepEqual(team, { n: 4, inView: true, lines: 2, sideways: false, cut: 0 }, 'everybody in the banner is in sight');
+  const parts = await prm.locator('.rl-chip', { hasText: 'Hassan (sample)' }).locator('.rl-part').evaluateAll((els) => els.map((e) => ({ text: e.textContent, top: e.getBoundingClientRect().top, bottom: e.getBoundingClientRect().bottom })));
+  assert.ok(parts.length === 2 && /^This month \d+ made, \d+ delivered$/.test(parts[0].text) && /^All time [1-9]\d* made$/.test(parts[1].text) && parts[1].top >= parts[0].bottom - 1,
+    'this month and all time on a line each: ' + JSON.stringify(parts));
+  // The first row starts on the first screen, without the notice of the demo above the page (the live site has none).
+  const top = await prm.locator('table.rs-table tbody tr[data-id]').first().evaluate((el) => el.getBoundingClientRect().top);
+  const demoNote = await prm.locator('.demo-banner').evaluate((el) => el.getBoundingClientRect().height + parseFloat(getComputedStyle(el).marginBottom));
+  assert.ok(top - demoNote < 760, `the first row starts at ${Math.round(top - demoNote)}px of an 844px screen (${Math.round(top)}px under the demo's notice)`);
+  await shot(prm, '47-retainer-record-phone');
+  await more.click();
+  assert.equal(await more.getAttribute('aria-expanded'), 'true');
+  await prm.locator('.rs-toolbar select[aria-label="Retainer made by"]').selectOption({ index: 1 });
+  await prm.waitForFunction(() => /\(1 in use\)/.test(document.querySelector('.rs-more-btn')?.textContent || ''));
+  assert.ok(await prm.getByRole('button', { name: 'Clear filters' }).isVisible(), 'something is filtered: "Clear filters" shows');
+  await prm.getByRole('button', { name: 'Clear filters' }).click();
 });
 
 // ------------------------------------------------------------- phone width
