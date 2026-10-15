@@ -8,8 +8,8 @@ import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
 import { STATUS_LABELS, duesBadge, aliBadge, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
-import { dayListCheckups } from '../../lib/checkups.js';
-import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
+import { dayListCheckups, hasFormAnswers, formComplete, yesNo, PRICING_LABELS } from '../../lib/checkups.js';
+import { checkupFormModal, checkupAnswersModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 import { dayEndControls, laterDayHint, bookedFor } from './day-end.js';
 import { FIRST_DAY } from '../../lib/day-list.js';
 
@@ -150,7 +150,7 @@ export async function renderSheet(root, params, signal) {
   let rows = [];
   let checkups = []; // the day's checkup patients (no Mr#); see lib/checkups.js dayListCheckups for which of them are shown
   let serials = new Map(); // row id -> its serial number in the list as last drawn (draw)
-  let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Checkup patient"
+  let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Add checkup patient"
   let checkupsWarn = ''; // why the checkups could not be loaded (the visits still show)
   let checkupsKey = ''; // branch and day the `checkups` above belong to
   let filter = '';
@@ -344,7 +344,7 @@ export async function renderSheet(root, params, signal) {
     }
   }
 
-  // The dialog behind "Options" on a checkup row: follow-up status, patient file, the checkup list, remove.
+  // The dialog behind "Options" on a checkup row: the checkup form, follow-up status, patient file, the checkup list, remove.
   function checkupOptions(c) {
     const who = c.patient_name;
     const mr = registeredMr(c);
@@ -359,18 +359,32 @@ export async function renderSheet(root, params, signal) {
     const digits = String(c.phone || '').replace(/\D/g, '');
     const inCheckupList = `#/staff/checkups?q=${encodeURIComponent(digits.length >= 4 ? digits : who)}`;
     const actions = [
+      // a checkup typed in on arrival (here or in the Google Sheet): the assistant fills in the form for it after the checkup
+      canEdit && !formComplete(c) ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: async () => {
+        dialog?.close();
+        const saved = await checkupAnswersModal(c);
+        if (saved === false) load(); // it is gone: read the list again
+        if (!saved) return;
+        checkups = checkups.map((x) => (x.id === saved.id ? saved : x));
+        draw();
+        toast(`Answers saved on ${saved.patient_name}'s checkup.`, 'ok');
+      } }, 'Fill in the checkup form') : null,
       c.patient_id
         ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
         : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
       h('a', { class: 'btn', href: inCheckupList }, 'Open in the checkup list'),
       canRemoveCheckup(c) ? h('button', { type: 'button', class: 'btn btn-danger', onclick: () => { dialog?.close(); removeCheckupModal(c, { onDone: () => { checkups = checkups.filter((x) => x.id !== c.id); draw(); } }); } }, 'Remove from the list') : null,
     ];
+    const shown = (label, value) => h('div', { class: 'field' }, h('div', { class: 'field-label' }, label), h('div', {}, value || '–'));
     dialog = modal(`${who} · Checkup patient`, h('div', {},
       h('p', { class: 'muted' }, c.patient_id ? 'Has a patient file now.' : 'No Mr# yet. A checkup patient gets a patient file when they start treatment.'),
       h('div', { class: 'form-grid' },
-        h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Name'), h('div', {}, who)),
-        h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Phone'), h('div', {}, c.phone || '–')),
-        field('Follow-up status', follow)),
+        shown('Name', who),
+        shown('Phone', c.phone),
+        field('Follow-up status', follow),
+        // the answers of the checkup form, when it was filled in (not for a checkup from the sheet or from before the form)
+        hasFormAnswers(c) ? [shown('Dr. Ali recommended', yesNo(c.ali_recommended)), shown('Understood pricing', PRICING_LABELS[c.pricing_understood]),
+          shown('Wants to start', yesNo(c.wants_treatment)), shown('When / why not', c.treatment_plan)] : null),
       h('div', { class: 'inline', style: { marginTop: '10px' } }, actions)), [{ label: 'Done', primary: true }]);
   }
 
@@ -673,7 +687,7 @@ export async function renderSheet(root, params, signal) {
     const shownChecks = shownCheckups();
     branchHead.hidden = !!branchId;
     addPanel.hidden = !branchId || !search;
-    // "+ Checkup patient" only where checkups exist (the database update has been run) and for today or an earlier day.
+    // "+ Add checkup patient" only where checkups exist (the database update has been run) and for today or an earlier day.
     checkupBtn.hidden = checkupsMissing || date > localISO() || !can('sheet.edit');
     // (a later day, such as the one "End the day" opens: patients added there are booked for that day, day-end.js)
     addHint.textContent = date > localISO() ? laterDayHint(date) : checkupBtn.hidden ? ADD_HINT_PLAIN : ADD_HINT_CHECKUP;
@@ -727,19 +741,26 @@ export async function renderSheet(root, params, signal) {
   }) : null;
 
   const branchHead = h('th', { scope: 'col', hidden: true }, 'Branch');
-  // A person who only comes for a checkup gets no Mr#: "+ Checkup patient" puts them on this list (and on the Checkups page).
+  // A person who only comes for a checkup gets no Mr#: "+ Add checkup patient" (the checkup form) puts them on this list and on the Checkups page.
   // A patient who starts treatment and is new gets an Mr# with "+ New walk-in".
   const ADD_HINT_PLAIN = 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.';
-  const ADD_HINT_CHECKUP = 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Checkup patient" (no Mr#).';
+  const ADD_HINT_CHECKUP = 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Add checkup patient" (no Mr#).';
   const addHint = h('span', { class: 'muted' }, ADD_HINT_PLAIN);
   const checkupBtn = h('button', { class: 'btn', type: 'button', hidden: true, 'aria-haspopup': 'dialog', onclick: async () => {
     const res = await checkupFormModal({ branchId, date, fixedDay: true });
     if (!res) return;
     if (res.patient) { addPatient(res.patient); return; } // the person already has a patient file: put that file on the list instead
+    if (res.updated) { // the person was on this list already: the answers went on that checkup
+      checkups = checkups.map((c) => (c.id === res.updated.id ? res.updated : c));
+      draw();
+      toast(`Answers saved on ${res.updated.patient_name}'s checkup.`, 'ok');
+      return;
+    }
     checkups = [...checkups, res];
     draw();
-    toast(`${res.patient_name} added as a checkup patient.`, 'ok');
-  } }, '+ Checkup patient');
+    // (added on arrival, "Add as Waiting": the form is filled in after the checkup, from Options on the row)
+    toast(res.day_status === 'waiting' ? `${res.patient_name} added as Waiting. After the checkup: Options, then "Fill in the checkup form".` : `${res.patient_name} added as a checkup patient.`, 'ok');
+  } }, '+ Add checkup patient');
   const addPanel = search ? h('div', { class: 'add-panel' },
     h('div', { class: 'add-panel-text' },
       h('strong', {}, 'Add a patient to this list'),
