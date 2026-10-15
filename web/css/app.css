@@ -784,6 +784,46 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 .topnav-layout { grid-template-columns: 1fr; }
 .topnav-layout > .sidebar { display: none; }
 .drawer-group .nav-link { padding-left: var(--space-5); }
+/* Arrange my menu (nav-arrange.js): the drop-down names inside an arranged More, the drawer's button, and its dialog.
+   A drop-down hangs from the sticky bar, so scrolling the page never brings its last entries up: a long one (a whole menu
+   put under More) scrolls inside the window instead. */
+.topbar .menu-list {
+  max-height: calc(100vh - var(--topbar-h) - env(safe-area-inset-top, 0px) - var(--space-4));
+  max-height: calc(100dvh - var(--topbar-h) - env(safe-area-inset-top, 0px) - var(--space-4));
+  overflow-y: auto; overscroll-behavior: contain;
+}
+/* The page keeps its place when focus goes to the bar itself (back from a dialog opened in the name menu, or Escape in a
+   drop-down): the scroll-padding that keeps focused fields clear of the bar took any focus up here as "hidden behind it" and
+   scrolled the page to the top. Not the links inside a drop-down list, which scroll within it. */
+.topbar :is(.nav-link, .icon-btn, .wordmark, .topsearch input) { scroll-margin-top: calc(-1 * (var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--space-4))); }
+.menu-heading { padding: var(--space-2) var(--space-3) var(--space-1); font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+/* A drop-down under More: its pages are indented under its name, and so is a line inside it (Reports: the reports, then the Accounts
+   tabs): it reads as part of the section. The lines between More's parts run the full width. */
+.menu-section > a { padding-left: var(--space-6); }
+.menu-section > hr { margin-left: var(--space-6); }
+.nav-subgroup { padding-left: var(--space-4); }
+/* In the phone drawer such a drop-down's pages sit under its name, and a line ends them: More's own pages come after it,
+   back at the usual indent. */
+.drawer-subgroup { border-bottom: 1px solid var(--on-dark-line); padding-bottom: var(--space-1); margin-bottom: var(--space-1); }
+.drawer-group .drawer-subgroup .nav-link { padding-left: var(--space-7); }
+.drawer-links { display: flex; flex-direction: column; gap: var(--space-1); }
+.sidebar .drawer-arrange { align-self: flex-start; margin: var(--space-2) var(--space-2) var(--space-3); color: var(--on-dark-strong); font-size: var(--fs-sm); }
+/* After a click the dialog itself keeps the clicked button under the pointer (keepAt): the browser's own scroll anchoring would
+   move it a second time. */
+.arrange { overflow-anchor: none; }
+.arrange h3 { margin: var(--space-4) 0 var(--space-2); }
+.arrange h4 { margin: var(--space-3) 0 var(--space-1); font-size: var(--fs-sm); }
+.arrange-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-1); }
+.arrange-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); }
+/* The page just moved: after a click the button under the pointer belongs to the next page, so the moved row shows where it went. */
+.arrange-row.arrange-moved { border-color: var(--aubergine); background: var(--aubergine-soft); box-shadow: inset 3px 0 0 var(--aubergine); }
+.arrange-num { flex: none; min-width: 1.75em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.arrange-name { flex: 1 1 12rem; min-width: 0; font-weight: 600; }
+.arrange-name small { display: block; font-weight: 400; color: var(--text-muted); }
+.arrange-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+/* Move up on the first row (Move down on the last) keeps focus, so it is greyed out by colour: fading it would fade its focus ring too. */
+.arrange-actions .btn[aria-disabled="true"] { opacity: 1; color: var(--text-subtle); border-color: var(--border); background: var(--surface-sunken); }
+.arrange-count { margin: 0 0 var(--space-2); }
 .drawer-close { align-self: flex-end; color: inherit; flex: none; }
 /* Tap-to-close layer behind the phone drawer (a real element, so taps never reach the page). */
 .drawer-scrim {
