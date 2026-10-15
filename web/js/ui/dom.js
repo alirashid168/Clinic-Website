@@ -367,6 +367,8 @@ function focusEl(el, options) {
  * opts.unsaved(): true while the dialog holds something that is not saved (with confirmDismiss). Then confirmDismiss is also asked before
  * the page changes (Back, a link: main.js asks confirmLeave()), and a reload or closing the tab gets the browser's own question.
  * The result's mayLeave(ask = confirmDismiss) asks, unless a question is open already: for a control in the dialog that leaves it.
+ * opts.locked: the person cannot close it: there is no × button, and Escape and a click outside do nothing. Only its own actions
+ * close it (give it a way out, such as "Log out"), or the code (close(), closeAllModals() at every page change and at logout).
  * Focus stays inside the dialog and returns to the button that opened it.
  */
 export function modal(title, body, actions = [], opts = {}) {
@@ -412,7 +414,7 @@ export function modal(title, body, actions = [], opts = {}) {
   },
   h('div', { class: 'modal-head' },
     heading,
-    h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => dismiss() }, '×')),
+    opts.locked ? null : h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => dismiss() }, '×')),
   h('div', { class: 'modal-body', id: bodyId }, body),
   buttons.length ? h('div', { class: 'modal-actions' }, buttons) : null,
   h('div', { class: 'sr-only' }, polite, assertive));
@@ -432,7 +434,7 @@ export function modal(title, body, actions = [], opts = {}) {
     try { return (await ask()) !== false; } catch (err) { console.error(err); return false; } finally { asking = false; }
   }
   async function dismiss() {
-    if ((opts.lockWhileWorking && working) || asking) return;
+    if (opts.locked || (opts.lockWhileWorking && working) || asking) return;
     if (await mayLeave()) close();
   }
 

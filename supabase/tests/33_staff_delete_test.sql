@@ -143,6 +143,7 @@ insert into staff_ref_excluded (table_name, column_name, reason) values
   ('clinicians',                 'staff_id',              'a doctor''s login link, not a record: delete_staff unlinks it and the doctor stays for visits'),
   ('staff_permission_overrides', 'staff_id',              'personal access ticks of the account: removed with it (on delete cascade)'),
   ('staff_menu_prefs',           'staff_id',              'the account''s own menu order (Arrange my menu): removed with it (on delete cascade)'),
+  ('desk_names',                 'staff_id',              'names typed at a shared login''s desk: removed with the account (on delete cascade)'),
   ('patients',                   'portal_user_id',        'a patient''s own portal login, never a staff account'),
   ('login_events',               'user_id',               'signing in is not work: an account that only logged in is unused; staff_logins() names a removed login from its audit row'),
   ('idempotency_keys',           'created_by',            'a retry key of one save: the invoice or plan that save made is counted through its own created_by'),

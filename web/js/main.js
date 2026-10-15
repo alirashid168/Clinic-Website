@@ -10,6 +10,7 @@ import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMess
 import { state } from './state.js';
 import { authChangeHandler, endedNotice, startRecheck, RECHECK_EVENT } from './auth-watch.js';
 import { CONFIG } from './config.js';
+import { forgetDeskName } from './lib/desk-name.js';
 import * as content from './content.js';
 import { renderHome, renderVisitor, renderResults } from './views/public.js';
 
@@ -238,6 +239,8 @@ function onSignedIn() {
   const mine = !returnTo?.staffId || returnTo.staffId === state.session?.staff?.id;
   const back = mine && returnTo?.hash.startsWith(area) ? returnTo.hash : null;
   returnTo = null;
+  // A shared login asks "Please enter your name" after every sign-in, even when the same login signs in again in this tab.
+  forgetDeskName();
   startIdle();
   recheck?.poke();
   location.hash = back || (kind === 'staff' ? '#/staff/today' : '#/patient');
@@ -246,27 +249,32 @@ function onSignedIn() {
 // What the logout toast says about Aaj ki List edits still on this computer. autosave.clearForUser resolves to
 // { pending, failed }: pending edits are sent by themselves the next time that person opens the list (if within a
 // day), failed ones wait for Try again or Discard. (An older autosave.js resolved to one number for both.)
-function waitingMessage(left) {
+// On a shared login they wait for the same name at the desk (lib/desk-name.js editOwner).
+function waitingMessage(left, shared = false) {
   const changes = (n) => `${n} change${n === 1 ? '' : 's'} on the Aaj ki List`;
   const it = (n) => (n === 1 ? 'it' : 'them');
-  const listed = (n) => `${n === 1 ? 'It' : 'They'} will be listed at the top of the Aaj ki List the next time you log in here, where you can Try again or Discard ${it(n)}.`;
+  const next = shared ? 'the next time you log in here and give the same name' : 'the next time you log in here';
+  const listed = (n) => `${n === 1 ? 'It' : 'They'} will be listed at the top of the Aaj ki List ${next}, where you can Try again or Discard ${it(n)}.`;
   if (typeof left === 'number') {
-    return left > 0 ? `${changes(left)} ${left === 1 ? 'is' : 'are'} still on this computer. Recent ones are sent the next time you log in here and open the Aaj ki List; any that could not be saved are listed at the top, where you can Try again or Discard ${it(left)}.` : '';
+    return left > 0 ? `${changes(left)} ${left === 1 ? 'is' : 'are'} still on this computer. Recent ones are sent ${next} and open the Aaj ki List; any that could not be saved are listed at the top, where you can Try again or Discard ${it(left)}.` : '';
   }
   const { pending = 0, failed = 0 } = left || {};
   const text = [];
-  if (pending) text.push(`${changes(pending)} ${pending === 1 ? 'is' : 'are'} waiting on this computer. ${pending === 1 ? 'It' : 'They'} will be sent the next time you log in here and open the Aaj ki List, as long as that is within a day; after that ${pending === 1 ? 'it is' : 'they are'} listed at the top for you to check.`);
+  if (pending) text.push(`${changes(pending)} ${pending === 1 ? 'is' : 'are'} waiting on this computer. ${pending === 1 ? 'It' : 'They'} will be sent ${next} and open the Aaj ki List, as long as that is within a day; after that ${pending === 1 ? 'it is' : 'they are'} listed at the top for you to check.`);
   if (failed) text.push(`${changes(failed)} could not be saved. ${listed(failed)}`);
   return text.join(' ');
 }
 
 // { remote: true }: the login already ended in another tab, so there is nothing to send or to end here.
-// { local: true }: end only this computer's login (the data layer keeps other computers on a shared login signed in).
+// { local: true }: end only this computer's login (the data layer keeps other computers on a shared login signed in). Always so
+// for a shared login (staff.shared_login): the same login stays signed in at the other desks and computers that use it.
 // { notice }: a message to show after logging out, along with the one about waiting Aaj ki List edits.
 // { reason }: why, for the other tabs of this browser, which only see that the login ended (see noticeFor()).
 async function signOut({ remote = false, local = false, notice = '', reason = '' } = {}) {
   if (signingOut) return;
   signingOut = true;
+  const shared = !!state.session?.staff?.shared_login;
+  if (shared) local = true;
   stopIdle();
   closeAllModals();
   clearMessages(); // toasts and announcements can name patients
@@ -289,9 +297,12 @@ async function signOut({ remote = false, local = false, notice = '', reason = ''
     try { confirmed = (await state.data?.signOut(local ? { scope: 'local', reason } : undefined)) !== false; } catch (e) { console.error(e); confirmed = false; }
   }
   state.session = null;
+  // The name given at a shared login's desk ends with the login (after the waiting edits above went out with it).
+  forgetDeskName();
+  state.data?.setDeskName?.(null, null);
   recheck?.poke();
   clearMessages(); // anything that arrived while the edits were being sent
-  const notices = [{ message: waitingMessage(left), ms: 12000 }, { message: notice, ms: 10000 }].filter((n) => n.message);
+  const notices = [{ message: waitingMessage(left, shared), ms: 12000 }, { message: notice, ms: 10000 }].filter((n) => n.message);
   // Offline there is nothing hung to clear, and a reload would only show the browser's "no internet" page.
   if (!confirmed && navigator.onLine !== false) return reloadAfterLogout(notices); // signingOut stays true: nothing else runs in this page
   signingOut = false;
@@ -434,9 +445,10 @@ const noticeFor = (reason) => {
   return endedNotice(reason, { patient: state.session?.kind === 'patient', idleMinutes: limit ? Math.max(1, Math.round(limit / 60000)) : 0 });
 };
 
+// (Not for a shared login: the next person on that login is somebody else, and must not land on the page the one before left open.)
 async function idleSignOut() {
   if (!idleApplies()) return;
-  if (location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId: state.session?.staff?.id };
+  if (location.hash.startsWith('#/staff') && !state.session?.staff?.shared_login) returnTo = { hash: location.hash, staffId: state.session?.staff?.id };
   // Only this computer's login ends: the same shared login may be in use on another computer.
   await signOut({ local: true, reason: 'idle', notice: noticeFor('idle') });
 }
@@ -448,7 +460,7 @@ async function idleSignOut() {
 // server for the same reason: there is no login left here to end.
 async function endedElsewhere(reason) {
   const staffId = state.session?.staff?.id;
-  if (staffId && location.hash.startsWith('#/staff')) returnTo = { hash: location.hash, staffId };
+  if (staffId && location.hash.startsWith('#/staff') && !state.session?.staff?.shared_login) returnTo = { hash: location.hash, staffId };
   await signOut({ remote: true, notice: noticeFor(reason) });
 }
 

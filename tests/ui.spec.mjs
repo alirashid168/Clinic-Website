@@ -8706,6 +8706,7 @@ await step('End the day after midnight: a page opened before midnight says what 
 });
 await pmid.close();
 
+<<<<<<< billing-desk
 // ------------------------------------------------------------- Bill on the Aaj ki List, the invoice form with the payment, the printed bill and
 // "Create ▾" (owner, 15 Oct 2026: "the add invoice button should be on the aaj ki list ... payment could be taken and an invoice bill printout
 // provided for the patient"; "a create button with drop down having patient, invoice and health record").
@@ -9352,6 +9353,331 @@ await step('Bill on a phone: a name beside Bill is not cut; the invoice form nam
   assert.ok(await m.getByLabel('Performed by, line 1').evaluate((s) => s.scrollWidth <= s.clientWidth + 1 && s.getBoundingClientRect().width > 250), 'the doctor box has the width of the line');
   await pp.close();
 });
+=======
+// ------------------------------------------------------------- shared logins: "Please enter your name" (the owner, 15 Oct 2026)
+// "instead of name picker, just give a popup saying please enter your name". The demo's "Front desk Islamabad" is a shared login.
+// The demo keeps its data in the page's memory, so the shared desk and Dr. Ali share one page (hash changes only). A demo login does
+// not survive a reload either, so moving to another page stands in for a reload; the name is checked in this tab's sessionStorage.
+const pdn = await newPage();
+const nameDialog = (pg) => pg.getByRole('dialog', { name: 'Please enter your name' });
+const nameBox = (pg) => nameDialog(pg).getByLabel(/^Your name/);
+// (textContent: in the top bar the login and the name are boxes of their own, which innerText would put on lines of their own)
+const accountLabel = (pg) => pg.locator('.user-menu > button .user-name').evaluate((el) => el.textContent.trim());
+// The scope of every logout from now on ('local' = this computer only), recorded around the demo adapter's signOut.
+const logoutScopes = (pg) => pg.evaluate(async () => {
+  const { state } = await import('/js/state.js');
+  if (!state.data.__scopes) {
+    const signOut = state.data.signOut.bind(state.data);
+    state.data.__scopes = [];
+    state.data.signOut = (o) => { state.data.__scopes.push(o?.scope || 'global'); return signOut(o); };
+  }
+  return state.data.__scopes;
+});
+const greeting = (pg, name) => pg.locator('h1', { hasText: new RegExp(`^Good (morning|afternoon|evening), ${name}$`) });
+await step('shared login: signing in asks "Please enter your name" before anything else; no ×, no Cancel, Escape and a click outside do nothing; a too-short or too-long name is refused', async () => {
+  await loginAs(pdn, 'Front desk Islamabad');
+  const dlg = nameDialog(pdn);
+  await dlg.waitFor();
+  assert.equal(await dlg.getByRole('button', { name: 'Close' }).count(), 0, 'no × button');
+  assert.equal(await dlg.getByRole('button', { name: 'Cancel' }).count(), 0, 'no Cancel');
+  assert.deepEqual((await dlg.locator('.modal-actions button').allInnerTexts()).map((t) => t.trim()), ['Log out', 'Continue'], 'Continue, and Log out for the wrong login');
+  assert.equal(await pdn.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.labels?.[0]?.textContent), 'Your name (required)', 'it starts in the name box');
+  assert.equal(await pdn.locator('#app').evaluate((el) => el.inert), true, 'the page behind cannot be clicked or typed into');
+  assert.equal((await pdn.locator('#main').innerText()).trim(), '', 'nor is the page drawn (or its data read) before the name is given');
+  // Another page (Back, a typed address) while it asks: that page asks again, and is not drawn either.
+  await pdn.evaluate(() => { location.hash = '#/staff/patients'; });
+  await pdn.waitForFunction(() => location.hash === '#/staff/patients');
+  await dlg.waitFor();
+  await pdn.waitForTimeout(300);
+  assert.equal(await nameDialog(pdn).count(), 1, 'one popup');
+  assert.equal((await pdn.locator('#main').innerText()).trim(), '', 'the Patients page is not drawn without a name');
+  await pdn.evaluate(() => { location.hash = '#/staff/today'; });
+  await pdn.waitForFunction(() => location.hash === '#/staff/today');
+  await dlg.waitFor();
+  await pdn.keyboard.press('Escape');
+  await pdn.mouse.click(8, 400); // on the dimmed page, outside the dialog
+  await pdn.waitForTimeout(200);
+  assert.ok(await dlg.isVisible(), 'Escape and a click outside leave it open');
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  assert.equal((await dlg.locator('.field-error').innerText()).trim(), 'Write your name (at least 2 letters).');
+  await nameBox(pdn).fill('  S  ');
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  assert.equal((await dlg.locator('.field-error').innerText()).trim(), 'Write your name (at least 2 letters).', 'one letter (spaces do not count) is too short');
+  await nameBox(pdn).fill('a'.repeat(61));
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  assert.equal((await dlg.locator('.field-error').innerText()).trim(), 'Write at most 60 letters.');
+  assert.ok(await dlg.isVisible(), 'still asking');
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad', 'no name next to the login yet');
+  await shot(pdn, '31-shared-login-name-popup');
+});
+await step('shared login: Continue (or Enter) puts the name next to the login in the name menu; it stays for the tab, so another page does not ask again', async () => {
+  await nameBox(pdn).fill('  Sadia   ');
+  await nameBox(pdn).press('Enter');
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · Sadia');
+  assert.equal(await pdn.locator('.user-menu > button').getAttribute('aria-label'), 'Account menu, Front desk Islamabad · Sadia');
+  assert.equal(await pdn.locator('#app').evaluate((el) => el.inert), false, 'the page can be used now');
+  await pdn.locator('h1', { hasText: /^Good (morning|afternoon|evening), Sadia$/ }).waitFor(); // Today greets the person, not "Front"
+  assert.deepEqual(await pdn.evaluate(() => { const k = JSON.parse(sessionStorage.getItem('desk-name')); return [k.staffId, k.name, typeof k.at]; }), ['s-fd-isb', 'Sadia', 'number'], 'kept for this tab, with the time it was last used (a reload within the idle time keeps it)');
+  await pdn.locator('.user-menu > button').click();
+  assert.equal((await pdn.locator('#user-menu-list .menu-note > span').innerText()).trim(), 'Front desk Islamabad · Sadia');
+  assert.equal(await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).count(), 1, 'Change name is in the name menu');
+  await pdn.keyboard.press('Escape');
+  await pdn.goto(BASE + '#/staff/patients');
+  await pdn.waitForSelector('h1:has-text("Patients")');
+  await pdn.waitForTimeout(300);
+  assert.equal(await nameDialog(pdn).count(), 0, 'another page does not ask again');
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · Sadia');
+});
+await step('shared login: "Change name" asks again at once (the old name stops), offers the names used on this computer, takes an Urdu name, and the page greets the new person', async () => {
+  await pdn.goto(BASE + '#/staff/today');
+  await greeting(pdn, 'Sadia').waitFor();
+  await pdn.locator('.user-menu > button').click();
+  await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).click();
+  const dlg = nameDialog(pdn);
+  await dlg.waitFor();
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad', 'the old name stops straight away');
+  assert.equal(await pdn.evaluate(() => sessionStorage.getItem('desk-name')), null);
+  assert.equal(await nameBox(pdn).inputValue(), '', 'the box starts empty (the next person writes their own name)');
+  assert.deepEqual(await dlg.locator('datalist option').evaluateAll((os) => os.map((o) => o.value)), ['Sadia'], 'names typed before on this computer are offered');
+  assert.equal(await nameBox(pdn).getAttribute('list'), await dlg.locator('datalist').getAttribute('id'));
+  await pdn.keyboard.press('Escape');
+  assert.ok(await dlg.isVisible(), 'it cannot be closed without a name here either');
+  await nameBox(pdn).fill('عائشہ');
+  await dlg.getByRole('button', { name: 'Continue' }).click();
+  await dlg.waitFor({ state: 'detached' });
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · عائشہ');
+  await greeting(pdn, 'عائشہ').waitFor(); // the page is drawn again for the new person, without moving
+  assert.equal(await pdn.evaluate(() => location.hash), '#/staff/today');
+});
+await step('shared login: a note typed offline stays with the person who typed it: after "Change name" it is not sent under the next name, and goes out when that person gives their name again', async () => {
+  const rowsHere = pdn.locator('table.checkup-table tbody tr[data-id]');
+  await pdn.goto(BASE + '#/staff/checkups');
+  await rowsHere.first().waitFor();
+  const id = await rowsHere.first().getAttribute('data-id');
+  const notes = () => pdn.locator(`table.checkup-table tbody tr[data-id="${id}"] input[aria-label^="Notes for"]`);
+  const before = await notes().inputValue();
+  await pdn.context().setOffline(true);
+  await pdn.locator('.offline-banner:not([hidden])').waitFor();
+  await notes().fill('Typed by the first person, offline (test)');
+  await pdn.waitForFunction(() => /Offline: 1 typed change/.test(document.querySelector('.save-state')?.textContent || ''));
+  // The next person: Change name. The name list cannot be saved this time; the person still gets through.
+  await pdn.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const save = state.data.saveDeskName;
+    state.data.saveDeskName = async () => { state.data.saveDeskName = save; throw new Error('Sample save refused (test)'); };
+  });
+  await pdn.locator('.user-menu > button').click();
+  await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).click();
+  await pdn.locator('.toast', { hasText: '1 change typed by عائشہ could not be sent yet. It waits on this computer for عائشہ, until that name is given on this login here again.' }).waitFor();
+  await nameBox(pdn).fill('Sample Mehak');
+  await nameDialog(pdn).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  expectErrors(/Sample save refused/);
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · Sample Mehak');
+  await pdn.context().setOffline(false);
+  await rowsHere.first().waitFor();
+  await pdn.waitForTimeout(800);
+  await pdn.goto(BASE + '#/staff/today');
+  await pdn.goto(BASE + '#/staff/checkups');
+  await notes().waitFor();
+  assert.equal(await notes().inputValue(), before, 'not sent under the next person\'s name');
+  // The first person back at the desk: their note goes out, under their name.
+  await pdn.locator('.user-menu > button').click();
+  await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).click();
+  await nameBox(pdn).fill('عائشہ');
+  await nameDialog(pdn).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  await pdn.waitForFunction(() => document.querySelector('.save-state')?.textContent.trim() === 'All changes saved');
+  await pdn.goto(BASE + '#/staff/today');
+  await pdn.goto(BASE + '#/staff/checkups');
+  await notes().waitFor();
+  assert.equal(await notes().inputValue(), 'Typed by the first person, offline (test)', 'sent once that name was given again');
+});
+await step('shared login, no idle logout (0 = never; the demo has no setting at all): the name holds through the shift, and after 12 hours without use the first click asks again instead of being used under the old name', async () => {
+  // The clock moved on in this page only (Date.now), as on a computer left on overnight.
+  const later = (hours) => pdn.evaluate((h) => {
+    window.__realNow ||= Date.now.bind(Date);
+    Date.now = h ? () => window.__realNow() + h * 3600 * 1000 : window.__realNow;
+  }, hours);
+  assert.equal(await pdn.evaluate(async () => (await import('/js/state.js')).state.ref.settings?.session_timeout_minutes ?? null), null, 'the demo has no idle logout setting');
+  await pdn.goto(BASE + '#/staff/today');
+  await greeting(pdn, 'عائشہ').waitFor();
+  await later(11);
+  await pdn.goto(BASE + '#/staff/patients');
+  await pdn.waitForSelector('h1:has-text("Patients")');
+  await pdn.waitForTimeout(300);
+  assert.equal(await nameDialog(pdn).count(), 0, 'the next page within the shift (11 hours) does not ask');
+  await later(13);
+  await pdn.locator('.topnav a:has-text("Today")').click();
+  await nameDialog(pdn).waitFor();
+  assert.equal(await pdn.evaluate(() => location.hash), '#/staff/patients', 'the click was not used (under the old name)');
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad', 'the old name stopped');
+  assert.equal(await pdn.evaluate(() => sessionStorage.getItem('desk-name')), null);
+  await later(0);
+  await nameBox(pdn).fill('عائشہ');
+  await nameDialog(pdn).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad · عائشہ');
+  await pdn.waitForSelector('h1:has-text("Patients")'); // drawn again for the person who gave the name, on the same page
+  assert.equal(await pdn.evaluate(() => location.hash), '#/staff/patients');
+});
+await step('shared login: End the day is put down to the name at the desk ("ended by Front desk Islamabad (name)"); a new sign-in asks again, and Log out in the popup logs out', async () => {
+  await pdn.goto(BASE + '#/staff/sheet');
+  await pdn.getByRole('button', { name: 'End the day' }).click();
+  await pdn.locator('.modal').getByRole('button', { name: 'End the day' }).click();
+  await pdn.waitForSelector('.toast:has-text("Day ended. Copy saved in History.")');
+  await pdn.goto(BASE + '#/staff/day-history');
+  await pdn.waitForSelector('.day-history-list a');
+  const today = await dayInfo(pdn, 0);
+  const lines = await historyLines(pdn);
+  assert.match(lines[0], new RegExp(`^${today.label} – Islamabad – .* Ended \\d{2}:\\d{2} by Front desk Islamabad \\(عائشہ\\)$`), lines[0]);
+  // The same login signing in again (another person, later): asked again. Logging out of a shared login ends it on this computer
+  // only: the same login stays signed in at the other desks (and computers) that use it.
+  assert.deepEqual(await logoutScopes(pdn), []);
+  await tryAnotherRole(pdn);
+  assert.deepEqual(await logoutScopes(pdn), ['local'], 'this computer only');
+  assert.equal(await pdn.evaluate(() => sessionStorage.getItem('desk-name')), null, 'the name ends with the login');
+  await loginAs(pdn, 'Front desk Islamabad');
+  const dlg = nameDialog(pdn);
+  await dlg.waitFor();
+  assert.equal(await accountLabel(pdn), 'Front desk Islamabad');
+  assert.deepEqual(await dlg.locator('datalist option').evaluateAll((os) => os.map((o) => o.value)), ['عائشہ', 'Sample Mehak', 'Sadia'], 'the latest name first');
+  await dlg.getByRole('button', { name: 'Log out' }).click();
+  await pdn.waitForSelector('.door');
+  assert.equal(await nameDialog(pdn).count(), 0);
+  assert.deepEqual(await logoutScopes(pdn), ['local', 'local'], 'Log out in the popup: this computer only');
+});
+await step('a personal login never sees the popup, nor "Change name"', async () => {
+  await loginAs(pdn, 'Front desk \\(Gulshan\\)');
+  await pdn.waitForTimeout(400);
+  assert.equal(await nameDialog(pdn).count(), 0, 'no popup');
+  assert.equal(await accountLabel(pdn), 'Front desk (Gulshan)');
+  await pdn.locator('.user-menu > button').click();
+  assert.equal(await pdn.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).count(), 0, 'no Change name');
+  await pdn.keyboard.press('Escape');
+  await tryAnotherRole(pdn);
+  assert.deepEqual(await logoutScopes(pdn), ['local', 'local', 'global'], 'a personal login logs out as before (everywhere)');
+});
+await step('Dr. Ali: Staff accounts shows "Shared" and "Names used" (newest first); he marks another account shared, makes a new shared account, and the audit log names the person at the desk', async () => {
+  await loginAs(pdn, 'Dr. Ali Rashid');
+  assert.equal(await nameDialog(pdn).count(), 0, 'Dr. Ali is not asked');
+  await pdn.goto(BASE + '#/staff/admin?tab=staff');
+  const isb = pdn.locator('tr', { hasText: 'demo.frontdesk.isb@example.com' });
+  await isb.waitFor();
+  assert.equal(await isb.locator('.badge', { hasText: 'Shared' }).count(), 1, 'the shared login says so');
+  assert.equal(await pdn.locator('tr', { hasText: 'demo.frontdesk2@example.com' }).locator('.badge', { hasText: 'Shared' }).count(), 0, 'a personal login does not');
+  assert.equal(await pdn.locator('tr', { hasText: 'demo.admin@example.com' }).getByRole('button', { name: /^Shared login/ }).count(), 0, 'no Shared login button on the admin row');
+  await isb.getByRole('button', { name: 'Names used, Front desk Islamabad' }).click();
+  const names = pdn.getByRole('dialog', { name: 'Names used · Front desk Islamabad' });
+  await names.waitFor();
+  assert.deepEqual((await names.locator('tbody tr td:nth-child(2)').allInnerTexts()).map((t) => t.trim()),
+    ['عائشہ', 'عائشہ', 'عائشہ', 'Sadia', 'Hina (sample)', 'Sadia (sample)', 'Mehak (sample)', 'Sadia (sample)'], 'newest first, the ones typed today on top (the save of "Sample Mehak" failed on purpose; عائشہ again after 12 hours without use)');
+  assert.match(await names.locator('p').first().innerText(), /^5 names in the last 60 days: /);
+  assert.match(await names.locator('tbody tr').first().locator('td').first().innerText(), /\d{2}:\d{2}$/, 'with the date and time');
+  await shot(pdn, '32-names-used');
+  await names.getByRole('button', { name: 'Done' }).click();
+  // Mark Front desk (Gulshan) as a shared login from its row.
+  const gul = pdn.locator('tr', { hasText: 'demo.frontdesk2@example.com' });
+  assert.equal(await gul.getByRole('button', { name: /^Names used/ }).count(), 0, 'no Names used on a personal login');
+  await gul.getByRole('button', { name: 'Shared login, Front desk (Gulshan)' }).click();
+  const sm = pdn.getByRole('dialog', { name: 'Shared login · Front desk (Gulshan)' });
+  await sm.getByLabel('Shared login — several people use it; it asks for their name when they sign in').check();
+  await sm.getByRole('button', { name: 'Save' }).click();
+  await pdn.waitForSelector('.toast:has-text("Saved. Front desk (Gulshan) asks for a name at every sign-in.")');
+  await gul.locator('.badge', { hasText: 'Shared' }).waitFor();
+  await gul.getByRole('button', { name: 'Names used, Front desk (Gulshan)' }).click();
+  await pdn.getByRole('dialog', { name: 'Names used · Front desk (Gulshan)' }).getByText('Nobody has entered a name on this login in the last 60 days.').waitFor();
+  await pdn.getByRole('dialog', { name: 'Names used · Front desk (Gulshan)' }).getByRole('button', { name: 'Done' }).click();
+  // A new account made as a shared login.
+  await pdn.getByRole('button', { name: 'New staff account' }).click();
+  const m = pdn.getByRole('dialog', { name: 'New staff account' });
+  await m.getByPlaceholder('Full name').fill('Assistants Sample Branch');
+  await m.locator('input[type=email]').fill('assistants.sample@dralirashid.com');
+  await m.getByLabel('Shared login — several people use it; it asks for their name when they sign in').check();
+  await m.getByRole('button', { name: 'Create account' }).click();
+  const made = pdn.locator('tr', { hasText: 'assistants.sample@dralirashid.com' });
+  await made.locator('.badge', { hasText: 'Shared' }).waitFor();
+  // ... and made a personal login again from its row.
+  await made.getByRole('button', { name: 'Shared login, Assistants Sample Branch' }).click();
+  const off = pdn.getByRole('dialog', { name: 'Shared login · Assistants Sample Branch' });
+  const box = off.getByLabel('Shared login — several people use it; it asks for their name when they sign in');
+  assert.equal(await box.isChecked(), true, 'the box shows it is shared now');
+  await box.uncheck();
+  await off.getByRole('button', { name: 'Save' }).click();
+  await pdn.waitForSelector('.toast:has-text("Saved. Assistants Sample Branch is a personal login again.")');
+  await made.locator('.badge', { hasText: 'Shared' }).waitFor({ state: 'detached' });
+  assert.equal(await made.getByRole('button', { name: /^Names used/ }).count(), 0, 'no Names used on it any more');
+  // The audit log: End the day from the shared desk, put down to the name typed there.
+  await pdn.goto(BASE + '#/staff/admin?tab=audit');
+  await pdn.waitForSelector('h2:text("Recent changes")');
+  await pdn.locator('table.list tr', { hasText: 'end_day' }).filter({ hasText: 'Front desk Islamabad (عائشہ)' }).first().waitFor();
+  await pdn.locator('table.list tr', { hasText: 'checkups' }).filter({ hasText: 'Front desk Islamabad (عائشہ)' }).first().waitFor();
+  assert.equal(await pdn.locator('table.list tr', { hasText: 'Sample Mehak' }).count(), 0, 'nothing was put down to the person who did not type it');
+  // Front desk (Gulshan) is asked for a name now.
+  await tryAnotherRole(pdn);
+  await loginAs(pdn, 'Front desk \\(Gulshan\\)');
+  await nameDialog(pdn).waitFor();
+});
+await step('shared login: the top bar cuts a long login short, never the person\'s name; on a phone "Change name" is in the drawer, out of its fixed foot', async () => {
+  await nameBox(pdn).fill('Muhammad Usman Sample');
+  await nameDialog(pdn).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  for (const login of ['Front desk (Gulshan)', 'Front desk North Nazimabad Sample Branch']) {
+    // (the longest real login name, "Front desk North Nazimabad", and more, put in the label the way the page draws it)
+    await pdn.locator('.user-menu > button .desk-login').evaluate((el, text) => { el.textContent = text; }, login);
+    const fit = await pdn.locator('.user-menu > button .user-name').evaluate((el) => {
+      const who = el.querySelector('.desk-who');
+      return { who: who.textContent, whole: who.scrollWidth <= who.clientWidth, width: el.getBoundingClientRect().width };
+    });
+    assert.deepEqual([fit.who, fit.whole], ['Muhammad Usman Sample', true], `${login}: the person's name is shown whole`);
+    assert.ok(fit.width <= 301, `at most 300px wide (${fit.width})`);
+  }
+  await pdn.setViewportSize({ width: 375, height: 667 });
+  await pdn.getByRole('button', { name: 'Menu', exact: true }).click();
+  const drawer = pdn.locator('#staff-drawer');
+  await drawer.getByRole('button', { name: 'Change name' }).waitFor();
+  assert.equal(await drawer.locator('.sidebar-foot').getByRole('button', { name: 'Change name' }).count(), 0, 'not in the foot that stays on screen');
+  await drawer.getByRole('button', { name: 'Change name' }).click();
+  await nameDialog(pdn).waitFor();
+  await nameBox(pdn).fill('Sample Hina');
+  await nameDialog(pdn).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(pdn).waitFor({ state: 'detached' });
+  assert.equal(await drawer.locator('.sidebar-foot > div').first().evaluate((el) => el.textContent.trim()), 'Front desk (Gulshan) · Sample Hina', 'the new name in the drawer (drawn again, closed)');
+  await pdn.setViewportSize({ width: 1366, height: 860 });
+});
+await pdn.close();
+
+// Two tabs of one browser on the same shared login (a desk computer with the Aaj ki List and Billing open): a new name in one tab
+// is taken up by the other, which asks too. (Each demo tab has its own made-up data; the browser's storage is shared.)
+const twoTabs = await browser.newContext({ viewport: { width: 1366, height: 860 } });
+const tabA = await newPage(undefined, {}, twoTabs);
+const tabB = await newPage(undefined, {}, twoTabs);
+await step('shared login in two tabs: "Change name" in one tab makes the other ask too; the same name in both changes nothing', async () => {
+  for (const [tab, name] of [[tabA, 'Sample Ayesha'], [tabB, 'Sample Ayesha']]) {
+    await loginAs(tab, 'Front desk Islamabad');
+    await nameBox(tab).fill(name);
+    await nameDialog(tab).getByRole('button', { name: 'Continue' }).click();
+    await nameDialog(tab).waitFor({ state: 'detached' });
+  }
+  await tabA.waitForTimeout(300);
+  assert.equal(await nameDialog(tabA).count(), 0, 'the same name in the second tab: the first tab is not asked again');
+  await tabB.locator('.user-menu > button').click();
+  await tabB.locator('#user-menu-list').getByRole('button', { name: 'Change name' }).click();
+  await nameBox(tabB).fill('Sample Sadia');
+  await nameDialog(tabB).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(tabB).waitFor({ state: 'detached' });
+  await nameDialog(tabA).waitFor(); // the other tab stops the old name and asks
+  assert.equal(await accountLabel(tabA), 'Front desk Islamabad', 'the old name stopped there too');
+  await nameBox(tabA).fill('Sample Sadia');
+  await nameDialog(tabA).getByRole('button', { name: 'Continue' }).click();
+  await nameDialog(tabA).waitFor({ state: 'detached' });
+  await tabB.waitForTimeout(300);
+  assert.equal(await nameDialog(tabB).count(), 0, 'no back and forth');
+  assert.equal(await accountLabel(tabA), 'Front desk Islamabad · Sample Sadia');
+});
+await twoTabs.close();
+>>>>>>> golive
 
 // ------------------------------------------------------------- logging out after no activity
 // The owner (15 Oct): "please remove force log out. the google sheet stays logged in for days and days". session_timeout_minutes 0

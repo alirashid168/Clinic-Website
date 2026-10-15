@@ -11,6 +11,7 @@
 import { protocolFor, guidance as protocolGuidance, LAST_DEFINED_MONTH } from '../lib/protocol.js';
 import { PERMISSIONS, ROLES, defaultGrid, hasPermission, discountNeedsApproval } from '../lib/permissions.js';
 import { MAX_KEYS, KEY_PATTERN } from '../lib/menu-arrange.js';
+import { cleanDeskName, withDeskName } from '../lib/desk-name.js';
 import { todayISO, localISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
@@ -162,7 +163,13 @@ function seed() {
     // For Delete on Staff accounts: a doctor whose name is on a few records (further down), and a desk login nobody ever used.
     { id: 's-saba', full_name: 'Dr. Saba (sample)', email: 'demo.doctor2@example.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false },
     { id: 's-weekend', full_name: 'Weekend reception (sample)', email: 'demo.weekend@example.com', role: 'front_desk', active: true, branch_ids: [], restrict_to_branches: false },
+    // A shared login (20261015000300_desk_names.sql): whoever is at the Islamabad desk types their name after signing in.
+    { id: 's-fd-isb', full_name: 'Front desk Islamabad', email: 'demo.frontdesk.isb@example.com', role: 'front_desk', active: true, branch_ids: [5], restrict_to_branches: true, home_branch_id: 5, shared_login: true },
   ];
+  for (const st of db.staff) st.shared_login = !!st.shared_login;
+  // Names typed at that desk before (made-up), like public.desk_names: newest first when listed.
+  db.desk_names = [[12, 'Sadia (sample)', '09:02'], [9, 'Mehak (sample)', '14:30'], [6, 'Sadia (sample)', '09:10'], [2, 'Hina (sample)', '10:45']]
+    .map(([n, name, time]) => ({ id: uid(), staff_id: 's-fd-isb', name, entered_at: new Date(`${daysAgo(n)}T${time}:00+05:00`).toISOString() }));
   db.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').staff_id = 's-doc';
   db.clinicians.find((c) => c.display_name === 'Dr. Saba (sample)').staff_id = 's-saba';
   db.clinicians.find((c) => c.display_name === 'Dr. Ali Rashid').staff_id = 's-admin';
@@ -392,6 +399,11 @@ export function createDemoAdapter() {
   };
   const need = (key) => { if (!can(key)) fail('new row violates row-level security policy (' + key + ')'); };
   const branchOk = (branchId) => { const s = me(); return !!s && (s.role === 'admin' || !s.restrict_to_branches || s.branch_ids.includes(Number(branchId))); };
+  // The name typed at a shared login's desk (setDeskName), like the x-desk-name header the live site sends: it goes with each change.
+  // { viaFunction: true }: a row the live site's admin-users Edge Function writes itself, which never gets the header (no name).
+  let desk = null; // { staffId, name }
+  const deskName = () => (me()?.shared_login && desk?.staffId === me().id ? desk.name : null);
+  const audit = (table, action, row, { viaFunction = false } = {}) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', desk_name: viaFunction ? null : deskName(), at: new Date().toISOString() });
   // The clinic's money (20261015000400_finance_privacy.sql): totals for finance.view or billing.view; the cash closing's amounts for
   // finance.view, cash.verify or billing.view; the rest of the staff are refused, or get rows without amounts.
   const seesTotals = () => can('finance.view') || can('billing.view');
@@ -401,8 +413,11 @@ export function createDemoAdapter() {
   const karachiDay = (ts) => (/(Z|[+-]\d\d:?\d\d)$/.test(String(ts)) ? localISO(new Date(ts)) : String(ts).slice(0, 10));
   // Cash taken at a branch on a day (public.expected_cash: cash payments minus cash refunds, every row whoever asks).
   const cashIn = (branchId, date) => db.payments.filter((p) => p.branch_id === Number(branchId) && p.method === 'cash' && karachiDay(p.received_at) === date).reduce((s, p) => s + p.amount, 0);
+<<<<<<< billing-desk
   const audit = (table, action, row, before = null) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString(),
     old_data: before ? clone(before) : null, new_data: action === 'DELETE' ? null : clone(row) });
+=======
+>>>>>>> golive
   const patient = (id) => db.patients.find((p) => p.id === id);
   // An invoice line as invoice_items keeps it (with its discount, its price-list item and who did it), and the database's line rules.
   const lineRow = (it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price), discount_amount: Number(it.discount_amount || 0),
@@ -586,7 +601,7 @@ export function createDemoAdapter() {
         session.login.must_change = false;
       }
     },
-    async signOut() { session = null; return true; },
+    async signOut() { session = null; desk = null; return true; },
     // The demo has one login in one page: no other tab or computer can end it and it never expires, so no login event ever
     // arrives. Same call as the live adapter (fn(eventName, reason)); returns the function that stops listening.
     onAuthChange() { return () => {}; },
@@ -597,7 +612,7 @@ export function createDemoAdapter() {
       if (!s?.active) { session = null; return null; }
       return { kind: 'staff', staff: clone(s), perms: permsFor(s) };
     },
-    async resetDemo() { db = seed(); seedDayClosing(); session = null; ownPasswords.clear(); },
+    async resetDemo() { db = seed(); seedDayClosing(); session = null; desk = null; ownPasswords.clear(); },
 
     // ------------------------------------------------------------ the person's own menu (Arrange my menu)
     // Like public.staff_menu_prefs: each staff member reads and saves only their own row, and the database's check (an array of
@@ -614,6 +629,36 @@ export function createDemoAdapter() {
         fail('new row for relation "staff_menu_prefs" violates check constraint "staff_menu_prefs_arrangement_check"');
       }
       db.menu_prefs[s.id] = clone(list);
+    },
+
+    // ------------------------------------------------------------ shared logins: the name of the person at the desk (as 20261015000300_desk_names.sql)
+    setDeskName(staffId, name) { desk = staffId && name ? { staffId, name } : null; },
+    // Like the insert policy of public.desk_names: a shared login adds rows for itself only, while it is shared and switched on.
+    async saveDeskName(name) {
+      const s = me();
+      const { name: clean, error } = cleanDeskName(name);
+      if (error) fail(error);
+      if (!s?.active || !s.shared_login) fail('new row violates row-level security policy for table "desk_names"');
+      db.desk_names.push({ id: uid(), staff_id: s.id, name: clean, entered_at: new Date().toISOString() });
+      return { missing: false };
+    },
+    // Read by the login itself and by users.manage, newest first.
+    async deskNamesOf(staffId, { days = 60 } = {}) {
+      const s = me();
+      if (!s || (s.id !== staffId && !can('users.manage'))) return [];
+      const since = new Date(Date.now() - days * 86400000).toISOString();
+      return clone(db.desk_names.filter((r) => r.staff_id === staffId && r.entered_at >= since).sort((a, b) => (a.entered_at < b.entered_at ? 1 : -1)));
+    },
+    // The database's rules: users.manage; never an admin account (check constraint); nobody but the admin changes their own.
+    async setStaffShared(id, on) {
+      need('users.manage');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('The change was not saved. Reload the page and try again.');
+      if (me().role !== 'admin' && s.role === 'admin') fail('Only admin can change an admin account');
+      if (on && s.role === 'admin') fail('new row for relation "staff" violates check constraint "staff_shared_login_not_admin"');
+      if (me().role !== 'admin' && s.id === me().id) fail('You cannot change whether your own login is shared');
+      s.shared_login = !!on;
+      audit('staff', 'UPDATE', s);
     },
 
     // ------------------------------------------------------------ reference
@@ -694,7 +739,7 @@ export function createDemoAdapter() {
       if (db.portal_logins.some((l) => l.email === email) || db.staff.some((x) => x.email === email)) fail('That username is already used by another login.');
       db.portal_logins.push({ patient_id: id, email, password: String(password), must_change: true });
       p.portal_user_id = 'p-' + id;
-      audit('patients', 'PORTAL_LOGIN_CREATED', p);
+      audit('patients', 'PORTAL_LOGIN_CREATED', p, { viaFunction: true });
       return { username: email };
     },
     /** Staff set a new password for a login made that way; the patient must choose their own again. Resolves { username }. */
@@ -709,7 +754,7 @@ export function createDemoAdapter() {
       if (!login) fail('This patient logs in with their own email address. They can set a new password with "Forgot password" on the login page.');
       login.password = String(password);
       login.must_change = true;
-      audit('patients', 'PORTAL_PASSWORD_RESET', p);
+      audit('patients', 'PORTAL_PASSWORD_RESET', p, { viaFunction: true });
       return { username: login.email };
     },
     /** { has_login, clinic_login, username } */
@@ -912,7 +957,7 @@ export function createDemoAdapter() {
       if (date < FIRST_DAY) fail('TOO_FAR_BACK: That date is too far back.');
       const rows = dayRows(b, date);
       const now = new Date().toISOString();
-      const fields = { closed_at: now, closed_by: me().id, closed_by_name: me().full_name, snapshot: rows, counts: countDayList(rows) };
+      const fields = { closed_at: now, closed_by: me().id, closed_by_name: withDeskName(me().full_name, deskName()), snapshot: rows, counts: countDayList(rows) };
       let row = closingOf(b, date);
       if (row) Object.assign(row, fields, { times_updated: row.times_updated + 1 });
       else { row = { id: uid(), branch_id: b, list_date: date, ...fields, times_updated: 0 }; db.day_closings.push(row); }
@@ -1810,7 +1855,7 @@ export function createDemoAdapter() {
       if (taken) fail('A staff account with this email already exists.');
       const { password, ...rest } = row;
       if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
-      const s = { id: uid(), active: true, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...rest };
+      const s = { id: uid(), active: true, shared_login: false, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...rest };
       db.staff.push(s); audit('staff', 'INSERT', s);
       // As the admin-users function does: the doctor or assistant chosen gets this login.
       const linked = row.clinician_id && db.clinicians.find((c) => c.id === row.clinician_id);
@@ -1853,9 +1898,10 @@ export function createDemoAdapter() {
       for (const c of db.clinicians) if (c.staff_id === id) c.staff_id = null;
       audit('staff', 'DELETE_LOGIN', s);
       db.staff = db.staff.filter((x) => x.id !== id);
-      // Its personal ticks and its menu order go with it (on delete cascade in the database).
+      // Its personal ticks, its menu order and the names typed at its desk go with it (on delete cascade in the database).
       delete db.overrides[id];
       delete db.menu_prefs[id];
+      db.desk_names = db.desk_names.filter((r) => r.staff_id !== id);
       return { ok: true, result: 'removed', total: 0 };
     },
     async restoreStaff(id) {
@@ -1926,7 +1972,8 @@ export function createDemoAdapter() {
     async deleteScheduleRow(id) { need('schedule.manage'); db.schedule = db.schedule.filter((r) => r.id !== id); },
     async auditLog() {
       need('audit.view');
-      const rows = clone(db.audit.slice(0, 200));
+      // As the live list: a shared login's change says who was at the desk, "Front desk Islamabad (Sadia)".
+      const rows = clone(db.audit.slice(0, 200)).map((r) => ({ ...r, actor_name: withDeskName(r.actor, r.desk_name) }));
       if (db.audit.length > 200) { rows.truncated = true; rows.cap = 200; } // same notice as the live list
       return rows;
     },

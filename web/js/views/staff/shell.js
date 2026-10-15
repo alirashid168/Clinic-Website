@@ -2,12 +2,15 @@
 // a patient search box that finds by name, Mr# or phone from any screen, the signed-in person's menu,
 // and page routing. Below 73.75em (1180px at the default text size: phones, tablets, small laptops and
 // larger text settings) the same menu opens as a side drawer.
+// A shared login (several people at one branch's desk) first asks the person's name (desk-name.js).
 // Each page's module is loaded the first time it is opened, so the heavy ones (reports, admin with
 // its importers) are only downloaded by the people who use them.
-import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce, unsavedWork } from '../../ui/dom.js';
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
+import { askDeskName, changeDeskName, endDeskName, needsDeskName, syncDeskName } from './desk-name.js';
+import { deskNameFor, deskLabel, dropStaleDeskName, touchDeskName, deskNameFromOtherTab, deskNameMaxAgeMs, deskNameUnused, deskNameExpiresIn, idleLogoutOn } from '../../lib/desk-name.js';
 import { arrangeNav, loadArrangement, openArrangeMenu } from './nav-arrange.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
@@ -123,6 +126,13 @@ const hoverMenus = matchMedia('(hover: hover) and (min-width: 73.75em)');
 const wideScreen = matchMedia('(min-width: 73.75em)');
 let refSession = null; // the session the clinician, treatment and settings lists were loaded for
 let renderCtl = null;
+// Another tab of this browser took a new name for the same shared login (the next person at this computer chose "Change name"
+// there): this tab stops the old name too, and asks. deskTab is the shared login of the page on screen, with its "Change name".
+let deskTab = null;
+window.addEventListener('storage', (e) => {
+  const s = state.session?.staff;
+  if (deskTab && s?.shared_login && s.id === deskTab.staffId && deskNameFromOtherTab(e, s.id)) deskTab.change();
+});
 
 export async function renderStaff(root, path, params, signOut) {
   // Listeners and page polling set up by a render stop at the next navigation.
@@ -232,11 +242,72 @@ export async function renderStaff(root, path, params, signOut) {
     return wrap;
   })() : null;
 
-  const userBtn = h('button', { type: 'button', class: 'nav-link', 'aria-expanded': 'false', 'aria-controls': 'user-menu-list', 'aria-label': `Account menu, ${s.full_name}` },
-    h('span', { class: 'user-name' }, s.full_name), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
+  // A shared login shows the name of the person at the desk with it ("Front desk Islamabad · Ayesha"); "Change name" is for the next person.
+  // A name kept from before this page (a reload, or a tab the browser restored after a power cut) holds only if it was used within
+  // the idle logout time, or within 12 hours when there is no idle logout (Admin -> Settings: 0 is never; a missing setting is the
+  // same); while the person works, that time is kept fresh.
+  const idleMinutes = state.ref.settings?.session_timeout_minutes;
+  const deskMaxAge = deskNameMaxAgeMs(idleMinutes);
+  // With no idle logout nothing else ends a name in a page that stays open: this page watches for 12 hours without use.
+  const watchDesk = s.shared_login && !idleLogoutOn(idleMinutes);
+  if (s.shared_login) {
+    dropStaleDeskName(s.id, deskMaxAge);
+    // A page opened with no click or key after such a gap (the browser's Back button): that name stops before the page is drawn.
+    if (watchDesk && deskNameUnused(s.id, deskMaxAge) && !(await endDeskName(s))) return;
+    if (signal.aborted) return;
+    for (const type of ['pointerdown', 'keydown']) on(document, type, () => touchDeskName());
+  }
+  syncDeskName(s);
+  let rewatchDesk = () => {};
+  const nameLabels = [];
+  // (the name in <bdi>, so an Urdu name and the login around it each keep their own direction; in the top bar a long login is cut
+  // short, not the person's name: app.css)
+  const labelParts = (desk) => [h('span', { class: 'desk-login' }, s.full_name), desk ? [h('span', { class: 'desk-sep' }, ' · '), h('bdi', { class: 'desk-who' }, desk)] : null];
+  const nameLabel = (props) => { const el = h('span', props, labelParts(deskNameFor(s.id))); nameLabels.push(el); return el; };
+  const showDeskName = (desk) => {
+    for (const el of nameLabels) mount(el, labelParts(desk));
+    userBtn.setAttribute('aria-label', `Account menu, ${deskLabel(s.full_name, desk)}`);
+    rewatchDesk();
+  };
+  // Resolves true once a name is given, false when the popup closed without one (the person moved on, or logged out).
+  const askName = () => new Promise((resolve) => askDeskName({ staff: s, signOut, onName: (desk) => { showDeskName(desk); resolve(true); }, onGone: () => resolve(false) }));
+  // Once the new person has given their name the page is drawn again for them (its greeting; the offline typing kept under their
+  // name), unless a dialog under the popup holds unsaved work (only possible when another tab changed the name): it is left alone.
+  const changeName = () => changeDeskName({ staff: s, signOut, onName: (desk) => {
+    showDeskName(desk);
+    if (desk) setTimeout(() => { if (!unsavedWork()) window.dispatchEvent(new HashChangeEvent('hashchange')); }, 0);
+  } });
+  deskTab = s.shared_login ? { staffId: s.id, change: changeName } : null;
+  // No idle logout (see watchDesk): 12 hours after the name was last used (the evening's name on a computer left on overnight) the
+  // popup asks again, as "Change name" does. The first click or key after a computer slept through that time opens it too, and is
+  // not used under the old name; so does coming back to the tab.
+  if (watchDesk) {
+    let timer = null;
+    const expire = () => { clearTimeout(timer); timer = null; changeName(); };
+    rewatchDesk = () => {
+      clearTimeout(timer);
+      const left = deskNameExpiresIn(s.id, deskMaxAge);
+      if (left === null || signal.aborted) return; // no name: the popup is asking (watched again once a name is given)
+      timer = setTimeout(() => (deskNameUnused(s.id, deskMaxAge) ? expire() : rewatchDesk()), Math.min(left + 1000, 2 ** 31 - 1));
+    };
+    signal.addEventListener('abort', () => clearTimeout(timer));
+    for (const type of ['pointerdown', 'keydown', 'click']) {
+      window.addEventListener(type, (e) => {
+        if (!deskNameUnused(s.id, deskMaxAge)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        expire();
+      }, { signal, capture: true });
+    }
+    on(document, 'visibilitychange', () => { if (document.visibilityState === 'visible' && deskNameUnused(s.id, deskMaxAge)) expire(); });
+    rewatchDesk();
+  }
+  const userBtn = h('button', { type: 'button', class: 'nav-link', 'aria-expanded': 'false', 'aria-controls': 'user-menu-list', 'aria-label': `Account menu, ${deskLabel(s.full_name, deskNameFor(s.id))}` },
+    nameLabel({ class: ['user-name', s.shared_login ? 'has-desk-name' : ''] }), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
   const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },
-    h('div', { class: 'menu-note' }, s.full_name, h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
+    h('div', { class: 'menu-note' }, nameLabel({}), h('div', { class: 'muted' }, ROLE_LABELS[s.role])),
     h('hr', {}),
+    s.shared_login ? h('button', { type: 'button', class: 'menu-btn', onclick: () => { closeAll(); userBtn.focus(); changeName(); } }, 'Change name') : null,
     // The public homepage, as visitors see it (owner, 12 Oct 2026); it has a "Back to staff pages" link while signed in (views/public.js).
     h('a', { href: '#/', onclick: () => closeAll() }, 'View the website'),
     // The menu closes and focus goes back to the account button first, so the dialog gives focus back to something visible.
@@ -267,10 +338,11 @@ export async function renderStaff(root, path, params, signOut) {
     h('button', { type: 'button', class: 'icon-btn drawer-close', 'aria-label': 'Close menu', onclick: () => closeDrawer(true) }, h('span', { 'aria-hidden': 'true' }, '×')),
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' }, onclick: () => closeDrawer(location.hash === '#/staff/today') }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
     drawerLinks,
-    // Right after the menu it arranges, so the foot that stays on a phone's screen keeps its size.
+    // Right after the menu it arranges, so the foot that stays on a phone's screen keeps its size ("Change name" too).
     h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); openArrangeMenu(menu()); } }, 'Arrange my menu'),
+    s.shared_login ? h('button', { type: 'button', class: 'link-btn drawer-arrange', onclick: () => { closeDrawer(false); toggle.focus(); changeName(); } }, 'Change name') : null,
     h('div', { class: 'sidebar-foot' },
-      h('div', {}, s.full_name), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
+      h('div', {}, nameLabel({})), h('div', { style: { opacity: .7 } }, ROLE_LABELS[s.role]),
       // On its own line: Change password and Log out keep their row, well apart.
       h('a', { class: 'link-btn', href: '#/', onclick: () => closeDrawer(false) }, 'View the website'),
       h('div', { class: 'inline', style: { marginTop: '8px', columnGap: 'var(--space-6)' } },
@@ -334,6 +406,9 @@ export async function renderStaff(root, path, params, signOut) {
     topbar,
     h('div', { class: 'app topnav-layout' }, drawer, content),
     scrim);
+  // Before the person can use anything: a shared login says who is at the desk, and only then is the page drawn (and its data read).
+  if (needsDeskName(s) && !(await askName())) return;
+  if (signal.aborted) return;
 
   try {
     if (section === 'patient' && id && sub === 'portal' && can('patients.view')) await renderPortalPreview(main, id);

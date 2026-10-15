@@ -8,6 +8,7 @@
 import { h, mount, toast, friendlyError, isLostAnswer, select, announce, srOnly, empty, tabs, shortDate, downloadCSV, localISO, busy, modal } from '../../ui/dom.js';
 import { state } from '../../state.js';
 import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
+import { editOwner } from '../../lib/desk-name.js';
 import { commitOnFinish } from './common.js';
 import { colourClass, sheetOrder, newestFirst, rowMatches, rowMonth, monthName } from '../../lib/records.js';
 
@@ -31,7 +32,8 @@ export const rowName = (row) => row.patient?.full_name || row.patient_name || 't
 // ---------------------------------------------------------------- the offline queue of a page
 /**
  * One queue per page and per signed-in staff member (autosave.js keeps the edits under a key with their user id), so a change
- * typed offline is never sent under someone else's login on a shared computer. `send(rowId, changes)` resolves to the saved row,
+ * typed offline is never sent under someone else's login on a shared computer (nor, on a shared login, under the name of the next
+ * person at the desk: editOwner). `send(rowId, changes)` resolves to the saved row,
  * or null when the row is gone.
  */
 export function recordQueue({ storageKey, table, page, fieldNames, send }) {
@@ -39,7 +41,7 @@ export function recordQueue({ storageKey, table, page, fieldNames, send }) {
   let queueUser = null;
   let ui = null; // the save-status display of this page while it is on screen
   let hadProblem = false;
-  const currentUser = () => state.session?.staff?.id || null;
+  const currentUser = () => editOwner(state.session?.staff);
   const failed = () => (Array.isArray(queue?.failed) ? queue.failed : []);
   const describe = (edit) => {
     if (!edit) return 'a change';

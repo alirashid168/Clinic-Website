@@ -5,6 +5,7 @@ import { state, can, isAdmin, branchName, myBranches, defaultBranchId, clinician
 import { duesBadge, aliBadge, capNote, STATUS_LABELS } from './common.js';
 import { printReceipt } from './invoice.js';
 import { FEEDBACK_KIND_LABELS, FEEDBACK_TOPIC_LABELS, formatPhone } from '../../lib/public-forms.js';
+import { deskNameFor } from '../../lib/desk-name.js';
 
 /** The Karachi calendar day of a timestamp (not the UTC day, which is a day behind before 5 AM). */
 const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
@@ -57,6 +58,8 @@ export async function renderDashboard(root) {
   const duesPartial = !!totalDues?.truncated;
   const visible = rows.filter((r) => myBranches().some((b) => b.id === r.branch.id));
   const sum = (k) => visible.reduce((t, r) => t + (r[k] || 0), 0);
+  // A shared login is greeted with the name typed at its desk (desk-name.js), not with the first word of the login ("Front").
+  const greet = s.shared_login ? deskNameFor(s.id) : s.full_name.split(' ')[0] === 'Dr.' ? s.full_name : s.full_name.split(' ')[0];
   // Money (owner, 15 Oct 2026): the dues added up per branch only for who may see totals (finance.view, billing.view); the cash
   // closing's "off by Rs ..." only for who may see the money (also cash.verify). The front desk's cash count is blind.
   const seesTotals = can('finance.view') || can('billing.view');
@@ -66,7 +69,7 @@ export async function renderDashboard(root) {
     : !seesCash || c.difference === null || c.difference === undefined ? h('span', { class: 'badge badge-ok' }, 'Closed')
     : Number(c.difference) === 0 ? h('span', { class: 'badge badge-ok' }, 'Closed, matches') : h('span', { class: 'badge badge-dues' }, `Closed, off by ${rupees(c.difference)}`));
   mount(root,
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, ${s.full_name.split(' ')[0] === 'Dr.' ? s.full_name : s.full_name.split(' ')[0]}`), h('p', {}, shortDate(day)))),
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}${greet ? `, ${greet}` : ''}`), h('p', {}, shortDate(day)))),
     checkupPanel,
     h('div', { class: 'stat-row' },
       h('div', { class: 'stat' }, h('strong', {}, sum('patients')), h('span', {}, 'Patients on today\'s lists')),
