@@ -1607,6 +1607,31 @@ await step('money: the front desk (Create invoices and take payments, no View in
   assert.equal(await pfin.locator('.stat:has-text("Received today")').count(), 0, 'no "Received today"');
   assert.equal(await pfin.locator('.topnav a:text-is("Billing")').count(), 0, 'and still no Billing page');
 });
+await step('money: a payment taken at another branch: the front desk does not read it, so its payment form fills in no more than the dues (which count every branch)', async () => {
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Dr. Ali Rashid');
+  await pfin.goto(BASE + '#/staff/patients?q=Hamza');
+  await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
+  await pfin.getByRole('button', { name: 'Take payment', exact: true }).click();
+  const ali = pfin.locator('.modal:has(h2:has-text("Take payment · Hamza Qureshi"))');
+  await ali.getByLabel('For invoice').waitFor();
+  await ali.getByLabel('Amount').fill('4000');
+  await ali.getByLabel('Branch').selectOption('1');
+  await ali.getByRole('button', { name: 'Save payment' }).click();
+  await pfin.waitForSelector('.toast:has-text("Payment of Rs 4,000 saved.")');
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Front desk \\(North Nazimabad\\)');
+  await pfin.goto(BASE + '#/staff/patients?q=Hamza');
+  await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
+  const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
+  await money.locator('strong', { hasText: 'Rs 7,000 pending' }).waitFor();
+  await pfin.getByRole('button', { name: 'Take payment', exact: true }).click();
+  const m = pfin.locator('.modal:has(h2:has-text("Take payment · Hamza Qureshi"))');
+  await m.getByLabel('For invoice').waitFor();
+  assert.match(await m.getByLabel('For invoice').locator('option:checked').innerText(), /Rs 10,000 unpaid/, 'the Gulshan payment is not on the desk\'s invoice');
+  assert.equal(await m.getByLabel('Amount').inputValue(), '7000', 'the amount filled in is the dues, not the invoice\'s 10,000');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+});
 await step('money: with "Create invoices and take payments" unticked for the front desk, a patient\'s invoices and payments are with accounts', async () => {
   await tryAnotherRole(pfin);
   await loginAs(pfin, 'Dr. Ali Rashid');
@@ -1619,7 +1644,7 @@ await step('money: with "Create invoices and take payments" unticked for the fro
   await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
   const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
   await money.waitFor();
-  assert.match(await money.innerText(), /Rs 11,000 pending\s+Invoices and payments are with accounts\./);
+  assert.match(await money.innerText(), /Rs 7,000 pending\s+Invoices and payments are with accounts\./);
   for (const name of ['New invoice', 'Take payment']) assert.equal(await pfin.getByRole('button', { name, exact: true }).count(), 0, `no ${name}`);
 });
 await pfin.close();

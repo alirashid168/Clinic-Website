@@ -1240,7 +1240,8 @@ export function createDemoAdapter() {
       // billing.view reads them; the front desk (billing.create alone) reads this patient's own at its branches (20261015000500).
       if (!can('billing.view') && !can('billing.create')) fail('NOT_ALLOWED: a patient\'s invoices need "Create invoices and take payments" or "View invoices and payments" in the access list.');
       const mine = (r) => r.patient_id === patientId && (can('billing.view') || branchOk(r.branch_id));
-      return { invoices: clone(db.invoices.filter(mine)), payments: clone(db.payments.filter(mine)) };
+      // (and, as the live data layer, the dues as they are now for who sees the dues flag: every branch counts)
+      return { invoices: clone(db.invoices.filter(mine)), payments: clone(db.payments.filter(mine)), dues: can('dues.view') ? dues(patientId) : undefined };
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {

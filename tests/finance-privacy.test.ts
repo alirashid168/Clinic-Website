@@ -171,6 +171,24 @@ test('demo: a patient\'s invoices and payments: none for the assistant; the fron
   await assert.rejects(() => d.patientBilling(hamza.id), /NOT_ALLOWED/);
 });
 
+test('demo: a payment taken at another branch is not read by a branch-restricted front desk, but the dues it gets with the invoices count it (the payment form fills in no more than the dues)', async () => {
+  const d = await demoLive();
+  const hamza = (await d.searchPatients('Hamza'))[0];
+  await as(d, 's-fd-nn');
+  const before = await d.patientBilling(hamza.id);
+  assert.equal(before.dues, 15000, 'the desk sees the dues flag ("See $$ pending dues flag"), so the dues come with the invoices');
+  await as(d, 's-admin');
+  await d.recordPayment({ patient_id: hamza.id, branch_id: 1, amount: 4000, method: 'cash', invoice_id: before.invoices[0].id });
+  await as(d, 's-fd-nn');
+  const after = await d.patientBilling(hamza.id);
+  assert.equal(after.payments.length, before.payments.length, 'the Gulshan payment is not read ("billers view payments": its own branches)');
+  assert.equal(after.dues, 11000, 'the dues count every branch');
+  await as(d, 's-admin');
+  await d.setRolePermission('front_desk', 'dues.view', false);
+  await as(d, 's-fd-nn');
+  assert.equal((await d.patientBilling(hamza.id)).dues, undefined, 'without the dues flag, no dues');
+});
+
 // ======================================================================================= the live adapter
 function fakeClient(answer: (table: string, ops: any[]) => any) {
   const f: any = { requests: [] as any[], rpcs: [] as any[], rpcAnswer: (_n: string, _a: any): any => ({ data: null, error: null, status: 200 }) };
@@ -278,4 +296,14 @@ test('live: the front desk (Create invoices and take payments, no View invoices 
     assert.ok(insert.ops.some((o: any) => o[0] === 'insert' && o[1].amount === 5000 && o[1].branch_id === 2) && insert.ops.some((o: any) => o[0] === 'select'),
       `${perms.join(',')}: the payment is sent and read back (for the receipt)`);
   }
+});
+
+test('live: with the dues flag, the payment form\'s invoices and payments come with the patient\'s dues (dues_for, every branch); without it no dues are asked for', async () => {
+  const { f, data } = await livePage(['billing.create', 'dues.view']);
+  f.rpcAnswer = (name: string) => ({ data: name === 'dues_for' ? [{ patient_id: 'pt-1', dues: 7000 }] : [], error: null, status: 200 });
+  assert.equal((await data.patientBilling('pt-1')).dues, 7000);
+  assert.deepEqual(f.rpcs.map((r: any) => [r.name, r.args.p_patients]), [['dues_for', ['pt-1']]]);
+  const blind = await livePage(['billing.create']);
+  assert.equal((await blind.data.patientBilling('pt-1')).dues, undefined);
+  assert.equal(blind.f.rpcs.length, 0);
 });

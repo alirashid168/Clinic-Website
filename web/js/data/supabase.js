@@ -1528,13 +1528,17 @@ export async function createSupabaseAdapter() {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
       check(await sb.from('invoices').update({ status: 'void', void_reason: reason?.trim() || null }).eq('id', id));
     },
-    // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
+    // Invoices and payments only (no photos): what the payment form needs to match money to invoices. With "See $$ pending dues
+    // flag", the patient's dues as they are now too (dues_for counts every branch; the front desk reads only its own branches'
+    // payments, 20261015000500, so the form fills in no more than the dues).
     async patientBilling(patientId) {
-      const [invoices, payments] = await Promise.all([
+      const seesDues = !!(await this.getSession().catch(() => null))?.perms?.has('dues.view');
+      const [invoices, payments, dues] = await Promise.all([
         sb.from('invoices').select('id,invoice_no,issue_date,subtotal,discount_amount,total,status').eq('patient_id', patientId).order('issue_date').then(check),
         sb.from('payments').select('id,invoice_id,amount,received_at').eq('patient_id', patientId).then(check),
+        seesDues ? duesFor([patientId]).then((d) => d[patientId] ?? 0).catch(() => undefined) : undefined,
       ]);
-      return { invoices, payments };
+      return { invoices, payments, dues };
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {

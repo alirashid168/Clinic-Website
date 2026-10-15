@@ -58,6 +58,9 @@
 --   1. Put the website live first (the new pages work with the database as it is now: the front desk's cash closing and its
 --      "Closed" or "Not closed" on Today keep working, it bills and takes payments as before; "Payments today" says the database
 --      update is needed).
+--      Do steps 1 and 2 back to back. Until both are live the front desk sees money totals: since 20261015000500 it reads its
+--      branch's payments, so the old website's Cash closing page adds them up into "Cash payments recorded today", and the
+--      old payments_summary(), total_dues() and branch income views answer it if it asks the database directly.
 --   2. Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
 --      With the Supabase CLI, keep the file name as it is (20261015000400 sorts after 20261015000100_staff_menu_prefs.sql; on live
 --      it runs after 20261015000500_front_desk_billing.sql, which was applied first, and that is fine).
