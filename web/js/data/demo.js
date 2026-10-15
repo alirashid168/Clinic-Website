@@ -129,6 +129,11 @@ function seed() {
     'Retainer Impression', 'Retainer Pick', 'Retainer Followup', 'Checkup', 'Followup', 'Scaling', 'Filling', 'RCT', 'Extraction',
     'X-Ray / OPG', 'Crown Insertion', 'Veneers Insertion', 'Smile Makeover', 'Shape Modification', 'Hygiene Appointment', 'Pain / Emergency']
     .map((name, i) => ({ id: i + 1, name, category: i < 8 ? 'braces' : i < 11 ? 'retainer' : 'general', is_braces_monthly: name === 'Monthly', active: true }));
+  // Made-up round prices for the price list (not the clinic's): the invoice form fills a line's rate from them.
+  const SAMPLE_PRICES = { Monthly: 5000, Bonding: 30000, 'Upper Bonding': 15000, 'Lower Bonding': 15000, 'Bracket Fix': 1000, 'Braces Scaling': 3000,
+    'Braces Off': 10000, 'Retainer Impression': 2000, 'Retainer Pick': 8000, Checkup: 1500, Scaling: 4000, Filling: 5000, RCT: 18000, Extraction: 3000,
+    'X-Ray / OPG': 1500, 'Crown Insertion': 20000, 'Veneers Insertion': 25000, 'Shape Modification': 5000, 'Hygiene Appointment': 3500, 'Pain / Emergency': 2000 };
+  for (const t of db.treatments) t.default_price = SAMPLE_PRICES[t.name] ?? null;
 
   db.expense_categories = ['Rent', 'Salaries', 'Doctor percentage', 'Dental supplies', 'Lab charges', 'Utilities (electricity, gas, water)',
     'Internet and phone', 'Maintenance and repairs', 'Marketing and ads', 'Taxes', 'Travel', 'Staff food and refreshments', 'Miscellaneous']
@@ -1177,13 +1182,14 @@ export function createDemoAdapter() {
     },
 
     // ------------------------------------------------------------ billing
-    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
+    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, notes = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
       // The database refuses these (invoice_items.quantity > 0, invoices.discount_amount >= 0); an empty quantity still means 1.
       if (items.some((it) => it.quantity != null && it.quantity !== '' && !(Number(it.quantity) > 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_quantity_check"');
       if (Number(discount_amount) < 0) fail('new row for relation "invoices" violates check constraint "invoices_discount_amount_check"');
       const key = opts.idempotencyKey || idempotencyKey;
-      const sig = JSON.stringify([patient_id, Number(branch_id), visit_id, Number(discount_amount) || 0, discount_reason, items.map((it) => [it.description, Number(it.quantity || 1), Number(it.unit_price)])]);
+      const note = String(notes ?? '').trim() || null; // (save_invoice keeps the invoice note trimmed, an empty one as none)
+      const sig = JSON.stringify([patient_id, Number(branch_id), visit_id, Number(discount_amount) || 0, discount_reason, items.map((it) => [it.description, Number(it.quantity || 1), Number(it.unit_price)]), notes]);
       const prior = key && db.invoices.find((i) => i.id === saved.get('invoice:' + key)?.id);
       if (prior) {
         if (saved.get('invoice:' + key).sig !== sig) fail(`IDEMPOTENCY_MISMATCH: an earlier attempt already saved invoice ${prior.invoice_no} with different details. Refresh the patient record and check it (void it if it is wrong) before saving again.`);
@@ -1195,7 +1201,7 @@ export function createDemoAdapter() {
       const pending = discountNeedsApproval(role, subtotal, Number(discount_amount), db.discount_caps[role], can('discount.approve'));
       const inv = { id: uid(), invoice_no: 'INV-' + todayISO().slice(0, 4) + '-' + String(db.invoices.length + 1).padStart(6, '0'), patient_id,
         branch_id: Number(branch_id), visit_id, issue_date: todayISO(), subtotal, discount_amount: Number(discount_amount), discount_reason,
-        total: Math.max(0, subtotal - Number(discount_amount)), status: pending ? 'pending_approval' : 'issued', template_key: 'classic',
+        total: Math.max(0, subtotal - Number(discount_amount)), status: pending ? 'pending_approval' : 'issued', template_key: 'classic', notes: note, created_at: new Date().toISOString(),
         items: items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) })),
         created_by: me().id };
       db.invoices.push(inv); audit('invoices', 'INSERT', inv);

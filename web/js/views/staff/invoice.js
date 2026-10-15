@@ -1,5 +1,5 @@
 // Invoices: printable templates, new invoice form, payment form.
-import { h, mount, rupees, shortDate, modal, field, select, toast, friendlyError, isLostAnswer, showFormErrors, clearFieldErrors, localISO, addMonthsISO, addDaysISO } from '../../ui/dom.js';
+import { h, mount, rupees, shortDate, modal, field, select, toast, friendlyError, isLostAnswer, showFormErrors, clearFieldErrors, localISO, addMonthsISO, addDaysISO, capFirst, announce } from '../../ui/dom.js';
 import { state, branchName, can, myBranches, defaultBranchId } from '../../state.js';
 import { CONFIG } from '../../config.js';
 
@@ -56,9 +56,101 @@ export function printSheet(el) {
   window.print();
 }
 
-export function invoiceSheet(inv, patient, templateKey) {
+// Payment methods as the form offers them (payments.method). "Online" is a bank transfer or a mobile wallet sent to the clinic's account.
+const PAY_METHODS = [
+  { value: 'cash', label: 'Cash' }, { value: 'card', label: 'Card' }, { value: 'bank_transfer', label: 'Online (bank transfer)' },
+  { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' },
+];
+const METHOD_WORDS = { cash: 'Cash', card: 'Card', bank_transfer: 'Online', cheque: 'Cheque', other: 'Other' };
+
+/**
+ * The patient as the printed bill needs them (phone, gender, date of birth). A row of the Aaj ki List carries only a few of the
+ * patient's details, so the rest are read once with the patient search (by Mr#). Never fails: without an answer the bill leaves out
+ * what is not known.
+ */
+async function billPatient(p) {
+  if (!p || ('gender' in p && 'date_of_birth' in p && 'phone' in p)) return p;
+  try {
+    const found = (await state.data.searchPatients(String(p.mr_number || p.full_name || ''))).find((x) => x.id === p.id);
+    return found ? { ...found, ...Object.fromEntries(Object.entries(p).filter(([, v]) => v !== null && v !== undefined)) } : p;
+  } catch { return p; }
+}
+
+
+// ---- The printed bill (A4), laid out like the bill the clinic gave on Healthwire (owner, 15 Oct 2026: "this is the patient bill invoice
+// that we give him at the end of treatment"): the clinic's name centred at the top, a rule, the patient on the left and the date and
+// invoice number on the right, a rule, the boxed lines, then the totals on the right with the payment mode on their left.
+const billNumber = (n) => Number(n || 0).toLocaleString('en-PK', { maximumFractionDigits: 2 });
+const billRupees = (n) => `Rs. ${Math.round(Number(n) || 0).toLocaleString('en-PK')}`;
+
+/** "15/10/2026 - 05:02 PM", Karachi time, from when the invoice was made; only the date when the time is not known. */
+function billDate(inv) {
+  if (inv.created_at) {
+    const parts = {};
+    for (const p of new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
+      .formatToParts(new Date(inv.created_at))) parts[p.type] = p.value;
+    return `${parts.day}/${parts.month}/${parts.year} - ${parts.hour}:${parts.minute} ${String(parts.dayPeriod || '').toUpperCase()}`;
+  }
+  const [y, m, d] = String(inv.issue_date || '').split('-');
+  return y && m && d ? `${d}/${m}/${y}` : '';
+}
+
+/** Whole years from a date of birth to today (Karachi), or null when it is not known. */
+function ageOn(dob, today = localISO()) {
+  const [y, m, d] = String(dob || '').slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const [ty, tm, td] = today.split('-').map(Number);
+  const age = ty - y - (tm < m || (tm === m && td < d) ? 1 : 0);
+  return age >= 0 && age < 130 ? age : null;
+}
+
+function billSheet(inv, patient, t, payments) {
+  const branch = state.ref.branches.find((b) => b.id === inv.branch_id);
+  const items = inv.items || [];
+  const total = Number(inv.total ?? inv.subtotal - inv.discount_amount);
+  const mine = (payments || []).filter((p) => p.invoice_id === inv.id);
+  const paid = mine.reduce((s, p) => s + Number(p.amount), 0);
+  const modes = [...new Set(mine.filter((p) => Number(p.amount) > 0).map((p) => METHOD_WORDS[p.method] || p.method))];
+  const age = ageOn(patient?.date_of_birth);
+  const ageGender = [age === null ? '' : `${age} Y`, patient?.gender ? capFirst(patient.gender) : ''].filter(Boolean).join(' / ');
+  const line = (label, value) => (value || value === 0 ? h('div', { class: 'bill-field' }, h('strong', {}, `${label}: `), String(value)) : null);
+  const sum = (label, value, grand = false) => h('tr', { class: grand ? 'bill-grand' : null }, h('th', { scope: 'row' }, label), h('td', {}, value));
+  const sheet = h('div', { class: ['invoice-sheet', 'bill-sheet', 'print-area'] },
+    h('div', { class: 'bill-head' },
+      h('span', { class: 'bill-logo', 'aria-hidden': 'true' }),
+      h('div', { class: 'bill-wordmark' },
+        h('div', { class: 'bill-name' }, "Dr. Ali Rashid's"),
+        h('div', { class: 'bill-clinic' }, 'Dental Clinic'),
+        h('div', { class: 'bill-cities' }, 'Karachi · Lahore · Islamabad'))),
+    branch ? h('p', { class: 'bill-branch' }, [branch.name, branch.address].filter(Boolean).join(' · ')) : null,
+    h('div', { class: 'bill-who' },
+      h('div', {}, line('Name', patient?.full_name), line('MR#', patient?.mr_number), line('Phone', patient?.phone), line('Age/Gender', ageGender)),
+      h('div', {}, line('Date', billDate(inv)), line('Invoice#', inv.invoice_no))),
+    inv.status === 'void' ? h('p', { class: 'bill-status' }, 'VOID') : inv.status === 'pending_approval' ? h('p', { class: 'bill-status' }, 'Discount waiting for approval') : null,
+    h('table', { class: 'bill-items' },
+      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Description'), h('th', { scope: 'col' }, 'Rate'), h('th', { scope: 'col' }, 'Quantity'), h('th', { scope: 'col' }, 'Amount'))),
+      h('tbody', {}, items.map((it) => h('tr', {},
+        h('td', {}, it.description), h('td', {}, billNumber(it.unit_price)), h('td', {}, billNumber(it.quantity)), h('td', {}, billNumber(Number(it.quantity) * Number(it.unit_price))))))),
+    h('div', { class: 'bill-foot' },
+      h('p', { class: 'bill-mode' }, h('strong', {}, 'Payment Mode: '), modes.length ? modes.join(', ') : 'Not paid yet'),
+      h('table', { class: 'bill-sums' }, h('tbody', {},
+        sum('Sub-Total', billRupees(inv.subtotal)),
+        Number(inv.discount_amount) ? sum('Discount', `- ${billRupees(inv.discount_amount)}`) : null,
+        sum('Grand Total', billRupees(total), true),
+        sum('Paid Amount', billRupees(Math.max(0, paid))),
+        sum('Due Amount', billRupees(Math.max(0, total - paid))),
+        paid > total ? sum('Advance', billRupees(paid - total)) : null))),
+    inv.notes ? h('p', { class: 'bill-note' }, h('strong', {}, 'Note: '), inv.notes) : null,
+    h('p', { class: 'bill-thanks' }, 'Thank you for choosing us. Keep this invoice for your records.'));
+  sheet.style.setProperty('--inv-accent', t.accent);
+  return sheet;
+}
+
+/** The invoice as printed: the A4 bill (payments: this invoice's, for Paid, Due and Payment Mode), or the 80mm thermal receipt as before. */
+export function invoiceSheet(inv, patient, templateKey, { payments } = {}) {
   const t = TEMPLATES[templateKey || inv.template_key] || TEMPLATES.classic;
   const thermal = (templateKey || inv.template_key) === 'thermal';
+  if (!thermal) return billSheet(inv, patient, t, payments ?? patient?.payments);
   const branch = state.ref.branches.find((b) => b.id === inv.branch_id);
   const items = inv.items || [];
   const sheet = h('div', { class: ['invoice-sheet', 'print-area', thermal && 'thermal', thermal && 'print-thermal'] },
@@ -83,104 +175,247 @@ export function invoiceSheet(inv, patient, templateKey) {
 /**
  * Shows an invoice with a Print button. Staff also get the template picker;
  * patients (and staff passing { patientView: true }) see the invoice's saved template only.
+ * payments: the payments the bill counts (those on this invoice); a patient record's own payments by default.
+ * receipt: { payment, due } adds "Print receipt" for the money just taken. autoPrint: print at once ("Save & Print").
+ * saved: a line above the bill saying what was just saved. onClose: runs once the dialog (or the receipt after it) has closed.
  */
-export function printInvoice(inv, patient, { patientView = state.session?.kind !== 'staff' } = {}) {
+export function printInvoice(inv, patient, { patientView = state.session?.kind !== 'staff', payments = patient?.payments, receipt = null, autoPrint = false, saved = '', onClose } = {}) {
   let key = inv.template_key || 'classic';
   const holder = h('div', {});
-  const draw = () => mount(holder, invoiceSheet(inv, patient, key));
+  const draw = () => mount(holder, invoiceSheet(inv, patient, key, { payments }));
   draw();
   const picker = patientView ? null : select(Object.entries(TEMPLATES).map(([value, t]) => ({ value, label: t.name })), key, { onchange: (e) => { key = e.target.value; draw(); } });
-  modal(`Invoice ${inv.invoice_no}`, h('div', {}, picker ? field('Template', picker) : null, holder), [
+  // The receipt opens once this dialog has closed, so only one sheet is on screen (and on paper) at a time.
+  let thenReceipt = false;
+  const dialog = modal(`Invoice ${inv.invoice_no}`, h('div', {}, saved ? h('p', { class: 'alert alert-info', role: 'status' }, saved) : null, picker ? field('Template', picker) : null, holder), [
     { label: 'Close' },
+    receipt ? { label: 'Print receipt', onClick: () => { thenReceipt = true; } } : null,
     { label: 'Print', primary: true, onClick: () => { printSheet(holder.firstElementChild); return false; } },
-  ]);
+  ].filter(Boolean), { onClose: () => { if (thenReceipt) printReceipt(receipt.payment, patient, inv, receipt.due, { onClose }); else onClose?.(); } });
+  // Opened by Save in the form: the second click of a double click on Save lands on this dialog's buttons, where Save was, and is let go.
+  const opened = performance.now();
+  if (saved) dialog.dialog.addEventListener('click', (e) => { if (e.detail > 1 && performance.now() - opened < 1500 && e.target.closest?.('.modal-actions')) { e.stopPropagation(); e.preventDefault(); } }, true);
+  if (autoPrint) printSheet(holder.firstElementChild);
+  return dialog;
 }
 
-/** New invoice for a patient. Calls onDone(invoice) after saving. */
-export function newInvoiceModal(patient, { branchId, visitId, onDone } = {}) {
+/**
+ * New invoice for a patient, with the payment taken in the same dialog (owner, 15 Oct 2026, as Healthwire's "Create Invoice"):
+ * lines picked from the clinic's treatments (the price list fills the rate), the discount, who did the treatment (a visit's doctor),
+ * the money received now with what stays due (or is paid ahead), a note for the bill, then "Save" or "Save & Print". After saving,
+ * the bill is shown with Print and, when money was taken, Print receipt; "Save & Print" prints it at once.
+ *
+ * options: branchId, visitId (the Aaj ki List row it is for), visitStaff (that visit's people: its doctor is "Performed by"),
+ * treatment (the row's treatment: the first line when it is on the price list), onDone(invoice) after saving, afterBill() once the
+ * bill shown after saving is closed (or the form, when only the invoice was saved).
+ *
+ * A slow line or a double click never makes a second invoice or a second payment: the invoice has one idempotency key per opened
+ * form (save_invoice); once it is saved the form keeps it and only the payment is left to save, and a payment whose answer was lost
+ * is looked up on that invoice before it is sent again.
+ */
+export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatment, onDone, afterBill } = {}) {
   // One key per opened form: pressing Save again after a failure cannot create a second invoice.
   const idempotencyKey = crypto.randomUUID();
+  const d = state.data;
+  let who = patient;
+  const details = billPatient(patient).then((p) => { who = p || patient; });
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
+  const treatments = state.ref.treatments || [];
+  const byName = new Map(treatments.map((t) => [String(t.name).trim().toLowerCase(), t]));
   const lines = [];
-  const linesBody = h('tbody', {});
-  const totalEl = h('strong', {});
-  const discount = h('input', { type: 'number', min: 0, step: 100, value: 0, oninput: () => recalc() });
+  const linesBox = h('div', { class: 'bill-lines', role: 'group', 'aria-label': 'Invoice lines' },
+    h('div', { class: 'bill-line bill-line-head', 'aria-hidden': 'true' },
+      h('span', {}, 'Treatment'), h('span', {}, 'Description'), h('span', {}, 'Qty'), h('span', {}, 'Rate (Rs)'), h('span', { class: 'right' }, 'Amount'), h('span', {})));
+  const totalsEl = h('div', { class: 'bill-totals', 'aria-live': 'polite' });
+  const dueEl = h('div', { class: 'bill-due', 'aria-live': 'polite' });
+  const discount = h('input', { type: 'number', min: 0, step: 100, value: 0, 'aria-label': 'Discount', oninput: () => recalc() });
+  const discountKind = select([{ value: 'rs', label: 'Rs' }, { value: 'pct', label: '%' }], 'rs', { 'aria-label': 'Discount in Rs or %', onchange: () => recalc() });
   const reason = h('input', { placeholder: 'Reason (needed for discounts)' });
-  const treatmentOptions = [{ value: '', label: 'Choose treatment…' }, ...state.ref.treatments.map((t) => ({ value: t.name, label: t.name }))];
+  const doctors = (state.ref.clinicians || []).filter((c) => c.is_doctor);
+  const onVisit = (id) => (visitStaff || []).some((s) => s.role === 'doctor' && s.clinician_id === id);
+  // "Performed by": the invoice has no place for a doctor, the visit has (its Doctor Name on the Aaj ki List), so it shows only for a visit.
+  const performer = visitId && doctors.length
+    ? select([{ value: '', label: 'Not set' }, ...doctors.map((c) => ({ value: c.id, label: c.display_name }))], (visitStaff || []).find((s) => s.role === 'doctor')?.clinician_id || '')
+    : null;
+  const method = select(PAY_METHODS, 'cash');
+  let paidTyped = false; // the amount follows the total until it is typed in
+  const paidNow = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', oninput: () => { paidTyped = true; recalc(); } });
+  const note = h('textarea', { rows: 2, maxlength: 1000, placeholder: 'Optional. Printed on the bill.' });
 
-  function addLine(desc = '', price = '') {
-    const n = lines.length + 1;
-    const line = {
-      desc: h('input', { value: desc, list: 'treatment-list', 'aria-label': `Treatment, line ${n}` }),
-      qty: h('input', { type: 'number', min: 1, value: 1, 'aria-label': `Qty, line ${n}`, oninput: () => recalc() }),
-      price: h('input', { type: 'number', min: 0, step: 100, value: price, 'aria-label': `Price (Rs), line ${n}`, oninput: () => recalc() }),
-    };
-    lines.push(line);
-    linesBody.append(h('tr', {}, h('td', {}, line.desc), h('td', {}, line.qty), h('td', {}, line.price)));
-    recalc();
-  }
   // An empty quantity means 1; a typed 0 or a negative number is an error (see Save), never a line that counts backwards.
   const qtyOf = (l) => (l.qty.value.trim() === '' ? 1 : Number(l.qty.value));
-  const subtotalOf = () => lines.reduce((s, l) => s + Math.max(0, qtyOf(l)) * Math.max(0, Number(l.price.value || 0)), 0);
+  const amountOf = (l) => Math.max(0, qtyOf(l)) * Math.max(0, Number(l.price.value || 0));
+  const subtotalOf = () => lines.reduce((s, l) => s + amountOf(l), 0);
+  const discountOf = (sub) => {
+    if (!can('discount.give')) return 0;
+    const v = Number(discount.value || 0);
+    return discountKind.value === 'pct' ? Math.round((sub * v) / 100) : v;
+  };
   function recalc() {
+    for (const l of lines) l.amount.textContent = rupees(amountOf(l));
     const sub = subtotalOf();
-    totalEl.textContent = `Subtotal ${rupees(sub)} · Total ${rupees(Math.max(0, sub - Math.max(0, Number(discount.value || 0))))}`;
+    const off = Math.max(0, discountOf(sub));
+    const total = Math.max(0, sub - off);
+    if (!paidTyped) paidNow.value = String(total);
+    totalsEl.replaceChildren(
+      h('span', {}, `Sub-total ${rupees(sub)}`),
+      off ? h('span', {}, `Discount ${rupees(off)}`) : '',
+      h('strong', {}, `Total ${rupees(total)}`));
+    const paid = Math.max(0, Number(paidNow.value || 0));
+    dueEl.textContent = paid < total ? `Due ${rupees(total - paid)}` : paid > total ? `Advance ${rupees(paid - total)} (counts towards the next invoice)` : 'Paid in full';
+    dueEl.className = ['bill-due', paid < total ? 'status-bad' : 'status-ok'].join(' ');
   }
-  const quick = select(treatmentOptions, '', { onchange: (e) => { if (e.target.value) { addLine(e.target.value); e.target.value = ''; } } });
-  addLine();
+  // The price list's rate goes in when a treatment from it is chosen, unless a rate was typed for this line by hand.
+  function fillRate(line) {
+    const t = byName.get(line.treat.value.trim().toLowerCase());
+    if (t && t.default_price !== null && t.default_price !== undefined && (line.auto || line.price.value === '')) {
+      line.price.value = String(Number(t.default_price));
+      line.auto = true;
+    }
+    recalc();
+  }
+  const addBtn = h('button', { class: 'btn btn-small', type: 'button', onclick: () => addLine().treat.focus() }, '+ Add item');
+  function addLine(name = '') {
+    const n = lines.length + 1;
+    const line = { auto: false };
+    line.treat = h('input', { value: name, list: 'treatment-list', autocomplete: 'off', placeholder: 'Search treatment', 'aria-label': `Treatment, line ${n}`, oninput: () => fillRate(line), onchange: () => fillRate(line) });
+    line.desc = h('input', { autocomplete: 'off', placeholder: 'Description', maxlength: 300, 'aria-label': `Description, line ${n}` });
+    line.qty = h('input', { type: 'number', min: 1, value: 1, inputmode: 'numeric', 'aria-label': `Qty, line ${n}`, oninput: () => recalc() });
+    line.price = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', placeholder: 'Rate', 'aria-label': `Rate (Rs), line ${n}`, oninput: () => { line.auto = false; recalc(); } });
+    line.amount = h('output', { class: 'right', 'aria-label': `Amount, line ${n}` });
+    line.row = h('div', { class: 'bill-line' }, line.treat, line.desc, line.qty, line.price, line.amount,
+      h('button', { type: 'button', class: 'icon-btn bill-remove', 'aria-label': `Remove line ${n}`, title: 'Remove this line', onclick: () => {
+        if (lines.length === 1) { for (const k of ['treat', 'desc', 'price']) line[k].value = ''; line.qty.value = 1; line.auto = false; recalc(); line.treat.focus(); return; }
+        lines.splice(lines.indexOf(line), 1);
+        line.row.remove();
+        recalc();
+        addBtn.focus();
+      } }, h('span', { 'aria-hidden': 'true' }, '×')));
+    lines.push(line);
+    linesBox.append(line.row);
+    if (name) fillRate(line); else recalc();
+    return line;
+  }
+  // The row's treatment starts the first line when it is on the price list (its name as the price list writes it).
+  addLine(byName.get(String(treatment || '').trim().toLowerCase())?.name || '');
 
-  const body = h('div', {},
-    h('datalist', { id: 'treatment-list' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
-    field('Branch', branchSel),
-    field('Add a treatment', quick),
-    h('div', { class: 'table-scroll' }, h('table', { class: 'list invoice-lines' },
-      h('caption', { class: 'sr-only' }, 'Invoice lines'),
-      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Treatment'), h('th', { scope: 'col' }, 'Qty'), h('th', { scope: 'col' }, 'Price (Rs)'))),
-      linesBody)),
-    h('button', { class: 'btn btn-small', type: 'button', onclick: () => { addLine(); lines[lines.length - 1].desc.focus(); } }, 'Add line'),
-    h('div', { class: 'form-grid', style: { marginTop: '12px' } },
-      can('discount.give') ? field('Discount (Rs)', discount, 'Above your limit, it goes to the accountant or Dr. Ali for approval.') : null,
-      can('discount.give') ? field('Discount reason', reason, 'Needed when there is a discount.') : null),
-    h('p', {}, totalEl));
+  const invoicePart = h('div', {},
+    h('datalist', { id: 'treatment-list' }, treatments.map((t) => h('option', { value: t.name }))),
+    h('div', { class: 'form-grid' }, field('Branch', branchSel),
+      performer ? field('Performed by', performer, 'Put on this visit as its doctor (Doctor Name on the Aaj ki List).') : null),
+    linesBox,
+    addBtn,
+    can('discount.give') ? h('div', { class: 'form-grid', style: { marginTop: '12px' } },
+      field('Discount', h('div', { class: 'bill-discount' }, discount, discountKind), 'Above your limit, it goes to the accountant or Dr. Ali for approval.'),
+      field('Discount reason', reason, 'Needed when there is a discount.')) : null,
+    totalsEl,
+    field('Invoice note', note));
+  const savedLine = h('p', { class: 'alert alert-info', hidden: true, role: 'status' });
+  const body = h('div', { class: 'bill-form' },
+    savedLine,
+    invoicePart,
+    h('fieldset', { class: 'bill-pay' }, h('legend', {}, 'Payment now'),
+      h('div', { class: 'form-grid' }, field('Payment method', method), field('Payment (Rs)', paidNow, 'What the patient pays now. Less is fine; 0 when nothing is paid now.')),
+      dueEl));
+  recalc();
 
   let stuck = null; // the message of an IDEMPOTENCY_MISMATCH: this form's key is used up, so Save is refused until a new form is opened
-  modal(`New invoice · ${patient.full_name}`, body, [
-    { label: 'Cancel' },
-    { label: 'Save invoice', primary: true, onClick: async () => {
-      if (stuck) { toast(stuck, 'error', 10000); return false; }
-      clearFieldErrors(body);
-      const errors = [];
-      const filled = lines.filter((l) => l.desc.value.trim());
+  let inv = null; // the saved invoice: Save again only finishes the payment
+  let pay = null; // the saved payment
+  let payUnsure = false; // a payment was sent and its answer was lost: it may be saved
+  let doctorDone = false;
+  let finished = false;
+  let print = false;
+  let savedWords = '';
+  const lockInvoice = () => {
+    for (const el of invoicePart.querySelectorAll('input, select, textarea, button')) el.disabled = true;
+    savedLine.textContent = `Invoice ${inv.invoice_no} is saved. Only the payment is left: press Save again, or Cancel and use Take payment later.`;
+    savedLine.hidden = false;
+  };
+
+  async function save(andPrint) {
+    if (stuck) { toast(stuck, 'error', 10000); return false; }
+    clearFieldErrors(body);
+    const errors = [];
+    const paidText = paidNow.value.trim();
+    const paid = paidText === '' ? 0 : Number(paidText);
+    const filled = lines.filter((l) => l.treat.value.trim() || l.desc.value.trim());
+    if (!inv) {
       for (const l of filled) {
-        if (l.price.value === '') errors.push({ input: l.price, message: 'Enter a price for this treatment.' });
-        else if (!(Number(l.price.value) >= 0)) errors.push({ input: l.price, message: 'The price cannot be negative.' });
+        if (l.price.value === '') errors.push({ input: l.price, message: 'Enter a rate for this treatment.' });
+        else if (!(Number(l.price.value) >= 0)) errors.push({ input: l.price, message: 'The rate cannot be negative.' });
         if (!(qtyOf(l) > 0)) errors.push({ input: l.qty, message: 'The quantity must be more than 0.' });
       }
-      if (!filled.length) errors.push({ input: lines[0].desc, message: 'Add at least one treatment with a price.' });
+      if (!filled.length) errors.push({ input: lines[0].treat, message: 'Add at least one treatment with a rate.' });
       const sub = subtotalOf();
-      const off = Number(discount.value || 0);
+      const off = discountOf(sub);
       // A Rs 0 invoice is allowed (owner, 2026-10-08): complimentary treatment is recorded that way. Prices and
       // quantities still cannot be negative or zero-quantity, and the database requires subtotal >= 0.
       if (off < 0) errors.push({ input: discount, message: 'The discount cannot be negative.' });
+      else if (discountKind.value === 'pct' && Number(discount.value) > 100) errors.push({ input: discount, message: 'The discount cannot be more than 100%.' });
       else if (!errors.length && off > sub) errors.push({ input: discount, message: `The discount cannot be more than the subtotal (${rupees(sub)}).` });
       if (off > 0 && !reason.value.trim()) errors.push({ input: reason, message: 'Write a reason for the discount.' });
-      if (errors.length) { showFormErrors(body, errors); return false; }
-      const items = filled.map((l) => ({ description: l.desc.value.trim(), quantity: qtyOf(l), unit_price: Number(l.price.value) }));
-      let inv;
+    }
+    if (!(paid >= 0)) errors.push({ input: paidNow, message: 'The payment cannot be negative. Write 0 when nothing is paid now.' });
+    if (errors.length) { showFormErrors(body, errors); return false; }
+
+    if (!inv) {
+      const items = filled.map((l) => ({ description: [l.treat.value.trim(), l.desc.value.trim()].filter(Boolean).join(' - '), quantity: qtyOf(l), unit_price: Number(l.price.value) }));
       try {
-        const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items, discount_amount: off, discount_reason: reason.value.trim() || null, visit_id: visitId || null };
+        const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items, discount_amount: discountOf(subtotalOf()), discount_reason: reason.value.trim() || null, visit_id: visitId || null, notes: note.value.trim() || null };
         // The key goes in the options argument (data contract); it is also on the payload for adapters that read it there.
-        inv = await state.data.createInvoice({ ...payload, idempotencyKey }, { idempotencyKey });
+        inv = await d.createInvoice({ ...payload, idempotencyKey }, { idempotencyKey });
       } catch (e) {
         const { text, stuck: spent } = saveFailure(e, 'invoices');
         if (spent) stuck = text;
         toast(text, 'error', 10000);
         return false;
       }
-      toast(inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`, 'ok');
-      await afterSave(onDone, inv);
-    } },
-  ]);
+      lockInvoice();
+    }
+    // Who did the treatment goes on the visit (once; nothing is added when that doctor is on it already).
+    if (performer?.value && !doctorDone) {
+      doctorDone = true;
+      if (!onVisit(performer.value)) {
+        try { await d.setVisitStaff(visitId, performer.value, 'doctor'); } catch (e) { toast(`Invoice ${inv.invoice_no} is saved, but the doctor was not put on the visit: ${friendlyError(e)}`, 'error', 10000); }
+      }
+    }
+    if (paid > 0 && !pay) {
+      try {
+        // The earlier try may have been saved: this invoice is new, so a payment on it can only be that one.
+        if (payUnsure) pay = (await d.patientBilling(patient.id)).payments?.find((x) => x.invoice_id === inv.id) || null;
+        if (!pay) pay = await d.recordPayment({ patient_id: patient.id, branch_id: inv.branch_id, amount: paid, method: method.value, invoice_id: inv.id, notes: null });
+      } catch (e) {
+        payUnsure = payUnsure || isLostAnswer(e);
+        toast(`Invoice ${inv.invoice_no} is saved. The payment ${payUnsure ? 'may or may not have been saved' : 'was not saved'}: ${friendlyError(e)} Press Save again to ${payUnsure ? 'check and finish' : 'try again'}.`, 'error', 12000);
+        return false;
+      }
+    }
+    finished = true;
+    print = andPrint;
+    // Said on the bill that opens next (a toast would lie over its buttons).
+    const words = inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`;
+    savedWords = pay ? `${words} Payment of ${rupees(pay.amount)} saved.` : words;
+    announce(savedWords);
+    await details;
+    await afterSave(onDone, inv);
+    return undefined;
+  }
+
+  modal(`New invoice · ${patient.full_name}`, body, [
+    { label: 'Cancel' },
+    { label: 'Save', onClick: () => save(false) },
+    { label: 'Save & Print', primary: true, onClick: () => save(true) },
+  ], {
+    initialFocus: lines[0].treat,
+    onClose: () => {
+      // Saved: the bill, with Print (and Print receipt for the money taken); "Save & Print" prints it at once.
+      if (finished) {
+        const total = Number(inv.total ?? inv.subtotal - inv.discount_amount);
+        printInvoice(inv, who, { payments: pay ? [pay] : [], receipt: pay ? { payment: pay, due: Math.max(0, total - Number(pay.amount)) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
+      } else if (inv) afterSave(onDone, inv).then(() => afterBill?.()); // the invoice was saved, the payment was not: the page still shows the new invoice
+    },
+  });
 }
 
 /** Issued invoices with what is still unpaid on each (payments are matched to invoices when taken). */
@@ -256,12 +491,12 @@ export function receiptSheet(payment, patient, invoice, remainingDues) {
   return sheet;
 }
 
-export function printReceipt(payment, patient, invoice, remainingDues) {
+export function printReceipt(payment, patient, invoice, remainingDues, { onClose } = {}) {
   const sheet = receiptSheet(payment, patient, invoice, remainingDues);
   modal('Payment receipt', sheet, [
     { label: 'Close' },
     { label: 'Print', primary: true, onClick: () => { printSheet(sheet); return false; } },
-  ]);
+  ], { onClose });
 }
 
 // Overdue always says "Overdue" in words; the colour only repeats it.

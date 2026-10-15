@@ -1585,6 +1585,91 @@ table.invoice-lines td { padding: var(--space-1) var(--space-2) var(--space-1) 0
 table.invoice-lines input { min-width: 0; }
 .invoice-sheet.thermal, .print-thermal .invoice-sheet, .invoice-sheet.print-thermal { max-width: 300px; font-size: var(--fs-xs); padding: var(--space-3); }
 
+/* ------------------------------------------------------------ Bill (owner, 15 Oct 2026): the invoice form with the payment, the
+   printed bill and the top bar's "Create ▾". */
+/* The form, as Healthwire's "Create Invoice": a line per treatment (treatment, description, qty, rate, amount, ×), the totals, the
+   payment now with what stays due. On a phone each line is three rows: treatment, description, then qty, rate, amount and ×. */
+.modal:has(.bill-form), .modal:has(.bill-sheet) { width: min(880px, 100%); }
+.bill-lines { display: grid; gap: var(--space-2); margin: var(--space-3) 0 var(--space-2); }
+.bill-line { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.6fr) 4.5rem 7.5rem 7rem 2.75rem; gap: var(--space-2); align-items: center; }
+.bill-line input { min-width: 0; }
+.bill-line-head { font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+.bill-line output { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.bill-remove { min-width: 40px; min-height: 40px; font-size: var(--fs-xl); }
+.bill-discount { display: flex; gap: var(--space-2); }
+.bill-discount input { flex: 1 1 auto; min-width: 0; }
+.bill-discount select { flex: 0 0 5rem; }
+.bill-totals { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1) var(--space-4); margin: var(--space-3) 0; font-variant-numeric: tabular-nums; }
+.bill-pay { margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
+.bill-pay legend { padding: 0 var(--space-1); font-weight: 700; }
+.bill-due { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .bill-line-head { display: none; }
+  .bill-line { grid-template-columns: 4rem minmax(0, 1fr) minmax(0, 1fr) 2.75rem; padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
+  .bill-line > input:nth-child(1), .bill-line > input:nth-child(2) { grid-column: 1 / -1; }
+}
+/* The printed bill (A4), on white paper also in dark mode: the clinic's mark and name centred, a rule, the patient and the invoice, a
+   rule, the boxed lines, the totals on the right with the payment mode on their left. */
+.invoice-sheet.bill-sheet { max-width: 794px; padding: var(--space-8); background: #ffffff; color: #1b1b1b; font-size: 14px; line-height: 1.45; }
+.bill-head { display: flex; justify-content: center; align-items: center; gap: var(--space-3); }
+.bill-logo { flex: none; width: 30px; height: 66px; background: var(--inv-accent, #3e2464); -webkit-mask: url('../logo-mark.svg') center / contain no-repeat; mask: url('../logo-mark.svg') center / contain no-repeat; }
+.bill-wordmark { text-align: center; text-transform: uppercase; line-height: 1.2; font-family: Georgia, 'Times New Roman', serif; color: var(--inv-accent, #3e2464); }
+.bill-name { font-size: 25px; font-weight: 700; letter-spacing: .12em; }
+.bill-clinic { font-size: 16px; font-weight: 700; letter-spacing: .3em; }
+.bill-cities { font-size: 10px; letter-spacing: .22em; }
+.bill-branch { margin: var(--space-2) 0 0; text-align: center; font-size: 12px; color: #4a4a4a; }
+.bill-who { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-6); margin-top: var(--space-4); padding: var(--space-3) var(--space-2); border-top: 2px solid #1b1b1b; border-bottom: 2px solid #1b1b1b; line-height: 1.8; }
+.bill-field { overflow-wrap: anywhere; }
+.bill-status { margin: var(--space-3) 0 0; font-weight: 800; letter-spacing: .08em; text-align: center; text-transform: uppercase; color: #9b1c1c; }
+table.bill-items { width: 100%; margin-top: var(--space-4); border-collapse: collapse; border: 2px solid #1b1b1b; }
+table.bill-items th, table.bill-items td { padding: 8px 12px; text-align: left; vertical-align: top; color: #1b1b1b; background: none; }
+table.bill-items th { font-weight: 700; border-bottom: 2px solid #1b1b1b; }
+table.bill-items td { border-top: 1px solid #c8c8c8; }
+table.bill-items :is(th, td):not(:first-child) { width: 7.5rem; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bill-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-3) var(--space-6); margin-top: var(--space-3); }
+.bill-mode { flex: 1 1 12rem; margin: 0; text-align: center; }
+table.bill-sums { border-collapse: collapse; margin-left: auto; }
+table.bill-sums th, table.bill-sums td { padding: 3px 0; color: #1b1b1b; background: none; border: 0; }
+table.bill-sums th { padding-right: var(--space-6); text-align: left; font-weight: 500; }
+table.bill-sums td { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.bill-sums .bill-grand :is(th, td) { font-weight: 800; font-size: 16px; }
+.bill-note { margin: var(--space-4) 0 0; }
+.bill-thanks { margin: var(--space-6) 0 0; font-size: 12px; color: #4a4a4a; text-align: center; }
+@media (max-width: 560px) {
+  .invoice-sheet.bill-sheet { padding: var(--space-4); font-size: 13px; }
+  .bill-name { font-size: 19px; }
+  .bill-who { grid-template-columns: minmax(0, 1fr); }
+  table.bill-items th, table.bill-items td { padding: 6px; }
+  table.bill-items :is(th, td):not(:first-child) { width: auto; }
+}
+/* Bill on a row of the Aaj ki List: in the name cell, which stays at the left edge on a laptop and on a phone. */
+table.sheet .name-cell.has-bill { gap: 2px; padding-right: 3px; }
+table.sheet .name-cell.has-bill .name-btn { flex: 1 1 auto; min-width: 0; width: auto; }
+.bill-btn {
+  flex: none; height: 20px; padding: 0 7px; border: 1px solid var(--aubergine); border-radius: 10px; background: var(--enamel); color: var(--aubergine);
+  font: 600 11.5px/18px var(--sheet-font, var(--font)); cursor: pointer;
+}
+.bill-btn:hover, .bill-btn:focus-visible { background: var(--aubergine); color: #ffffff; }
+@media (pointer: coarse), (hover: none) {
+  .bill-btn { height: 32px; padding: 0 12px; border-radius: 16px; font-size: var(--fs-ui); line-height: 30px; }
+}
+/* "Create ▾" in the top bar, at the right beside the search; on a phone a "+" (its name stays for screen readers). */
+.create-menu .menu-list { left: auto; right: 0; min-width: 200px; }
+.topbar .create-btn { border: 1px solid var(--on-dark-control-border); }
+.create-plus { display: none; }
+.pick-patient { min-height: 18rem; }
+@media not all and (min-width: 73.75em) {
+  .topbar .create-btn { justify-content: center; min-width: var(--target); padding-inline: var(--space-2); }
+  .create-btn .create-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .create-btn .caret { display: none; }
+  .create-btn .create-plus { display: inline; font-size: var(--fs-xl); line-height: 1; }
+}
+@media (max-width: 30em) {
+  /* A phone: the "+" of Create takes the room of the clinic's name in the bar, so the search keeps its width (the mark stays, and the
+     name is still the link's text). */
+  .topbar:has(.create-menu) .wordmark { width: 1.6em; margin-right: var(--space-1); overflow: hidden; }
+}
+
 /* login slip: the username and password handed to a patient, one small (A6) page */
 .login-slip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s); padding: var(--space-5); max-width: 380px; margin-top: var(--space-3); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .login-slip p { margin: 0 0 var(--space-2); }

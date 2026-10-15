@@ -1470,10 +1470,11 @@ export async function createSupabaseAdapter() {
      * Without the migration it falls back to the old three steps. A retry finishes the same draft: with the lines the
      * form has NOW (an earlier attempt that stopped half way is rewritten), or returns the invoice if it was issued.
      */
-    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
+    async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, notes = null, idempotencyKey = null }, opts = {}) {
       const key = opts.idempotencyKey || idempotencyKey || null;
       const lines = items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) }));
-      const header = { patient_id, branch_id: Number(branch_id), visit_id, discount_amount: Number(discount_amount) || 0, discount_reason };
+      // notes: the invoice note on the bill (save_invoice keeps it from 20261015000600_invoice_note.sql; before that it is not kept).
+      const header = { patient_id, branch_id: Number(branch_id), visit_id, discount_amount: Number(discount_amount) || 0, discount_reason, notes: notes || null };
       const viaRpc = await rpc('save_invoice', { p_idempotency_key: key, p_invoice: header, p_items: lines });
       if (!viaRpc.missing) return viaRpc.data;
 
@@ -1501,7 +1502,7 @@ export async function createSupabaseAdapter() {
       if (!inv) {
         inv = check(await sb.from('invoices').insert({
           patient_id, branch_id: header.branch_id, visit_id, subtotal, discount_amount: header.discount_amount,
-          discount_reason, status: 'draft',
+          discount_reason, notes: header.notes, status: 'draft',
         }).select().single());
         inv.items = [];
         status = inv.status;

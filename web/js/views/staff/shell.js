@@ -22,6 +22,7 @@ const pagesModule = () => import('./pages.js');
 const patientsModule = () => import('./patients.js');
 const renderPatient = lazy(patientsModule, 'renderPatient');
 const renderPortalPreview = lazy(() => import('../portal.js'), 'renderPortalPreview');
+const openCreate = lazy(() => import('./create-menu.js'), 'openCreate');
 
 const PAGES = {
   today: { render: lazy(pagesModule, 'renderDashboard'), show: () => true },
@@ -189,6 +190,25 @@ export async function renderStaff(root, path, params, signOut) {
     : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label));
   const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }); // its entries: arrangeNav, below the drawer
 
+  // ---- "Create ▾" beside the search (owner, 15 Oct 2026, as on Healthwire): a new patient, an invoice, a health record
+  // (create-menu.js), each for whoever may make one; no menu for someone who may make none. It is not a page, so "Arrange my
+  // menu" leaves it where it is, and it stays in the top bar on a phone (a "+" there).
+  const createChoices = [
+    can('patients.create') ? ['patient', 'Patient'] : null,
+    can('billing.create') ? ['invoice', 'Invoice'] : null,
+    can('treatment.enter') || can('patients.edit') ? ['health', 'Health record'] : null,
+  ].filter(Boolean);
+  const createMenu = createChoices.length ? (() => {
+    const btn = h('button', { type: 'button', class: 'nav-link create-btn', 'aria-expanded': 'false', 'aria-controls': 'create-menu-list' },
+      h('span', { class: 'create-plus', 'aria-hidden': 'true' }, '+'), h('span', { class: 'create-label' }, 'Create'), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
+    const list = h('div', { class: 'menu-list', id: 'create-menu-list' }, createChoices.map(([key, label]) => h('button', {
+      type: 'button', class: 'menu-btn', 'aria-haspopup': 'dialog',
+      // The menu closes and focus goes back to "Create" first, so the dialog gives focus back to something visible.
+      onclick: () => { closeAll(); btn.focus(); openCreate(key).catch((e) => toast(friendlyError(e), 'error')); },
+    }, label)));
+    return disclosure(h('div', { class: 'menu create-menu' }, btn, list), btn, list);
+  })() : null;
+
   // ---- patient search from any screen: name, Mr# or phone (an ARIA combobox).
   const searchBox = can('patients.view') ? (() => {
     const input = h('input', { type: 'search', placeholder: 'Search by name, Mr# or phone', 'aria-label': 'Search patients', autocomplete: 'off' });
@@ -267,6 +287,7 @@ export async function renderStaff(root, path, params, signOut) {
     h('a', { href: '#/staff/today', class: 'wordmark', style: { textDecoration: 'none' } }, "Dr. Ali Rashid's", h('small', {}, 'Clinic system')),
     topnav,
     searchBox,
+    createMenu,
     userMenu);
 
   const main = h('main', { class: 'main', id: 'main' });

@@ -712,6 +712,13 @@ export async function renderSheet(root, params, signal) {
       c.patient_id
         ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
         : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
+      // Registered: Bill (for their row on this list when they are on it, else for the patient file at this checkup's branch).
+      c.patient_id && can('billing.create') ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => {
+        dialog?.close();
+        const there = rows.find((r) => r.patient_id === c.patient_id && r.branch_id === c.branch_id);
+        if (there) billRow(there);
+        else newInvoiceModal({ id: c.patient_id, full_name: who, mr_number: mr || null, phone: c.phone || null }, { branchId: c.branch_id, treatment: c.checkup_for, onDone: load });
+      } }, 'Bill') : null,
       h('a', { class: 'btn', href: inCheckupList }, 'Open in the checkup list'),
       canRemoveCheckup(c) ? h('button', { type: 'button', class: 'btn btn-danger', onclick: () => { dialog?.close(); removeCheckupModal(c, { onDone: () => { checkups = checkups.filter((x) => x.id !== c.id); listVersion++; draw(); } }); } }, 'Remove from the list') : null,
     ];
@@ -925,6 +932,8 @@ export async function renderSheet(root, params, signal) {
     // (Both data adapters put the patient's photo_consent_public on every visit row, so the dialog needs no extra fetch.)
     const uploadPhotos = () => photoUploadModal(row.patient, { visitId: row.id, branchId: row.branch_id, onDone: load });
     const actions = [
+      // Bill: the invoice with the payment and the printed bill (the same as the Bill button on the row).
+      can('billing.create') ? h('button', { class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: () => billRow(row) }, 'Bill') : null,
       can('photos.upload') ? h('button', { class: 'btn', onclick: uploadPhotos }, 'Upload photos') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone: load }) }, 'New invoice') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => paymentModal(row.patient, { branchId: row.branch_id, dues: row.dues, onDone: load }) }, 'Take payment') : null,
@@ -958,6 +967,20 @@ export async function renderSheet(root, params, signal) {
     dialog.dialog.querySelector('h2')?.focus();
   }
 
+  // Bill (owner, 15 Oct 2026: "the add invoice button should be on the aaj ki list ... and payment could be taken and an invoice bill
+  // printout provided for the patient"): the invoice form for this patient at the list's branch, for this visit, with the row's
+  // treatment on its first line when it is on the price list and the visit's doctor as "Performed by". It is drawn from the row the
+  // list has now (a reload may have put in a new copy). Saved, the list is read again, and once the bill shown then is closed the
+  // cursor goes back to the row's control (focus: its data-focus key; the patient's name when that control is gone).
+  function billRow(row, focus = 'bill') {
+    const now = rows.find((r) => r.id === row.id) || row;
+    newInvoiceModal(now.patient, {
+      branchId: now.branch_id, visitId: now.id, visitStaff: now.staff, treatment: now.treatment_label,
+      onDone: () => load(),
+      afterBill: () => setTimeout(() => backToRow(now.id, focus)),
+    });
+  }
+
   // The Invoice column (the sheet's "Healthwire" column: billing is done on the website now). Done when this visit has an
   // invoice; Pending (dark red) once the patient is being treated or done and has none. A patient not seen yet (waiting,
   // booked) has an empty grey chip, like a row of the sheet that is not done yet: no invoice is due, so it says nothing
@@ -969,13 +992,12 @@ export async function renderSheet(root, params, signal) {
     const due = row.status === 'in_treatment' || row.status === 'completed';
     const cls = ['chip', 'chip-fill', due ? 'gs-darkred invoice-pending' : 'gs-grey invoice-none'];
     const words = due ? 'Pending' : srOnly('No invoice yet');
-    // Saved: the list is drawn again with this chip as Done, which is no button, so focus goes back to the row's name
-    // (backToRow). The dialog closes once onDone is over: the next task finds it closed.
-    const onDone = async () => { await load(); setTimeout(() => backToRow(row.id, 'invoice')); };
+    // Saved: the list is drawn again with this chip as Done, which is no button, so focus goes back to the row's name once the
+    // bill shown after saving is closed (billRow).
     return can('billing.create')
       ? h('button', {
         type: 'button', class: cls, 'aria-haspopup': 'dialog', 'aria-label': `${due ? 'Invoice pending' : 'No invoice yet'} for ${who}: make a new invoice`,
-        title: 'New invoice', dataset: { focus: 'invoice' }, onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone }),
+        title: 'New invoice', dataset: { focus: 'invoice' }, onclick: () => billRow(row, 'invoice'),
       }, words)
       : h('span', { class: cls }, words);
   }
@@ -1065,6 +1087,18 @@ export async function renderSheet(root, params, signal) {
     const medical = SHOW_MEDICAL_ON_LIST ? medicalText(row.patient) : '';
     const medicalFlag = medical ? h('span', { class: 'name-flags' }, h('span', { class: 'badge badge-warn', title: `Medical history: ${medical}` },
       h('span', { 'aria-hidden': 'true' }, 'Med'), srOnly('Medical'))) : null;
+    const nameBtn = h('button', {
+      type: 'button', class: 'link-btn name-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, onclick: () => openRow(row),
+      title: `${who}: actions, braces guidance and notes`,
+    },
+    h('span', { class: 'name-text' }, who),
+    medicalFlag,
+    h('span', { class: 'kebab', 'aria-hidden': 'true' }, '⋮'));
+    // Bill, beside the name: in the name column, which stays in sight at the left edge on a laptop and on a phone alike.
+    const bill = can('billing.create') ? h('button', {
+      type: 'button', class: 'bill-btn', 'aria-haspopup': 'dialog', 'aria-label': `Bill ${who}`, title: 'Bill: invoice, payment and the printed bill',
+      dataset: { focus: 'bill' }, onclick: () => billRow(row),
+    }, 'Bill') : null;
 
     return h('tr', { dataset: { id: row.id, n } },
       !branchId ? h('td', { class: 'branch-cell' }, cellText(branchName(row.branch_id))) : null,
@@ -1072,14 +1106,7 @@ export async function renderSheet(root, params, signal) {
       h('td', { class: 'mr-cell frozen' }, cellText(srOnly('Mr# '), row.patient.mr_number)),
       // The patient cell is the row's header (th scope=row). A click on the name opens the row's actions, with the patient's
       // flags (medical history, see Dr. Ali, dues) and the note.
-      h('th', { scope: 'row', class: 'frozen row-head name-col' },
-        h('button', {
-          type: 'button', class: 'link-btn name-btn', 'aria-haspopup': 'dialog', dataset: { focus: 'patient' }, onclick: () => openRow(row),
-          title: `${who}: actions, braces guidance and notes`,
-        },
-        h('span', { class: 'name-text' }, who),
-        medicalFlag,
-        h('span', { class: 'kebab', 'aria-hidden': 'true' }, '⋮'))),
+      h('th', { scope: 'row', class: 'frozen row-head name-col' }, bill ? h('div', { class: 'name-cell has-bill' }, nameBtn, bill) : nameBtn),
       h('td', {}, month),
       h('td', {}, typedCell(treatment)),
       h('td', { class: 'center' }, h('span', { class: 'token', title: arrived ? `Arrived ${arrived}` : null }, srOnly('Token '), row.token_no ?? srOnly('none'), arrived ? srOnly(`, arrived ${arrived}`) : null)),

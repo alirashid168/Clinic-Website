@@ -3385,13 +3385,16 @@ await step('busy day: after a row\'s dialog adds the Dr. Ali flag, an invoice fr
     await pb.waitForSelector('.modal', { state: 'detached' });
     assert.deepEqual(await focused(), [name, key], `${name}: back on the control that opened the dialog`);
   }
-  // a new invoice from the Pending chip, which turns Done (no button): back on the patient's name
+  // a new invoice from the Pending chip, which turns Done (no button): once the bill shown after saving is closed, back on the
+  // patient's name
   const r18 = rowOf('Sample Patient 018');
   await r18.locator('button.invoice-pending').focus();
   await pb.keyboard.press('Enter');
   await dialogs.getByLabel('Treatment, line 1').fill('Checkup');
-  await dialogs.getByLabel('Price (Rs), line 1').fill('1500');
-  await dialogs.getByRole('button', { name: 'Save invoice' }).click();
+  await dialogs.getByLabel('Rate (Rs), line 1').fill('1500');
+  await dialogs.getByRole('button', { name: 'Save', exact: true }).click();
+  await pb.locator('.modal h2', { hasText: /^Invoice INV-/ }).waitFor();
+  await pb.keyboard.press('Escape');
   await pb.waitForSelector('.modal', { state: 'detached' });
   await r18.locator('span.chip:text-is("Done")').waitFor();
   await pb.waitForFunction(() => document.activeElement?.matches('.name-btn') && document.activeElement.closest('tr').textContent.includes('Sample Patient 018'));
@@ -7981,6 +7984,180 @@ await step('End the day after midnight: a page opened before midnight says what 
   await m.waitFor({ state: 'detached' });
 });
 await pmid.close();
+
+// ------------------------------------------------------------- Bill on the Aaj ki List, the invoice form with the payment, the printed bill and
+// "Create ▾" (owner, 15 Oct 2026: "the add invoice button should be on the aaj ki list ... payment could be taken and an invoice bill printout
+// provided for the patient"; "a create button with drop down having patient, invoice and health record").
+const pbill = await newPage();
+// window.print stops a headless browser: it is replaced by one that keeps what would be on paper (only the .print-area sheets print).
+const stubPrint = (pg) => pg.evaluate(() => {
+  window.__printed = [];
+  window.print = () => { window.__printed.push({ printing: document.body.classList.contains('printing'), sheets: [...document.querySelectorAll('.print-area')].map((a) => a.innerText) }); window.dispatchEvent(new Event('afterprint')); };
+});
+const billingOf = (pg, mr) => pg.evaluate(async (mr) => {
+  const { state } = await import('/js/state.js');
+  const p = (await state.data.searchPatients(mr)).find((x) => x.mr_number === mr);
+  return state.data.patientBilling(p.id);
+}, mr);
+await step('Bill on the Aaj ki List (front desk): the invoice form for that patient at the list\'s branch, a treatment fills its rate, a part payment by card; Save & Print prints the bill with the patient, the invoice, the line, the totals, what was paid and is due and the payment mode; the invoice and the payment are on the patient\'s page', async () => {
+  await loginAs(pbill, 'Front desk \\(North Nazimabad\\)');
+  await stubPrint(pbill);
+  await pbill.goto(BASE + '#/staff/sheet');
+  const row = pbill.locator('table.sheet tbody tr', { hasText: 'Kinza Rauf' });
+  await row.getByRole('button', { name: 'Bill Kinza Rauf' }).click();
+  const m = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New invoice · Kinza Rauf' }) });
+  await m.waitFor();
+  assert.equal(await m.getByLabel('Branch').evaluate((s) => s.selectedOptions[0].textContent), 'North Nazimabad', 'the list\'s branch');
+  await m.getByLabel('Treatment, line 1').fill('RCT');
+  assert.equal(await m.getByLabel('Rate (Rs), line 1').inputValue(), '18000', 'the price list fills the rate');
+  assert.equal(await m.getByLabel('Payment (Rs)').inputValue(), '18000', 'the payment starts at the total');
+  await m.getByLabel('Description, line 1').fill('Upper right molar');
+  await m.getByLabel('Payment method').selectOption('card');
+  await m.getByLabel('Payment (Rs)').fill('5000');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Due Rs 13,000', 'what stays due, as it is typed');
+  await m.getByRole('button', { name: 'Save & Print' }).click();
+  const bill = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  const invoiceNo = (await bill.locator('h2').innerText()).replace('Invoice ', '');
+  await pbill.waitForFunction(() => window.__printed.length === 1);
+  const [printed] = await pbill.evaluate(() => window.__printed);
+  assert.ok(printed.printing && printed.sheets.length === 1, `one sheet on paper: ${JSON.stringify(printed)}`);
+  const paper = printed.sheets[0];
+  for (const re of [/Name: Kinza Rauf/, /MR#: 9825/, new RegExp(`Invoice#: ${invoiceNo}`), /Date: \d\d\/\d\d\/\d{4} - \d\d:\d\d [AP]M/, /RCT - Upper right molar\s+18,000\s+1\s+18,000/,
+    /Grand Total\s+Rs\. 18,000/, /Paid Amount\s+Rs\. 5,000/, /Due Amount\s+Rs\. 13,000/, /Payment Mode: Card/]) assert.match(paper, re);
+  assert.match(await bill.locator('.alert-info').innerText(), new RegExp(`Invoice ${invoiceNo} saved\\. Payment of Rs 5,000 saved\\.`));
+  await shot(pbill, '41-bill-printed');
+  // The receipt for the money taken is offered too; closing it comes back to the list.
+  await bill.getByRole('button', { name: 'Print receipt' }).click();
+  const receipt = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'Payment receipt' }) });
+  await receipt.waitFor();
+  assert.match(await receipt.innerText(), /Received\s+Rs 5,000/);
+  await receipt.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await pbill.waitForSelector('.modal', { state: 'detached' });
+  await pbill.waitForFunction(() => document.activeElement?.closest('tr')?.textContent.includes('Kinza Rauf'));
+  await row.locator('span.chip:text-is("Done")').waitFor();
+  assert.match(await row.locator('td.pp').innerText(), /^13k/, 'the row\'s P.P is what stays due');
+  // The patient's page: the invoice with what is unpaid on it, and the payment.
+  await pbill.goto(BASE + '#/staff/patients?q=9825');
+  await pbill.locator('table.list tbody tr', { hasText: 'Kinza Rauf' }).locator('a').first().click();
+  await pbill.waitForSelector('h1:has-text("Kinza Rauf")');
+  const money = pbill.locator('section.panel', { has: pbill.locator('h2', { hasText: 'Money' }) });
+  const line = money.locator('table.list').first().locator('tbody tr', { hasText: invoiceNo });
+  await line.waitFor();
+  assert.match(await line.innerText(), /Rs 13,000 unpaid[\s\S]*Rs 18,000/);
+  const { invoices, payments } = await billingOf(pbill, '9825');
+  const saved = invoices.find((i) => i.invoice_no === invoiceNo);
+  assert.equal(saved.visit_id && saved.branch_id, 2, 'for the visit on the list, at North Nazimabad');
+  assert.deepEqual(payments.filter((p) => p.invoice_id === saved.id).map((p) => [p.amount, p.method]), [[5000, 'card']], 'one card payment of Rs 5,000 on that invoice');
+});
+await step('Bill: Save pressed twice quickly makes one invoice and one payment; the bill opens without printing (no payment: "Not paid yet", all of it due)', async () => {
+  await pbill.goto(BASE + '#/staff/sheet');
+  const before = await billingOf(pbill, '9811');
+  const row = pbill.locator('table.sheet tbody tr', { hasText: 'Areeba Siddiqui' });
+  await row.getByRole('button', { name: 'Bill Areeba Siddiqui' }).click();
+  const m = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New invoice · Areeba Siddiqui' }) });
+  await m.getByLabel('Treatment, line 1').fill('Checkup');
+  await m.getByLabel('Payment (Rs)').fill('1500');
+  await m.getByRole('button', { name: 'Save', exact: true }).dblclick();
+  const bill = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  await pbill.waitForTimeout(300);
+  // (the second click lands where the bill's buttons are now: it is let go, so no receipt opens and the bill stays)
+  assert.deepEqual(await pbill.locator('.modal h2').allInnerTexts(), [await bill.locator('h2').innerText()], 'only the bill is open');
+  const after = await billingOf(pbill, '9811');
+  assert.equal(after.invoices.length, before.invoices.length + 1, 'one invoice');
+  assert.equal(after.payments.length, before.payments.length + 1, 'one payment');
+  assert.equal(await pbill.evaluate(() => window.__printed.length), 1, 'Save does not print (the one print is the first step\'s)');
+  await bill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  // Nothing paid now: the bill says so, and the whole total is due.
+  await row.getByRole('button', { name: 'Bill Areeba Siddiqui' }).click();
+  const m2 = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New invoice · Areeba Siddiqui' }) });
+  await m2.getByLabel('Treatment, line 1').fill('Scaling');
+  await m2.getByLabel('Payment (Rs)').fill('0');
+  assert.equal((await m2.locator('.bill-due').innerText()).trim(), 'Due Rs 4,000');
+  await m2.getByRole('button', { name: 'Save', exact: true }).click();
+  const bill2 = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill2.waitFor();
+  const text = await bill2.locator('.bill-sheet').innerText();
+  assert.match(text, /Payment Mode: Not paid yet/);
+  assert.match(text, /Paid Amount\s+Rs\. 0/);
+  assert.match(text, /Due Amount\s+Rs\. 4,000/);
+  assert.equal(await bill2.getByRole('button', { name: 'Print receipt' }).count(), 0, 'no receipt without a payment');
+  await bill2.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await pbill.waitForSelector('.modal', { state: 'detached' });
+});
+await step('Create ▾ (front desk): Invoice finds the patient by name, then the invoice form for them at the front desk\'s branch, for their visit on today\'s list; Patient opens the new-patient registration', async () => {
+  await pbill.locator('.create-btn').click();
+  assert.deepEqual(await pbill.locator('#create-menu-list button').allInnerTexts(), ['Patient', 'Invoice', 'Health record'], 'front desk: patients.create, billing.create and patients.edit');
+  await pbill.locator('#create-menu-list button', { hasText: 'Invoice' }).click();
+  const pick = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^New invoice$/ }) });
+  await pick.getByLabel('Search patients by name, Mr# or phone').fill('Hamza');
+  await pick.locator('[role=option]', { hasText: 'Hamza Qureshi' }).click();
+  const m = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New invoice · Hamza Qureshi' }) });
+  await m.waitFor();
+  assert.equal(await pick.count(), 0, 'the search dialog has closed');
+  assert.equal(await m.getByLabel('Branch').evaluate((s) => s.selectedOptions[0].textContent), 'North Nazimabad');
+  assert.equal(await m.getByLabel('Performed by').count(), 1, 'for their visit on today\'s list: "Performed by" (the visit\'s doctor)');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await pbill.waitForSelector('.modal', { state: 'detached' });
+  await pbill.locator('.create-btn').click();
+  await pbill.locator('#create-menu-list button', { hasText: 'Patient' }).click();
+  const reg = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New patient' }) });
+  await reg.waitFor();
+  await reg.getByRole('button', { name: 'Cancel' }).click();
+  await pbill.waitForSelector('.modal', { state: 'detached' });
+  // Not a menu page: "Arrange my menu" does not list it, and it is not in the menu bar's pages.
+  assert.equal(await pbill.locator('.topnav .create-menu').count(), 0);
+});
+await pbill.close();
+await step('Create ▾ per role: the assistant gets Health record only (and writes today\'s treatment details with it; the medical history is read-only for them), the accountant Invoice only, Dr. Ali all three', async () => {
+  const pr = await newPage();
+  const items = async () => { await pr.locator('.create-btn').click(); const t = await pr.locator('#create-menu-list button').allInnerTexts(); await pr.keyboard.press('Escape'); return t; };
+  await loginAs(pr, 'Assistant');
+  assert.deepEqual(await items(), ['Health record']);
+  await pr.locator('.create-btn').click();
+  await pr.locator('#create-menu-list button', { hasText: 'Health record' }).click();
+  const pick = pr.locator('.modal', { has: pr.locator('h2', { hasText: /^Health record$/ }) });
+  await pick.getByLabel('Search patients by name, Mr# or phone').fill('Kinza');
+  await pick.locator('[role=option]', { hasText: 'Kinza Rauf' }).click();
+  const hr = pr.locator('.modal', { has: pr.locator('h2', { hasText: 'Health record · Kinza Rauf' }) });
+  await hr.waitFor();
+  assert.ok(await hr.getByLabel('Allergies').isDisabled(), 'medical history: patients.edit only');
+  await hr.getByLabel('Treatment details').fill('U L 016 PC refresh');
+  await hr.getByRole('button', { name: 'Save' }).click();
+  await pr.waitForSelector('.toast:has-text("Health record saved for Kinza Rauf.")');
+  const details = await pr.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    return (await state.data.listVisits({ date: localISO() })).filter((v) => v.patient.full_name === 'Kinza Rauf').map((v) => v.details_text);
+  });
+  assert.deepEqual(details, ['U L 016 PC refresh'], 'saved on today\'s visit, as the Treatment Details cell of the list');
+  await tryAnotherRole(pr);
+  await loginAs(pr, 'Accountant');
+  assert.deepEqual(await items(), ['Invoice']);
+  await tryAnotherRole(pr);
+  await loginAs(pr, 'Dr. Ali Rashid');
+  assert.deepEqual(await items(), ['Patient', 'Invoice', 'Health record']);
+  await pr.close();
+});
+await step('Bill and Create on a phone: the Bill button is in sight beside the name without scrolling sideways, "Create" is a "+" in the top bar, and the page does not scroll sideways', async () => {
+  const pp = await newPage({ width: 390, height: 844 });
+  await loginAs(pp, 'Front desk \\(North Nazimabad\\)');
+  await pp.goto(BASE + '#/staff/sheet');
+  const bill = pp.getByRole('button', { name: 'Bill Kinza Rauf' });
+  await bill.waitFor();
+  const box = await bill.boundingBox();
+  assert.ok(box && box.x >= 0 && box.x + box.width <= 390, `Bill inside the screen: ${JSON.stringify(box)}`);
+  const plus = await pp.getByRole('button', { name: 'Create', exact: true }).boundingBox();
+  assert.ok(plus && plus.x + plus.width <= 390 && plus.width >= 40, `"+" in the top bar: ${JSON.stringify(plus)}`);
+  const search = await pp.locator('.topsearch').boundingBox();
+  assert.ok(search.width >= 120, `the search box keeps its room: ${search.width}`);
+  assert.ok(await pp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'no sideways scrolling');
+  await bill.click();
+  await pp.locator('.modal h2', { hasText: 'New invoice · Kinza Rauf' }).waitFor();
+  await shot(pp, '42-bill-form-phone');
+  await pp.close();
+});
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }
