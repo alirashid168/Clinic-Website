@@ -133,7 +133,12 @@ function seed() {
   const SAMPLE_PRICES = { Monthly: 5000, Bonding: 30000, 'Upper Bonding': 15000, 'Lower Bonding': 15000, 'Bracket Fix': 1000, 'Braces Scaling': 3000,
     'Braces Off': 10000, 'Retainer Impression': 2000, 'Retainer Pick': 8000, Checkup: 1500, Scaling: 4000, Filling: 5000, RCT: 18000, Extraction: 3000,
     'X-Ray / OPG': 1500, 'Crown Insertion': 20000, 'Veneers Insertion': 25000, 'Shape Modification': 5000, 'Hygiene Appointment': 3500, 'Pain / Emergency': 2000 };
-  for (const t of db.treatments) t.default_price = SAMPLE_PRICES[t.name] ?? null;
+  for (const t of db.treatments) { t.default_price = SAMPLE_PRICES[t.name] ?? null; t.price_list = false; }
+  // The price list (treatments.price_list): what is billed, with its own price. Made-up items and round prices, not the clinic's list
+  // (that is loaded into the live database by the clinic, never into this public repository).
+  [['Braces Kit (Metal, sample)', 50000, 'braces'], ['Braces Kit (Ceramic, sample)', 75000, 'braces'], ['Braces Kit (Self-ligating, sample)', 100000, 'braces'],
+    ['Braces Monthly Payment (sample)', 5000, 'braces'], ['Retainers, pair (sample)', 12000, 'retainer']]
+    .forEach(([name, price, category], i) => db.treatments.push({ id: db.treatments.length + 1, name, category, default_price: price, is_braces_monthly: false, active: true, price_list: true, sort_order: i + 1 }));
 
   db.expense_categories = ['Rent', 'Salaries', 'Doctor percentage', 'Dental supplies', 'Lab charges', 'Utilities (electricity, gas, water)',
     'Internet and phone', 'Maintenance and repairs', 'Marketing and ads', 'Taxes', 'Travel', 'Staff food and refreshments', 'Miscellaneous']
@@ -373,8 +378,17 @@ export function createDemoAdapter() {
   };
   const need = (key) => { if (!can(key)) fail('new row violates row-level security policy (' + key + ')'); };
   const branchOk = (branchId) => { const s = me(); return !!s && (s.role === 'admin' || !s.restrict_to_branches || s.branch_ids.includes(Number(branchId))); };
-  const audit = (table, action, row) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString() });
+  const audit = (table, action, row, before = null) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString(),
+    old_data: before ? clone(before) : null, new_data: action === 'DELETE' ? null : clone(row) });
   const patient = (id) => db.patients.find((p) => p.id === id);
+  // An invoice line as invoice_items keeps it (with its discount, its price-list item and who did it), and the database's line rules.
+  const lineRow = (it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price), discount_amount: Number(it.discount_amount || 0),
+    treatment_id: it.treatment_id ?? null, clinician_id: it.clinician_id ?? null });
+  const checkLines = (items, discount) => {
+    if (items.some((it) => Number(it.discount_amount || 0) < 0 || Number(it.discount_amount || 0) > Number(it.quantity || 1) * Number(it.unit_price || 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_discount_check"');
+    const onLines = items.reduce((s, it) => s + Number(it.discount_amount || 0), 0);
+    if (onLines > Number(discount || 0)) fail(`The discounts on the lines (Rs ${onLines}) are more than the invoice's discount (Rs ${Number(discount || 0)}). The invoice's discount includes its lines' discounts.`);
+  };
   const dues = (pid) => db.invoices.filter((i) => i.patient_id === pid && i.status === 'issued').reduce((s, i) => s + i.total, 0)
     - db.payments.filter((p) => p.patient_id === pid).reduce((s, p) => s + p.amount, 0);
   const activeFlag = (pid) => db.patient_flags.find((f) => f.patient_id === pid && !f.cleared_at) || null;
@@ -1187,9 +1201,10 @@ export function createDemoAdapter() {
       // The database refuses these (invoice_items.quantity > 0, invoices.discount_amount >= 0); an empty quantity still means 1.
       if (items.some((it) => it.quantity != null && it.quantity !== '' && !(Number(it.quantity) > 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_quantity_check"');
       if (Number(discount_amount) < 0) fail('new row for relation "invoices" violates check constraint "invoices_discount_amount_check"');
+      checkLines(items, discount_amount);
       const key = opts.idempotencyKey || idempotencyKey;
       const note = String(notes ?? '').trim() || null; // (save_invoice keeps the invoice note trimmed, an empty one as none)
-      const sig = JSON.stringify([patient_id, Number(branch_id), visit_id, Number(discount_amount) || 0, discount_reason, items.map((it) => [it.description, Number(it.quantity || 1), Number(it.unit_price)]), notes]);
+      const sig = JSON.stringify([patient_id, Number(branch_id), visit_id, Number(discount_amount) || 0, discount_reason, items.map((it) => [it.description, Number(it.quantity || 1), Number(it.unit_price), Number(it.discount_amount || 0), it.treatment_id ?? null, it.clinician_id ?? null]), notes]);
       const prior = key && db.invoices.find((i) => i.id === saved.get('invoice:' + key)?.id);
       if (prior) {
         if (saved.get('invoice:' + key).sig !== sig) fail(`IDEMPOTENCY_MISMATCH: an earlier attempt already saved invoice ${prior.invoice_no} with different details. Refresh the patient record and check it (void it if it is wrong) before saving again.`);
@@ -1202,8 +1217,7 @@ export function createDemoAdapter() {
       const inv = { id: uid(), invoice_no: 'INV-' + todayISO().slice(0, 4) + '-' + String(db.invoices.length + 1).padStart(6, '0'), patient_id,
         branch_id: Number(branch_id), visit_id, issue_date: todayISO(), subtotal, discount_amount: Number(discount_amount), discount_reason,
         total: Math.max(0, subtotal - Number(discount_amount)), status: pending ? 'pending_approval' : 'issued', template_key: 'classic', notes: note, created_at: new Date().toISOString(),
-        items: items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) })),
-        created_by: me().id };
+        items: items.map(lineRow), created_by: me().id };
       db.invoices.push(inv); audit('invoices', 'INSERT', inv);
       if (key) saved.set('invoice:' + key, { id: inv.id, sig });
       if (pending) db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: inv.discount_amount, reason: discount_reason, status: 'pending', created_at: new Date().toISOString() });
@@ -1218,7 +1232,7 @@ export function createDemoAdapter() {
       return clone(pay);
     },
     async patientBilling(patientId) {
-      need('billing.view');
+      if (!can('billing.view') && !can('billing.create') && !can('billing.edit')) need('billing.view');
       return { invoices: clone(db.invoices.filter((i) => i.patient_id === patientId)), payments: clone(db.payments.filter((x) => x.patient_id === patientId)) };
     },
     // ------------------------------------------------------------ installment plans
@@ -1259,7 +1273,56 @@ export function createDemoAdapter() {
       need('billing.edit');
       if (!reason) fail('A reason is required to void an invoice');
       const inv = db.invoices.find((i) => i.id === id);
-      inv.status = 'void'; inv.void_reason = reason; audit('invoices', 'UPDATE', inv);
+      const before = clone(inv);
+      inv.status = 'void'; inv.void_reason = reason; audit('invoices', 'UPDATE', inv, before);
+    },
+    /** As edit_invoice (20261015000900_billing_desk.sql): an issued invoice's lines, discounts and note, with the discount limits. */
+    async editInvoice(id, { items, discount_amount = 0, discount_reason = null, notes = null }) {
+      if (!can('billing.edit')) fail('NOT_ALLOWED: changing an invoice needs "Edit or void invoices" in the access list.');
+      const inv = db.invoices.find((i) => i.id === id);
+      if (!inv || !branchOk(inv.branch_id)) fail('This invoice was not found. Refresh the page.');
+      if (inv.status === 'void') fail('This invoice is void and cannot be changed.');
+      if (inv.status === 'pending_approval') fail('This invoice\'s discount is waiting for approval. Approve or reject the discount first, then change the invoice.');
+      if (!items?.length) fail('An invoice needs at least one line.');
+      if (items.some((it) => !(Number(it.quantity || 1) > 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_quantity_check"');
+      const off = Number(discount_amount) || 0;
+      checkLines(items, off);
+      if (off > inv.discount_amount && inv.discount_approved_by && !can('discount.approve')) fail('This invoice\'s discount was approved by the accountant or Dr. Ali. A bigger discount needs one of them.');
+      const before = clone(inv);
+      const subtotal = items.reduce((s, it) => s + Number(it.quantity || 1) * Number(it.unit_price || 0), 0);
+      const why = off > 0 ? (String(discount_reason ?? '').trim() || null) : null;
+      const note = String(notes ?? '').trim() || null;
+      const sameLines = JSON.stringify(inv.items.map(lineRow).map((x) => JSON.stringify(x)).sort()) === JSON.stringify(items.map(lineRow).map((x) => JSON.stringify(x)).sort());
+      if (sameLines && off === inv.discount_amount && why === (inv.discount_reason || null) && note === (inv.notes || null)) return clone(inv);
+      if (!sameLines) {
+        for (const it of inv.items) audit('invoice_items', 'DELETE', it, it);
+        inv.items = items.map((it) => ({ id: uid(), ...lineRow(it) }));
+        for (const it of inv.items) audit('invoice_items', 'INSERT', it);
+      }
+      // A discount made bigger than it was (in rupees, or as a share of the sub-total) is checked against the person's limit.
+      const bigger = off > 0 && (off > before.discount_amount || off * before.subtotal > before.discount_amount * subtotal);
+      const role = me().role;
+      Object.assign(inv, { subtotal, discount_amount: off, discount_reason: why, notes: note, total: Math.max(0, subtotal - off) });
+      if (bigger && discountNeedsApproval(role, subtotal, off, db.discount_caps[role], can('discount.approve'))) {
+        inv.status = 'pending_approval';
+        db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: off, reason: why, status: 'pending', created_at: new Date().toISOString() });
+      }
+      audit('invoices', 'UPDATE', inv, before);
+      return clone(inv);
+    },
+    /** A payment's method, amount, time or note (the "edit payments" policy: billing.edit at their branches; a refund needs billing.refund). */
+    async updatePayment(id, changes) {
+      need('billing.edit');
+      const pay = db.payments.find((p) => p.id === id);
+      if (!pay || !branchOk(pay.branch_id)) fail('new row violates row-level security policy (branch)');
+      const next = { ...pay, ...Object.fromEntries(Object.entries(changes).filter(([k]) => ['method', 'amount', 'received_at', 'notes'].includes(k))) };
+      next.amount = Number(next.amount);
+      if (!next.amount) fail('new row for relation "payments" violates check constraint "payments_amount_check"');
+      if (next.amount < 0 && !can('billing.refund')) fail('new row violates row-level security policy for table "payments"');
+      const before = clone(pay);
+      Object.assign(pay, next);
+      audit('payments', 'UPDATE', pay, before);
+      return clone(pay);
     },
     async discountRequests() {
       if (!can('discount.approve')) return [];

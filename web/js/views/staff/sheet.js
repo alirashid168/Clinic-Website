@@ -940,7 +940,6 @@ export async function renderSheet(root, params, signal) {
       // Bill: the invoice with the payment and the printed bill (the same as the Bill button on the row).
       can('billing.create') ? h('button', { class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: () => billRow(row) }, 'Bill') : null,
       can('photos.upload') ? h('button', { class: 'btn', onclick: uploadPhotos }, 'Upload photos') : null,
-      can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(row.patient, { branchId: row.branch_id, visitId: row.id, onDone: load }) }, 'New invoice') : null,
       can('billing.create') ? h('button', { class: 'btn', onclick: () => paymentModal(row.patient, { branchId: row.branch_id, dues: row.dues, onDone: load }) }, 'Take payment') : null,
       can('flags.raise') && !row.see_dr_ali ? h('button', { class: 'btn', onclick: () => flagForAliModal(row.patient, load) }, 'Next appointment with Dr. Ali') : null,
       // Close this dialog first, so the profile is not left underneath it.
@@ -1660,7 +1659,8 @@ export async function renderSheet(root, params, signal) {
     h('div', { class: 'sheet-subhead' }, countsBox, h('div', { class: 'sheet-slot' }, newRowsNote, h('div', { class: 'sheet-bars' }, failBox, undoBox, warnBox, offlineBox)), saveStatus),
     dayEnd.note,
     statusHint,
-    h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
+    // The visit types (the price list is for invoices: treatments.price_list).
+    h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.filter((t) => !t.price_list).map((t) => h('option', { value: t.name }))),
     h('datalist', { id: 'sheet-doctors' }, state.ref.clinicians.filter((c) => c.is_doctor).map((c) => h('option', { value: c.display_name }))),
     addPanel,
     h('div', { class: 'sheet-wrap', onkeydown: onKey },

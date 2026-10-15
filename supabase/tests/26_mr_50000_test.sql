@@ -130,11 +130,12 @@ select pg_temp.check((select count(*) from public.role_permissions) = (select co
   'the role grid has the same rows and exactly one cell changed');
 -- The database was built with this migration already applied, so "before" cannot be compared; the audit log remembers every change
 -- ever made to the grid instead: the only cells ever changed are the front desk's portal.invite and, since 20261015000500 (front desk makes
--- invoices and takes payments), the front desk's billing.create; no cell was ever removed.
+-- invoices and takes payments), the front desk's billing.create, and since 20261015000900 (the billing desk) the coordinator's
+-- billing.edit; no cell was ever removed.
 select pg_temp.check(not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'UPDATE'
-                                  and (new_data ->> 'role', new_data ->> 'permission_key') not in (('front_desk', 'portal.invite'), ('front_desk', 'billing.create')))
+                                  and (new_data ->> 'role', new_data ->> 'permission_key') not in (('front_desk', 'portal.invite'), ('front_desk', 'billing.create'), ('coordinator', 'billing.edit')))
                      and not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'DELETE'),
-  'the audit log shows no other grid cell was ever changed or removed: only the front desk''s portal.invite and billing.create');
+  'the audit log shows no other grid cell was ever changed or removed: only the front desk''s portal.invite and billing.create and the coordinator''s billing.edit');
 select pg_temp.check((select string_agg(role::text || '=' || allowed::text, ',' order by role::text) from public.role_permissions where permission_key = 'portal.invite')
                       = 'accountant=false,admin=true,assistant=false,coordinator=true,doctor=false,front_desk=true',
   'portal.invite: front desk, coordinator and admin yes; assistant, doctor and accountant still no');

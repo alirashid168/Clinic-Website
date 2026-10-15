@@ -1472,8 +1472,11 @@ export async function createSupabaseAdapter() {
      */
     async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, notes = null, idempotencyKey = null }, opts = {}) {
       const key = opts.idempotencyKey || idempotencyKey || null;
-      const lines = items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price) }));
-      // notes: the invoice note on the bill (save_invoice keeps it from 20261015000600_invoice_note.sql; before that it is not kept).
+      // Each line's discount (part of the invoice's discount_amount), price-list item and "Performed by" (20261015000900_billing_desk.sql;
+      // an older save_invoice leaves them out and still saves the invoice with its whole discount).
+      const lines = items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price),
+        discount_amount: Number(it.discount_amount || 0), treatment_id: it.treatment_id ?? null, clinician_id: it.clinician_id ?? null }));
+      // notes: the invoice note on the bill (save_invoice keeps it from 20261015000800_invoice_note.sql; before that it is not kept).
       const header = { patient_id, branch_id: Number(branch_id), visit_id, discount_amount: Number(discount_amount) || 0, discount_reason, notes: notes || null };
       const viaRpc = await rpc('save_invoice', { p_idempotency_key: key, p_invoice: header, p_items: lines });
       if (!viaRpc.missing) return viaRpc.data;
@@ -1516,7 +1519,7 @@ export async function createSupabaseAdapter() {
         inv.items = [];
         partial.set('invoice:' + key, { id: inv.id, sig });
       }
-      if (!inv.items?.length) check(await sb.from('invoice_items').insert(lines.map((it) => ({ invoice_id: inv.id, ...it }))));
+      if (!inv.items?.length) check(await sb.from('invoice_items').insert(lines.map((it) => ({ invoice_id: inv.id, description: it.description, quantity: it.quantity, unit_price: it.unit_price }))));
       if (edited) status = check(await sb.from('invoices').update({ discount_amount: header.discount_amount, discount_reason }).eq('id', inv.id).select('status').single()).status;
       if (status === 'draft') check(await sb.from('invoices').update({ status: 'issued' }).eq('id', inv.id));
       return full(inv.id);
@@ -1527,6 +1530,25 @@ export async function createSupabaseAdapter() {
     async voidInvoice(id, reason) {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
       check(await sb.from('invoices').update({ status: 'void', void_reason: reason?.trim() || null }).eq('id', id));
+    },
+    /**
+     * Changes an issued invoice's lines, discounts and note in one database call (edit_invoice, 20261015000900_billing_desk.sql): all or
+     * nothing, with the discount limits and their approval. The same edit sent again changes nothing, so a retry after a lost answer is safe.
+     */
+    async editInvoice(id, { items, discount_amount = 0, discount_reason = null, notes = null }) {
+      const lines = items.map((it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price),
+        discount_amount: Number(it.discount_amount || 0), treatment_id: it.treatment_id ?? null, clinician_id: it.clinician_id ?? null }));
+      const res = await rpc('edit_invoice', { p_invoice_id: id, p_invoice: { discount_amount: Number(discount_amount) || 0, discount_reason, notes }, p_items: lines });
+      if (res.missing) throw new Error('Changing an invoice needs the database update 20261015000900_billing_desk.sql. Ask for it to be run, then try again.');
+      return res.data;
+    },
+    /** A payment's method, amount, time or note ("edit payments": billing.edit at their branches; every change is in the audit log). */
+    async updatePayment(id, changes) {
+      const allowed = Object.fromEntries(Object.entries(changes).filter(([k]) => ['method', 'amount', 'received_at', 'notes'].includes(k)));
+      const rows = check(await sb.from('payments').update(allowed).eq('id', id).select());
+      // Row-level security hides a row this person may not change: the update then changes nothing and says nothing.
+      if (!rows?.length) throw new Error('This payment could not be changed: it is not at a branch you work at, or you may not edit payments.');
+      return rows[0];
     },
     // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
     async patientBilling(patientId) {

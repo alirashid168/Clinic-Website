@@ -33,7 +33,7 @@ export const PERMISSIONS = [
     { key: 'dues.override', label: 'Override the dues hold', category: 'Billing', defaults: [N, N, N, N, Y] },
     { key: 'billing.view', label: 'View invoices and payments', category: 'Billing', defaults: [Y, N, N, Y, Y] },
     { key: 'billing.create', label: 'Create invoices and take payments', category: 'Billing', defaults: [Y, N, N, N, Y] },
-    { key: 'billing.edit', label: 'Edit or void invoices', category: 'Billing', defaults: [N, N, N, N, Y] },
+    { key: 'billing.edit', label: 'Edit or void invoices', category: 'Billing', defaults: [N, N, N, Y, Y] },
     { key: 'billing.refund', label: 'Give refunds', category: 'Billing', defaults: [N, N, N, N, Y] },
     { key: 'discount.give', label: 'Give discounts within cap', category: 'Billing', defaults: [Y, N, N, N, Y] },
     { key: 'discount.approve', label: 'Approve discounts above cap', category: 'Billing', defaults: [N, N, N, N, Y] },

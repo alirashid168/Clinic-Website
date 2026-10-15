@@ -200,14 +200,179 @@ export function printInvoice(inv, patient, { patientView = state.session?.kind !
 }
 
 /**
- * New invoice for a patient, with the payment taken in the same dialog (owner, 15 Oct 2026, as Healthwire's "Create Invoice"):
- * lines picked from the clinic's treatments (the price list fills the rate), the discount, who did the treatment (a visit's doctor),
- * the money received now with what stays due (or is paid ahead), a note for the bill, then "Save" or "Save & Print". After saving,
- * the bill is shown with Print and, when money was taken, Print receipt; "Save & Print" prints it at once.
+ * What an invoice line can be (owner, 15 Oct 2026: "braces kit should be given separate amounts as they are different. please take all
+ * payments from the treatment price from healthwire"): the price list first (treatments.price_list: a name and its price), then the
+ * Aaj ki List's visit types that have a price. A visit type without a price is not something to bill.
+ */
+export function billableItems() {
+  const all = (state.ref.treatments || []).filter((t) => t.active !== false);
+  const priced = (t) => t.default_price !== null && t.default_price !== undefined && t.default_price !== '';
+  return [...all.filter((t) => t.price_list), ...all.filter((t) => !t.price_list && priced(t))];
+}
+
+const nameKey = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+let formNo = 0; // each form's own price-list id, so two forms never share one
+
+/**
+ * The lines, the discounts and the note of an invoice, as Healthwire's "Create Invoice" (owner, 15 Oct 2026: "quantity, price,
+ * description, discount and the total given below"): a line per treatment with Treatment (the price list, searchable: its price fills
+ * the rate), Description, Rate, Qty, Amount, Discount (Rs or %), Performed by (a doctor) and ×; "+ Add item"; the discount on the
+ * total (Rs or %) with its reason; the sub-total, the discount and the grand total; the invoice note. Used by the new invoice and by Edit.
  *
- * options: branchId, visitId (the Aaj ki List row it is for), visitStaff (that visit's people: its doctor is "Performed by"),
- * treatment (the row's treatment: the first line when it is on the price list), onDone(invoice) after saving, afterBill() once the
- * bill shown after saving is closed (or the form, when only the invoice was saved).
+ * items: the lines of an invoice being changed; treatment: the first line's treatment (when it is on the list); doctorId: the doctor a
+ * new line starts with; discount (the invoice's whole discount), reason, notes: an invoice being changed. onChange(totals) on every change.
+ * read() gives { errors, items, discount, reason, notes, total } as save_invoice and edit_invoice take them: the invoice's discount is
+ * the lines' discounts plus the discount on the total, and each line keeps its own (invoice_items.discount_amount).
+ */
+function invoiceEditor({ items = null, treatment = '', doctorId = '', discount = 0, reason = '', notes = '', onChange } = {}) {
+  const listId = `price-list-${++formNo}`;
+  const priceList = billableItems();
+  const byName = new Map(priceList.map((t) => [nameKey(t.name), t]));
+  const allById = new Map((state.ref.treatments || []).map((t) => [Number(t.id), t]));
+  const doctors = (state.ref.clinicians || []).filter((c) => c.is_doctor && c.active !== false);
+  // Giving a discount is for "Give discounts within cap"; someone without it (the coordinator changing an invoice) keeps the discounts as they are.
+  const mayDiscount = can('discount.give');
+  const lines = [];
+  const linesBox = h('div', { class: ['bill-lines', !mayDiscount && !items && 'no-discount'], role: 'group', 'aria-label': 'Invoice lines' },
+    h('div', { class: 'bill-line bill-line-head', 'aria-hidden': 'true' },
+      h('span', {}, 'Treatment'), h('span', {}, 'Description'), h('span', {}, 'Rate (Rs)'), h('span', {}, 'Qty'), h('span', { class: 'right' }, 'Amount'),
+      h('span', { class: 'bill-disc-head' }, 'Discount'), h('span', {}, 'Performed by'), h('span', {})));
+  const totalsEl = h('div', { class: 'bill-totals', 'aria-live': 'polite' });
+  const lineOffBefore = (items || []).reduce((s, it) => s + Number(it.discount_amount || 0), 0);
+  const totalOff = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', value: Math.max(0, Number(discount || 0) - lineOffBefore) || 0, 'aria-label': 'Total discount', disabled: !mayDiscount, oninput: () => recalc() });
+  const totalKind = select([{ value: 'rs', label: 'Rs' }, { value: 'pct', label: '%' }], 'rs', { 'aria-label': 'Total discount in Rs or %', disabled: !mayDiscount, onchange: () => recalc() });
+  const reasonIn = h('input', { value: reason || '', maxlength: 300, placeholder: 'Reason (needed for discounts)', disabled: !mayDiscount });
+  const noteIn = h('textarea', { rows: 2, maxlength: 1000, placeholder: 'Optional. Printed on the bill.' }, notes || '');
+
+  // An empty quantity means 1; a typed 0 or a negative number is an error (see read), never a line that counts backwards.
+  const qtyOf = (l) => (l.qty.value.trim() === '' ? 1 : Number(l.qty.value));
+  const amountOf = (l) => Math.max(0, qtyOf(l)) * Math.max(0, Number(l.price.value || 0));
+  // A discount typed as a % is turned into whole rupees of what it is a % of.
+  const offOf = (input, kind, of) => {
+    const v = Number(input.value || 0);
+    return kind.value === 'pct' ? Math.round((of * v) / 100) : v;
+  };
+  const lineOff = (l) => offOf(l.off, l.offKind, amountOf(l));
+  function totals() {
+    const sub = lines.reduce((s, l) => s + amountOf(l), 0);
+    const onLines = lines.reduce((s, l) => s + Math.max(0, lineOff(l)), 0);
+    const onTotal = Math.max(0, offOf(totalOff, totalKind, Math.max(0, sub - onLines)));
+    const off = onLines + onTotal;
+    return { sub, onLines, onTotal, off, total: Math.max(0, sub - off) };
+  }
+  function recalc() {
+    for (const l of lines) l.amount.textContent = rupees(amountOf(l));
+    const t = totals();
+    totalsEl.replaceChildren(
+      h('span', {}, `Sub-total ${rupees(t.sub)}`),
+      t.off ? h('span', {}, `Discount ${rupees(t.off)}`) : '',
+      h('strong', {}, `Grand total ${rupees(t.total)}`));
+    onChange?.(t);
+  }
+  // The price list's rate goes in when an item from it is chosen, unless a rate was typed for this line by hand.
+  function fillRate(line) {
+    const t = byName.get(nameKey(line.treat.value));
+    if (t && (line.auto || line.price.value === '')) {
+      line.price.value = String(Number(t.default_price ?? 0));
+      line.auto = true;
+    }
+    recalc();
+  }
+  const addBtn = h('button', { class: 'btn btn-small', type: 'button', onclick: () => addLine().treat.focus() }, '+ Add item');
+  function addLine(it = null) {
+    const n = lines.length + 1;
+    const line = { auto: false };
+    // A line being changed shows its price-list item by name (the description after it), and keeps the item it points at while that
+    // name is not changed (also an item since switched off, which is no longer on the list).
+    const known = it?.treatment_id ? allById.get(Number(it.treatment_id)) : null;
+    const desc = String(it?.description || '');
+    const treatName = known ? known.name : it ? desc : (byName.get(nameKey(treatment))?.name || '');
+    const rest = known && nameKey(desc).startsWith(nameKey(known.name)) ? desc.slice(known.name.length).replace(/^\s*-\s*/, '') : '';
+    line.keep = it?.treatment_id ? { id: Number(it.treatment_id), name: treatName } : null;
+    line.treat = h('input', { value: treatName, list: listId, autocomplete: 'off', placeholder: 'Search the price list', 'aria-label': `Treatment, line ${n}`, oninput: () => fillRate(line), onchange: () => fillRate(line) });
+    line.desc = h('input', { value: rest, autocomplete: 'off', placeholder: 'Description', maxlength: 300, 'aria-label': `Description, line ${n}` });
+    line.price = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', placeholder: 'Rate', value: it ? Number(it.unit_price) : '', 'aria-label': `Rate (Rs), line ${n}`, oninput: () => { line.auto = false; recalc(); } });
+    line.qty = h('input', { type: 'number', min: 1, value: it ? Number(it.quantity) : 1, inputmode: 'numeric', 'aria-label': `Qty, line ${n}`, oninput: () => recalc() });
+    line.amount = h('output', { class: 'right bill-amount', 'aria-label': `Amount, line ${n}` });
+    line.off = h('input', { type: 'number', min: 0, step: 100, inputmode: 'decimal', value: Number(it?.discount_amount || 0) || '', placeholder: 'Discount', disabled: !mayDiscount, 'aria-label': `Discount, line ${n}`, oninput: () => recalc() });
+    line.offKind = select([{ value: 'rs', label: 'Rs' }, { value: 'pct', label: '%' }], 'rs', { 'aria-label': `Discount in Rs or %, line ${n}`, disabled: !mayDiscount, onchange: () => recalc() });
+    const doc = it ? it.clinician_id || '' : doctorId || '';
+    const gone = doc && !doctors.some((c) => c.id === doc) ? [{ value: doc, label: 'A doctor no longer listed' }] : [];
+    line.doctor = select([{ value: '', label: 'Doctor not set' }, ...doctors.map((c) => ({ value: c.id, label: c.display_name })), ...gone], doc, { 'aria-label': `Performed by, line ${n}` });
+    line.row = h('div', { class: 'bill-line' }, line.treat, line.desc, line.price, line.qty, line.amount,
+      h('div', { class: 'bill-disc' }, line.off, line.offKind), line.doctor,
+      h('button', { type: 'button', class: 'icon-btn bill-remove', 'aria-label': `Remove line ${n}`, title: 'Remove this line', onclick: () => {
+        if (lines.length === 1) {
+          for (const k of ['treat', 'desc', 'price', 'off']) line[k].value = '';
+          line.qty.value = 1; line.auto = false; line.keep = null; recalc(); line.treat.focus(); return;
+        }
+        lines.splice(lines.indexOf(line), 1);
+        line.row.remove();
+        recalc();
+        addBtn.focus();
+      } }, h('span', { 'aria-hidden': 'true' }, '×')));
+    lines.push(line);
+    linesBox.append(line.row);
+    if (!it && treatName) fillRate(line); else recalc();
+    return line;
+  }
+  if (items?.length) for (const it of items) addLine(it); else addLine();
+
+  const el = h('div', { class: 'bill-editor' },
+    h('datalist', { id: listId }, priceList.map((t) => h('option', { value: t.name, label: rupees(t.default_price ?? 0) }))),
+    linesBox,
+    addBtn,
+    mayDiscount || Number(discount) > 0 ? h('div', { class: 'form-grid', style: { marginTop: '12px' } },
+      field('Discount on the total', h('div', { class: 'bill-discount' }, totalOff, totalKind),
+        mayDiscount ? 'Above your limit, it goes to the accountant or Dr. Ali for approval.' : 'Only staff who give discounts change them.'),
+      field('Discount reason', reasonIn, 'Needed when there is a discount.')) : null,
+    totalsEl,
+    field('Invoice note', noteIn));
+  recalc();
+
+  function read() {
+    const errors = [];
+    const filled = lines.filter((l) => l.treat.value.trim() || l.desc.value.trim());
+    for (const l of filled) {
+      if (l.price.value === '') errors.push({ input: l.price, message: 'Enter a rate for this treatment.' });
+      else if (!(Number(l.price.value) >= 0)) errors.push({ input: l.price, message: 'The rate cannot be negative.' });
+      if (!(qtyOf(l) > 0)) errors.push({ input: l.qty, message: 'The quantity must be more than 0.' });
+      const off = lineOff(l);
+      if (off < 0) errors.push({ input: l.off, message: 'The discount cannot be negative.' });
+      else if (l.offKind.value === 'pct' && Number(l.off.value) > 100) errors.push({ input: l.off, message: 'The discount cannot be more than 100%.' });
+      else if (off > amountOf(l)) errors.push({ input: l.off, message: `The discount cannot be more than this line's amount (${rupees(amountOf(l))}).` });
+    }
+    if (!filled.length) errors.push({ input: lines[0].treat, message: 'Add at least one treatment with a rate.' });
+    const t = totals();
+    const typed = offOf(totalOff, totalKind, Math.max(0, t.sub - t.onLines));
+    // A Rs 0 invoice is allowed (owner, 2026-10-08): complimentary treatment is recorded that way.
+    if (typed < 0) errors.push({ input: totalOff, message: 'The discount cannot be negative.' });
+    else if (totalKind.value === 'pct' && Number(totalOff.value) > 100) errors.push({ input: totalOff, message: 'The discount cannot be more than 100%.' });
+    else if (!errors.length && t.off > t.sub) errors.push({ input: totalOff, message: `The discount cannot be more than the sub-total (${rupees(t.sub)}).` });
+    if (t.off > 0 && mayDiscount && !reasonIn.value.trim()) errors.push({ input: reasonIn, message: 'Write a reason for the discount.' });
+    const out = filled.map((l) => {
+      const hit = byName.get(nameKey(l.treat.value));
+      const treatmentId = hit ? Number(hit.id) : l.keep && nameKey(l.keep.name) === nameKey(l.treat.value) ? l.keep.id : null;
+      return {
+        description: [l.treat.value.trim(), l.desc.value.trim()].filter(Boolean).join(' - '), quantity: qtyOf(l), unit_price: Number(l.price.value),
+        discount_amount: Math.max(0, lineOff(l)), treatment_id: treatmentId, clinician_id: l.doctor.value || null,
+      };
+    });
+    return { errors, items: out, discount: t.off, reason: t.off > 0 ? reasonIn.value.trim() || null : null, notes: noteIn.value.trim() || null, total: t.total };
+  }
+  const lock = () => { for (const x of el.querySelectorAll('input, select, textarea, button')) x.disabled = true; };
+  return { el, read, totals, lock, first: () => lines[0].treat };
+}
+
+/**
+ * New invoice for a patient, with the payment taken in the same dialog (owner, 15 Oct 2026, as Healthwire's "Create Invoice"):
+ * the lines (invoiceEditor: the price list fills the rate; a discount and "Performed by" per line), the discount on the total, the
+ * money received now with what stays due (or is paid ahead), a note for the bill, then "Save" or "Save & Print". After saving, the
+ * bill is shown with Print and, when money was taken, Print receipt; "Save & Print" prints it at once.
+ *
+ * options: branchId, visitId (the Aaj ki List row it is for), visitStaff (that visit's people: its doctor starts every line's
+ * "Performed by"), treatment (the row's treatment: the first line when it is on the price list), onDone(invoice) after saving,
+ * afterBill() once the bill shown after saving is closed (or the form, when only the invoice was saved).
  *
  * A slow line or a double click never makes a second invoice or a second payment: the invoice has one idempotency key per opened
  * form (save_invoice); once it is saved the form keeps it and only the payment is left to save, and a payment whose answer was lost
@@ -220,96 +385,21 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
   let who = patient;
   const details = billPatient(patient).then((p) => { who = p || patient; });
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
-  const treatments = state.ref.treatments || [];
-  const byName = new Map(treatments.map((t) => [String(t.name).trim().toLowerCase(), t]));
-  const lines = [];
-  const linesBox = h('div', { class: 'bill-lines', role: 'group', 'aria-label': 'Invoice lines' },
-    h('div', { class: 'bill-line bill-line-head', 'aria-hidden': 'true' },
-      h('span', {}, 'Treatment'), h('span', {}, 'Description'), h('span', {}, 'Qty'), h('span', {}, 'Rate (Rs)'), h('span', { class: 'right' }, 'Amount'), h('span', {})));
-  const totalsEl = h('div', { class: 'bill-totals', 'aria-live': 'polite' });
   const dueEl = h('div', { class: 'bill-due', 'aria-live': 'polite' });
-  const discount = h('input', { type: 'number', min: 0, step: 100, value: 0, 'aria-label': 'Discount', oninput: () => recalc() });
-  const discountKind = select([{ value: 'rs', label: 'Rs' }, { value: 'pct', label: '%' }], 'rs', { 'aria-label': 'Discount in Rs or %', onchange: () => recalc() });
-  const reason = h('input', { placeholder: 'Reason (needed for discounts)' });
-  const doctors = (state.ref.clinicians || []).filter((c) => c.is_doctor);
-  const onVisit = (id) => (visitStaff || []).some((s) => s.role === 'doctor' && s.clinician_id === id);
-  // "Performed by": the invoice has no place for a doctor, the visit has (its Doctor Name on the Aaj ki List), so it shows only for a visit.
-  const performer = visitId && doctors.length
-    ? select([{ value: '', label: 'Not set' }, ...doctors.map((c) => ({ value: c.id, label: c.display_name }))], (visitStaff || []).find((s) => s.role === 'doctor')?.clinician_id || '')
-    : null;
   const method = select(PAY_METHODS, 'cash');
   let paidTyped = false; // the amount follows the total until it is typed in
-  const paidNow = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', oninput: () => { paidTyped = true; recalc(); } });
-  const note = h('textarea', { rows: 2, maxlength: 1000, placeholder: 'Optional. Printed on the bill.' });
-
-  // An empty quantity means 1; a typed 0 or a negative number is an error (see Save), never a line that counts backwards.
-  const qtyOf = (l) => (l.qty.value.trim() === '' ? 1 : Number(l.qty.value));
-  const amountOf = (l) => Math.max(0, qtyOf(l)) * Math.max(0, Number(l.price.value || 0));
-  const subtotalOf = () => lines.reduce((s, l) => s + amountOf(l), 0);
-  const discountOf = (sub) => {
-    if (!can('discount.give')) return 0;
-    const v = Number(discount.value || 0);
-    return discountKind.value === 'pct' ? Math.round((sub * v) / 100) : v;
-  };
-  function recalc() {
-    for (const l of lines) l.amount.textContent = rupees(amountOf(l));
-    const sub = subtotalOf();
-    const off = Math.max(0, discountOf(sub));
-    const total = Math.max(0, sub - off);
-    if (!paidTyped) paidNow.value = String(total);
-    totalsEl.replaceChildren(
-      h('span', {}, `Sub-total ${rupees(sub)}`),
-      off ? h('span', {}, `Discount ${rupees(off)}`) : '',
-      h('strong', {}, `Total ${rupees(total)}`));
+  let total = 0;
+  const showDue = () => {
     const paid = Math.max(0, Number(paidNow.value || 0));
     dueEl.textContent = paid < total ? `Due ${rupees(total - paid)}` : paid > total ? `Advance ${rupees(paid - total)} (counts towards the next invoice)` : 'Paid in full';
     dueEl.className = ['bill-due', paid < total ? 'status-bad' : 'status-ok'].join(' ');
-  }
-  // The price list's rate goes in when a treatment from it is chosen, unless a rate was typed for this line by hand.
-  function fillRate(line) {
-    const t = byName.get(line.treat.value.trim().toLowerCase());
-    if (t && t.default_price !== null && t.default_price !== undefined && (line.auto || line.price.value === '')) {
-      line.price.value = String(Number(t.default_price));
-      line.auto = true;
-    }
-    recalc();
-  }
-  const addBtn = h('button', { class: 'btn btn-small', type: 'button', onclick: () => addLine().treat.focus() }, '+ Add item');
-  function addLine(name = '') {
-    const n = lines.length + 1;
-    const line = { auto: false };
-    line.treat = h('input', { value: name, list: 'treatment-list', autocomplete: 'off', placeholder: 'Search treatment', 'aria-label': `Treatment, line ${n}`, oninput: () => fillRate(line), onchange: () => fillRate(line) });
-    line.desc = h('input', { autocomplete: 'off', placeholder: 'Description', maxlength: 300, 'aria-label': `Description, line ${n}` });
-    line.qty = h('input', { type: 'number', min: 1, value: 1, inputmode: 'numeric', 'aria-label': `Qty, line ${n}`, oninput: () => recalc() });
-    line.price = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', placeholder: 'Rate', 'aria-label': `Rate (Rs), line ${n}`, oninput: () => { line.auto = false; recalc(); } });
-    line.amount = h('output', { class: 'right', 'aria-label': `Amount, line ${n}` });
-    line.row = h('div', { class: 'bill-line' }, line.treat, line.desc, line.qty, line.price, line.amount,
-      h('button', { type: 'button', class: 'icon-btn bill-remove', 'aria-label': `Remove line ${n}`, title: 'Remove this line', onclick: () => {
-        if (lines.length === 1) { for (const k of ['treat', 'desc', 'price']) line[k].value = ''; line.qty.value = 1; line.auto = false; recalc(); line.treat.focus(); return; }
-        lines.splice(lines.indexOf(line), 1);
-        line.row.remove();
-        recalc();
-        addBtn.focus();
-      } }, h('span', { 'aria-hidden': 'true' }, '×')));
-    lines.push(line);
-    linesBox.append(line.row);
-    if (name) fillRate(line); else recalc();
-    return line;
-  }
-  // The row's treatment starts the first line when it is on the price list (its name as the price list writes it).
-  addLine(byName.get(String(treatment || '').trim().toLowerCase())?.name || '');
-
-  const invoicePart = h('div', {},
-    h('datalist', { id: 'treatment-list' }, treatments.map((t) => h('option', { value: t.name }))),
-    h('div', { class: 'form-grid' }, field('Branch', branchSel),
-      performer ? field('Performed by', performer, 'Put on this visit as its doctor (Doctor Name on the Aaj ki List).') : null),
-    linesBox,
-    addBtn,
-    can('discount.give') ? h('div', { class: 'form-grid', style: { marginTop: '12px' } },
-      field('Discount', h('div', { class: 'bill-discount' }, discount, discountKind), 'Above your limit, it goes to the accountant or Dr. Ali for approval.'),
-      field('Discount reason', reason, 'Needed when there is a discount.')) : null,
-    totalsEl,
-    field('Invoice note', note));
+  };
+  const paidNow = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', oninput: () => { paidTyped = true; showDue(); } });
+  const editor = invoiceEditor({
+    treatment, doctorId: (visitStaff || []).find((s) => s.role === 'doctor')?.clinician_id || '',
+    onChange: (t) => { total = t.total; if (!paidTyped) paidNow.value = String(total); showDue(); },
+  });
+  const invoicePart = h('div', {}, h('div', { class: 'form-grid' }, field('Branch', branchSel)), editor.el);
   const savedLine = h('p', { class: 'alert alert-info', hidden: true, role: 'status' });
   const body = h('div', { class: 'bill-form' },
     savedLine,
@@ -317,18 +407,18 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
     h('fieldset', { class: 'bill-pay' }, h('legend', {}, 'Payment now'),
       h('div', { class: 'form-grid' }, field('Payment method', method), field('Payment (Rs)', paidNow, 'What the patient pays now. Less is fine; 0 when nothing is paid now.')),
       dueEl));
-  recalc();
+  showDue();
 
   let stuck = null; // the message of an IDEMPOTENCY_MISMATCH: this form's key is used up, so Save is refused until a new form is opened
   let inv = null; // the saved invoice: Save again only finishes the payment
   let pay = null; // the saved payment
   let payUnsure = false; // a payment was sent and its answer was lost: it may be saved
-  let doctorDone = false;
   let finished = false;
   let print = false;
   let savedWords = '';
   const lockInvoice = () => {
-    for (const el of invoicePart.querySelectorAll('input, select, textarea, button')) el.disabled = true;
+    editor.lock();
+    branchSel.disabled = true;
     savedLine.textContent = `Invoice ${inv.invoice_no} is saved. Only the payment is left: press Save again, or Cancel and use Take payment later.`;
     savedLine.hidden = false;
   };
@@ -336,33 +426,16 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
   async function save(andPrint) {
     if (stuck) { toast(stuck, 'error', 10000); return false; }
     clearFieldErrors(body);
-    const errors = [];
     const paidText = paidNow.value.trim();
     const paid = paidText === '' ? 0 : Number(paidText);
-    const filled = lines.filter((l) => l.treat.value.trim() || l.desc.value.trim());
-    if (!inv) {
-      for (const l of filled) {
-        if (l.price.value === '') errors.push({ input: l.price, message: 'Enter a rate for this treatment.' });
-        else if (!(Number(l.price.value) >= 0)) errors.push({ input: l.price, message: 'The rate cannot be negative.' });
-        if (!(qtyOf(l) > 0)) errors.push({ input: l.qty, message: 'The quantity must be more than 0.' });
-      }
-      if (!filled.length) errors.push({ input: lines[0].treat, message: 'Add at least one treatment with a rate.' });
-      const sub = subtotalOf();
-      const off = discountOf(sub);
-      // A Rs 0 invoice is allowed (owner, 2026-10-08): complimentary treatment is recorded that way. Prices and
-      // quantities still cannot be negative or zero-quantity, and the database requires subtotal >= 0.
-      if (off < 0) errors.push({ input: discount, message: 'The discount cannot be negative.' });
-      else if (discountKind.value === 'pct' && Number(discount.value) > 100) errors.push({ input: discount, message: 'The discount cannot be more than 100%.' });
-      else if (!errors.length && off > sub) errors.push({ input: discount, message: `The discount cannot be more than the subtotal (${rupees(sub)}).` });
-      if (off > 0 && !reason.value.trim()) errors.push({ input: reason, message: 'Write a reason for the discount.' });
-    }
+    const form = inv ? null : editor.read();
+    const errors = form ? [...form.errors] : [];
     if (!(paid >= 0)) errors.push({ input: paidNow, message: 'The payment cannot be negative. Write 0 when nothing is paid now.' });
     if (errors.length) { showFormErrors(body, errors); return false; }
 
     if (!inv) {
-      const items = filled.map((l) => ({ description: [l.treat.value.trim(), l.desc.value.trim()].filter(Boolean).join(' - '), quantity: qtyOf(l), unit_price: Number(l.price.value) }));
       try {
-        const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items, discount_amount: discountOf(subtotalOf()), discount_reason: reason.value.trim() || null, visit_id: visitId || null, notes: note.value.trim() || null };
+        const payload = { patient_id: patient.id, branch_id: Number(branchSel.value), items: form.items, discount_amount: form.discount, discount_reason: form.reason, visit_id: visitId || null, notes: form.notes };
         // The key goes in the options argument (data contract); it is also on the payload for adapters that read it there.
         inv = await d.createInvoice({ ...payload, idempotencyKey }, { idempotencyKey });
       } catch (e) {
@@ -372,13 +445,6 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
         return false;
       }
       lockInvoice();
-    }
-    // Who did the treatment goes on the visit (once; nothing is added when that doctor is on it already).
-    if (performer?.value && !doctorDone) {
-      doctorDone = true;
-      if (!onVisit(performer.value)) {
-        try { await d.setVisitStaff(visitId, performer.value, 'doctor'); } catch (e) { toast(`Invoice ${inv.invoice_no} is saved, but the doctor was not put on the visit: ${friendlyError(e)}`, 'error', 10000); }
-      }
     }
     if (paid > 0 && !pay) {
       try {
@@ -407,15 +473,96 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
     { label: 'Save', onClick: () => save(false) },
     { label: 'Save & Print', primary: true, onClick: () => save(true) },
   ], {
-    initialFocus: lines[0].treat,
+    initialFocus: editor.first(),
     onClose: () => {
       // Saved: the bill, with Print (and Print receipt for the money taken); "Save & Print" prints it at once.
       if (finished) {
-        const total = Number(inv.total ?? inv.subtotal - inv.discount_amount);
-        printInvoice(inv, who, { payments: pay ? [pay] : [], receipt: pay ? { payment: pay, due: Math.max(0, total - Number(pay.amount)) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
+        const due = Number(inv.total ?? inv.subtotal - inv.discount_amount);
+        printInvoice(inv, who, { payments: pay ? [pay] : [], receipt: pay ? { payment: pay, due: Math.max(0, due - Number(pay.amount)) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
       } else if (inv) afterSave(onDone, inv).then(() => afterBill?.()); // the invoice was saved, the payment was not: the page still shows the new invoice
     },
   });
+}
+
+/**
+ * Edit an issued invoice (owner, 15 Oct 2026: "admin and accounts should have edit button ... and also clinic coordinator should have
+ * this option to edit the invoice"): its lines, discounts and note, for "Edit or void invoices" (billing.edit). One database call
+ * (edit_invoice) changes it all or nothing; the discount limits and their approval apply as for a new invoice (a discount made bigger
+ * than the person's limit waits for approval), and the change is in the audit log. The payments on it stay as they are.
+ */
+export function editInvoiceModal(inv, patient, { onDone } = {}) {
+  const editor = invoiceEditor({ items: inv.items || [], discount: inv.discount_amount, reason: inv.discount_reason, notes: inv.notes });
+  const body = h('div', { class: 'bill-form' },
+    h('p', { class: 'muted' }, `${patient?.full_name || ''}${patient?.mr_number ? ` · Mr# ${patient.mr_number}` : ''} · ${branchName(inv.branch_id) || ''} · ${shortDate(inv.issue_date)}. Payments on this invoice stay as they are. The change is kept in the audit log.`),
+    editor.el);
+  modal(`Edit invoice ${inv.invoice_no}`, body, [
+    { label: 'Cancel' },
+    { label: 'Save changes', primary: true, onClick: async () => {
+      clearFieldErrors(body);
+      const form = editor.read();
+      if (form.errors.length) { showFormErrors(body, form.errors); return false; }
+      let out;
+      try {
+        out = await state.data.editInvoice(inv.id, { items: form.items, discount_amount: form.discount, discount_reason: form.reason, notes: form.notes });
+      } catch (e) { toast(saveFailure(e, 'invoices').text, 'error', 10000); return false; }
+      toast(out?.status === 'pending_approval' ? `Invoice ${inv.invoice_no} saved. The discount is waiting for approval.` : `Invoice ${inv.invoice_no} saved.`, 'ok');
+      await afterSave(onDone, out);
+      return undefined;
+    } },
+  ], { initialFocus: editor.first() });
+}
+
+// A payment's time as the form shows it (Karachi, to the minute) and back: "2026-10-15T17:02" <-> an ISO timestamp.
+function karachiInput(ts) {
+  const parts = {};
+  for (const p of new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Karachi', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(ts))) parts[p.type] = p.value;
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+const fromKarachiInput = (v) => new Date(`${v}:00+05:00`).toISOString();
+
+/**
+ * Edit a payment (owner, 15 Oct 2026: "if we enter cash payment as card or vice versa, it creates a problem. so edit option should be
+ * given"): its method, amount, date and time, and note, for "Edit or void invoices" (billing.edit). Only what was changed is sent; the
+ * change is in the audit log. A refund stays a refund (its amount is changed as what was given back).
+ */
+export function editPaymentModal(pay, patient, { onDone } = {}) {
+  const refund = Number(pay.amount) < 0;
+  const known = PAY_METHODS.some((m) => m.value === pay.method);
+  const method = select(known ? PAY_METHODS : [...PAY_METHODS, { value: pay.method, label: METHOD_WORDS[pay.method] || pay.method }], pay.method);
+  const amount = h('input', { type: 'number', min: 1, step: 100, inputmode: 'decimal', value: Math.abs(Number(pay.amount)) });
+  const startedAt = pay.received_at ? karachiInput(pay.received_at) : '';
+  const when = h('input', { type: 'datetime-local', value: startedAt, step: 60 });
+  const notes = h('input', { value: pay.notes || '', maxlength: 500, placeholder: 'Optional' });
+  const body = h('div', {},
+    h('p', { class: 'muted' }, `${patient?.full_name || ''}${patient?.mr_number ? ` · Mr# ${patient.mr_number}` : ''}. The change is kept in the audit log.`),
+    h('div', { class: 'form-grid' },
+      field('Method', method),
+      field(refund ? 'Amount given back (Rs)' : 'Amount (Rs)', amount, null, { required: true }),
+      field('Date and time', when, 'Karachi time.'),
+      field('Note', notes)));
+  modal(`Edit ${refund ? 'refund' : 'payment'} · ${rupees(Math.abs(Number(pay.amount)))} ${METHOD_WORDS[pay.method] || pay.method}`, body, [
+    { label: 'Cancel' },
+    { label: 'Save changes', primary: true, onClick: async () => {
+      clearFieldErrors(body);
+      const value = Number(amount.value);
+      const errors = [];
+      if (!(value > 0)) errors.push({ input: amount, message: 'Enter an amount above zero.' });
+      if (!when.value) errors.push({ input: when, message: 'Choose the date and time the money was received.' });
+      if (errors.length) { showFormErrors(body, errors); return false; }
+      const changes = {};
+      if (method.value !== pay.method) changes.method = method.value;
+      const signed = refund ? -value : value;
+      if (signed !== Number(pay.amount)) changes.amount = signed;
+      if (when.value !== startedAt) changes.received_at = fromKarachiInput(when.value);
+      if ((notes.value.trim() || null) !== (pay.notes || null)) changes.notes = notes.value.trim() || null;
+      if (!Object.keys(changes).length) { toast('Nothing was changed.'); return undefined; }
+      try { await state.data.updatePayment(pay.id, changes); } catch (e) { toast(friendlyError(e), 'error', 10000); return false; }
+      toast(changes.method ? `Payment saved as ${METHOD_WORDS[changes.method] || changes.method}.` : 'Payment saved.', 'ok');
+      await afterSave(onDone);
+      return undefined;
+    } },
+  ], { initialFocus: method });
 }
 
 /** Issued invoices with what is still unpaid on each (payments are matched to invoices when taken). */

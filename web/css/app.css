@@ -1591,27 +1591,50 @@ table.invoice-lines input { min-width: 0; }
 
 /* ------------------------------------------------------------ Bill (owner, 15 Oct 2026): the invoice form with the payment, the
    printed bill and the top bar's "Create ▾". */
-/* The form, as Healthwire's "Create Invoice": a line per treatment (treatment, description, qty, rate, amount, ×), the totals, the
-   payment now with what stays due. On a phone each line is three rows: treatment, description, then qty, rate, amount and ×. */
-.modal:has(.bill-form), .modal:has(.bill-sheet) { width: min(880px, 100%); }
+/* The form, as Healthwire's "Create Invoice": a line per treatment (treatment, description, rate, qty, amount, discount, performed by,
+   ×), the totals, the payment now with what stays due. Narrower than a laptop each line is four rows: treatment and ×, description,
+   rate, qty and amount, then discount and performed by. */
+.modal:has(.bill-form) { width: min(1120px, 100%); }
+.modal:has(.bill-sheet) { width: min(880px, 100%); }
 .bill-lines { display: grid; gap: var(--space-2); margin: var(--space-3) 0 var(--space-2); }
-.bill-line { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.6fr) 4.5rem 7.5rem 7rem 2.75rem; gap: var(--space-2); align-items: center; }
-.bill-line input { min-width: 0; }
+.bill-line {
+  display: grid; gap: var(--space-2); align-items: center;
+  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 5.5rem 3.75rem 6rem 10.75rem minmax(0, 1.6fr) 2.75rem;
+  grid-template-areas: "treat desc rate qty amount disc doc rm";
+}
+.bill-line > :nth-child(1) { grid-area: treat; }
+.bill-line > :nth-child(2) { grid-area: desc; }
+.bill-line > :nth-child(3) { grid-area: rate; }
+.bill-line > :nth-child(4) { grid-area: qty; }
+.bill-line > :nth-child(5) { grid-area: amount; }
+.bill-line > :nth-child(6) { grid-area: disc; }
+.bill-line > :nth-child(7) { grid-area: doc; }
+.bill-line > :nth-child(8) { grid-area: rm; }
+.bill-line input, .bill-line select { min-width: 0; width: 100%; }
 .bill-line-head { font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
 .bill-line output { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.bill-disc { display: flex; gap: 4px; min-width: 0; }
+.bill-disc input { flex: 1 1 auto; }
+.bill-disc select { flex: 0 0 3.6rem; width: 3.6rem; padding-inline: 6px; }
+.bill-disc input { padding-inline: 10px; }
+/* Someone who may not give discounts: the column stays (the lines keep their shape) but holds nothing. */
+.bill-lines.no-discount :is(.bill-disc, .bill-disc-head) { visibility: hidden; }
 .bill-remove { min-width: 40px; min-height: 40px; font-size: var(--fs-xl); }
 .bill-discount { display: flex; gap: var(--space-2); }
 .bill-discount input { flex: 1 1 auto; min-width: 0; }
 .bill-discount select { flex: 0 0 5rem; }
+@media (max-width: 1000px) {
+  .bill-line-head { display: none; }
+  .bill-line {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 2.75rem;
+    grid-template-areas: "treat treat treat rm" "desc desc desc desc" "rate qty amount amount" "disc disc doc doc";
+    padding-bottom: var(--space-2); border-bottom: 1px solid var(--border);
+  }
+}
 .bill-totals { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1) var(--space-4); margin: var(--space-3) 0; font-variant-numeric: tabular-nums; }
 .bill-pay { margin: var(--space-3) 0 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-m); min-width: 0; }
 .bill-pay legend { padding: 0 var(--space-1); font-weight: 700; }
 .bill-due { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
-@media (max-width: 640px) {
-  .bill-line-head { display: none; }
-  .bill-line { grid-template-columns: 4rem minmax(0, 1fr) minmax(0, 1fr) 2.75rem; padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
-  .bill-line > input:nth-child(1), .bill-line > input:nth-child(2) { grid-column: 1 / -1; }
-}
 /* The printed bill (A4), on white paper also in dark mode: the clinic's mark and name centred, a rule, the patient and the invoice, a
    rule, the boxed lines, the totals on the right with the payment mode on their left. */
 .invoice-sheet.bill-sheet { max-width: 794px; padding: var(--space-8); background: #ffffff; color: #1b1b1b; font-size: 14px; line-height: 1.45; }
@@ -1662,6 +1685,7 @@ table.sheet .name-cell.has-bill .name-btn { flex: 1 1 auto; min-width: 0; width:
 .topbar .create-btn { border: 1px solid var(--on-dark-control-border); }
 .create-plus { display: none; }
 .pick-patient { min-height: 18rem; }
+.audit-change { font-size: var(--fs-xs); overflow-wrap: anywhere; }
 @media not all and (min-width: 73.75em) {
   .topbar .create-btn { justify-content: center; min-width: var(--target); padding-inline: var(--space-2); }
   .create-btn .create-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }

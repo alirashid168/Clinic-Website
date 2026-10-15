@@ -1,4 +1,4 @@
--- The invoice note (20261015000600_invoice_note.sql): save_invoice keeps the note the front desk writes on the bill, an empty
+-- The invoice note (20261015000800_invoice_note.sql): save_invoice keeps the note the front desk writes on the bill, an empty
 -- note is kept as none, and the note is one of the details a retry must repeat (another note with the same key is refused, like
 -- another price). The rest of save_invoice is tested in 22_audit_fixes_test.sql.
 \set ON_ERROR_STOP 1
@@ -30,7 +30,7 @@ grant execute on all functions in schema pg_temp to authenticated, anon;
 -- Run the migration again first: it must be safe to run twice, and 22_audit_fixes_test.sql runs 20261007002000_audit_fixes.sql a
 -- second time, which puts back the save_invoice from before the note in a database that has every migration. (It commits, so it runs
 -- before the transaction below.)
-\ir ../migrations/20261015000600_invoice_note.sql
+\ir ../migrations/20261015000800_invoice_note.sql
 
 begin;
 select set_config('test.pat', :pat, false);

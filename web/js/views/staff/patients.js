@@ -5,7 +5,7 @@ import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { portalLoginModal } from './portal-login.js';
 import { retainerStatuses, checkOverdue } from '../../lib/records.js';
-import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt } from './invoice.js';
+import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt, editInvoiceModal, editPaymentModal } from './invoice.js';
 
 export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart condition', 'Bleeding disorder', 'Pregnancy', 'Asthma', 'Epilepsy', 'Thyroid', 'Hepatitis / HIV', 'Kidney disease'];
 
@@ -372,7 +372,10 @@ export async function renderPatient(root, id) {
               h('td', {}, h('button', { class: 'link-btn', onclick: () => printInvoice(i, p) }, i.invoice_no), h('div', { class: 'muted' }, shortDate(i.issue_date))),
               h('td', {}, i.status !== 'issued' ? h('span', { class: 'badge badge-warn' }, i.status.replace('_', ' ')) : bal ? h('span', { class: ['badge', bal.remaining > 0 ? 'badge-dues' : 'badge-ok'] }, bal.remaining > 0 ? `${rupees(bal.remaining)} unpaid` : 'Paid') : null),
               h('td', { class: 'right' }, rupees(i.total ?? i.subtotal - i.discount_amount)),
-              can('billing.edit') && i.status === 'issued' ? h('td', { class: 'right' }, h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Void invoice ${i.invoice_no}`, onclick: () => voidInvoice(i) }, 'Void')) : h('td', {}));
+              can('billing.edit') && i.status === 'issued' ? h('td', { class: 'right nowrap' },
+                // Edit: the lines, discounts and note (owner, 15 Oct 2026: "admin and accounts should have edit button").
+                h('button', { class: 'btn btn-small', 'aria-label': `Edit invoice ${i.invoice_no}`, onclick: () => editInvoiceModal(i, p, { onDone: reload }) }, 'Edit'), ' ',
+                h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Void invoice ${i.invoice_no}`, onclick: () => voidInvoice(i) }, 'Void')) : h('td', {}));
           })))) : h('p', { class: 'muted' }, 'No invoices.'),
         p.payments.length ? h('details', { style: { marginTop: '10px' } },
           h('summary', { class: 'muted', style: { cursor: 'pointer' } }, `${p.payments.length} payments · ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))} received`),
@@ -382,7 +385,9 @@ export async function renderPatient(root, id) {
               h('td', { class: 'nowrap' }, shortDate(dayOf(pay.received_at))),
               h('td', {}, pay.method.replace('_', ' '), pay.invoice_id ? h('div', { class: 'muted' }, p.invoices.find((i) => i.id === pay.invoice_id)?.invoice_no || '') : null),
               h('td', { class: ['right', Number(pay.amount) < 0 && 'status-bad'] }, rupees(pay.amount)),
-              h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
+              h('td', { class: 'right nowrap' },
+                can('billing.edit') ? h('button', { class: 'btn btn-small', 'aria-label': `Edit payment, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)} ${pay.method.replace('_', ' ')}`, onclick: () => editPaymentModal(pay, p, { onDone: reload }) }, 'Edit') : null, ' ',
+                h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
         h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
           can('billing.create') ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null),
         (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },

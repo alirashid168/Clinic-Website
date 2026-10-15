@@ -546,6 +546,15 @@ async function exportData(root) {
     }) }, label)))));
 }
 
+// What an update changed, from the row before and after it (audit_log.old_data / new_data): "method: cash → card". A few fields, short.
+const AUDIT_SKIP = new Set(['updated_at', 'total', 'line_total', 'is_refund']);
+function auditChange(r) {
+  if (r.action !== 'UPDATE' || !r.old_data || !r.new_data) return '';
+  const short = (v) => { const t = v === null || v === undefined || v === '' ? '(empty)' : typeof v === 'object' ? JSON.stringify(v) : String(v); return t.length > 40 ? `${t.slice(0, 39)}…` : t; };
+  const keys = Object.keys(r.new_data).filter((k) => !AUDIT_SKIP.has(k) && JSON.stringify(r.old_data[k] ?? null) !== JSON.stringify(r.new_data[k] ?? null));
+  return keys.slice(0, 4).map((k) => `${k.replace(/_/g, ' ')}: ${short(r.old_data[k])} → ${short(r.new_data[k])}`).join('; ') + (keys.length > 4 ? '; …' : '');
+}
+
 async function audit(root) {
   const [rows, logins] = await Promise.all([state.data.auditLog(), isAdmin() ? state.data.staffLogins().catch(() => null) : null]);
   const device = (ua) => { const u = ua || ''; const os = /iPhone|iPad/.test(u) ? 'iPhone/iPad' : /Android/.test(u) ? 'Android' : /Windows/.test(u) ? 'Windows' : /Mac/.test(u) ? 'Mac' : /Linux/.test(u) ? 'Linux' : ''; const br = /Edg\//.test(u) ? 'Edge' : /Chrome\//.test(u) ? 'Chrome' : /Safari\//.test(u) ? 'Safari' : /Firefox\//.test(u) ? 'Firefox' : ''; return [br, os].filter(Boolean).join(' on ') || u.slice(0, 40); };
@@ -563,5 +572,6 @@ async function audit(root) {
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'When'), h('th', { scope: 'col' }, 'Who'), h('th', { scope: 'col' }, 'What'), h('th', { scope: 'col' }, 'Change'))),
       h('tbody', {}, rows.map((r) => h('tr', {},
         h('td', { class: 'nowrap' }, when(r.at)),
-        h('td', {}, r.actor_name || r.actor || 'System'), h('td', {}, r.table_name.replace('_', ' ')), h('td', {}, r.action.toLowerCase())))))) : empty('No changes recorded yet.')));
+        h('td', {}, r.actor_name || r.actor || 'System'), h('td', {}, r.table_name.replace('_', ' ')),
+        h('td', {}, r.action.toLowerCase(), auditChange(r) ? h('div', { class: 'muted audit-change' }, auditChange(r)) : null)))))) : empty('No changes recorded yet.')));
 }

@@ -230,7 +230,7 @@ export async function renderImport(root) {
 
       const rebuild = () => {
         for (const t of tabs) t.read = readTab(t.rows, { fixedDate: t.fixedDate, columns: t.columns });
-        built = buildImport(tabs, state.ref.clinicians, state.ref.treatments, todayISO());
+        built = buildImport(tabs, state.ref.clinicians, state.ref.treatments.filter((t) => !t.price_list), todayISO()); // visit types only, never the price list
         // a row without an Mr# whose Treatment says checkup is a checkup patient: never a visit (owner, 9 Oct 2026). It is not sent at all.
         const split = splitCheckupRows(built.rows);
         built.visitRows = split.visits; built.checkupRows = split.checkups;

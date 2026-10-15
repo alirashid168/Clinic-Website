@@ -2957,13 +2957,13 @@ await step('busy day: an exact Mr# and Enter adds that patient at once (no extra
   await pb.keyboard.press('Escape');
 });
 await step('busy day: every action of the old list is still reachable (row actions, notes, + add doctor with undo, quick-tap, group, dues check, quick filters, checkup Options, New invoice from Pending)', async () => {
-  // row actions behind a click on the name: guidance, upload photos, new invoice, take payment, Dr. Ali, profile, notes
+  // row actions behind a click on the name: guidance, upload photos, Bill (the invoice), take payment, Dr. Ali, profile, notes
   const r10 = pb.locator('table.sheet tbody tr', { hasText: 'Sample Patient 010' });
   await r10.locator('.name-btn').click();
   const m = pb.locator('.modal');
   await m.locator('h2:has-text("Sample Patient 010 · Mr# 7010")').waitFor();
   // (the front desk does not upload clinic photos: Dr. Ali's dialog below has that button)
-  for (const name of ['New invoice', 'Take payment', 'Next appointment with Dr. Ali', 'Open profile']) assert.ok(await m.getByRole('button', { name }).count(), name);
+  for (const name of ['Bill', 'Take payment', 'Next appointment with Dr. Ali', 'Open profile']) assert.ok(await m.getByRole('button', { name }).count(), name);
   assert.ok(await m.locator('.stat').count(), 'braces guidance');
   await m.getByLabel('Notes').fill('Bring the retainer case');
   await pb.keyboard.press('Escape');
@@ -3052,7 +3052,7 @@ await step('busy day at 1366x768: every treatment of the list is whole in the Tr
     document.activeElement?.blur();
     const input = document.querySelector('table.sheet tbody tr:not(.is-checkup) input[aria-label^="Treatment for"]');
     const before = input.value;
-    const names = [...state.ref.treatments.map((t) => t.name), 'Monthly / Followup'];
+    const names = [...state.ref.treatments.filter((t) => !t.price_list).map((t) => t.name), 'Monthly / Followup']; // the visit types (the price list is for invoices)
     const cut = names.filter((n) => { input.value = n; return input.scrollWidth > input.clientWidth; });
     input.value = before; // (set without an input event: nothing is saved)
     const clips = [...document.querySelector('table.sheet tbody tr').children].filter((td) => getComputedStyle(td).overflowX !== 'visible').map((td) => td.className);
@@ -8449,6 +8449,202 @@ await step('Bill and Create on a phone: the Bill button is in sight beside the n
   await shot(pp, '42-bill-form-phone');
   await pp.close();
 });
+
+// ------------------------------------------------------------- The invoice form like Healthwire's (a discount and "Performed by" per line), the price
+// list, and editing invoices and payments (owner, 15 Oct 2026: "quantity, price, description, discount and the total given below"; "braces kit
+// should be given separate amounts as they are different"; "admin and accounts should have edit button ... and also clinic coordinator").
+const pdesk = await newPage();
+const moneyOf = (pg) => pg.locator('section.panel', { has: pg.locator('h2', { hasText: 'Money' }) });
+const openMoney = async (pg, mr, name) => {
+  await pg.goto(BASE + `#/staff/patients?q=${mr}`);
+  await pg.locator('table.list tbody tr', { hasText: name }).locator('a').first().click();
+  await pg.waitForSelector(`h1:has-text("${name}")`);
+  await moneyOf(pg).waitFor();
+};
+let deskInvoice = '';
+await step('Price list: the invoice picker offers the sample braces kits first, each with its own price, and the Aaj ki List\'s treatment picker does not; two lines with a discount on one, a discount on the total and a doctor per line give the right totals, and the printed bill matches', async () => {
+  await loginAs(pdesk, 'Front desk \\(North Nazimabad\\)');
+  await stubPrint(pdesk);
+  await pdesk.goto(BASE + '#/staff/sheet');
+  await pdesk.waitForSelector('#sheet-treatments', { state: 'attached' });
+  const visitTypes = await pdesk.locator('#sheet-treatments option').evaluateAll((os) => os.map((o) => o.value));
+  assert.ok(visitTypes.includes('Monthly') && visitTypes.includes('Bonding'), 'the visit types are on the list\'s picker');
+  assert.ok(!visitTypes.some((v) => /Braces Kit|Braces Monthly Payment|Retainers, pair/.test(v)), `no price-list item on the list's picker: ${visitTypes.join(', ')}`);
+  const row = pdesk.locator('table.sheet tbody tr', { hasText: 'Kinza Rauf' });
+  await row.getByRole('button', { name: 'Bill Kinza Rauf' }).click();
+  const m = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: 'New invoice · Kinza Rauf' }) });
+  await m.waitFor();
+  const offered = await m.getByLabel('Treatment, line 1').evaluate((input) => [...input.list.options].map((o) => [o.value, o.label]));
+  assert.deepEqual(offered.slice(0, 3), [['Braces Kit (Metal, sample)', 'Rs 50,000'], ['Braces Kit (Ceramic, sample)', 'Rs 75,000'], ['Braces Kit (Self-ligating, sample)', 'Rs 100,000']],
+    'the price list first, each kit with its own price');
+  assert.ok(offered.some(([v]) => v === 'Monthly') && !offered.some(([v]) => v === 'Braces Checkup'), 'then visit types that have a price (none without one)');
+  await m.getByLabel('Treatment, line 1').fill('Braces Kit (Ceramic, sample)');
+  assert.equal(await m.getByLabel('Rate (Rs), line 1').inputValue(), '75000', 'the kit\'s own price fills the rate');
+  await m.getByLabel('Discount, line 1').fill('500');
+  await m.getByLabel('Performed by, line 1').selectOption({ label: 'Dr. Bushra (sample)' });
+  await m.getByRole('button', { name: '+ Add item' }).click();
+  await m.getByLabel('Treatment, line 2').fill('Braces Monthly Payment (sample)');
+  assert.equal(await m.getByLabel('Rate (Rs), line 2').inputValue(), '5000');
+  await m.getByLabel('Qty, line 2').fill('2');
+  await m.getByLabel('Discount in Rs or %, line 2').selectOption('pct');
+  await m.getByLabel('Discount, line 2').fill('3');
+  assert.equal(await m.getByLabel('Amount, line 2').innerText(), 'Rs 10,000', 'the line\'s amount: rate x quantity');
+  await m.getByLabel('Total discount', { exact: true }).fill('200');
+  await m.getByLabel('Discount reason').fill('Sample offer');
+  assert.equal((await m.locator('.bill-totals').innerText()).replace(/\s+/g, ' ').trim(), 'Sub-total Rs 85,000 Discount Rs 1,000 Grand total Rs 84,000',
+    'sub-total 85,000; discount 500 on the kit + 300 (3% of the monthly payments) + 200 on the total (the demo front desk may give 5%, Rs 1,000); grand total 84,000');
+  await m.getByLabel('Payment (Rs)').fill('50000');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Due Rs 34,000');
+  await m.getByRole('button', { name: 'Save & Print' }).click();
+  const bill = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  deskInvoice = (await bill.locator('h2').innerText()).replace('Invoice ', '');
+  await pdesk.waitForFunction(() => window.__printed.length === 1);
+  const paper = (await pdesk.evaluate(() => window.__printed))[0].sheets[0];
+  for (const re of [/Braces Kit \(Ceramic, sample\)\s+75,000\s+1\s+75,000/, /Braces Monthly Payment \(sample\)\s+5,000\s+2\s+10,000/, /Sub-Total\s+Rs\. 85,000/,
+    /Discount\s+- Rs\. 1,000/, /Grand Total\s+Rs\. 84,000/, /Paid Amount\s+Rs\. 50,000/, /Due Amount\s+Rs\. 34,000/, /Payment Mode: Cash/]) assert.match(paper, re);
+  assert.doesNotMatch(paper, /Dr\. Bushra/, 'the bill does not show who did the treatment');
+  await bill.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await pdesk.waitForSelector('.modal', { state: 'detached' });
+  const { invoices } = await billingOf(pdesk, '9825');
+  const saved = invoices.find((i) => i.invoice_no === deskInvoice);
+  const bushra = await pdesk.evaluate(async () => (await import('/js/state.js')).state.ref.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').id);
+  assert.equal(saved.discount_amount, 1000, 'the invoice\'s discount is the whole discount');
+  assert.equal(saved.status, 'issued', 'within the front desk\'s limit');
+  assert.deepEqual(saved.items.map((it) => [it.description, it.discount_amount, it.clinician_id, !!it.treatment_id]),
+    [['Braces Kit (Ceramic, sample)', 500, bushra, true], ['Braces Monthly Payment (sample)', 300, null, true]], 'each line keeps its discount, its doctor and its price-list item');
+});
+await step('Edit is for "Edit or void invoices": the front desk sees no Edit on the patient\'s invoices or payments (and takes a second payment, cash)', async () => {
+  await openMoney(pdesk, '9825', 'Kinza Rauf');
+  const money = moneyOf(pdesk);
+  await money.locator('table.list').first().locator('tbody tr', { hasText: deskInvoice }).waitFor();
+  await money.locator('details summary').click();
+  assert.equal(await money.getByRole('button', { name: /^Edit (invoice|payment)/ }).count(), 0, 'no Edit for the front desk');
+  await pdesk.getByRole('button', { name: 'Take payment' }).click();
+  const take = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: 'Take payment · Kinza Rauf' }) });
+  const forThis = await take.getByLabel('For invoice').evaluate((sel, no) => [...sel.options].find((o) => o.textContent.startsWith(no)).value, deskInvoice);
+  await take.getByLabel('For invoice').selectOption(forThis);
+  await take.getByLabel('Amount (Rs)').fill('2000');
+  await take.getByRole('button', { name: 'Save payment' }).click();
+  await pdesk.waitForSelector('.toast:has-text("Payment of Rs 2,000 saved.")');
+});
+await step('The accountant edits a payment from Cash to Card and an invoice line (the quantity), from the patient\'s Money panel', async () => {
+  await tryAnotherRole(pdesk);
+  await loginAs(pdesk, 'Accountant');
+  await openMoney(pdesk, '9825', 'Kinza Rauf');
+  const money = moneyOf(pdesk);
+  await money.locator('details summary').click();
+  await money.getByRole('button', { name: /^Edit payment, .* Rs 50,000 cash$/ }).click();
+  const e = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: 'Edit payment · Rs 50,000 Cash' }) });
+  await e.getByLabel('Method').selectOption('card');
+  await e.getByRole('button', { name: 'Save changes' }).click();
+  await pdesk.waitForSelector('.toast:has-text("Payment saved as Card.")');
+  await money.locator('details summary').click();
+  await money.getByRole('button', { name: /^Edit payment, .* Rs 50,000 card$/ }).waitFor();
+  // The invoice: two monthly payments were one.
+  await money.getByRole('button', { name: `Edit invoice ${deskInvoice}` }).click();
+  const ei = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: `Edit invoice ${deskInvoice}` }) });
+  assert.equal(await ei.getByLabel('Treatment, line 1').inputValue(), 'Braces Kit (Ceramic, sample)', 'the lines as saved');
+  assert.equal(await ei.getByLabel('Discount, line 1').inputValue(), '500');
+  assert.equal(await ei.getByLabel('Performed by, line 1').evaluate((s) => s.selectedOptions[0].textContent), 'Dr. Bushra (sample)');
+  assert.equal(await ei.getByLabel('Total discount', { exact: true }).inputValue(), '200', 'the discount on the total is what is left of the invoice\'s discount');
+  await ei.getByLabel('Qty, line 2').fill('1');
+  assert.equal((await ei.locator('.bill-totals').innerText()).replace(/\s+/g, ' ').trim(), 'Sub-total Rs 80,000 Discount Rs 1,000 Grand total Rs 79,000');
+  await ei.getByRole('button', { name: 'Save changes' }).click();
+  await pdesk.waitForSelector(`.toast:has-text("Invoice ${deskInvoice} saved.")`);
+  assert.match(await money.locator('table.list').first().locator('tbody tr', { hasText: deskInvoice }).innerText(), /Rs 27,000 unpaid[\s\S]*Rs 79,000/, 'the new total, less the 52,000 paid');
+});
+await step('The clinic coordinator (billing.edit since 15 Oct) edits the other payment from Cash to Card and an invoice line (its description); the discounts are not theirs to change', async () => {
+  await tryAnotherRole(pdesk);
+  await loginAs(pdesk, 'Clinic coordinator');
+  await openMoney(pdesk, '9825', 'Kinza Rauf');
+  const money = moneyOf(pdesk);
+  await money.locator('details summary').click();
+  await money.getByRole('button', { name: /^Edit payment, .* Rs 2,000 cash$/ }).click();
+  const e = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: 'Edit payment · Rs 2,000 Cash' }) });
+  await e.getByLabel('Method').selectOption('card');
+  await e.getByLabel('Note').fill('Paid by card, entered as cash');
+  await e.getByRole('button', { name: 'Save changes' }).click();
+  await pdesk.waitForSelector('.toast:has-text("Payment saved as Card.")');
+  await money.getByRole('button', { name: `Edit invoice ${deskInvoice}` }).click();
+  const ei = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: `Edit invoice ${deskInvoice}` }) });
+  assert.ok(await ei.getByLabel('Discount, line 1').isDisabled() && await ei.getByLabel('Total discount', { exact: true }).isDisabled(), 'no "Give discounts": the discounts stay as they are');
+  await ei.getByLabel('Description, line 1').fill('Upper and lower');
+  await ei.getByRole('button', { name: 'Save changes' }).click();
+  await pdesk.waitForSelector(`.toast:has-text("Invoice ${deskInvoice} saved.")`);
+  const { invoices, payments } = await billingOf(pdesk, '9825');
+  const inv = invoices.find((i) => i.invoice_no === deskInvoice);
+  assert.equal(inv.status, 'issued', 'the same discount on the same sub-total needs no approval');
+  assert.deepEqual(inv.items.map((it) => [it.description, it.quantity, it.discount_amount]),
+    [['Braces Kit (Ceramic, sample) - Upper and lower', 1, 500], ['Braces Monthly Payment (sample)', 1, 300]]);
+  assert.deepEqual(payments.filter((p) => p.invoice_id === inv.id).map((p) => [p.amount, p.method]).sort((a, b) => a[0] - b[0]), [[2000, 'card'], [50000, 'card']], 'both payments are card now');
+});
+await step('The assistant sees no Edit; Dr. Ali\'s Audit log shows both payment changes (cash -> card, and who) and the invoice changes', async () => {
+  await tryAnotherRole(pdesk);
+  await loginAs(pdesk, 'Assistant');
+  await openMoney(pdesk, '9825', 'Kinza Rauf');
+  await moneyOf(pdesk).locator('details summary').click();
+  await moneyOf(pdesk).getByRole('button', { name: /^Receipt, / }).first().waitFor();
+  assert.equal(await moneyOf(pdesk).getByRole('button', { name: /^Edit (invoice|payment)/ }).count(), 0, 'no Edit for the assistant');
+  await tryAnotherRole(pdesk);
+  await loginAs(pdesk, 'Dr. Ali Rashid');
+  await pdesk.goto(BASE + '#/staff/admin?tab=audit');
+  await pdesk.waitForSelector('h2:has-text("Recent changes")');
+  const rows = await pdesk.locator('table.list tbody tr').evaluateAll((trs) => trs.map((tr) => tr.innerText.replace(/\s+/g, ' ')));
+  assert.ok(rows.some((r) => /Accountant \(sample\) payments update method: cash → card/.test(r)), `the accountant's change: ${rows.slice(0, 8).join(' | ')}`);
+  assert.ok(rows.some((r) => /Clinic coordinator \(sample\) payments update method: cash → card; notes: \(empty\) → Paid by card, entered as cash/.test(r)), 'the coordinator\'s change');
+  assert.ok(rows.some((r) => /Clinic coordinator \(sample\) invoice items insert/.test(r)) && rows.some((r) => /Accountant \(sample\) invoices update subtotal: 85000 → 80000/.test(r)), 'the invoice edits');
+  // Dr. Ali edits too (admin has every permission).
+  await openMoney(pdesk, '9825', 'Kinza Rauf');
+  assert.ok(await moneyOf(pdesk).getByRole('button', { name: `Edit invoice ${deskInvoice}` }).count(), 'Edit for Dr. Ali');
+});
+await step('Clinic setup: Dr. Ali adds a price-list item, re-prices and renames one and switches one off; a name that is already a visit type is refused; the invoice form offers the list as it is now', async () => {
+  await pdesk.goto(BASE + '#/staff/admin?tab=setup');
+  await pdesk.waitForSelector('h2:text("Price list")');
+  const panel = pdesk.locator('section.panel', { has: pdesk.locator('h2', { hasText: /^Price list$/ }) });
+  assert.match(await panel.innerText(), /Braces Kit \(Metal, sample\)\s+Rs 50,000/);
+  await panel.getByRole('button', { name: 'New price-list item' }).click();
+  let m = pdesk.locator('.modal');
+  await m.getByLabel('Name').fill('Monthly');
+  await m.getByLabel('Price (Rs)').fill('4000');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.getByText('"Monthly" is already a visit type of the Aaj ki List.').waitFor();
+  await m.getByLabel('Name').fill('Braces Kit (Lingual, sample)');
+  await m.getByLabel('Price (Rs)').fill('150000');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pdesk.waitForSelector('.toast:has-text("Saved")');
+  await panel.locator('td', { hasText: 'Braces Kit (Lingual, sample)' }).waitFor();
+  await panel.getByRole('button', { name: 'Edit Braces Kit (Metal, sample)' }).click();
+  m = pdesk.locator('.modal');
+  await m.getByLabel('Name').fill('Braces Kit (Steel, sample)');
+  await m.getByLabel('Price (Rs)').fill('60000');
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pdesk.waitForSelector('.toast:has-text("Saved")');
+  await panel.getByRole('button', { name: 'Edit Retainers, pair (sample)' }).click();
+  m = pdesk.locator('.modal');
+  await m.getByLabel('On the invoice form').uncheck();
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pdesk.waitForSelector('.toast:has-text("Saved")');
+  const text = await panel.innerText();
+  assert.match(text, /Braces Kit \(Steel, sample\)\s+Rs 60,000/);
+  assert.match(text, /Retainers, pair \(sample\)[\s\S]*Switched off/);
+  assert.ok(!(await pdesk.locator('section.panel', { has: pdesk.locator('h2', { hasText: /^Treatments$/ }) }).innerText()).includes('Braces Kit'), 'the Treatments table holds the visit types only');
+  // The invoice form, from Create ▾ for a patient on no list today.
+  await pdesk.locator('.create-btn').click();
+  await pdesk.locator('#create-menu-list button', { hasText: 'Invoice' }).click();
+  const pick = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: /^New invoice$/ }) });
+  await pick.getByLabel('Search patients by name, Mr# or phone').fill('Kinza');
+  await pick.locator('[role=option]', { hasText: 'Kinza Rauf' }).click();
+  const f = pdesk.locator('.modal', { has: pdesk.locator('h2', { hasText: 'New invoice · Kinza Rauf' }) });
+  const offered = await f.getByLabel('Treatment, line 1').evaluate((input) => [...input.list.options].map((o) => `${o.value} ${o.label}`));
+  assert.ok(offered.includes('Braces Kit (Steel, sample) Rs 60,000') && offered.includes('Braces Kit (Lingual, sample) Rs 150,000'), offered.slice(0, 7).join(' | '));
+  assert.ok(!offered.some((o) => /Metal|Retainers, pair/.test(o)), 'the old name and the switched-off item are gone');
+  await f.getByLabel('Treatment, line 1').fill('Braces Kit (Steel, sample)');
+  assert.equal(await f.getByLabel('Rate (Rs), line 1').inputValue(), '60000', 'the new price');
+  await f.getByRole('button', { name: 'Cancel' }).click();
+  await pdesk.waitForSelector('.modal', { state: 'detached' });
+});
+await pdesk.close();
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

@@ -190,6 +190,15 @@ export async function renderSetup(root) {
     .filter((s) => (s.role === 'doctor' || s.role === 'admin') && ((s.active && !s.deleted_at) || s.id === row?.staff_id))
     .map((s) => ({ value: s.id, label: s.deleted_at ? `${s.full_name} (deleted)` : s.active ? s.full_name : `${s.full_name} (switched off)` }))];
   const records = await recordEditors(d, refresh);
+  // The price list and the Aaj ki List's visit types are both rows of public.treatments (treatments.price_list tells them apart), and a
+  // name is used once among all of them: a name already there says so at its field.
+  const visitTypes = lists.treatments.filter((t) => !t.price_list);
+  const priceList = lists.treatments.filter((t) => t.price_list);
+  const nameTaken = (v, row) => {
+    const key = String(v || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const other = lists.treatments.find((t) => t.id !== row?.id && String(t.name).trim().replace(/\s+/g, ' ').toLowerCase() === key);
+    return other ? `"${other.name}" is already ${other.price_list ? 'on the price list' : 'a visit type of the Aaj ki List'}.` : null;
+  };
 
   mount(root,
     h('p', { class: 'muted' }, 'Changes here apply everywhere straight away: the website, Aaj ki List dropdowns, invoices and reports. Switching something off keeps its history and hides it from new entries.'),
@@ -232,12 +241,26 @@ export async function renderSetup(root) {
         { key: 'description', label: 'What this group does' },
       ],
     }),
+    // The price list (owner, 15 Oct 2026: "braces kit should be given separate amounts as they are different. please take all payments
+    // from the treatment price from healthwire"): what the invoice form offers first, each with its own price.
     editor({
-      title: 'Treatments', addLabel: 'New treatment', rows: lists.treatments,
-      help: 'The dropdown on Aaj ki List and on invoices. A default price fills the invoice line automatically.',
+      title: 'Price list', addLabel: 'New price-list item', rows: priceList,
+      help: 'What is billed and for how much: the invoice form offers these first (then the visit types below that have a price), and the price fills the line\'s rate (it can still be changed on the invoice). Switched off, an item leaves the invoice form; old invoices keep it.',
+      onSave: (row) => save('treatments')({ ...row, price_list: true }),
+      columns: [
+        { key: 'sort_order', label: 'Order', type: 'number', default: Math.max(0, ...priceList.map((t) => Number(t.sort_order) || 0)) + 1, tableFirst: true },
+        { key: 'name', label: 'Name', required: true, placeholder: 'e.g. Braces Kit (Metal)', check: (v, out, row) => nameTaken(v, row) },
+        { key: 'default_price', label: 'Price (Rs)', type: 'number', min: 0, step: 100, required: true, show: (r) => rupees(r.default_price ?? 0) },
+        { key: 'category', label: 'Category', type: 'select', required: true, default: 'braces', options: () => TREATMENT_CATEGORIES.map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) })), help: 'For the reports and the doctor percentage rules.' },
+        { key: 'active', label: 'On the invoice form', type: 'check', show: (r) => (r.active ? 'Yes' : off('Switched off')) },
+      ],
+    }),
+    editor({
+      title: 'Treatments', addLabel: 'New treatment', rows: visitTypes,
+      help: 'The Treatment drop-down of the Aaj ki List (the visit types). A visit type with a default price is also offered on invoices, after the price list.',
       onSave: save('treatments'),
       columns: [
-        { key: 'name', label: 'Name', required: true },
+        { key: 'name', label: 'Name', required: true, check: (v, out, row) => nameTaken(v, row) },
         { key: 'category', label: 'Category', type: 'select', required: true, default: 'general', options: () => TREATMENT_CATEGORIES.map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) })) },
         { key: 'default_price', label: 'Default price (Rs)', type: 'number', min: 0, show: (r) => (r.default_price ? rupees(r.default_price) : '') },
         { key: 'is_braces_monthly', label: 'Counts as a braces monthly visit', type: 'check', show: (r) => (r.is_braces_monthly ? 'Monthly' : '') },
