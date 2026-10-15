@@ -1,9 +1,10 @@
 // Patients: search list and full patient profile.
 import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select, empty, phoneLink, busy, srOnly, localISO, addMonthsISO, showFormErrors, clearFieldErrors, capFirst } from '../../ui/dom.js';
-import { state, can, branchName, isAdmin, clinicianName } from '../../state.js';
+import { state, can, branchName, isAdmin, clinicianName, myBranches, defaultBranchId } from '../../state.js';
 import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { portalLoginModal } from './portal-login.js';
+import { retainerStatuses, checkOverdue } from '../../lib/records.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt } from './invoice.js';
 
 export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart condition', 'Bleeding disorder', 'Pregnancy', 'Asthma', 'Epilepsy', 'Thyroid', 'Hepatitis / HIV', 'Kidney disease'];
@@ -123,12 +124,23 @@ export async function renderPatient(root, id) {
     // One calendar month after the braces came off, worked out on the date itself (never a day early in Pakistan).
     const nextCheck = h('input', { type: 'date', value: offDate ? addMonthsISO(offDate, 1) : '' });
     modal('Braces are off — start the retainer case?', h('div', {},
-      h('p', {}, 'Retainers are made in-house. The case starts at the impression stage and appears on the Coordinator → Retainers list, with a reminder for the first check.'),
+      h('p', {}, 'Retainers are made in-house. The patient goes on the Retainer Record of their city as "Impression taken", with the date of the first check.'),
       h('div', { class: 'form-grid' }, field('Arch', arch), field('First retainer check', nextCheck))), [
       { label: 'Not now' },
       { label: 'Start retainer case', primary: true, onClick: async () => {
         try {
-          await d.saveRetainerCase({ patient_id: id, braces_case_id: braces.id, branch_id: p.first_branch_id || null, arch: arch.value, stage: 'impression', impression_date: offDate, next_check_date: nextCheck.value || null });
+          // The row goes on the tab of the patient's city (the Retainer Record has one tab per city), at a branch the signed-in person may
+          // work at (a row at any other branch is refused): the patient's first branch, else the braces case's bonding branch, else their own
+          // branch in that city (or anywhere, when they have none there). Else no branch: a row of the city's tab.
+          const mine = myBranches();
+          const at = (branchId) => mine.find((b) => b.id === Number(branchId)) || null;
+          const first = state.ref.branches.find((b) => b.id === Number(p.first_branch_id));
+          const cityId = first?.city_id || p.city_id || null;
+          const own = at(defaultBranchId());
+          const branch = at(p.first_branch_id) || at(braces.bonding_branch_id)
+            || (own && (!cityId || own.city_id === cityId || !mine.some((b) => b.city_id === cityId)) ? own : null);
+          await d.addRetainerRecord({ patient_id: id, patient_name: p.full_name, contact: p.phone || null, braces_case_id: braces.id, branch_id: branch?.id || null,
+            city_id: branch?.city_id || cityId || state.ref.cities[0]?.id, arch: arch.value, status: 'Impression taken', impression_date: offDate || null, next_check_date: nextCheck.value || null });
           toast('Retainer case started.', 'ok');
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
@@ -394,12 +406,13 @@ export async function renderPatient(root, id) {
         h('tbody', {}, p.documents.map((doc) => h('tr', {},
           h('td', { class: 'nowrap' }, shortDate(doc.added_on)), h('td', {}, DOCUMENT_KINDS[doc.kind] || doc.kind), h('td', {}, doc.title),
           h('td', { class: 'right' }, doc.url ? documentLink(doc) : h('span', { class: 'muted' }, 'Not available'))))))) : empty('No documents yet. Signed consent forms and ID copies go here.')),
-    p.retainers.length ? h('section', { class: 'panel' }, h('h2', {}, 'Retainers'),
-      h('div', { class: 'table-scroll' }, h('table', { class: 'list' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Arch'), h('th', { scope: 'col' }, 'Stage'), h('th', { scope: 'col' }, 'Impression'), h('th', { scope: 'col' }, 'Next check'))),
+    p.retainers.length ? h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', {}, 'Retainers'), h('a', { href: `#/staff/retainers?city=${p.retainers[0].city_id}` }, 'Open the Retainer Record')),
+      h('div', { class: 'table-scroll' }, h('table', { class: 'list' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Impression'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, 'Retainer date'), h('th', { scope: 'col' }, 'Arch'), h('th', { scope: 'col' }, 'Next check'))),
         h('tbody', {}, p.retainers.map((r) => {
-          // Overdue says so in words; the badge colour only repeats it.
-          const overdue = r.next_check_date && r.next_check_date < today && r.stage !== 'closed';
-          return h('tr', {}, h('td', {}, r.arch), h('td', {}, r.stage.replace('_', ' ')), h('td', {}, shortDate(r.impression_date)),
+          // Overdue says so in words; the badge colour only repeats it. A cancelled retainer has no check to miss (the Retainer Record's rule).
+          const overdue = checkOverdue(r, retainerStatuses(state.ref.settings), today);
+          return h('tr', {}, h('td', {}, r.impression_date ? shortDate(r.impression_date) : r.impression_text || ''), h('td', {}, r.status || ''),
+            h('td', {}, r.retainer_date ? shortDate(r.retainer_date) : r.retainer_text || ''), h('td', {}, capFirst(r.arch || '')),
             h('td', {}, shortDate(r.next_check_date), overdue ? [' ', h('span', { class: 'badge badge-dues badge-overdue' }, 'Overdue')] : null));
         }))))) : null);
   loadMissingLinks();

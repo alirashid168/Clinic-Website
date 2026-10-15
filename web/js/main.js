@@ -21,7 +21,7 @@ const CLINICS_DESC = "Clinic locations, opening hours and Dr. Ali Rashid's days 
 
 const STAFF_TITLES = {
   today: 'Today', sheet: 'Aaj ki List', 'day-history': 'History of Aaj ki List', queue: 'Queue board', checkups: 'Checkups', patients: 'Patients', patient: 'Patient record',
-  billing: 'Billing', accounts: 'Accounts', reports: 'Reports', coordinator: 'Coordinator', stock: 'Stock',
+  billing: 'Billing', accounts: 'Accounts', reports: 'Reports', coordinator: 'Coordinator', retainers: 'Retainer Record', lab: 'Lab work', stock: 'Stock',
   complaints: 'Complaints', jobs: 'Job applications', review: "Dr. Ali's list", log: 'Doctor log', admin: 'Admin',
 };
 

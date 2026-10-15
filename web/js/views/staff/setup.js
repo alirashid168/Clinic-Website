@@ -1,7 +1,9 @@
 // Admin → Clinic setup: branches, doctors and assistants, doctor groups,
 // treatment list and expense categories, editable without touching the database.
+// Also the Retainer Record's team and status list, and Lab work's team, labs and work types.
 import { h, mount, toast, friendlyError, modal, field, select, empty, rupees, srOnly, showFormErrors, clearFieldErrors, capFirst } from '../../ui/dom.js';
 import { state, loadPublicRef, loadStaffRef } from '../../state.js';
+import { PALETTE, TEAM_ROLES, STATUS_MEANS, colourClass, retainerStatuses, labWorkTypes, optionKey, pickColour, teamNameKey } from '../../lib/records.js';
 
 const REGIONS = [{ value: '', label: 'Any city' }, { value: 'KHI', label: 'Karachi' }, { value: 'LHR', label: 'Lahore' }, { value: 'ISB', label: 'Islamabad' }];
 const TREATMENT_CATEGORIES = ['braces', 'retainer', 'general', 'cosmetic', 'surgery', 'diagnostic'];
@@ -10,7 +12,9 @@ const off = (text) => h('span', { class: 'badge badge-inactive' }, text);
 
 /**
  * A small table editor: one row per record, an "Edit" button per row and an
- * "Add" button. `columns` describe the form fields; `show` renders the cell.
+ * "Add" button. `columns` describe the form fields; `show` renders the cell; `check(value, out, row)` gives a
+ * message when a value cannot be saved, shown at its field (or { field, message } for another field). onSave may
+ * throw an error with a `field` key: the message is then shown at that field too.
  */
 function editor({ title, help, rows, columns, onSave, addLabel = 'Add', fixedId = false }) {
   const form = (row) => {
@@ -37,12 +41,19 @@ function editor({ title, help, rows, columns, onSave, addLabel = 'Add', fixedId 
           if (c.type === 'select' && v === '') v = null;
           if (typeof v === 'string') v = v.trim() || null;
           if (c.required && (v === null || v === '' || v === undefined)) { errors.push({ input: el, message: `${c.label} is needed.` }); continue; }
+          if (c.check && !(row && c.lockOnEdit)) {
+            const msg = c.check(v, out, row);
+            if (msg) { errors.push({ input: inputs[msg.field] || el, message: msg.message || msg }); continue; }
+          }
           if (row && c.lockOnEdit) continue;
           out[c.key] = v;
         }
         if (errors.length) { showFormErrors(body, errors); return false; }
         if (fixedId && !row) out.id = Number(out.id);
-        try { await onSave(out); toast('Saved.', 'ok'); } catch (e) { toast(friendlyError(e), 'error'); return false; }
+        try { const said = await onSave(out); toast(typeof said === 'string' ? said : 'Saved.', 'ok'); } catch (e) {
+          if (e?.field && inputs[e.field]) { showFormErrors(body, [{ input: inputs[e.field], message: e.message }]); return false; }
+          toast(friendlyError(e), 'error'); return false;
+        }
       } },
     ]);
   };
@@ -66,6 +77,105 @@ function editor({ title, help, rows, columns, onSave, addLabel = 'Add', fixedId 
         h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Edit ${text(cell(nameCol, r))}`, onclick: () => form(r) }, 'Edit'))))))) : empty(`Nothing here yet. Use "${addLabel}".`));
 }
 
+// A colour of the fixed palette (lib/records.js; white text only on the dark ones), as a chip in the table.
+const COLOUR_OPTIONS = () => PALETTE.map((p) => ({ value: p.key, label: `${p.label}${p.dark ? ' (white text)' : ''}` }));
+const colourChip = (key) => h('span', { class: ['pill', colourClass(key)] }, PALETTE.find((p) => p.key === key)?.label || 'Light grey');
+
+/**
+ * The Retainer Record and Lab work lists. The two teams are tables; the status list and the work types are settings
+ * (app_settings), edited here as rows: each row's Order is its place in the drop-down.
+ */
+async function recordEditors(d, refresh) {
+  let rTeam, lTeam;
+  try { [rTeam, lTeam] = await Promise.all([d.retainerTeam(), d.labTeam()]); } catch (e) {
+    if (e?.code !== 'RECORDS_MISSING') throw e;
+    return [h('section', { class: 'panel' }, h('h2', {}, 'Retainer team and lab team'), h('p', { class: 'muted' }, 'These lists appear once the database update for the Retainer Record and Lab work has been run.'))];
+  }
+  const cities = state.ref.cities.filter((c) => state.ref.branches.some((b) => b.city_id === c.id));
+  const asRows = (list) => list.map((x, i) => ({ ...x, id: i + 1, order: i + 1 }));
+  const saveList = (key, list) => async (row) => {
+    const rows = asRows(list);
+    const at = row.id ? rows.findIndex((x) => x.id === row.id) : -1;
+    if (rows.some((x, i) => i !== at && optionKey(x.label) === optionKey(row.label))) throw new Error(`"${row.label}" is on the list already.`);
+    // New words for an item: the rows that have the old words take the new ones too (public.rename_record_option), or they would drop
+    // off the list as "not on the list", and a status that means made or delivered would stop counting in the banner.
+    const old = at >= 0 ? rows[at].label : null;
+    const renamed = old !== null && row.label && row.label !== old ? await d.renameRecordOption(key, old, row.label) : 0;
+    const next = { ...(at >= 0 ? rows[at] : {}), ...row, order: row.order ?? rows.length + 1 };
+    if (at >= 0) rows[at] = next; else rows.push(next);
+    // A row moved to an Order another row has goes in front of it; the list is numbered 1, 2, 3 ... again when it is shown.
+    const sorted = rows.map((x, i) => ({ x, i })).sort((a, b) => (Number(a.x.order) || 0) - (Number(b.x.order) || 0) || (a.x === next ? -1 : b.x === next ? 1 : a.i - b.i)).map(({ x }) => x);
+    await d.setSetting(key, sorted.map(({ id, order, means, colour, ...keep }) => ({ ...keep, colour: colour || 'grey', ...(means ? { means } : {}) })));
+    await refresh();
+    return renamed ? `Saved. ${renamed.toLocaleString('en-PK')} ${renamed === 1 ? 'row now says' : 'rows now say'} "${row.label}".` : undefined;
+  };
+  // A name already on the team, in any capitals and spacing (the database's unique name: lab_team per kind), says so in plain words,
+  // before saving and when the database refuses it (somebody added the name a moment ago).
+  const sameNameAs = (list, row, kind = null) => list.find((m) => m.id !== row?.id && teamNameKey(m.name) === teamNameKey(row?.name) && (!kind || (m.kind || 'person') === kind));
+  const alreadyText = (name, kind) => `${String(name).trim().replace(/\s+/g, ' ')} is already on ${kind === 'lab' ? 'the list of labs' : 'the team'}.`;
+  const saveTeam = (fn) => async (row) => {
+    try { await d[fn](row); } catch (e) {
+      if (e?.code === '23505' || /_name_idx|duplicate key/.test(e?.message || '')) throw Object.assign(new Error(alreadyText(row.name, row.kind)), { field: 'name' });
+      throw e;
+    }
+    await refresh();
+  };
+  const statuses = retainerStatuses(state.ref.settings);
+  const works = labWorkTypes(state.ref.settings);
+  return [
+    editor({
+      title: 'Retainer team', addLabel: 'New team member', rows: rTeam,
+      help: 'The people on the Retainer Record\'s drop-downs. Each keeps their colour on every chip, in the Retainer Lab banner and in the filter. Tick "In the banner" for the people who make the retainers or check the models now (copying a sheet tab ticks its most active makers while nobody of that city is ticked, and gives them the strongest colours). Someone who left: untick Active (their old rows keep the name).',
+      onSave: saveTeam('saveRetainerTeamMember'),
+      columns: [
+        { key: 'name', label: 'Name', required: true, placeholder: 'As on the sheet', check: (v, out) => (sameNameAs(rTeam, { ...out, name: v }) ? alreadyText(v) : null) },
+        { key: 'role', label: 'Does', type: 'select', required: true, default: 'maker', options: () => Object.entries(TEAM_ROLES).map(([value, label]) => ({ value, label })) },
+        // (a new member starts with a strong colour nobody has: light grey is the blank chip and "someone not on the team")
+        { key: 'colour', label: 'Colour', type: 'select', required: true, default: pickColour(rTeam, { top: true }), options: COLOUR_OPTIONS, show: (r) => colourChip(r.colour) },
+        { key: 'city_id', label: 'City', type: 'select', options: () => [{ value: '', label: 'Every city' }, ...cities.map((c) => ({ value: c.id, label: c.name }))], show: (r) => cities.find((c) => c.id === r.city_id)?.name || 'Every city' },
+        { key: 'featured', label: 'In the banner', type: 'check', default: false, show: (r) => (r.featured ? 'In the banner' : '') },
+        { key: 'sort_order', label: 'Order', type: 'number', default: 50, hideInTable: true },
+        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : off('Left')) },
+      ],
+    }),
+    editor({
+      title: 'Retainer statuses', addLabel: 'New status', rows: asRows(statuses),
+      help: 'The Status drop-down of the Retainer Record, in this order. "Means" ties a status to what it does: Retainer made fills the retainer date; Delivered fills the dates, sets the first retainer check a month later and says "Delivered!"; Cancelled is left out of the banner\'s counts and has no check to miss. A status taken off the drop-down stays on the rows that have it. A status written in other words changes on every row that has it too.',
+      onSave: saveList('retainer_statuses', statuses),
+      columns: [
+        { key: 'order', label: 'Order', type: 'number', min: 1, required: true, default: statuses.length + 1, tableFirst: true },
+        { key: 'label', label: 'Status', required: true },
+        { key: 'colour', label: 'Colour', type: 'select', required: true, default: 'grey', options: COLOUR_OPTIONS, show: (r) => colourChip(r.colour) },
+        { key: 'means', label: 'Means', type: 'select', options: () => Object.entries(STATUS_MEANS).map(([value, label]) => ({ value, label })), show: (r) => (r.means ? STATUS_MEANS[r.means].split(':')[0] : '') },
+        { key: 'active', label: 'In the drop-down', type: 'check', show: (r) => (r.active ? 'Yes' : off('Hidden')) },
+      ],
+    }),
+    editor({
+      title: 'Lab team and labs', addLabel: 'New person or lab', rows: lTeam,
+      help: 'The "Handled by" and "Lab" drop-downs of Lab work. A name not on the list can still be typed on a row.',
+      onSave: saveTeam('saveLabTeamMember'),
+      columns: [
+        { key: 'name', label: 'Name', required: true },
+        { key: 'kind', label: 'Is', type: 'select', required: true, default: 'person', options: () => [{ value: 'person', label: 'A person who handles lab work' }, { value: 'lab', label: 'A lab' }],
+          check: (v, out, row) => (sameNameAs(lTeam, { ...out, id: row?.id, kind: v }, v || 'person') ? { field: 'name', message: alreadyText(out.name, v) } : null) },
+        { key: 'colour', label: 'Colour', type: 'select', required: true, default: 'grey', options: COLOUR_OPTIONS, show: (r) => colourChip(r.colour) },
+        { key: 'active', label: 'Active', type: 'check', show: (r) => (r.active ? 'Active' : off('Off')) },
+      ],
+    }),
+    editor({
+      title: 'Lab work types', addLabel: 'New work type', rows: asRows(works),
+      help: 'The Work drop-down of Lab work, in this order. A work type written in other words changes on every lab case that has it too.',
+      onSave: saveList('lab_work_types', works),
+      columns: [
+        { key: 'order', label: 'Order', type: 'number', min: 1, required: true, default: works.length + 1, tableFirst: true },
+        { key: 'label', label: 'Work', required: true },
+        { key: 'colour', label: 'Colour', type: 'select', default: 'grey', options: COLOUR_OPTIONS, show: (r) => colourChip(r.colour) },
+        { key: 'active', label: 'In the drop-down', type: 'check', show: (r) => (r.active ? 'Yes' : off('Hidden')) },
+      ],
+    }),
+  ];
+}
+
 export async function renderSetup(root) {
   const d = state.data;
   const lists = await d.setupLists();
@@ -75,6 +185,7 @@ export async function renderSetup(root) {
   const groupName = (id) => lists.groups.find((g) => g.id === id)?.name || '';
   const staffName = (id) => lists.staff.find((s) => s.id === id)?.full_name || '';
   const doctorStaff = () => [{ value: '', label: 'No login yet' }, ...lists.staff.filter((s) => s.role === 'doctor' || s.role === 'admin').map((s) => ({ value: s.id, label: s.full_name }))];
+  const records = await recordEditors(d, refresh);
 
   mount(root,
     h('p', { class: 'muted' }, 'Changes here apply everywhere straight away: the website, Aaj ki List dropdowns, invoices and reports. Switching something off keeps its history and hides it from new entries.'),
@@ -153,5 +264,6 @@ export async function renderSetup(root) {
         { key: 'sort_order', label: 'Order', type: 'number', default: Math.max(0, ...lists.categories.map((c) => Number(c.sort_order) || 0)) + 1, tableFirst: true },
         { key: 'active', label: 'In the dropdown', type: 'check', show: (r) => (r.active ? 'Yes' : off('Hidden')) },
       ],
-    }));
+    }),
+    records);
 }
