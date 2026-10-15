@@ -387,12 +387,7 @@ export async function renderPatient(root, id) {
           await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); await reload();
         }) }, 'Invite to patient portal') : null,
         resetSlot,
-<<<<<<< patient-uploads
-        can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
-=======
-        can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(p, { onDone: reload }) }, 'Upload photos') : null,
         makesBills ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
->>>>>>> golive
         can('billing.create') ? h('button', { class: 'btn btn-primary', onclick: () => paymentModal(p, { dues: p.dues, invoices: p.invoices, payments: p.payments, onDone: reload }) }, 'Take payment') : null)),
     p.flag ? h('div', { class: 'alert alert-warning inline', style: { justifyContent: 'space-between' } },
       h('span', {}, h('strong', {}, 'Next appointment with Dr. Ali Rashid. '), p.flag.reason),
