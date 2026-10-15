@@ -320,7 +320,8 @@ function showMessagesFromBeforeReload() {
 }
 
 // ---------------------------------------------------------------- idle logout
-// Staff are logged out after a period of no activity (shared clinic computers).
+// Staff can be logged out after a period of no activity (Admin → Settings). The setting is in minutes; 0 means never
+// (the clinic's choice: a login stays, like the Google Sheet, until Log out in the name menu), and so does a missing value.
 // A warning comes a minute before, with a "Stay signed in" button. The limit
 // is checked against the clock, so a computer that slept is not given extra time.
 //
@@ -335,8 +336,12 @@ let lastScheduled = 0;
 let idleTimer = null;
 let warning = null;
 
-const idleApplies = () => !signingOut && state.session?.kind === 'staff' && state.data?.mode !== 'demo';
-const idleLimitMs = () => (Number(state.ref.settings?.session_timeout_minutes) || 30) * 60 * 1000;
+// The limit in milliseconds, or 0 for never (the setting is 0, missing or not a number).
+const idleLimitMs = () => {
+  const minutes = Number(state.ref.settings?.session_timeout_minutes);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60 * 1000 : 0;
+};
+const idleApplies = () => !signingOut && state.session?.kind === 'staff' && state.data?.mode !== 'demo' && idleLimitMs() > 0;
 
 function sharedActive() {
   try { return Number(localStorage.getItem(SHARED_KEY)) || 0; } catch { return 0; }
@@ -375,7 +380,8 @@ function scheduleIdle() {
 }
 
 function onActivity(e) {
-  if (!idleApplies()) return;
+  // Without a limit, activity is still noted here: a limit set later (Admin → Settings) counts from the last activity, not from the login.
+  if (!idleApplies()) { lastActive = Date.now(); return; }
   if (e?.type === 'visibilitychange' && document.visibilityState !== 'visible') return;
   // Inside the warning, its own buttons decide (so "Log out now" is not taken as activity).
   if (warning && e?.target instanceof Node && warning.dialog.contains(e.target)) return;
@@ -415,7 +421,11 @@ function warnIdle() {
 }
 
 // What the person is told after a logout they did not ask for (the wording is in auth-watch.js).
-const noticeFor = (reason) => endedNotice(reason, { patient: state.session?.kind === 'patient', idleMinutes: Math.max(1, Math.round(idleLimitMs() / 60000)) });
+// With no limit here (never), an idle logout of another tab (an older copy of the website) is told without a number of minutes.
+const noticeFor = (reason) => {
+  const limit = idleLimitMs();
+  return endedNotice(reason === 'idle' && !limit ? null : reason, { patient: state.session?.kind === 'patient', idleMinutes: Math.max(1, Math.round(limit / 60000)) });
+};
 
 async function idleSignOut() {
   if (!idleApplies()) return;
