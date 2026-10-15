@@ -8,7 +8,10 @@
 //                  is only a login name). Without one, an invitation email is sent.
 //   update_login   { user_id, email?, password? }  changes a staff login email and/or password                  (needs users.manage)
 //   ban_user       { user_id }                                                                                  (needs users.manage)
-//   unban_user     { user_id }                                                                                  (needs users.manage)
+//   unban_user     { user_id }  not for a deleted account (Bring back first)                                     (needs users.manage)
+//   delete_staff   { user_id }  switches the account off, then: no records -> the login is removed for good; records -> it stays
+//                  switched off and is marked deleted ("Deleted accounts"). { ok, result: 'removed' | 'archived', total }   (needs users.manage)
+//   restore_staff  { user_id }  takes the deleted mark off; the account stays switched off                       (needs users.manage)
 //   invite_patient { patient_id }  sends the patient an email to set a password for the portal              (needs portal.invite)
 //                  Only for a real email address: an address at the clinic domain is refused (use create_patient_login).
 //   create_patient_login   { patient_id, password }  makes the patient's portal login at the clinic: the username is
@@ -16,13 +19,15 @@
 //                  patient must choose their own password at the first login                                   (needs portal.invite)
 //   reset_patient_password { patient_id, password }  sets a new password for a login made that way             (needs portal.invite)
 //   portal_login_info      { patient_id }  { has_login, clinic_login, username }                                (needs portal.invite)
-// invite_patient and the three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts.
+// invite_patient and the three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts,
+// delete_staff and restore_staff in staff-delete-actions.ts (tested in Node).
 //
-// Deploy: supabase functions deploy admin-users
+// Deploy: supabase functions deploy admin-users (index.ts and the three files next to it)
 // The same release the website pins (web/js/data/supabase.js SDK_VERSION); bump both on purpose, after testing.
 import { createClient } from 'npm:@supabase/supabase-js@2.117.2';
 import { createPatientLogin, findLoginByEmail, invitePatient, portalLoginInfo, resetPatientPassword } from './patient-login-actions.ts';
 import { isPatientLoginName } from './portal-login.ts';
+import { deleteStaff, emailTakenMessage, restoreStaff } from './staff-delete-actions.ts';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -79,8 +84,9 @@ Deno.serve(async (req) => {
 
       const password = body.password == null ? '' : String(body.password);
       if (password && password.length < 8) return json({ error: 'The password needs at least 8 characters.' });
-      const { data: existing } = await admin.from('staff').select('id').eq('email', email).maybeSingle();
-      if (existing) return json({ error: 'That login email is already used. Pick another.' });
+      // A deleted account keeps its email (its records keep its name): the answer says whose it is and that it can be brought back.
+      const { data: existing } = await admin.from('staff').select('*').eq('email', email).maybeSingle();
+      if (existing) return json({ error: emailTakenMessage(existing) });
       // An invitation to an address that already has a login nobody has confirmed yet hands back THAT login (it was made by someone
       // else, for example by a patient invitation), and the staff row would be attached to it. A staff account is only ever made on
       // a login created just now. (With a password, createUser refuses an existing address by itself.)
@@ -118,9 +124,11 @@ Deno.serve(async (req) => {
       if (!(await can('users.manage'))) return json({ error: 'Only Dr. Ali can switch accounts on or off.' }, 403);
       const userId = String(body.user_id ?? '');
       if (userId === caller) return json({ error: 'You cannot switch off your own account.' });
-      const { data: target } = await admin.from('staff').select('role').eq('id', userId).maybeSingle();
+      const { data: target } = await admin.from('staff').select('*').eq('id', userId).maybeSingle();
       const callerIsAdmin = (await asCaller.rpc('is_admin')).data === true;
       if (target?.role === 'admin' && !callerIsAdmin) return json({ error: 'Only Dr. Ali can switch an admin account on or off.' }, 403);
+      // A deleted account is always switched off (the database refuses anything else): it comes back with Bring back first.
+      if (action === 'unban_user' && target?.deleted_at) return json({ error: `${target.full_name} is in Deleted accounts. Bring the account back first, then switch it on.` });
       await admin.from('staff').update(action === 'ban_user'
         ? { active: false, deactivated_at: new Date().toISOString(), deactivated_by: caller }
         : { active: true, deactivated_at: null }).eq('id', userId);
@@ -143,8 +151,8 @@ Deno.serve(async (req) => {
       if (email && email !== target.email) {
         if (!/^[^@\s]+@[^@\s]+$/.test(email) || !email.endsWith('@' + STAFF_DOMAIN)) return json({ error: `Staff emails must end with @${STAFF_DOMAIN}` });
         if (isPatientLoginName(email, STAFF_DOMAIN)) return json({ error: PATIENT_SHAPE_ERROR });
-        const { data: taken } = await admin.from('staff').select('id').eq('email', email).neq('id', userId).maybeSingle();
-        if (taken) return json({ error: 'That login email is already used. Pick another.' });
+        const { data: taken } = await admin.from('staff').select('*').eq('email', email).neq('id', userId).maybeSingle();
+        if (taken) return json({ error: emailTakenMessage(taken) });
         changes.email = email; changes.email_confirm = true;
       }
       const password = body.password == null ? '' : String(body.password);
@@ -167,6 +175,12 @@ Deno.serve(async (req) => {
         old_data: changes.email ? { email: target.email } : null,
         new_data: { email: changes.email ?? target.email, password_changed: Boolean(changes.password) } });
       return json({ ok: true, changed: [changes.email ? 'email' : null, changes.password ? 'password' : null].filter(Boolean) });
+    }
+
+    if (action === 'delete_staff' || action === 'restore_staff') {
+      const run = action === 'delete_staff' ? deleteStaff : restoreStaff;
+      const result = await run({ admin, asCaller, can, caller }, body);
+      return json(result.body, result.status);
     }
 
     if (action === 'invite_patient') {

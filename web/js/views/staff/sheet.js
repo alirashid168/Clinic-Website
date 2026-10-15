@@ -12,7 +12,7 @@ import { newInvoiceModal, paymentModal } from './invoice.js';
 import { dayListCheckups, hasFormAnswers, formComplete, yesNo, PRICING_LABELS } from '../../lib/checkups.js';
 import { personTones, personTone } from '../../lib/tones.js';
 import { splitPeople, matchClinician } from '../../lib/legacy.js';
-import { checkupFormModal, checkupAnswersModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
+import { checkupFormModal, quickCheckupModal, checkupAnswersModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
 import { dayEndControls, laterDayHint, bookedFor } from './day-end.js';
 import { FIRST_DAY } from '../../lib/day-list.js';
 
@@ -680,6 +680,20 @@ export async function renderSheet(root, params, signal) {
     }
   }
 
+  // "Fill in form" on a checkup row, and in its Options: the checkup form after the checkup (a patient put on the list as they came in,
+  // here, on the Today page or in the Google Sheet). The answers make the checkup Completed; the row's button is gone then, so the cursor
+  // goes to its Options button rather than to the top of the page.
+  async function fillCheckupForm(c) {
+    const saved = await checkupAnswersModal(checkups.find((x) => x.id === c.id) || c);
+    if (saved === false) load(); // it is gone: read the list again
+    if (!saved) return;
+    checkups = checkups.map((x) => (x.id === saved.id ? saved : x));
+    listVersion++;
+    draw();
+    toast(`Answers saved on ${saved.patient_name}'s checkup.`, 'ok');
+    setTimeout(() => { const a = document.activeElement; if (!a || a === document.body || a.matches('h1')) focusCell(saved.id, 'options'); });
+  }
+
   // The dialog behind ⋮ on a checkup row ("Checkup options"): the checkup form, follow-up status, notes, patient file, the
   // checkup list, remove.
   function checkupOptions(c) {
@@ -699,16 +713,7 @@ export async function renderSheet(root, params, signal) {
     const inCheckupList = `#/staff/checkups?q=${encodeURIComponent(digits.length >= 4 ? digits : who)}`;
     const actions = [
       // a checkup typed in on arrival (here or in the Google Sheet): the assistant fills in the form for it after the checkup
-      canEdit && !formComplete(c) ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: async () => {
-        dialog?.close();
-        const saved = await checkupAnswersModal(c);
-        if (saved === false) load(); // it is gone: read the list again
-        if (!saved) return;
-        checkups = checkups.map((x) => (x.id === saved.id ? saved : x));
-        listVersion++;
-        draw();
-        toast(`Answers saved on ${saved.patient_name}'s checkup.`, 'ok');
-      } }, 'Fill in the checkup form') : null,
+      canEdit && !formComplete(c) ? h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => { dialog?.close(); fillCheckupForm(c); } }, 'Fill in the checkup form') : null,
       c.patient_id
         ? h('a', { class: 'btn', href: `#/staff/patient/${c.patient_id}` }, mr ? `Mr# ${mr} - Open patient file` : 'Open patient file')
         : canRegisterCheckup() ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => { dialog?.close(); registerCheckupModal(c, { onDone: load, list: { add: addPatient } }); } }, 'Register as patient') : null,
@@ -1140,6 +1145,13 @@ export async function renderSheet(root, params, signal) {
     };
     doctors.addEventListener('change', drawDoctors);
     drawDoctors();
+    // After the checkup the assistant fills in the checkup form from the row itself (owner, 15 Oct 2026: "once the checkup is done, the
+    // assistant should have options to enter all the details"; it is in Options too). It sits in the Month cell, which a checkup leaves
+    // empty: next to the name, so it is in sight on a phone as well. Gone once the form is filled in (Options shows the answers then).
+    const formBtn = canEdit && !formComplete(c) ? h('button', {
+      type: 'button', class: 'chip chip-fill form-later', 'aria-haspopup': 'dialog', 'aria-label': `Fill in form for ${who}`,
+      title: 'Fill in the checkup form, after the checkup', dataset: { focus: 'form' }, onclick: () => fillCheckupForm(c),
+    }, 'Fill in form') : null;
     // No "Checkup" badge (owner, 11 Oct 2026: no flags on the list): as on the sheet, the row without an Mr# is the checkup
     // patient ("no Mr#" in the MR # cell), with a thin left edge here; a screen reader hears it with the name.
     return h('tr', { class: 'is-checkup', dataset: { id: c.id, kind: 'checkup', n } },
@@ -1153,7 +1165,7 @@ export async function renderSheet(root, params, signal) {
         srOnly('Checkup patient'),
         h('button', { type: 'button', class: 'kebab-btn', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, title: 'Options: checkup form, follow-up, notes, register, remove', dataset: { focus: 'options' }, onclick: () => checkupOptions(c) },
           h('span', { 'aria-hidden': 'true' }, '⋮')))),
-      h('td', {}, h('span', { class: 'chip chip-fill gs-grey' }, srOnly('Not braces'))),
+      h('td', {}, formBtn || h('span', { class: 'chip chip-fill gs-grey' }, srOnly('Not braces'))),
       h('td', {}, typedCell(text('checkup_for', 'Treatment', { list: 'sheet-treatments', class: 'cell-input center' }))),
       h('td', {}, typedCell(tokenIn)),
       h('td', {}, status),
@@ -1489,13 +1501,16 @@ export async function renderSheet(root, params, signal) {
   }) : null;
 
   const branchHead = h('th', { scope: 'col', class: 'branch-cell', hidden: true }, 'Branch');
-  // A person who only comes for a checkup gets no Mr#: "+ Add checkup patient" (the checkup form) puts them on this list and on the Checkups page.
+  // A person who only comes for a checkup gets no Mr#: "+ Add checkup patient" puts them on this list and on the Checkups page. On today's
+  // list only the name and the mobile number are asked (owner, 15 Oct 2026), as Waiting; "Fill in form" on their row asks the checkup form
+  // after the checkup. An earlier day's list asks the whole form (nobody arrives there: it is filled in afterwards).
   // A patient who starts treatment and is new gets an Mr# with "+ New walk-in".
   const ADD_HINT_PLAIN = 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.';
   const ADD_HINT_CHECKUP = 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Add checkup patient" (no Mr#).';
   const addHint = h('span', { class: 'muted' }, ADD_HINT_PLAIN);
   const checkupBtn = h('button', { class: 'btn btn-small', type: 'button', hidden: true, 'aria-haspopup': 'dialog', onclick: async () => {
-    const res = await checkupFormModal({ branchId, date, fixedDay: true });
+    const today = date === localISO();
+    const res = await (today ? quickCheckupModal({ branchId, branchFixed: true, fileAction: 'add' }) : checkupFormModal({ branchId, date, fixedDay: true }));
     if (!res) return;
     if (res.patient) { addPatient(res.patient); return; } // the person already has a patient file: put that file on the list instead
     if (res.updated) { // the person was on this list already: the answers went on that checkup
@@ -1508,8 +1523,8 @@ export async function renderSheet(root, params, signal) {
     checkups = [...checkups.filter((c) => c.id !== res.id), res]; // (by its id, as addPatient)
     listVersion++;
     drawAdded();
-    // (added on arrival, "Add as Waiting": the form is filled in after the checkup, from ⋮ (Options) on the row)
-    toast(res.day_status === 'waiting' ? `${res.patient_name} added as Waiting. After the checkup: Options, then "Fill in the checkup form".` : `${res.patient_name} added as a checkup patient.`, 'ok');
+    // (today: Waiting, the form is filled in after the checkup with "Fill in form" on the row)
+    toast(today ? `${res.patient_name} added to today's list for ${branchName(res.branch_id)}.` : `${res.patient_name} added as a checkup patient.`, 'ok');
   } }, '+ Add checkup patient');
   // The add line. It comes before the list in the page, so the keyboard reaches it from the toolbar in a few Tabs; on a
   // laptop app.css shows it under the list like the sheet's next empty row, in sight at the bottom on a long day. On a phone

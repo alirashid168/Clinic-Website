@@ -5,8 +5,10 @@
 //     still gets its invitation and its staff row;
 //   - create_staff with a password, and the staff address guards, behave as before;
 //   - invite_patient refuses a patient email at the clinic domain (the step that would plant such a login);
-//   - the patient login actions are reached through the handler and make clinic logins with app_metadata.
-// (The actions themselves are tested in patient-login-actions.test.ts.)
+//   - the patient login actions are reached through the handler and make clinic logins with app_metadata;
+//   - delete_staff and restore_staff are reached through the handler, the email of a deleted account is named when create_staff
+//     or update_login is given it, and Switch on (unban_user) refuses a deleted account.
+// (The actions themselves are tested in patient-login-actions.test.ts and staff-delete-actions.test.ts.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
@@ -20,14 +22,16 @@ const world: {
   calls: Array<[string, any]>;
   perms: Set<string>;
   nextId: number;
-} = { tables: {}, users: new Map(), calls: [], perms: new Set(), nextId: 1 };
+  records: Record<string, Row>; // what staff_records() answers, per staff id
+} = { tables: {}, users: new Map(), calls: [], perms: new Set(), nextId: 1, records: {} };
 
-function reset(seed: { patients?: Row[]; staff?: Row[]; users?: Row[]; perms?: string[] } = {}) {
+function reset(seed: { patients?: Row[]; staff?: Row[]; users?: Row[]; perms?: string[]; records?: Record<string, Row> } = {}) {
   world.tables = { patients: seed.patients ?? [], staff: seed.staff ?? [], clinicians: [], audit_log: [] };
   world.users = new Map((seed.users ?? []).map((u) => [u.id, u]));
   world.calls = [];
   world.perms = new Set(seed.perms ?? []);
   world.nextId = 1;
+  world.records = seed.records ?? {};
 }
 
 /** The service-role client: just the calls the function makes. A GoTrue-like login store, including its habit of handing back an unconfirmed login on a repeated invitation. */
@@ -93,7 +97,11 @@ function adminClient() {
 function callerClient() {
   return {
     auth: { getUser: async () => ({ data: { user: { id: 'caller-1' } } }) },
-    rpc: async (name: string, args: Row) => (name === 'has_perm' ? { data: world.perms.has(args.p_key), error: null } : { data: false, error: null }),
+    rpc: async (name: string, args: Row) => {
+      if (name === 'has_perm') return { data: world.perms.has(args.p_key), error: null };
+      if (name === 'staff_records') { world.calls.push(['rpc staff_records', args]); return { data: world.records[args.p_staff] ?? { total: 0, parts: [] }, error: null }; }
+      return { data: false, error: null };
+    },
   };
 }
 
@@ -207,4 +215,54 @@ test('create_patient_login and reset_patient_password through the handler: the l
 test('an unknown action is answered "Unknown action" (400), which the website turns into "Update the admin-users function first."', async () => {
   reset({ perms: ['portal.invite'] });
   assert.deepEqual(await call({ action: 'something_new' }), { status: 400, body: { error: 'Unknown action' } });
+});
+
+// ---------------------------------------------------------------- Delete and Bring back
+const deskRow = (over: Row = {}) => ({ id: 'desk-1', full_name: 'Busy Desk', email: 'busy@dralirashid.com', role: 'front_desk', active: true,
+  deactivated_at: null, deactivated_by: null, deleted_at: null, deleted_by: null, ...over });
+
+test('delete_staff through the handler: an account with records is switched off and kept as deleted; Bring back takes the mark off, still switched off', async () => {
+  reset({ perms: ['users.manage'], staff: [deskRow()], users: [{ id: 'desk-1', email: 'busy@dralirashid.com', confirmed: true }],
+    records: { 'desk-1': { total: 3, parts: [{ label: 'visits', one: 'visit', count: 3 }] } } });
+  const res = await call({ action: 'delete_staff', user_id: 'desk-1' });
+  assert.deepEqual(res, { status: 200, body: { ok: true, result: 'archived', total: 3 } });
+  const row = world.tables.staff[0];
+  assert.ok(row.deleted_at && row.deleted_by === 'caller-1' && row.active === false, 'switched off and marked deleted by the caller');
+  assert.deepEqual(world.calls.find(([k]) => k === 'updateUserById')![1], { id: 'desk-1', ban_duration: '876000h' });
+  assert.ok(world.users.has('desk-1'), 'the login is kept');
+  const back = await call({ action: 'restore_staff', user_id: 'desk-1' });
+  assert.deepEqual(back, { status: 200, body: { ok: true } });
+  assert.equal(row.deleted_at, null);
+  assert.equal(row.active, false, 'still switched off');
+  assert.deepEqual(world.tables.audit_log.map((a) => a.action), ['ARCHIVE_LOGIN', 'RESTORE_LOGIN']);
+});
+
+test('delete_staff and restore_staff through the handler: without users.manage both are 403 and nothing changes', async () => {
+  reset({ perms: [], staff: [deskRow()] });
+  assert.equal((await call({ action: 'delete_staff', user_id: 'desk-1' })).status, 403);
+  assert.equal((await call({ action: 'restore_staff', user_id: 'desk-1' })).status, 403);
+  assert.equal(world.calls.length, 0);
+  assert.equal(world.tables.staff[0].active, true);
+});
+
+test('create_staff and update_login: the email of a deleted account says whose it is and that it can be brought back; nothing is made', async () => {
+  reset({ perms: ['users.manage'], staff: [deskRow({ active: false, deleted_at: '2026-10-15T09:00:00.000Z' })] });
+  const made = await call({ ...newDoc, email: 'busy@dralirashid.com', password: 'a-long-enough-pass' });
+  assert.deepEqual(made.body, { error: 'That login email belongs to a deleted account (Busy Desk). Bring it back from Deleted accounts, or pick another email.' });
+  assert.ok(!names().includes('createUser'), 'no login was made');
+  assert.equal(world.tables.staff.length, 1);
+  // update_login: another account given that email gets the same answer, and its login is left as it was.
+  world.tables.staff.push(deskRow({ id: 'desk-2', full_name: 'New Desk', email: 'new@dralirashid.com' }));
+  const moved = await call({ action: 'update_login', user_id: 'desk-2', email: 'busy@dralirashid.com' });
+  assert.deepEqual(moved.body, { error: 'That login email belongs to a deleted account (Busy Desk). Bring it back from Deleted accounts, or pick another email.' });
+  assert.ok(!names().includes('updateUserById'), 'the login was not changed');
+  assert.equal(world.tables.staff[1].email, 'new@dralirashid.com');
+});
+
+test('unban_user (Switch on) refuses a deleted account: it is brought back first', async () => {
+  reset({ perms: ['users.manage'], staff: [deskRow({ active: false, deleted_at: '2026-10-15T09:00:00.000Z' })] });
+  const res = await call({ action: 'unban_user', user_id: 'desk-1' });
+  assert.deepEqual(res.body, { error: 'Busy Desk is in Deleted accounts. Bring the account back first, then switch it on.' });
+  assert.ok(!names().includes('updateUserById'), 'the login stays locked');
+  assert.equal(world.tables.staff[0].active, false);
 });

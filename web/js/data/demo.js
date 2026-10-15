@@ -34,6 +34,27 @@ const fail = (msg) => { throw new Error(msg); };
 const formError = (field, message, code = 'FORM_INVALID') => Object.assign(new Error(`${code}: ${message}`), { code, field });
 // Same wording as the admin-users Edge Function: a staff login name never has the shape of a patient username.
 const PATIENT_SHAPE_ERROR = 'That login name has the shape of a patient login (a name, a dash and a number). Choose a staff name such as reception@' + CONFIG.STAFF_EMAIL_DOMAIN + '.';
+// The columns that store a staff id, with the Delete dialog's words: the list of private.staff_record_columns()
+// (20261015000200_staff_delete.sql), with the demo's own name for four of the tables.
+const STAFF_RECORD_COLUMNS = [
+  ['visits', 'created_by', 'visits', 'visit'], ['visits', 'updated_by', 'visits last changed', 'visit last changed'],
+  ['visits', 'dues_override_by', 'dues holds overridden', 'dues hold overridden'], ['visits', 'protocol_override_by', 'braces rule overrides', 'braces rule override'],
+  ['payments', 'received_by', 'payments', 'payment'], ['invoices', 'created_by', 'invoices', 'invoice'], ['invoices', 'discount_approved_by', 'discounts approved', 'discount approved'],
+  ['discount_requests', 'requested_by', 'discount requests', 'discount request'], ['discount_requests', 'decided_by', 'discount requests decided', 'discount request decided'],
+  ['payment_plans', 'created_by', 'installment plans', 'installment plan'], ['expenses', 'created_by', 'expenses', 'expense'],
+  ['cash_closings', 'closed_by', 'cash closings', 'cash closing'], ['cash_closings', 'verified_by', 'cash closings verified', 'cash closing verified'],
+  ['patients', 'created_by', 'patients registered', 'patient registered'], ['braces_cases', 'created_by', 'braces cases', 'braces case'],
+  ['checkups', 'created_by', 'checkup patients', 'checkup patient'], ['day_closings', 'closed_by', 'days ended', 'day ended'],
+  ['retainer_cases', 'created_by', 'retainer records', 'retainer record'], ['lab_cases', 'created_by', 'lab work cases', 'lab work case'],
+  ['inventory_moves', 'created_by', 'stock entries', 'stock entry'], ['photos', 'uploaded_by', 'photos', 'photo'], ['xrays', 'uploaded_by', 'X-rays', 'X-ray'],
+  ['documents', 'uploaded_by', 'documents', 'document'], ['patient_flags', 'raised_by', 'patient flags raised', 'patient flag raised'],
+  ['patient_flags', 'cleared_by', 'patient flags cleared', 'patient flag cleared'], ['reminders', 'created_by', 'reminders made', 'reminder made'],
+  ['reminders', 'assigned_to', 'reminders assigned', 'reminder assigned'], ['complaints', 'resolved_by', 'complaints resolved', 'complaint resolved'],
+  ['complaint_messages', 'author_staff', 'complaint replies', 'complaint reply'], ['visit_ratings', 'followed_up_by', 'rating follow-ups', 'rating follow-up'],
+  ['job_applications', 'updated_by', 'job applications updated', 'job application updated'], ['job_events', 'by_staff', 'job application notes', 'job application note'],
+  ['staff', 'deactivated_by', 'staff accounts switched off', 'staff account switched off'], ['staff', 'deleted_by', 'staff accounts deleted', 'staff account deleted'],
+  ['audit', 'actor', 'changes in the audit log', 'change in the audit log'],
+];
 // A labelled placeholder "progress photo" (a drawn smile, not a real picture) for the sample patient.
 function samplePhoto(label, bg) {
   const teeth = [-84, -60, -36, -12, 12, 36, 60].map((x, i) => `<rect x="${200 + x - 10}" y="${150 + Math.abs(i - 3) * 6}" width="22" height="${30 - Math.abs(i - 3) * 4}" rx="6" fill="#fffdf7" stroke="#d9cbb8"/>`).join('');
@@ -128,8 +149,12 @@ function seed() {
     { id: 's-doc', full_name: 'Dr. Bushra (sample)', email: 'demo.doctor@example.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false, clinician_id: cl('Dr. Bushra (sample)') },
     { id: 's-coord', full_name: 'Clinic coordinator (sample)', email: 'demo.coordinator@example.com', role: 'coordinator', active: true, branch_ids: [], restrict_to_branches: false },
     { id: 's-acct', full_name: 'Accountant (sample)', email: 'demo.accounts@example.com', role: 'accountant', active: true, branch_ids: [], restrict_to_branches: false },
+    // For Delete on Staff accounts: a doctor whose name is on a few records (further down), and a desk login nobody ever used.
+    { id: 's-saba', full_name: 'Dr. Saba (sample)', email: 'demo.doctor2@example.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false },
+    { id: 's-weekend', full_name: 'Weekend reception (sample)', email: 'demo.weekend@example.com', role: 'front_desk', active: true, branch_ids: [], restrict_to_branches: false },
   ];
   db.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').staff_id = 's-doc';
+  db.clinicians.find((c) => c.display_name === 'Dr. Saba (sample)').staff_id = 's-saba';
   db.clinicians.find((c) => c.display_name === 'Dr. Ali Rashid').staff_id = 's-admin';
 
   // Made-up patients
@@ -246,6 +271,10 @@ function seed() {
     { id: uid(), patient_id: db.patients[11].id, kind: 'appointment', due_date: daysAgo(-2), note: 'Monthly due', status: 'open' },
     { id: uid(), patient_id: db.patients[18].id, kind: 'followup', due_date: daysAgo(1), note: 'Post-RCT check', status: 'contacted' },
   ];
+  // Dr. Saba (sample)'s records: three visits she added, two payments she took and a reminder she made. Delete keeps her account.
+  db.visits.filter((v) => v.status === 'completed').slice(0, 3).forEach((v) => { v.created_by = 's-saba'; });
+  db.payments.slice(0, 2).forEach((p) => { p.received_by = 's-saba'; });
+  db.reminders[1].created_by = 's-saba';
   db.visit_ratings = [{ visit_id: db.visits[0].id, patient_id: db.patients[0].id, stars: 2, comment: 'Long wait', created_at: daysAgo(3) }];
   // The first patient is the sample account shown by the "See a sample patient account" button:
   // a next appointment, two labelled progress photos and a message that got a reply.
@@ -494,7 +523,7 @@ export function createDemoAdapter() {
     },
     async staffLogins() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can see the login log');
-      return { staff: db.staff.map((s) => ({ id: s.id, full_name: s.full_name, email: s.email, role: s.role, active: s.active, last_sign_in_at: s.last_sign_in_at || null,
+      return { staff: db.staff.map((s) => ({ id: s.id, full_name: s.full_name, email: s.email, role: s.role, active: s.active, deleted_at: s.deleted_at || null, last_sign_in_at: s.last_sign_in_at || null,
           sign_ins_30d: (db.login_events || []).filter((e) => e.name === s.full_name).length })), events: clone(db.login_events || []) };
     },
     // Staff and the sample patient sign in from the list of demo accounts; a login a staff member made for a patient also works here.
@@ -1650,17 +1679,65 @@ export function createDemoAdapter() {
       need('users.manage');
       if (!row.email?.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Staff emails must end with @' + CONFIG.STAFF_EMAIL_DOMAIN);
       if (isPatientLoginName(row.email, CONFIG.STAFF_EMAIL_DOMAIN)) fail(PATIENT_SHAPE_ERROR);
-      if (db.staff.some((s) => s.email === row.email)) fail('A staff account with this email already exists.');
+      const taken = db.staff.find((s) => s.email === row.email);
+      if (taken?.deleted_at) fail(`That login email belongs to a deleted account (${taken.full_name}). Bring it back from Deleted accounts, or pick another email.`);
+      if (taken) fail('A staff account with this email already exists.');
       const { password, ...rest } = row;
       if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
       const s = { id: uid(), active: true, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...rest };
       db.staff.push(s); audit('staff', 'INSERT', s);
+      // As the admin-users function does: the doctor or assistant chosen gets this login.
+      const linked = row.clinician_id && db.clinicians.find((c) => c.id === row.clinician_id);
+      if (linked) linked.staff_id = s.id;
       return clone(s);
     },
     async deactivateStaff(id) {
       need('users.manage');
       if (id === me().id) fail('You cannot switch off your own account.');
-      const s = db.staff.find((x) => x.id === id); s.active = false; s.deactivated_at = new Date().toISOString(); audit('staff', 'UPDATE', s);
+      const s = db.staff.find((x) => x.id === id); s.active = false; s.deactivated_at = new Date().toISOString(); s.deactivated_by = me().id; audit('staff', 'UPDATE', s);
+    },
+    // Delete on Staff accounts, by the same rules as the admin-users function (delete_staff / restore_staff) and public.staff_records().
+    async staffRecords(id) {
+      if (!can('users.manage')) fail('Only Dr. Ali can see what a staff account has on the website');
+      const s = db.staff.find((x) => x.id === id);
+      // The demo keeps some who-columns as the person's name (payments, cash closings, the audit log), so the name counts too.
+      const mine = (v) => v != null && (v === id || (s && v === s.full_name));
+      // Most first, but the audit log (the last column) always last, as the database does: every saved change writes an audit row too.
+      const last = STAFF_RECORD_COLUMNS.length - 1;
+      const parts = STAFF_RECORD_COLUMNS.map(([table, col, label, one], sort) => ({ label, one, sort,
+        count: (db[table] || []).filter((r) => mine(r[col]) && !(table === 'staff' && r.id === id)).length }))
+        .filter((p) => p.count > 0).sort((a, b) => (a.sort === last) - (b.sort === last) || b.count - a.count || a.sort - b.sort).map(({ sort, ...p }) => p);
+      return { total: parts.reduce((t, p) => t + p.count, 0), parts, last_sign_in_at: s?.last_sign_in_at || null };
+    },
+    async deleteStaff(id) {
+      if (!can('users.manage')) fail('Only Dr. Ali can delete staff accounts.');
+      if (id === me().id) fail('You cannot delete your own account.');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      if (s.role === 'admin') fail('An admin account cannot be deleted.');
+      if (s.deleted_at) fail(`${s.full_name} is already in Deleted accounts.`);
+      const now = new Date().toISOString();
+      // Switched off first, as Switch off does; then counted. Nothing at all: the login goes for good, a linked doctor stays without it.
+      if (s.active) Object.assign(s, { active: false, deactivated_at: now, deactivated_by: me().id });
+      const { total } = await this.staffRecords(id);
+      if (total > 0) {
+        Object.assign(s, { deleted_at: now, deleted_by: me().id }); audit('staff', 'ARCHIVE_LOGIN', s);
+        return { ok: true, result: 'archived', total };
+      }
+      for (const c of db.clinicians) if (c.staff_id === id) c.staff_id = null;
+      audit('staff', 'DELETE_LOGIN', s);
+      db.staff = db.staff.filter((x) => x.id !== id);
+      // Its personal ticks and its menu order go with it (on delete cascade in the database).
+      delete db.overrides[id];
+      delete db.menu_prefs[id];
+      return { ok: true, result: 'removed', total: 0 };
+    },
+    async restoreStaff(id) {
+      if (!can('users.manage')) fail('Only Dr. Ali can bring back staff accounts.');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      if (!s.deleted_at) fail(`${s.full_name} is not in Deleted accounts.`);
+      Object.assign(s, { deleted_at: null, deleted_by: null }); audit('staff', 'RESTORE_LOGIN', s);
     },
     async updateStaffLogin(id, { email, password }) {
       need('users.manage');
@@ -1702,7 +1779,13 @@ export function createDemoAdapter() {
       s.role = role;
       audit('staff', 'UPDATE', s);
     },
-    async reactivateStaff(id) { need('users.manage'); db.staff.find((x) => x.id === id).active = true; },
+    async reactivateStaff(id) {
+      need('users.manage');
+      const s = db.staff.find((x) => x.id === id);
+      // As the database (staff_deleted_is_switched_off): a deleted account comes back with Bring back first.
+      if (s.deleted_at) fail(`${s.full_name} is in Deleted accounts. Bring the account back first, then switch it on.`);
+      s.active = true;
+    },
     async setSetting(key, value) { if (me()?.role !== 'admin') fail('Only admin can change settings'); db.settings[key] = value; },
     async discountCaps() { return clone(db.discount_caps); },
     async setDiscountCap(role, maxPercent, maxAmount) {
@@ -1771,7 +1854,8 @@ export function createDemoAdapter() {
     async setupLists() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
       db.doctor_commission_rules ||= [];
-      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories, staff: db.staff.filter((s) => s.active), commission_rules: db.doctor_commission_rules });
+      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories,
+        staff: db.staff.map(({ id, full_name, role, active, deleted_at }) => ({ id, full_name, role, active, deleted_at: deleted_at ?? null })), commission_rules: db.doctor_commission_rules });
     },
     async saveSetupRow(table, row) {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');

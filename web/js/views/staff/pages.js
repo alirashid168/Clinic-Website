@@ -15,8 +15,9 @@ const dayOf = (ts) => (ts ? localISO(new Date(ts)) : '');
 // toward the CV upload limits.
 let cvSweep = null;
 
-// The first page after login. Whoever keeps the Aaj ki List finds "+ Add checkup patient" (the checkup form, owner 11 Oct 2026) at the
-// top: the person goes on the Checkups page and on today's Aaj ki List of their branch.
+// The first page after login. Whoever keeps the Aaj ki List finds "+ Add checkup patient" at the top: the name and the mobile number only
+// (owner, 15 Oct 2026), and the person is on today's Aaj ki List of their branch, as Waiting; the checkup form is filled in after the checkup,
+// from their row there.
 export async function renderDashboard(root) {
   const d = state.data;
   const s = state.session.staff;
@@ -40,16 +41,15 @@ export async function renderDashboard(root) {
   const addCheckup = async () => {
     let form;
     try { form = await import('./checkup-actions.js'); } catch (e) { toast(friendlyError(e), 'error'); return; }
-    const row = await form.checkupFormModal(); // at the person's home branch, else they choose it
+    const row = await form.quickCheckupModal(); // at the person's only or home branch, else they choose it
     if (!row) return;
-    if (row.updated) { toast(`Answers saved on ${row.updated.patient_name}'s checkup.`, 'ok'); return; } // already on today's list: not one more
-    if (checkupCount !== null && row.checkup_date === day) { checkupCount += 1; countEl.textContent = countText(); }
-    toast(`${row.patient_name} added as a checkup patient.`, 'ok');
+    if (checkupCount !== null) { checkupCount += 1; countEl.textContent = countText(); }
+    toast(`${row.patient_name} added to today's list for ${branchName(row.branch_id)}.`, 'ok');
   };
   const checkupPanel = todaysCheckups?.missing ? null : h('section', { class: 'add-panel today-checkup', 'aria-label': 'Checkup patient' },
     h('div', { class: 'add-panel-text' },
       h('strong', {}, 'Checkup patient?'),
-      h('span', { class: 'muted' }, "Fill in the checkup form after the checkup. It goes on the Checkups page and on the branch's Aaj ki List for today.", countEl)),
+      h('span', { class: 'muted' }, "Write the name and mobile number: the name goes on today's Aaj ki List. After the checkup, the checkup form is filled in from their row there (\"Fill in form\", or Options).", countEl)),
     h('button', { type: 'button', class: 'btn btn-primary', 'aria-haspopup': 'dialog', onclick: addCheckup }, '+ Add checkup patient'),
     can('sheet.view') ? h('a', { class: 'btn', href: '#/staff/checkups' }, 'Open the Checkups page') : null);
   // totalDues is a number; a capped fallback may mark itself truncated.
