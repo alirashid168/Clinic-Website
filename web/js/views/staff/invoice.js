@@ -197,19 +197,27 @@ export async function paymentModal(patient, { branchId, dues, invoices, payments
   // Payments are taken against an invoice so each invoice shows what is still unpaid.
   let balances = [];
   try {
-    if (!invoices) ({ invoices, payments } = await state.data.patientBilling(patient.id));
+    if (!invoices) {
+      let now;
+      ({ invoices, payments, dues: now } = await state.data.patientBilling(patient.id));
+      if (Number.isFinite(now)) dues = now; // (the row's dues may be from before an invoice made in the same dialog)
+    }
     balances = invoiceBalances(invoices, payments).sort((a, b) => a.issue_date.localeCompare(b.issue_date));
   } catch { balances = []; }
   const open = balances.filter((i) => i.remaining > 0);
   const first = open[0];
-  const amount = h('input', { type: 'number', min: 1, step: 100, value: first ? first.remaining : dues > 0 ? dues : '' });
+  // A branch-restricted front desk reads only its own branches' payments (20261015000500): one taken at another branch leaves
+  // its invoice looking unpaid here, while the dues count every branch. So the amount filled in is never more than the dues.
+  const cap = can('dues.view') && Number.isFinite(dues) ? Math.max(0, dues) : Infinity;
+  const fill = (i) => Math.min(i.remaining, cap) || '';
+  const amount = h('input', { type: 'number', min: 1, step: 100, value: first ? fill(first) : dues > 0 ? dues : '' });
   const method = select([{ value: 'cash', label: 'Cash' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'card', label: 'Card' }, { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' }], 'cash');
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
   const invoiceSel = select([
     ...open.map((i) => ({ value: i.id, label: `${i.invoice_no} · ${shortDate(i.issue_date)} · ${rupees(i.remaining)} unpaid` })),
     ...balances.filter((i) => i.remaining <= 0).map((i) => ({ value: i.id, label: `${i.invoice_no} · ${shortDate(i.issue_date)} · paid` })),
     { value: '', label: 'Not for a particular invoice (advance)' },
-  ], first?.id || '', { onchange: (e) => { const i = open.find((x) => x.id === e.target.value); if (i && !refund?.checked) amount.value = i.remaining; } });
+  ], first?.id || '', { onchange: (e) => { const i = open.find((x) => x.id === e.target.value); if (i && !refund?.checked) amount.value = fill(i); } });
   const notes = h('input', { placeholder: 'Optional' });
   const refund = can('billing.refund') ? h('input', { type: 'checkbox' }) : null;
   const body = h('div', {},

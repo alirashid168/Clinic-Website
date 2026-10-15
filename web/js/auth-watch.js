@@ -49,13 +49,14 @@ const RECHECK_LIMIT_MS = 2 * 60 * 1000; // a look that has not answered by then 
  * the account off), 'account_gone' (deleted, or no longer linked to a record), 'idle' (the inactivity logout of another tab);
  * without one, the login ended in another tab or on the server, or it expired.
  * @param {string | null} reason
- * @param {{ patient?: boolean, idleMinutes?: number }} [who]  patient: a patient is told to call the clinic, not Dr. Ali
+ * @param {{ patient?: boolean, idleMinutes?: number }} [who]  patient: a patient is told to call the clinic, not Dr. Ali;
+ *   idleMinutes: this tab's limit, 0 when it never logs out for no activity (an 'idle' then gets the general words, without minutes)
  */
 export function endedNotice(reason, { patient = false, idleMinutes = 30 } = {}) {
   const contact = patient ? 'Please contact the clinic.' : 'Contact Dr. Ali.';
   if (reason === 'switched_off') return `You were logged out because this account was switched off. ${contact}`;
   if (reason === 'account_gone') return `You were logged out because this account no longer exists. ${contact}`;
-  if (reason === 'idle') return `You were logged out because there was no activity for ${idleMinutes} minute${idleMinutes === 1 ? '' : 's'}.`;
+  if (reason === 'idle' && idleMinutes > 0) return `You were logged out because there was no activity for ${idleMinutes} minute${idleMinutes === 1 ? '' : 's'}.`;
   return 'You were logged out. Your login ended in another tab or window, or it expired. Please log in again.';
 }
 
