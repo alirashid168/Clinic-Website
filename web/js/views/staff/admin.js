@@ -374,7 +374,21 @@ async function settings(root) {
   ], typeof s.dues_hold_mode === 'string' ? s.dues_hold_mode : 'warn');
   const wa = h('input', { value: s.whatsapp_number || '', placeholder: '03xx xxxxxxx' });
   const drop = h('input', { type: 'number', min: 7, value: s.dropoff_days ?? 42 });
-  const timeout = h('input', { type: 'number', min: 5, max: 720, step: 1, value: s.session_timeout_minutes ?? 30 });
+  // Logging staff out after no activity: 0 (or no value) is never, like the Google Sheet; otherwise the minutes. The box is for "After" only.
+  const savedMinutes = Number(s.session_timeout_minutes);
+  const neverOut = !(Number.isFinite(savedMinutes) && savedMinutes > 0);
+  const idleNever = h('input', { type: 'radio', name: 'idle-logout', value: 'never', checked: neverOut });
+  const idleAfter = h('input', { type: 'radio', name: 'idle-logout', value: 'after', checked: !neverOut });
+  const timeout = h('input', { type: 'number', min: 5, max: 720, step: 1, value: neverOut ? 30 : savedMinutes, disabled: neverOut, 'aria-label': 'Minutes of no activity before staff are logged out', style: { width: '6rem' } });
+  const syncIdle = () => { timeout.disabled = idleNever.checked; };
+  idleNever.addEventListener('change', syncIdle);
+  idleAfter.addEventListener('change', () => { syncIdle(); timeout.focus(); });
+  const idleField = h('div', { class: 'field', style: { gridColumn: '1 / -1' } },
+    h('fieldset', { class: 'choice-group', 'aria-describedby': 'idle-logout-hint' },
+      h('legend', { class: 'field-label' }, 'Log staff out after no activity'),
+      h('label', { class: 'choice' }, idleNever, h('span', {}, 'Never (stay signed in, like the Google Sheet)')),
+      h('div', { class: 'choice' }, h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer' } }, idleAfter, 'After'), timeout, ' minutes')),
+    h('span', { class: 'field-hint', id: 'idle-logout-hint' }, 'On a shared computer, staff can still press Log out in the name menu. With "After", choose 5 to 720 minutes (12 hours): one minute before, staff see a warning with a "Stay signed in" button, and clicks, typing, scrolling and touch all count as activity. Other staff get the change at their next login.'));
   const lowStars = select([1, 2, 3, 4].map((n) => ({ value: n, label: `${n} star${n > 1 ? 's' : ''} or less` })), Number(s.low_rating_threshold ?? 3));
   const capRows = ['front_desk', 'accountant', 'coordinator'].map((role) => {
     const c = caps[role] || { maxPercent: null, maxAmount: null };
@@ -434,8 +448,8 @@ async function settings(root) {
   const saveAll = busy(async () => {
     clearFieldErrors(root);
     const errors = [];
-    const minutes = Number(timeout.value);
-    if (!Number.isInteger(minutes) || minutes < 5 || minutes > 720) errors.push({ input: timeout, message: 'Enter a whole number of minutes from 5 to 720.' });
+    const minutes = idleNever.checked ? 0 : Number(timeout.value); // 0 = never
+    if (!idleNever.checked && (!Number.isInteger(minutes) || minutes < 5 || minutes > 720)) errors.push({ input: timeout, message: 'Enter a whole number of minutes from 5 to 720, or choose Never.' });
     const hours = collectHours();
     errors.push(...hours.errors);
     if (errors.length) { showFormErrors(root, errors); return; }
@@ -458,7 +472,7 @@ async function settings(root) {
     h('section', { class: 'panel' }, h('h2', {}, 'Website and follow-ups'),
       h('div', { class: 'form-grid' }, field('WhatsApp number for "Book free consultation"', wa), field('Drop-off list after (days without a visit)', drop),
         field('Low rating alert', lowStars, 'Ratings at or below this go to the coordinator\'s "Low ratings" list.'),
-        field('Log staff out after (minutes of no activity)', timeout, 'From 5 to 720 minutes (12 hours). One minute before, staff see a warning with a "Stay signed in" button. Clicks, typing, scrolling and touch all count as activity. Other staff get the new time at their next login.', { required: true }))),
+        idleField)),
     h('section', { class: 'panel' }, h('h2', {}, 'Branch opening hours'),
       h('p', { class: 'muted' }, 'What each branch card on the homepage shows. Karachi branches open on fixed weekdays whether or not Dr. Ali is there; Lahore and Islamabad open only on his visit dates.'),
       hourRows.map((r) => r.el)),
