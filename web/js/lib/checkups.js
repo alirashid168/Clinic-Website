@@ -13,16 +13,31 @@ export const FOLLOW_UP_STATUSES = ['Not Contacted', 'Follow-up Sent', 'No Respon
   'Started', 'Completed', 'Did Not Come', 'Not Interested', 'Referred', 'Not Recorded'];
 export const DAY_STATUSES = ['waiting', 'in_treatment', 'completed', 'cancelled', 'no_show'];
 export const DAY_STATUS_LABELS = { waiting: 'Waiting', in_treatment: 'In treatment', completed: 'Completed', cancelled: 'Cancelled', no_show: 'No show' };
-export const SOURCE_LABELS = { website: 'Website', google_sheet: 'Google Sheet', archive: 'Old list' };
+// google_form: an old answer of the Google Form "Checkup Patient Form 2.0", imported on Admin -> Import (web/js/lib/checkup-form.js).
+export const SOURCE_LABELS = { website: 'Website', google_sheet: 'Google Sheet', google_form: 'Google Form', archive: 'Old list' };
 export const IMPORT_BATCH = 250;
 // Clinic text (trimmed, lower case, inner spaces collapsed) -> branch code. Includes the app's own branch names so an
 // export can be imported again.
 export const CLINIC_BRANCH = { 'rj mall': 'GUL', 'gulshan': 'GUL', 'gulshan (rj mall)': 'GUL',
   'north nazimabad': 'NN', 'n. nazimabad': 'NN', 'nn': 'NN', 'dha karachi': 'DHA', 'dha': 'DHA',
   'lahore gulberg': 'LHR', 'gulberg lahore': 'LHR', 'gulberg': 'LHR', 'lahore': 'LHR', 'islamabad': 'ISB', 'isb': 'ISB' };
-/** The columns of the Excel export, in order: the owner's eleven first, then the website's own. */
+// The clinic's "Checkup Patient Form 2.0" (owner, 11 Oct 2026: "the checkup 2.0 form is good, and we are using that form now").
+// "What was your checkup for?" offers these and "Other"; the answer is kept as written in checkup_for. The last one is the Google Form's
+// last choice, which it spells "Wisdon tooth / Extraction" (20 of the 453 answers in the owner's file). "Did you understand the pricing
+// details?" is stored as a key (migration 20261011000300 allows only these three).
+export const CHECKUP_FOR_CHOICES = ['Braces', 'General checkup', 'Smile makeover', 'Scaling and polishing', 'Root canal', 'Extraction', 'Crown / bridge', 'Implant',
+  'Wisdom tooth / extraction'];
+export const PRICING_LABELS = { yes: 'Yes', no: 'No', needs_explanation: 'Needs clearer explanation' };
+/** true / false / null -> 'Yes' / 'No' / '' (a checkup added before the form, from the sheet or from the old list has no answers). */
+export const yesNo = (v) => (v === true ? 'Yes' : v === false ? 'No' : '');
+/** Does the checkup hold any answer of the form? Rows from before it (and from the sheet or the old list) hold none. */
+export const hasFormAnswers = (c) => !!c && (typeof c.ali_recommended === 'boolean' || typeof c.wants_treatment === 'boolean' || !!c.pricing_understood || !!c.treatment_plan);
+/** Does the checkup hold all four answers, i.e. was the form filled in for it? One answer added later (after a follow-up call) is not the form. */
+export const formComplete = (c) => !!c && typeof c.ali_recommended === 'boolean' && !!c.pricing_understood && typeof c.wants_treatment === 'boolean' && !!c.treatment_plan;
+/** The columns of the Excel export, in order: the owner's eleven first, then the website's own, then the answers of the form. */
 export const EXPORT_HEADER = ['Month', 'Patient Name', 'Phone', 'City', 'Clinic', 'Doctor', 'Treatment / Checkup For', 'Est. Fee (Rs)', 'Status',
-  'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on'];
+  'Notes', 'Source Tab', 'Date', 'Day status', 'Treatment details', 'Source', 'Mr#', 'Added on',
+  'Dr. Ali recommended', 'Understood pricing', 'Wants to start', 'When / why not'];
 
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -57,6 +72,66 @@ export function checkupPhone(raw) {
 export function checkupKey({ phone, name, month } = {}) {
   const m = /^(\d{4})-(\d{2})/.exec(month || '');
   return (checkupPhone(phone) ?? '') + '|' + String(name ?? '').replace(/\s+/g, ' ').trim().toLowerCase() + '|' + (m ? String(Number(m[1]) * 100 + Number(m[2])) : '');
+}
+
+// ------------------------------------------------------------------------------------------------ names
+/** A name in lower case, letters and digits only, single spaces ('' when nothing can be read, e.g. Urdu script). Same rule as private.aaj_norm_name. */
+export const nameNorm = (t) => String(t ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/ +/g, ' ').trim();
+const NAME_TITLES = new Set('m mr mrs ms miss dr md muhammad mohammad muhammed mohammed mohd syed syeda sayed hafiz haji baby master kid'.split(' '));
+
+/** One word of a name without the everyday ways of writing it in English letters ("Ayesha" / "Aisha", "Umer" / "Umar", "Noor" / "Nur"). Same rule as private.aaj_name_spelling. */
+export function nameSpelling(t) {
+  let s = String(t ?? '').toLowerCase().replace(/[^a-z]/g, '').replace(/[qv]/g, (c) => ({ q: 'k', v: 'w' }[c]));
+  s = s.replace(/([aeiou])ye/g, '$1i').replace(/(.)y(?![aeiou])/g, '$1i').replace(/([^aeiou])y(?=[aeiou])/g, '$1i');
+  s = s.replace(/ee/g, 'i').replace(/oo/g, 'u').replace(/ou/g, 'u').replace(/^e/, 'i').replace(/[oe]/g, (c) => ({ o: 'u', e: 'a' }[c]));
+  return s.replace(/(.)\1+/g, '$1').replace(/([aiu])h$/, '$1');
+}
+
+/**
+ * Is typed name a the person called b, without doubt? The same first name (titles such as Muhammad, M, Syed skipped; an everyday spelling is
+ * the same name) and no other name: "Aisha" is "Ayesha Khan", "Muhammad Usman Ali" is "Usman Ali"; "Ayesha Khan" is not "Ayesha Rajpoot", and
+ * "Sample Sister Aiza" is not "Sample Brother Bilal". Same rule as private.aaj_name_fits (the Aaj ki List's "phone + name"); the checkup form's
+ * import uses it for two answers on one phone on one day.
+ */
+export function nameFits(a, b) {
+  const na = nameNorm(a), nb = nameNorm(b);
+  const words = (n) => n.split(' ').filter((w) => w && !NAME_TITLES.has(w));
+  const wa = words(na), wb = words(nb);
+  if (wa.length && na === nb) return true;
+  if (!wa.length || !wb.length || wa.length > 4) return false;
+  const ka = wa.map(nameSpelling), kb = wb.map(nameSpelling);
+  if (!ka[0] || ka[0] !== kb[0] || !(ka.every((w) => kb.includes(w)) || kb.every((w) => ka.includes(w)))) return false;
+  // Muhammad (M, Md, Mohd ...), Syed, Hafiz, Baby ... count as words when both names have two or more: "Muhammad Usman" is not "Usman Tariq"
+  const raw = (n) => n.split(' ').filter((w) => w && !/^(mr|mrs|ms|miss|dr)$/.test(w))
+    .map((w) => (/^(m|md|mohd|mohammad|muhammed|mohammed)$/.test(w) ? 'muhammad' : w === 'sayed' ? 'syed' : w)).map(nameSpelling);
+  const ra = raw(na), rb = raw(nb);
+  return ra.length < 2 || rb.length < 2 || ra.every((w) => rb.includes(w)) || rb.every((w) => ra.includes(w));
+}
+
+// ------------------------------------------------------------------------------------------------ tick-box answers
+// "Who did your checkup?" and "What was your checkup for?" are tick boxes on the Google Form (several answers), which stores them as the
+// ticked choices joined with ", " and then the "Other" text. The website's form stores them the same way.
+/**
+ * Stored text -> { picked: the choices in it (as the list writes them, in the list's order), other: the rest, joined with ", " }.
+ * match(part) -> the choice a part of the text is, or null; split: what separates the parts (a comma; for people also / and &).
+ */
+export function splitChoices(text, choices, { match = null, split = /,/ } = {}) {
+  const parts = String(text ?? '').split(split).map((p) => p.trim().replace(/\s+/g, ' ')).filter(Boolean);
+  const key = (s) => String(s).toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '');
+  const find = match || ((p) => choices.find((c) => key(c) === key(p)) ?? null);
+  const picked = new Set();
+  const other = [];
+  for (const p of parts) {
+    const hit = find(p);
+    if (hit && choices.includes(hit)) picked.add(hit); else other.push(p);
+  }
+  return { picked: choices.filter((c) => picked.has(c)), other: other.join(', ') };
+}
+
+/** The ticked choices and the "Other" text -> the text to store ("Braces, Extraction, Gum treatment"), or null when nothing is ticked or typed. */
+export function joinChoices(picked, other) {
+  const parts = [...(picked || []), String(other ?? '').trim().replace(/\s+/g, ' ')].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
 }
 
 // ------------------------------------------------------------------------------------------------ months and fees
@@ -153,10 +228,14 @@ export function canonicalStatus(v) {
 }
 
 // ------------------------------------------------------------------------------------------------ the Aaj ki List
-/** Checkups to show on a day's list: only exact-day rows, and not a person who has become a patient with a visit on that list (D7). */
+/**
+ * Checkups to show on a day's list: only exact-day rows, never an answer imported from the Google Form (that day's list did not have
+ * it), and not a person who has become a patient with a visit on that list (D7). The same rule as private.day_list_checkups
+ * (20261012000300_checkup_form_day_lists.sql), which builds the copy that "End the day" saves and the History counts.
+ */
 export function dayListCheckups(checkups, visits) {
   const patients = new Set((visits || []).map((v) => v.patient_id).filter(Boolean));
-  return (checkups || []).filter((c) => !c.date_is_month && !(c.patient_id && patients.has(c.patient_id)));
+  return (checkups || []).filter((c) => !c.date_is_month && c.source !== 'google_form' && !(c.patient_id && patients.has(c.patient_id)));
 }
 
 // ------------------------------------------------------------------------------------------------ reading the old list
@@ -238,7 +317,7 @@ export function readCheckupList(rows2d) {
     const at = (field) => (columns[field] === undefined ? undefined : cells[columns[field]]);
     const name = cleanText(isEmptyCell(at('name')) ? null : String(at('name')).replace(/\s+/g, ' '), 200);
     if (name.value === null) { skip(row, 'No patient name'); continue; }
-    if (columns.source !== undefined && /^(website|google sheet)$/i.test(String(at('source') ?? '').trim())) { skip(row, 'Already on the website (exported from it)'); continue; }
+    if (columns.source !== undefined && /^(website|google sheet|google form)$/i.test(String(at('source') ?? '').trim())) { skip(row, 'Already on the website (exported from it)'); continue; }
 
     const month = parseMonth(at('month'));
     const phone = cleanText(at('phone'), 40);
@@ -309,6 +388,7 @@ export function checkupsToSheet(rows, branches) {
       c.est_fee === null || c.est_fee === undefined || c.est_fee === '' ? '' : Number(c.est_fee),
       text(c.follow_up), text(c.notes), text(c.source_tab),
       exactDay, DAY_STATUS_LABELS[c.day_status] || '', text(c.details), SOURCE_LABELS[c.source] || '', text(c.mr_number), karachiDate(c.created_at),
+      yesNo(c.ali_recommended), PRICING_LABELS[c.pricing_understood] || '', yesNo(c.wants_treatment), text(c.treatment_plan),
     ]);
   }
   return out;

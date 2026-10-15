@@ -15,7 +15,7 @@ import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
 import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
-import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel, dayListCheckups } from '../lib/checkups.js';
+import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel, nameFits, nameNorm, dayListCheckups } from '../lib/checkups.js';
 import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
 import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS, HONEYPOT } from '../lib/public-forms.js';
 
@@ -46,10 +46,12 @@ function chk(over) {
   const now = new Date().toISOString();
   return { id: uid(), checkup_date: null, date_is_month: false, branch_id: null, patient_name: '', phone: null, city: null, doctors: null, checkup_for: null,
     details: null, token: null, day_status: null, est_fee: null, follow_up: 'Not Contacted', notes: null, source: 'website', source_tab: null, sheet_key: null,
-    patient_id: null, created_by: null, created_at: now, updated_at: now, ...over };
+    patient_id: null, created_by: null, created_at: now, updated_at: now,
+    ali_recommended: null, pricing_understood: null, wants_treatment: null, treatment_plan: null, form_submitted_at: null, ...over };
 }
 // The limits of the checkups table (its check constraints), so the demo refuses what the database refuses.
-const CHECKUP_LIMITS = { patient_name: [1, 200], phone: [0, 40], city: [0, 80], doctors: [0, 300], checkup_for: [0, 300], details: [0, 2000], token: [0, 40], notes: [0, 2000], follow_up: [1, 60] };
+const CHECKUP_LIMITS = { patient_name: [1, 200], phone: [0, 40], city: [0, 80], doctors: [0, 300], checkup_for: [0, 300], details: [0, 2000], token: [0, 40], notes: [0, 2000], follow_up: [1, 60],
+  treatment_plan: [0, 500] };
 function checkValid(c) {
   for (const [col, [min, max]] of Object.entries(CHECKUP_LIMITS)) {
     const v = c[col];
@@ -59,6 +61,9 @@ function checkValid(c) {
   }
   if (c.est_fee !== null && c.est_fee !== undefined && !(c.est_fee >= 0)) fail('new row for relation "checkups" violates check constraint "checkups_est_fee_check"');
   if (c.day_status !== null && c.day_status !== undefined && !DAY_STATUSES.includes(c.day_status)) fail('new row for relation "checkups" violates check constraint "checkups_day_status_check"');
+  // the answers of the Checkup Patient Form 2.0 (migration 20261011000300)
+  if (c.pricing_understood !== null && c.pricing_understood !== undefined && !Object.keys(PRICING_LABELS).includes(c.pricing_understood)) fail('new row for relation "checkups" violates check constraint "checkups_pricing_understood_check"');
+  for (const col of ['ali_recommended', 'wants_treatment']) if (c[col] !== null && c[col] !== undefined && typeof c[col] !== 'boolean') fail(`invalid input syntax for type boolean: "${c[col]}"`);
 }
 /** 'YYYY-MM' -> the first day of the month after it. */
 const monthAfter = (ym) => (ym.slice(5, 7) === '12' ? `${Number(ym.slice(0, 4)) + 1}-01-01` : `${ym.slice(0, 4)}-${String(Number(ym.slice(5, 7)) + 1).padStart(2, '0')}-01`);
@@ -302,12 +307,14 @@ function seed() {
   db.checkups[4].follow_up = 'Started';
   const at = (n) => new Date(Date.now() + n).toISOString();
   db.checkups.push(
-    chk({ checkup_date: today, branch_id: 2, patient_name: 'Bareera Khalid', phone: '0300-5550701', city: 'Karachi', doctors: 'Dr. Rabia (sample)', checkup_for: 'Checkup',
-      day_status: 'waiting', source: 'website', created_at: at(1) }),
+    chk({ checkup_date: today, branch_id: 2, patient_name: 'Bareera Khalid', phone: '0300-5550701', city: 'Karachi', doctors: 'Dr. Rabia (sample)', checkup_for: 'Braces',
+      day_status: 'waiting', source: 'website', created_at: at(1),
+      ali_recommended: true, pricing_understood: 'needs_explanation', wants_treatment: true, treatment_plan: 'Next month, after her exams' }),
     chk({ checkup_date: today, branch_id: 2, patient_name: 'Salma Nadeem', phone: '0300-5550702', city: 'Karachi', doctors: 'Dr. Hina (sample)', checkup_for: 'Scaling',
       details: 'Scaling advised', token: '7', day_status: 'completed', source: 'google_sheet', sheet_key: 'S-demo00000001', created_at: at(2) }),
-    chk({ checkup_date: today, branch_id: 1, patient_name: 'Imtiaz Gill', phone: '0300-5550703', city: 'Karachi', doctors: null, checkup_for: 'Checkup',
-      day_status: 'waiting', source: 'website', created_at: at(3) }));
+    chk({ checkup_date: today, branch_id: 1, patient_name: 'Imtiaz Gill', phone: '0300-5550703', city: 'Karachi', doctors: 'Dr. Amna (sample)', checkup_for: 'Scaling and polishing',
+      day_status: 'waiting', source: 'website', created_at: at(3),
+      ali_recommended: false, pricing_understood: 'yes', wants_treatment: false, treatment_plan: 'Wants to compare prices first' }));
   db.audit = [];
   // The demo's stand-in for the login server: logins the clinic made for patients ({ patient_id, email, password, must_change }).
   // Kept apart from every patient row, and never returned by any method, like the real login server's passwords.
@@ -321,6 +328,7 @@ export function createDemoAdapter() {
   let session = null; // { staff } | { patient, login? }  (login: the portal login row that signed in)
   const ownPasswords = new Map(); // account id -> the password that account chose in changeOwnPassword() on this page (demo accounts have no real one)
   const saved = new Map(); // idempotency key -> what that save produced (a retried save returns it instead of saving twice)
+  const formKeys = new Map(); // the answers of the Google Form imported so far (private.checkup_form_imports): key -> checkup id
 
   const me = () => session?.staff || null;
   const can = (key) => {
@@ -351,7 +359,7 @@ export function createDemoAdapter() {
   const checkupVisible = (c) => (can('sheet.view') || can('patients.view')) && checkupBranchOk(c);
   const checkupView = (c) => ({ ...clone(c), phone_key: checkupPhone(c.phone), mr_number: c.patient_id && can('patients.view') ? patient(c.patient_id)?.mr_number ?? null : null });
   const monthText = (iso, withDay) => (withDay ? iso.slice(8, 10) + ' ' : '') + monthLabel(iso);
-  function checkupMatches({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '' } = {}) {
+  function checkupMatches({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', wants = '' } = {}) {
     const text = String(q || '').replace(/[%,()*\\"]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
     const digits = text.replace(/[^0-9]/g, '');
     const keys = [];
@@ -364,8 +372,9 @@ export function createDemoAdapter() {
       && (!month.test(from || '') || (c.checkup_date !== null && c.checkup_date >= from + '-01'))
       && (!month.test(to || '') || (c.checkup_date !== null && c.checkup_date < monthAfter(to)))
       && (!followUp || c.follow_up === followUp)
-      && (!['website', 'google_sheet', 'archive'].includes(source) || c.source === source)
-      && (registered !== 'yes' || c.patient_id) && (registered !== 'no' || !c.patient_id))
+      && (!['website', 'google_sheet', 'google_form', 'archive'].includes(source) || c.source === source)
+      && (registered !== 'yes' || c.patient_id) && (registered !== 'no' || !c.patient_id)
+      && (wants !== 'yes' || c.wants_treatment === true) && (wants !== 'no' || c.wants_treatment === false))
       .sort((a, b) => (a.checkup_date === b.checkup_date ? 0 : a.checkup_date === null ? 1 : b.checkup_date === null ? -1 : a.checkup_date < b.checkup_date ? 1 : -1)
         || (a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1) || (a.id < b.id ? -1 : 1));
   }
@@ -755,7 +764,7 @@ export function createDemoAdapter() {
       const days = new Map();
       const add = (b, day) => { if (day && (!from || day >= from) && day <= top && branches.includes(b)) days.set(`${day}|${b}`, { b, day }); };
       for (const v of db.visits) add(v.branch_id, v.visit_date);
-      for (const c of db.checkups) if (!c.date_is_month) add(c.branch_id, c.checkup_date);
+      for (const c of db.checkups) if (!c.date_is_month && c.source !== 'google_form') add(c.branch_id, c.checkup_date); // (as dayListCheckups)
       for (const x of db.day_closings) add(x.branch_id, x.list_date);
       const all = [...days.values()].sort((x, y) => (x.day === y.day ? x.b - y.b : x.day < y.day ? 1 : -1));
       const size = Math.min(Math.max(Math.trunc(Number(limit)) || 1, 1), 200);
@@ -787,8 +796,8 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ checkups (patients without a patient file / Mr#)
     // The same rules as the database: read = sheet.view or patients.view; add and change = sheet.edit; all within the person's branches
     // (a row with no branch is open to everyone who may read); delete = admin, or sheet.edit on a row that is not from the old list.
-    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', page = 0, pageSize = 50 } = {}) {
-      const rows = checkupMatches({ q, branchId, from, to, followUp, source, registered });
+    async listCheckups({ q = '', branchId = null, from = null, to = null, followUp = '', source = '', registered = '', wants = '', page = 0, pageSize = 50 } = {}) {
+      const rows = checkupMatches({ q, branchId, from, to, followUp, source, registered, wants });
       const first = Math.max(0, Number(page) || 0) * pageSize;
       return { rows: rows.slice(first, first + pageSize).map(checkupView), total: rows.length };
     },
@@ -798,8 +807,9 @@ export function createDemoAdapter() {
       if (rows.length > 20000) { out.truncated = true; out.cap = 20000; }
       return out;
     },
+    // (an answer imported from the Google Form is on the Checkups page, never on a day's list: that day's list did not have it)
     async listDayCheckups({ branchId = null, date }) {
-      return db.checkups.filter((c) => c.checkup_date === date && !c.date_is_month && (!branchId || c.branch_id === Number(branchId)) && checkupVisible(c))
+      return db.checkups.filter((c) => c.checkup_date === date && !c.date_is_month && c.source !== 'google_form' && (!branchId || c.branch_id === Number(branchId)) && checkupVisible(c))
         .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(checkupView);
     },
     subscribeCheckups() { return () => {}; },
@@ -823,8 +833,8 @@ export function createDemoAdapter() {
     },
     async deleteCheckup(id) {
       const c = db.checkups.find((x) => x.id === id);
-      if (!c || !checkupVisible(c) || !(me()?.role === 'admin' || (can('sheet.edit') && checkupBranchOk(c) && c.source !== 'archive'))) {
-        fail('NOT_REMOVED: this checkup could not be removed (rows from the old list can only be removed by Dr. Ali).');
+      if (!c || !checkupVisible(c) || !(me()?.role === 'admin' || (can('sheet.edit') && checkupBranchOk(c) && c.source !== 'archive' && c.source !== 'google_form'))) {
+        fail('NOT_REMOVED: this checkup could not be removed (rows from the old list or the Google Form can only be removed by Dr. Ali).');
       }
       db.checkups = db.checkups.filter((x) => x.id !== id); audit('checkups', 'DELETE', c);
     },
@@ -905,6 +915,114 @@ export function createDemoAdapter() {
           city: text(w.city, 80), doctors: text(w.doctors, 300), checkup_for: text(w.checkup_for, 300), est_fee: fee !== null && fee >= 0 && fee <= 9999999999.99 ? fee : null,
           follow_up: status, notes, source: 'archive', source_tab: text(w.source_tab, 120), created_by: me().id });
         db.checkups.push(c); existing.set(key, c); audit('checkups', 'INSERT', c); out.inserted++;
+      });
+      return out;
+    },
+
+    // Admin: the old answers of the Google Form "Checkup Patient Form 2.0", with the database's rules (import_checkup_form, migration
+    // 20261011000300): the same keys, the same order of places an answer goes to, the same counts. dryRun works on a copy (the preview).
+    async importCheckupForm(rows, { dryRun = false } = {}) {
+      if (me()?.role !== 'admin') fail('NOT_ALLOWED: only Dr. Ali can import the answers of the checkup form.');
+      if (!Array.isArray(rows)) fail('BAD_ROWS: send the rows as a list.');
+      if (rows.length > 500) fail('TOO_MANY_ROWS: send at most 500 rows at a time.');
+      const list = dryRun ? clone(db.checkups) : db.checkups;
+      const keys = dryRun ? new Map(formKeys) : formKeys;
+      const out = { given: rows.length, inserted: 0, filled_day: 0, filled_month: 0, already: 0, same: 0, skipped: [], skipped_count: 0, other_name: 0, other_answers: 0,
+        follow_up_noted: 0, dry_run: !!dryRun };
+      const skip = (row, reason) => { out.skipped_count++; if (out.skipped.length < 100) out.skipped.push({ row, reason }); };
+      const text = (v, max) => cleanText(typeof v === 'string' ? v : null, max).value;
+      const karachi = (ms) => new Date(ms + 5 * 3600000).toISOString();     // Karachi's wall clock (+05:00 all year), as YYYY-MM-DDTHH:MM:SS
+      const today = karachi(Date.now()).slice(0, 10);
+      const open = karachi(Date.now() - 3 * 3600000).slice(0, 10);
+      const nameKey = (t) => String(t).replace(/\s+/g, ' ').trim().toLowerCase();
+      rows.forEach((raw, n) => {
+        const w = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+        const rowNo = /^[0-9]{1,9}$/.test(String(w.row ?? '')) ? Number(w.row) : n + 1;
+        const name = text(typeof w.name === 'string' ? w.name.replace(/\s+/g, ' ') : null, 200);
+        // a time of this century with its offset, on a day its month has (the browser would roll 30 Feb over to March)
+        const t = typeof w.submitted_at === 'string' ? /^(20[0-9]{2})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?(Z|[+-](0[0-9]|1[0-4]):?[0-5][0-9])$/.exec(w.submitted_at) : null;
+        const ms = t && new Date(Date.UTC(Number(t[1]), Number(t[2]) - 1, Number(t[3]))).getUTCDate() === Number(t[3]) ? Date.parse(w.submitted_at) : NaN;
+        const local = Number.isNaN(ms) ? null : karachi(ms);
+        const date = local ? local.slice(0, 10) : null;
+        if (name === null) return skip(rowNo, 'No patient name');
+        if (!date) return skip(rowNo, 'The date could not be read');
+        if (date > today) return skip(rowNo, 'The date is in the future');
+        if (date >= open) return skip(rowNo, "Given today: today's list is still kept in the Google Sheet. Import the file again tomorrow.");
+        const phone = text(w.phone, 40);
+        const pk = checkupPhone(phone);
+        const key = `${date} ${local.slice(11, 19)}|${pk ?? ''}|${name.toLowerCase()}`;
+        if (keys.has(key)) { out.already++; return; }
+        const branch = db.branches.find((b) => b.code.toUpperCase() === String(w.branch ?? '').trim().toUpperCase())?.id ?? null;
+        const ali = typeof w.ali_recommended === 'boolean' ? w.ali_recommended : null;
+        const wants = typeof w.wants_treatment === 'boolean' ? w.wants_treatment : null;
+        const pricing = Object.keys(PRICING_LABELS).includes(w.pricing_understood) ? w.pricing_understood : null;
+        const plan = text(w.treatment_plan, 500), doctors = text(w.doctors, 300), checkupFor = text(w.checkup_for, 300), follow = text(w.follow_up, 60), notes = text(w.notes, 2000);
+        // the checkup of that person on that day at that branch: the same phone and name (private.aaj_name_fits; another name on the same
+        // phone is another person, e.g. two children on a parent's phone), or the same name without a phone; the same name letter for letter
+        // first, then the oldest; the first whose answers agree (private.checkup_form_agrees). Else, when that person is not on that day's
+        // list, the old list's row of that person and month, when its answers agree. A checkup holding other answers is never filled in.
+        let kind = 'filled_day';
+        let second = false;
+        const agrees = (x) => (ali === null || (x.ali_recommended ?? null) === null || x.ali_recommended === ali)
+          && (pricing === null || (x.pricing_understood ?? null) === null || x.pricing_understood === pricing)
+          && (wants === null || (x.wants_treatment ?? null) === null || x.wants_treatment === wants)
+          && (plan === null || (x.treatment_plan ?? null) === null || x.treatment_plan.toLowerCase() === plan.toLowerCase());
+        const day = list.filter((x) => x.checkup_date === date && !x.date_is_month && x.source !== 'archive' && (x.branch_id ?? null) === branch);
+        const samePhone = pk ? day.filter((x) => checkupPhone(x.phone) === pk) : [];
+        const person = day.filter((x) => (samePhone.includes(x) && (!nameNorm(name) || !nameNorm(x.patient_name) || nameFits(name, x.patient_name)))
+          || ((!pk || !checkupPhone(x.phone)) && nameKey(x.patient_name) === name.toLowerCase()))
+          .sort((a, b) => (Number(nameKey(b.patient_name) === name.toLowerCase()) - Number(nameKey(a.patient_name) === name.toLowerCase()))
+            || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1));
+        let c = person.find(agrees);
+        if (!c && person.length) second = true;               // that person's checkup of that day holds other answers
+        else if (!c && samePhone.length) out.other_name++;
+        if (!c && !second) {
+          kind = 'filled_month';
+          const arch = list.find((x) => x.source === 'archive' && checkupKey({ phone: x.phone, name: x.patient_name, month: x.checkup_date }) === checkupKey({ phone, name, month: date }));
+          if (arch && agrees(arch)) c = arch; else second = !!arch;
+        }
+        if (c) {
+          // the plain word in the spellings the sync reads as a checkup is no answer; what the checkup keeps its own text for goes into its notes
+          const nextFor = (c.checkup_for ?? null) === null || /^\s*ch[ea]{1,2}c?k?[- ]?ups?\s*$/i.test(c.checkup_for) ? checkupFor ?? c.checkup_for ?? null : c.checkup_for;
+          const nextDoctors = c.doctors ?? doctors;
+          const nextBranch = c.branch_id ?? branch;
+          const nextFollow = kind === 'filled_day' && c.follow_up === 'Not Contacted' && follow !== null ? follow : c.follow_up;
+          // the follow-up status from REMINDERS that the checkup does not take (it has another, or it is the old list's row): kept in the notes,
+          // unless the answer's notes already have what REMINDERS said ("Reminder: ...", lib/checkup-form.js)
+          const remind = follow !== null && String(nextFollow ?? '').toLowerCase() !== follow.toLowerCase() && !/(^|; )Reminder: /.test(notes ?? '')
+            ? `Reminder (Google Form): ${follow}` : null;
+          let nextNotes = c.notes ?? null;
+          for (const part of [notes, remind,
+            doctors !== null && nextDoctors.toLowerCase() !== doctors.toLowerCase() ? `On the Google Form: "Who did your checkup?" ${doctors}` : null,
+            checkupFor !== null && nextFor.toLowerCase() !== checkupFor.toLowerCase() ? `On the Google Form: "What was your checkup for?" ${checkupFor}` : null,
+            branch !== null && nextBranch !== branch ? `On the Google Form: "Which branch did you visit?" ${db.branches.find((b) => b.id === branch)?.name}` : null]) {
+            if (part !== null && !(nextNotes || '').includes(part)) nextNotes = !(nextNotes || '').trim() ? part : (nextNotes + '; ' + part).slice(0, 2000);
+          }
+          const next = {
+            ali_recommended: c.ali_recommended ?? ali, pricing_understood: c.pricing_understood ?? pricing, wants_treatment: c.wants_treatment ?? wants,
+            treatment_plan: c.treatment_plan ?? plan, doctors: nextDoctors, checkup_for: nextFor, phone: c.phone ?? phone, branch_id: nextBranch,
+            follow_up: nextFollow,
+            notes: nextNotes,
+          };
+          if (Object.keys(next).some((k) => (next[k] ?? null) !== (c[k] ?? null))) {
+            if (remind !== null && !(c.notes || '').includes(remind) && (nextNotes || '').includes(remind)) out.follow_up_noted++;
+            Object.assign(c, next, { form_submitted_at: c.form_submitted_at ?? new Date(ms).toISOString(), updated_at: new Date().toISOString() });
+            if (!dryRun) audit('checkups', 'UPDATE', c);
+            out[kind]++;
+          } else out.same++;
+          keys.set(key, c.id);
+          return;
+        }
+        const at = new Date(ms).toISOString();
+        const fresh = chk({ checkup_date: date, branch_id: branch, patient_name: name, phone, doctors, checkup_for: checkupFor, day_status: 'completed',
+          follow_up: follow ?? 'Not Contacted', notes, source: 'google_form', source_tab: 'Checkup Form 2.0', ali_recommended: ali, pricing_understood: pricing,
+          wants_treatment: wants, treatment_plan: plan, form_submitted_at: at, created_at: at, created_by: me().id });
+        checkValid(fresh);
+        list.push(fresh);
+        if (!dryRun) audit('checkups', 'INSERT', fresh);
+        keys.set(key, fresh.id);
+        out.inserted++;
+        if (second) out.other_answers++;
       });
       return out;
     },
