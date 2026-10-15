@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import {
-  MAX_KEYS, KEY_PATTERN, pageKey, cleanArrangement, menuEntries, topKeys, arrangementFor, arrangeMenu, barLabel,
+  MAX_KEYS, KEY_PATTERN, pageKey, cleanArrangement, menuEntries, topKeys, arrangementFor, arrangeMenu, barLabel, atAddress,
 } from '../web/js/lib/menu-arrange.js';
 
 // ---- a menu like shell.js's
@@ -109,6 +109,15 @@ test('a page pinned out of a drop-down leaves it; a pinned tab page is "current"
   assert.ok(out.some((x: Item) => x.label === 'Patients (Reports)'), 'the Patients report is told apart from the Patients page');
   assert.ok(out.some((x: Item) => x.label === 'Patients' && x.href === '#/staff/patients'));
   assert.deepEqual(out.find((x: Item) => x.key === 'reports').items.map((i: Item) => i.divider ? '---' : i.label), ['Financial', 'OPD', '---', 'Expenses', 'Cash closing']);
+});
+
+test('atAddress (how nav-arrange.js marks a pinned tab page again after the page changed tab): the same page and tab, more in the address is fine', () => {
+  assert.equal(atAddress('coordinator?tab=lab', '#/staff/coordinator?tab=lab'), true);
+  assert.equal(atAddress('coordinator?tab=lab', '#/staff/coordinator?tab=reminders'), false, 'another tab of the same page');
+  assert.equal(atAddress('coordinator?tab=lab', '#/staff/coordinator'), false, 'the page opened without a tab: not this link (the bar has no "first tab")');
+  assert.equal(atAddress('coordinator?tab=lab', '#/staff/admin?tab=lab'), false, 'another page');
+  assert.equal(atAddress('reports?group=financial', '#/staff/reports?group=financial&tab=income&from=2026-10-01&to=2026-10-15'), true, "a report's dates in the address");
+  assert.equal(atAddress('reports?group=financial', '#/staff/reports?group=opd&tab=visits'), false);
 });
 
 test('the Aaj ki List page on the top bar beside the Aaj ki List drop-down reads "Aaj ki List (today)": no name is on the bar twice', () => {

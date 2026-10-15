@@ -127,10 +127,21 @@ function trim(items) {
 const parse = (key) => { const [path, query = ''] = String(key).replace(/^#\/staff\//, '').split('?'); return { path, params: new URLSearchParams(query) }; };
 
 /**
+ * Whether the page `key` ('coordinator?tab=lab') is the one at the address `here` ('#/staff/coordinator?tab=lab'): the same page,
+ * with everything after its '?' the same there too (the address may say more: a report's dates, a branch).
+ */
+export function atAddress(key, here) {
+  const page = parse(key);
+  const now = parse(here);
+  return page.path === now.path && [...page.params].every(([k, v]) => now.params.get(k) === v);
+}
+
+/**
  * The menu in the same shape as menu(), arranged by `saved`. The clinic's own menu comes back unchanged (the same array) when
  * nothing differs from it. { spill: n } moves the last n entries of the top bar into More (a top bar too long for the screen).
  * { here } is the address on screen ('#/staff/coordinator?tab=lab'): a page with a tab on the top bar is marked as the
- * current one (key = its section, as shell.js's current() expects) only on that very tab.
+ * current one (key = its section, as shell.js's current() expects) only on that very tab. The pages change tabs without a
+ * new address event, so nav-arrange.js marks such a link again from the address as it is then (atAddress).
  */
 export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
   const entries = menuEntries(menu);
@@ -140,11 +151,10 @@ export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
   if (sameList(top, defaultTop(entries))) return menu;
   const onTop = new Set(top);
   const open = (i) => i.divider || !onTop.has(pageKey(i.href)); // still in its drop-down (anything that is not a page stays too)
-  const now = parse(here);
   const pinned = (e) => {
     const { path, params } = parse(e.key);
     const tab = [...params.keys()].length > 0;
-    const current = !tab || (now.path === path && [...params].every(([k, v]) => now.params.get(k) === v));
+    const current = !tab || atAddress(e.key, here);
     return { ...e.item, label: barLabel(entries, e), key: current ? (e.item.key || path) : `page:${e.key}` };
   };
   const out = [];

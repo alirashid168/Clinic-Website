@@ -10,7 +10,7 @@
 // The copy holds only page keys, nothing about patients, so it is left behind at logout like the other per-person settings.
 import { h, modal, toast, announce } from '../../ui/dom.js';
 import { state } from '../../state.js';
-import { menuEntries, topKeys, arrangeMenu, arrangementFor, cleanArrangement, barLabel } from '../../lib/menu-arrange.js';
+import { menuEntries, topKeys, arrangeMenu, arrangementFor, cleanArrangement, barLabel, atAddress, pageKey } from '../../lib/menu-arrange.js';
 
 const COPY_KEY = (staffId) => `staff-menu:${staffId}`;
 const LONG_BAR = 9; // more entries than this on the top bar: the dialog warns that it may not fit on a small laptop
@@ -79,22 +79,50 @@ export function arrangeNav(menu, { topnav, navEntry, drawerLinks, drawerEntry, s
   draw();
   redraw = draw;
   signal?.addEventListener('abort', () => { if (redraw === draw) redraw = null; });
+  followTabs([topnav, drawerLinks], signal);
+}
+
+/**
+ * A page put on the top bar with its tab (Reminders, a Reports group, an Admin tab) is marked as the page on screen only while
+ * that tab is. The pages change tabs with history.replaceState, which fires no event, so the address is looked at again around
+ * every click, key press and change: before it (so the phone drawer opens on the right page) and just after it (once the page
+ * has changed tab). shell.js does the same for a drop-down's links each time it opens. The clinic's own menu has no such links.
+ */
+function followTabs(lists, signal) {
+  const mark = () => {
+    for (const list of lists) {
+      for (const a of list.querySelectorAll(':scope > a.nav-link[href*="?"]')) {
+        const on = atAddress(pageKey(a.getAttribute('href')), location.hash);
+        if (on === a.hasAttribute('aria-current')) continue;
+        a.classList.toggle('current', on);
+        if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+      }
+    }
+  };
+  const look = () => { mark(); setTimeout(mark); };
+  for (const type of ['click', 'keydown', 'change']) document.addEventListener(type, look, { capture: true, signal });
 }
 
 /**
  * Keeps the top bar on one line: when the menus, the search box (which first shrinks to its smallest) and the name menu do
  * not fit (a long arrangement on a 1366px laptop), the last entries of the top bar go into More, one at a time, until they do.
- * Looked at again when the window size changes and when the web fonts arrive. build(n) returns the bar's entries with n moved.
- * Not while the person is in the menu (keyboard focus in it, or a drop-down opened with a click): that would pull it from under
- * them, so it waits until focus leaves the bar. Returns the function that draws the bar afresh (with nothing moved) and fits it.
+ * Looked at again when the bar's width changes (the window's size, or the page's scrollbar, which a dialog hides while it is
+ * open and which a long page brings once it has loaded) and when the web fonts arrive. build(n) returns the bar's entries with
+ * n moved. Not while the person is in the menu (keyboard focus in it, or a drop-down opened with a click): that would pull it
+ * from under them, so it waits until focus leaves the bar. Returns the function that draws the bar afresh (with nothing moved)
+ * and fits it.
  */
 function fitTopBar(nav, build, signal) {
   let spill = 0;
   let waiting = false;
-  const tooWide = () => { const bar = nav.closest('.topbar') || nav.parentElement; return bar.scrollWidth > bar.clientWidth + 1; };
+  let sizes = null; // watches the bar's width (below), from its first fit on the page
+  let watching = false;
+  const barOf = () => nav.closest('.topbar') || nav.parentElement;
+  const tooWide = () => { const bar = barOf(); return bar.scrollWidth > bar.clientWidth; };
   const draw = (n) => { spill = n; nav.replaceChildren(...build(n)); };
   const fit = () => {
     if (signal?.aborted || !nav.isConnected || !nav.getClientRects().length) return; // not on the page yet, or the phone drawer is in use at this width
+    if (sizes && !watching) { watching = true; sizes.observe(barOf()); }
     if (nav.contains(document.activeElement) || nav.querySelector('.menu.open')) { waiting = true; return; }
     waiting = false;
     if (spill) draw(0);
@@ -104,6 +132,14 @@ function fitTopBar(nav, build, signal) {
   let frame = 0;
   const later = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(fit); };
   window.addEventListener('resize', later, { signal });
+  // The bar's width also changes with no window resize: Save in "Arrange my menu" fits the bar while the dialog has hidden the
+  // page's scrollbar, and the scrollbar comes back (about 15px narrower) when the dialog closes. Only the width counts: the
+  // bar's height does not decide whether it fits.
+  if (typeof ResizeObserver === 'function') {
+    let width = null;
+    sizes = new ResizeObserver(([e]) => { if (e.contentRect.width !== width) { width = e.contentRect.width; later(); } });
+    signal?.addEventListener('abort', () => sizes.disconnect());
+  }
   nav.addEventListener('focusout', () => { if (waiting) later(); }, { signal });
   document.fonts?.addEventListener?.('loadingdone', later, { signal });
   document.fonts?.ready?.then(later, () => {});

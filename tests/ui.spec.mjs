@@ -14,8 +14,8 @@ let passed = 0;
 // A step that makes the app fail on purpose (a function that is too old, a dropped connection) expects the console.error the app writes for it.
 const expectErrors = (re) => { for (let i = errors.length - 1; i >= 0; i -= 1) if (re.test(errors[i])) errors.splice(i, 1); };
 
-async function newPage(viewport = { width: 1366, height: 860 }, options = {}) {
-  const page = await browser.newPage({ viewport, ...options });
+async function newPage(viewport = { width: 1366, height: 860 }, options = {}, from = browser) {
+  const page = await from.newPage({ viewport, ...options });
   // Demo mode needs nothing from the internet; outside hosts (fonts, CDN) are cut off so a slow network cannot hang the test.
   await page.route((url) => !/^(localhost|127\.0\.0\.1)$/.test(url.hostname) && url.protocol.startsWith('http'), (r) => r.abort());
   // The live site has its Supabase keys filled in; the test always runs the made-up DEMO data instead.
@@ -2079,6 +2079,71 @@ await step('Arrange my menu before its database update is run: kept on this comp
   assert.ok(row?.includes('stock'), `sent up at the login (the database has ${JSON.stringify(row)})`);
   await shot(pnEarly, '26-menu-sent-up-after-update');
 });
+// Real scrollbars, as on the clinic's Windows laptops (this test's Chrome hides them otherwise). A dialog hides the page's scrollbar
+// while it is open, and Save fits the top bar before the dialog closes: once the scrollbar is back the bar has about 15px less.
+const browserBars = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined, ignoreDefaultArgs: ['--hide-scrollbars'] });
+const pnBars = await newPage({ width: 1366, height: 768 }, {}, browserBars);
+await step('Arrange my menu with real scrollbars: after Save the top bar fits the page as it is once the dialog has closed (no sideways scrolling)', async () => {
+  await loginAs(pnBars, 'Dr. Ali Rashid');
+  await pnBars.goto(BASE + '#/staff/patients');
+  await pnBars.waitForFunction(() => window.innerWidth - document.documentElement.clientWidth > 0, null, { timeout: 5000 }); // the long list brings the scrollbar
+  await openArrange(pnBars);
+  for (const name of ['Reminders (Coordinator)', 'Lab work (Coordinator)', 'Cash closing (Reports)']) {
+    await arrangeDialog(pnBars).getByRole('button', { name: `Put on the top bar: ${name}`, exact: true }).click();
+  }
+  await saveArrange(pnBars);
+  const fits = () => { const bar = document.querySelector('.topbar'); const page = document.documentElement; return bar.scrollWidth <= bar.clientWidth && page.scrollWidth <= page.clientWidth; };
+  await pnBars.waitForFunction(fits, null, { timeout: 3000 }).catch(async () => {
+    const m = await pnBars.evaluate(() => ({ bar: document.querySelector('.topbar').scrollWidth - document.querySelector('.topbar').clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth }));
+    assert.fail(`the top bar is ${m.bar}px too wide and the page scrolls sideways by ${m.page}px`);
+  });
+  const shown = await barLabels(pnBars);
+  assert.equal(shown.at(-1), 'More');
+  const inMenus = await pnBars.locator('.topnav .menu-list a').allTextContents();
+  for (const label of ['Reminders', 'Lab work', 'Cash closing']) assert.ok(shown.includes(label) || inMenus.includes(label), `${label} can be reached`);
+  await shot(pnBars, '26b-top-bar-with-scrollbar');
+});
+await browserBars.close();
+// The pages change tabs without a new address (history.replaceState): a tab page on the top bar is marked from the address as it is
+// now, on the bar and in the phone drawer, the way a drop-down marks its links each time it opens.
+const pnTabs = await newPage();
+await step('Arrange my menu: with Reminders and Lab work on the top bar, changing tab inside the page moves the "current page" mark with it (bar and drawer)', async () => {
+  await pnTabs.goto(BASE + '#/login/staff');
+  await pnTabs.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['coordinator?tab=reminders', 'coordinator?tab=lab', 'today', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator'])));
+  await loginAs(pnTabs, 'Dr. Ali Rashid');
+  const markedOn = (where) => pnTabs.waitForFunction(([sel, want]) => [...document.querySelectorAll(sel)].filter((a) => a.getAttribute('aria-current') === 'page' && a.classList.contains('current')).map((a) => a.textContent.trim()).join('|') === want
+    && [...document.querySelectorAll(sel)].filter((a) => a.getAttribute('aria-current') === 'page' || a.classList.contains('current')).length === (want ? 1 : 0), where, { timeout: 3000 });
+  await pnTabs.locator('.topnav > a:text-is("Reminders")').click();
+  await pnTabs.waitForSelector('[role="tab"][aria-selected="true"]:has-text("Reminders")');
+  await markedOn(['.topnav > a', 'Reminders']);
+  // A click on the Lab work tab inside the page.
+  await pnTabs.getByRole('tab', { name: /Lab work/ }).click();
+  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=lab');
+  await markedOn(['.topnav > a', 'Lab work']);
+  await markedOn(['#staff-drawer .drawer-links > a', 'Lab work']);
+  // The keyboard: the arrow keys move along the tabs, Enter chooses one. A tab that is not on the bar marks nothing there.
+  await pnTabs.keyboard.press('ArrowLeft');
+  await pnTabs.keyboard.press('Enter');
+  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=dropoffs');
+  await markedOn(['.topnav > a', '']);
+  await pnTabs.keyboard.press('ArrowLeft');
+  await pnTabs.keyboard.press('Enter');
+  await markedOn(['.topnav > a', 'Reminders']);
+  await pnTabs.keyboard.press('End'); // Low ratings, then back past Retainers to Lab work
+  await pnTabs.keyboard.press('ArrowLeft');
+  await pnTabs.keyboard.press('ArrowLeft');
+  await pnTabs.keyboard.press('Enter');
+  await pnTabs.waitForFunction(() => location.hash === '#/staff/coordinator?tab=lab');
+  await markedOn(['.topnav > a', 'Lab work']);
+  // On a phone the drawer opens on Lab work, the page on screen, and a screen reader hears it as the current page.
+  await pnTabs.setViewportSize({ width: 390, height: 844 });
+  await pnTabs.locator('.menu-toggle').click();
+  await pnTabs.waitForSelector('#staff-drawer.open');
+  assert.deepEqual(await pnTabs.locator('#staff-drawer a[aria-current="page"]').allTextContents(), ['Lab work']);
+  assert.equal(await pnTabs.evaluate(() => document.activeElement.textContent.trim()), 'Lab work', 'focus starts on the page on screen');
+  await pnTabs.keyboard.press('Escape');
+});
+await pnTabs.close();
 
 // ------------------------------------------------------------- the Checkups page (admin), Download Excel, the checkup list import
 // (Made-up names and phones only. Each page has its own in-memory demo data: the same page is used from the import to the
