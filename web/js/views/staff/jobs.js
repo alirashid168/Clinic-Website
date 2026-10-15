@@ -136,7 +136,7 @@ export async function renderJobs(root, params) {
         toast('Saved.', 'ok');
         await load(); // the list is redrawn before this dialog closes, so focus can return to the page
       } },
-    ]);
+    ], { startOnTitle: true }); // mostly for reading: it opens on its top (who applied for what, how to reach them), not scrolled down to Status
   }
 
   for (const [sel, key] of [[statusSel, 'status'], [positionSel, 'position'], [branchSel, 'branch']]) {

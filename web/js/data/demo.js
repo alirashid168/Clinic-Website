@@ -1063,7 +1063,7 @@ export function createDemoAdapter() {
     },
     async deleteComplaint(id) {
       const c = db.complaints.find((x) => x.id === id);
-      if (!c || c.source !== 'website' || me()?.role !== 'admin') fail('NOT_REMOVED: only Dr. Ali (admin) can delete a website form, and a patient\'s complaint is never deleted.');
+      if (!c || c.source !== 'website' || c.patient_id || me()?.role !== 'admin') fail('NOT_REMOVED: only Dr. Ali (admin) can delete a website form, and a patient\'s complaint is never deleted.');
       db.complaints = db.complaints.filter((x) => x.id !== id);
       db.complaint_messages = db.complaint_messages.filter((m) => m.complaint_id !== id);
     },

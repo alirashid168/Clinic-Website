@@ -19,8 +19,9 @@
 --      access list. Only it shows the applications, their CNIC, phone and CV.
 --   2. Website feedback in public.complaints, so staff handle everything in the one Complaints inbox: patient_id may be
 --      empty for a row with source 'website', and new columns hold the type, topic and contact details. A patient's own
---      complaints keep source 'portal' (the insert policy now says so). An admin may delete a website form (junk or spam);
---      a patient's complaint is never deleted.
+--      complaints keep source 'portal' (the insert policy now says so) and none of the website's columns. An admin may
+--      delete a website form (junk or spam); a patient's complaint is never deleted, and can never be made into a website
+--      form (where a complaint came from, and what a website form said, never changes once it is in).
 --   3. public.job_applications and its history public.job_application_events (status changes and internal notes, with
 --      who and when). Staff read them with jobs.view; nobody writes them directly (only the functions below).
 --   4. private.public_form_log, the log the rate limits count (a CV in it is used), the bucket job-cvs, its storage
@@ -104,10 +105,12 @@ alter table public.complaints
     and (contact_phone is null or contact_phone ~ '^03[0-9]{9}$')
     and (contact_mr is null or contact_mr ~ '^[0-9A-Za-z/-]{1,20}$')
     and (not contact_me or contact_phone is not null)),
-  -- A patient's complaint belongs to the patient; a website form has its type and topic instead.
+  -- A patient's complaint belongs to the patient and has none of the website's columns; a website form belongs to no
+  -- patient and has its type and topic instead. So the two kinds of row can never pass for each other.
   add constraint complaints_who_check check (
-    (source = 'portal' and patient_id is not null)
-    or (source = 'website' and kind is not null and topic is not null));
+    (source = 'portal' and patient_id is not null and kind is null and topic is null and contact_name is null
+       and contact_phone is null and contact_mr is null and not contact_me)
+    or (source = 'website' and patient_id is null and kind is not null and topic is not null));
 
 create index if not exists complaints_website_idx on public.complaints (created_at) where source = 'website';
 create index if not exists complaints_contact_phone_idx on public.complaints (contact_phone, created_at) where contact_phone is not null;
@@ -115,11 +118,31 @@ create index if not exists complaints_contact_phone_idx on public.complaints (co
 -- Patients still file only their own complaints, and only as 'portal'; a website form is only made by submit_feedback().
 alter policy "patients file complaints" on public.complaints
   with check ((patient_id = public.current_patient_id() and source = 'portal') or public.has_perm('complaints.view'));
+-- Where a complaint came from never changes, and neither does what a website form said: staff change only its status, its
+-- doctor and who resolved it (and a merge of two patients moves a patient's complaint to the patient kept). The staff update
+-- policy has no column list, so this trigger holds it, for everyone. Without it a patient's complaint could be relabelled as
+-- a website form (and then deleted below), or a website form could be put on a patient's account.
+create or replace function private.complaint_keep_origin()
+returns trigger
+language plpgsql set search_path = public
+as $$
+begin
+  if (new.patient_id is null) is distinct from (old.patient_id is null)
+     or row(new.source, new.kind, new.topic, new.contact_name, new.contact_phone, new.contact_mr, new.contact_me)
+        is distinct from row(old.source, old.kind, old.topic, old.contact_name, old.contact_phone, old.contact_mr, old.contact_me) then
+    raise exception 'COMPLAINT_LOCKED: where a complaint came from, and what a website form said, is never changed.' using errcode = '42501';
+  end if;
+  return new;
+end $$;
+revoke all on function private.complaint_keep_origin() from public, anon, authenticated;
+drop trigger if exists complaints_keep_origin on public.complaints;
+create trigger complaints_keep_origin before update on public.complaints
+  for each row execute function private.complaint_keep_origin();
 -- Anyone can send the website form, so junk can arrive: an admin may delete a website form (its notes go with it). A patient's
 -- complaint is never deleted. (Before this file nobody could delete a complaint.)
 drop policy if exists "admin removes website forms" on public.complaints;
 create policy "admin removes website forms" on public.complaints for delete to authenticated
-  using (source = 'website' and public.is_admin());
+  using (source = 'website' and patient_id is null and public.is_admin());
 revoke all on public.complaints, public.complaint_messages from anon;
 
 -- ---------------------------------------------------------------------------------------------------------------

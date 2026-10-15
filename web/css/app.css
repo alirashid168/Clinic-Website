@@ -659,6 +659,7 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 @media (min-width: 600px) { .form-actions .form-send { width: auto; min-width: 16rem; } }
 .form-alert { margin: 0; }
 .form-alert-action { display: block; margin-top: var(--space-3); } /* the WhatsApp button under "try again later" */
+.form-cv-whatsapp { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--fs-sm); } /* under a CV the form cannot take */
 /* The box only bots fill in: off screen, out of the tab order (tabindex -1) and hidden from screen readers (aria-hidden). */
 .hp-field { position: absolute !important; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 .form-thanks { text-align: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: var(--space-7) var(--space-5); }

@@ -7,7 +7,8 @@
 -- applications (CNIC, phone, CV), the CV checks (wrong bucket, wrong path, reused file, wrong type or size, stale), the CV
 -- upload limits (files a minute and a day, bytes a day, unused CVs) held by the trigger for Storage's own superuser write too,
 -- no overwrite of a CV, the staff status/notes history, cleanup of CVs never sent, and website feedback in the Complaints inbox
--- (which only an admin may delete; a patient's complaint never; only a complaint linked to a doctor counts on their dashboard).
+-- (which only an admin may delete; a patient's complaint never, and it can never be made into a website form; only a
+-- complaint linked to a doctor counts on their dashboard).
 -- Every name, phone, CNIC and file here is made up.
 \set ON_ERROR_STOP 1
 \set admin '''00000000-0000-0000-0000-000000002900'''
@@ -129,6 +130,7 @@ insert into public.staff (id, full_name, email, role, restrict_to_branches, bran
 insert into public.patients (full_name, phone, portal_user_id) values ('Sample Patient Twentynine', '03005550299', :pat), ('Sample Other Patient', '03005550298', null);
 insert into public.branches (code, name, city_id, active) values ('Z29', 'Closed sample branch', (select id from public.cities limit 1), false);
 select set_config('test.other', (select id::text from public.patients where full_name = 'Sample Other Patient'), false);
+select set_config('test.pat_id', (select id::text from public.patients where full_name = 'Sample Patient Twentynine'), false);
 select set_config('test.closed', (select id::text from public.branches where code = 'Z29'), false);
 -- The coordinator column has the Complaints inbox (whatever the clinic has ticked since): pin it so the test does not depend on that.
 update public.role_permissions set allowed = true where role = 'coordinator' and permission_key = 'complaints.view';
@@ -744,6 +746,25 @@ begin
   perform pg_temp.expect_error($q$insert into public.complaints (patient_id, subject, body, source, kind, topic) values (public.current_patient_id(), 'x', 'y', 'website', 'complaint', 'other')$q$,
     'row-level security', 'a patient cannot file a complaint as the website form');
   perform pg_temp.expect_error(format($q$insert into public.complaints (patient_id, subject, body) values (%L, 'x', 'y')$q$, current_setting('test.other')), 'row-level security', 'a patient cannot file a complaint for another patient');
+  perform pg_temp.expect_error($q$insert into public.complaints (patient_id, subject, body, kind, topic) values (public.current_patient_id(), 'x', 'y', 'appreciation', 'doctor')$q$,
+    'complaints_who_check', 'a patient cannot give a complaint the website form''s type and topic (a "thank-you" would not count on a doctor''s dashboard)');
+  perform pg_temp.expect_error($q$insert into public.complaints (patient_id, subject, body, contact_name, contact_phone, contact_me) values (public.current_patient_id(), 'x', 'y', 'Sample', '03001234567', true)$q$,
+    'complaints_who_check', 'a patient cannot give a complaint the website form''s contact details');
+  -- Where a complaint came from never changes: the coordinator (Complaints inbox) cannot make a patient's complaint into a
+  -- website form (which an admin could then delete), nor change what a website form said or put it on a patient's account.
+  perform pg_temp.act_as(current_setting('test.coord'));
+  perform pg_temp.expect_error($q$update public.complaints set source = 'website', kind = 'suggestion', topic = 'other' where subject = 'Wire poking (sample)'$q$,
+    'COMPLAINT_LOCKED', 'the coordinator cannot make a patient''s complaint into a website form');
+  perform pg_temp.expect_error($q$update public.complaints set kind = 'appreciation' where subject = 'Wire poking (sample)'$q$, 'COMPLAINT_LOCKED', 'nor give it a website type');
+  perform pg_temp.expect_error($q$update public.complaints set contact_phone = '03001234567', contact_me = true where contact_mr = '50012'$q$,
+    'COMPLAINT_LOCKED', 'nor change the contact details a website form came with');
+  perform pg_temp.expect_error($q$update public.complaints set kind = 'appreciation' where contact_mr = '50012'$q$, 'COMPLAINT_LOCKED', 'nor its type');
+  perform pg_temp.expect_error(format($q$update public.complaints set patient_id = %L where contact_mr = '50012'$q$, current_setting('test.other')),
+    'COMPLAINT_LOCKED', 'nor put a website form on a patient''s account');
+  update public.complaints set status = 'in_progress' where subject = 'Wire poking (sample)';
+  perform pg_temp.check(found and (select source = 'portal' and patient_id = current_setting('test.pat_id')::uuid and kind is null
+                                     from public.complaints where subject = 'Wire poking (sample)'),
+    'the coordinator still handles the patient''s complaint (its status), and it stays the patient''s');
   -- The doctor dashboard: a website form linked to a doctor counts, without the visitor's name.
   perform pg_temp.act_as(current_setting('test.admin'));
   update public.complaints set clinician_id = (select id from public.clinicians where display_name = 'Dr. Ali Rashid') where contact_mr = '50012';
@@ -771,6 +792,9 @@ begin
   delete from public.complaints where source = 'portal';
   get diagnostics n = row_count;
   perform pg_temp.check(n = 0 and exists (select 1 from public.complaints where source = 'portal'), 'not even an admin can delete a patient''s complaint');
+  delete from public.complaints where subject = 'Wire poking (sample)';
+  get diagnostics n = row_count;
+  perform pg_temp.check(n = 0 and exists (select 1 from public.complaints where subject = 'Wire poking (sample)'), 'not even by its id (the Delete button)');
   delete from public.complaints where contact_mr = '50012';
   get diagnostics n = row_count;
   perform pg_temp.check(n = 1, 'an admin deletes a website form (junk or spam)');
@@ -781,6 +805,18 @@ reset role;
 select pg_temp.expect_error($q$insert into public.complaints (subject, body, source) values ('x', 'y', 'portal')$q$, 'complaints_who_check', 'a portal complaint must belong to a patient');
 select pg_temp.expect_error($q$insert into public.complaints (subject, body, source, kind) values ('x', 'y', 'website', 'complaint')$q$, 'complaints_who_check', 'a website form must have its topic');
 select pg_temp.expect_error($q$insert into public.complaints (subject, body, source, kind, topic, contact_me) values ('x', 'y', 'website', 'complaint', 'other', true)$q$, 'complaints_contact_check', '"please contact me" needs a phone number');
+select pg_temp.expect_error(format($q$insert into public.complaints (patient_id, subject, body, source, kind, topic) values (%L, 'x', 'y', 'website', 'complaint', 'other')$q$, current_setting('test.pat_id')),
+  'complaints_who_check', 'a website form belongs to no patient');
+select pg_temp.expect_error(format($q$insert into public.complaints (patient_id, subject, body, source, contact_mr) values (%L, 'x', 'y', 'portal', '50012')$q$, current_setting('test.pat_id')),
+  'complaints_who_check', 'a patient''s complaint has none of the website form''s columns');
+-- The rule that where a complaint came from never changes holds for everyone, the database owner included; a merge of two
+-- patients (merge_patients) still moves a patient's complaint to the patient kept.
+select pg_temp.expect_error($q$update public.complaints set source = 'website', kind = 'complaint', topic = 'other' where subject = 'Wire poking (sample)'$q$,
+  'COMPLAINT_LOCKED', 'the database owner cannot make a patient''s complaint into a website form either');
+with moved as (update public.complaints set patient_id = current_setting('test.other')::uuid where subject = 'Wire poking (sample)' returning 1)
+select pg_temp.check((select count(*) from moved) = 1, 'a patient''s complaint can still move to another patient (a merge of two patients)');
+with moved as (update public.complaints set patient_id = current_setting('test.pat_id')::uuid where subject = 'Wire poking (sample)' returning 1)
+select pg_temp.check((select count(*) from moved) = 1, '(and back)');
 
 -- 11. A field left out is empty, never an error; invisible characters are removed; an email address is one plain address;
 --     "Other" is not a degree; the CV upload limits stay right without reading the bucket

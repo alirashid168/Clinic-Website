@@ -1548,7 +1548,7 @@ export async function createSupabaseAdapter() {
     },
     /** Deletes a website form for good (junk or spam). Only an admin may, and a patient's complaint never (the database's delete policy). */
     async deleteComplaint(id) {
-      const rows = check(await sb.from('complaints').delete().eq('id', id).eq('source', 'website').select('id'));
+      const rows = check(await sb.from('complaints').delete().eq('id', id).eq('source', 'website').is('patient_id', null).select('id'));
       if (!rows.length) throw plainError('NOT_REMOVED: only Dr. Ali (admin) can delete a website form, and a patient\'s complaint is never deleted.', 'NOT_REMOVED');
     },
     async fileComplaint({ subject, body }) {

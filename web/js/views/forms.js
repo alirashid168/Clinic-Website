@@ -15,7 +15,8 @@ import {
 
 const JOIN_PRIVACY = 'Only Dr. Ali Rashid and the people he chooses for hiring see your details and CV. The clinic keeps them to contact you about jobs and never shares them.';
 const FEEDBACK_PRIVACY = 'Dr. Ali Rashid and the clinic coordinator read every message. It is used only to improve the clinic and, if you ask, to contact you. Your name and number are optional.';
-// When the website is too busy for the form (FORM_BUSY, FORM_BUSY_DAY): the message the WhatsApp chat starts with, and the link's words.
+// When the website is too busy for the form (FORM_BUSY, FORM_BUSY_DAY), or the CV cannot be sent (too large, another type): the
+// message the WhatsApp chat starts with, and the link's words.
 const WHATSAPP_INSTEAD = {
   job: ['Hi, I would like to apply for a job at the clinic. I am sending my CV here.', 'Send your CV on WhatsApp'],
   feedback: ['Hi, I would like to share a complaint or suggestion about the clinic.', 'Message the clinic on WhatsApp'],
@@ -137,12 +138,21 @@ export async function renderJoin(root) {
   const fieldInputs = () => ({ ...inputs, qualification: otherChosen() ? inputs.qualification_other : inputs.qualification });
   tidyOnBlur(inputs.phone, normalizePhone, formatPhone);
   tidyOnBlur(inputs.cnic, normalizeCnic);
+  // A CV the form cannot take (over 5 MB, another type): a phone cannot make a photo smaller or turn it into a PDF, so the
+  // WhatsApp way is offered right under the error, like the busy messages do.
+  const cvWhatsapp = h('p', { class: 'form-cv-whatsapp', hidden: true }, 'No other file on your phone? ', waLink(...WHATSAPP_INSTEAD.job, 'btn btn-small'));
+  const cvTrouble = (on) => { cvWhatsapp.hidden = !on; };
+  const cvCannotGo = () => { const file = inputs.cv.files[0]; return Boolean(file && cvFileInfo(file).error); };
   // A file that cannot be sent is said at once, not only after pressing Send.
   inputs.cv.addEventListener('change', () => {
     const file = inputs.cv.files[0];
     const info = file ? cvFileInfo(file) : null;
     if (info?.error) setFieldError(inputs.cv, info.error);
+    cvTrouble(Boolean(info?.error));
   });
+
+  const cvField = field('CV file', inputs.cv, 'A PDF, Word (.doc or .docx), JPG or PNG file, at most 5 MB. A photo of a printed CV is fine.', { required: true });
+  cvField.querySelector('.field-hint').before(cvWhatsapp); // under the error (which comes straight after the input), above the hint
 
   const button = h('button', { type: 'submit', class: 'btn btn-primary btn-lg form-send' }, 'Send my application');
   const form = h('form', { class: 'public-form', novalidate: true, 'aria-label': 'Job application' },
@@ -160,7 +170,7 @@ export async function renderJoin(root) {
       field('Experience', inputs.experience, `Optional, in a few words (up to ${LIMITS.experience} characters).`),
       field('Preferred branch', inputs.branch, null, { required: true })),
     h('fieldset', { class: 'form-group' }, h('legend', {}, 'Your CV'),
-      field('CV file', inputs.cv, 'A PDF, Word (.doc or .docx), JPG or PNG file, at most 5 MB. A photo of a printed CV is fine.', { required: true }),
+      cvField,
       field('Message', inputs.message, `Optional, up to ${LIMITS.jobMessage.toLocaleString('en-PK')} characters.`)),
     checkLine(inputs.consent, "Dr. Ali Rashid's clinic may keep these details to contact me about jobs.", { required: true }),
     trap.el,
@@ -186,6 +196,7 @@ export async function renderJoin(root) {
       consent: inputs.consent.checked, [HONEYPOT]: trap.input.value,
     };
     const { errors } = checkJobApplication(values, { cv: file });
+    cvTrouble(cvCannotGo());
     if (errors.length) return showErrors(form, fieldInputs(), errors);
     busyNow = true;
     sending(button, true, 'Sending…', 'Send my application');
@@ -199,7 +210,7 @@ export async function renderJoin(root) {
       ], [h('a', { class: 'btn btn-primary', href: '#/' }, 'Back to the homepage')]);
     } catch (err) {
       if (!submitProblem(err)) console.error(err); // a refusal of the form itself is not a fault
-      if (submitProblem(err)?.field === 'cv') uploaded = null; // that file is not usable: choose or upload it again
+      if (submitProblem(err)?.field === 'cv') { uploaded = null; cvTrouble(true); } // that file is not usable: choose or upload it again
       showProblem(form, fieldInputs(), alert, err, 'job');
     } finally {
       busyNow = false;

@@ -2297,6 +2297,7 @@ await step('join form: a wrong phone, CNIC, email, CV type, "Other" without the 
   assert.equal(await otherDegree.isVisible(), true, '"Other" opens the box for the degree');
   await form.getByLabel(/^CV file/).setInputFiles({ name: 'cv.exe', mimeType: 'application/x-msdownload', buffer: Buffer.from('MZ') });
   assert.match(await form.innerText(), /Your CV must be a PDF, Word \(\.doc or \.docx\), JPG or PNG file\./, 'said as soon as the file is chosen');
+  assert.equal(await form.locator('.form-cv-whatsapp').isVisible(), true, 'a CV the form cannot take: the WhatsApp way is offered');
   await form.getByRole('button', { name: 'Send my application' }).click();
   const text = await form.innerText();
   assert.match(text, /Please enter a Pakistani mobile number, for example 0300 1234567\./);
@@ -2309,6 +2310,18 @@ await step('join form: a wrong phone, CNIC, email, CV type, "Other" without the 
   await shot(pf, '41b-join-other-degree-390');
   await form.getByLabel(/^CV file/).setInputFiles({ name: 'cv.pdf', mimeType: 'application/pdf', buffer: Buffer.alloc(5 * 1024 * 1024 + 1) });
   assert.match(await form.innerText(), /Your CV is larger than 5 MB/);
+  // A phone photo of a printed CV over 5 MB (the hint says a photo is fine): a phone cannot make it smaller or turn it into a
+  // PDF, so the WhatsApp way is right under the error, as for the busy messages.
+  await form.getByLabel(/^CV file/).setInputFiles({ name: 'IMG_0042.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(6000000) });
+  assert.match(await form.innerText(), /Your CV is larger than 5 MB\. Please choose a smaller file, or a PDF\./);
+  const wa = form.locator('.form-cv-whatsapp');
+  assert.equal(await wa.isVisible(), true, 'a 6 MB photo: the WhatsApp way is offered');
+  assert.match(await wa.getByRole('link', { name: /^Send your CV on WhatsApp/ }).getAttribute('href'), /^https:\/\/wa\.me\/92\d+\?text=.*CV/);
+  assert.deepEqual(await form.getByLabel(/^CV file/).evaluate((input) => {
+    const next = input.nextElementSibling;
+    return [next?.classList.contains('field-error'), next?.nextElementSibling?.classList.contains('form-cv-whatsapp')];
+  }), [true, true], 'right under the error');
+  await shot(pf, '41c-join-cv-too-large-390');
 });
 await step('join form: a complete application is sent; the thank-you takes focus and repeats nothing that was typed', async () => {
   const form = pf.locator('form.public-form');
@@ -2322,6 +2335,7 @@ await step('join form: a complete application is sent; the thank-you takes focus
   await form.getByLabel(/^Graduation year/).fill('2021');
   await form.getByLabel(/^Preferred branch/).selectOption({ label: 'Gulberg Lahore' });
   await form.getByLabel(/^CV file/).setInputFiles({ name: 'sample-cv.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made-up CV for the test') });
+  assert.equal(await form.locator('.form-cv-whatsapp').isVisible(), false, 'a CV the form takes: no WhatsApp way under it');
   await form.getByLabel(/^Message/).fill('<b>Hello</b> I can start next month.');
   await form.getByLabel(/may keep these details/).check();
   await form.getByRole('button', { name: 'Send my application' }).click();
@@ -2512,6 +2526,29 @@ await step('staff: the application dialog shows the CNIC and phone, the message 
   await shot(pf, '46-staff-job-dialog');
   await pf.keyboard.press('Escape');
   await m.waitFor({ state: 'detached' });
+});
+await step('staff on a phone: an application opens on its top (job, qualification, mobile), not scrolled down to the Status list', async () => {
+  await pf.setViewportSize({ width: 390, height: 664 }); // what a 390x844 phone shows inside the browser
+  try {
+    for (const name of ['Sana Example', 'Sample Applicant UI']) {
+      await pf.getByRole('button', { name: `Open the application of ${name}` }).click();
+      const m = pf.locator('.modal');
+      await m.waitFor();
+      const seen = await m.evaluate((el) => {
+        const body = el.querySelector('.modal-body');
+        const job = [...el.querySelectorAll('.job-details dt')].find((dt) => dt.textContent === 'Job');
+        const b = body.getBoundingClientRect(), j = job.getBoundingClientRect();
+        return { scrolls: body.scrollHeight > body.clientHeight, scrollTop: body.scrollTop, jobInView: j.top >= b.top && j.bottom <= b.bottom,
+          onTitle: document.activeElement === el.querySelector('h2') };
+      });
+      assert.deepEqual(seen, { scrolls: true, scrollTop: 0, jobInView: true, onTitle: true }, name);
+      if (name === 'Sana Example') await shot(pf, '46b-staff-job-dialog-390x664');
+      await pf.keyboard.press('Escape');
+      await m.waitFor({ state: 'detached' });
+    }
+  } finally {
+    await pf.setViewportSize({ width: 1366, height: 860 });
+  }
 });
 await step('staff: website forms are in the Complaints inbox marked "Website form" with type, topic, branch and contact details, shown as text, with internal notes only', async () => {
   await pf.goto(BASE + '#/staff/complaints');
