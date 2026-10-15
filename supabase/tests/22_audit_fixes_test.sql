@@ -159,9 +159,11 @@ select pg_temp.check(public.total_dues() = current_setting('test.dues_before')::
 select pg_temp.check(public.total_dues() = (select coalesce(sum(dues), 0) from public.patient_balances where dues > 0), 'total_dues equals the sum of positive balances');
 
 -- ================================================================= row-level security still applies inside them (SECURITY INVOKER)
+-- A staff member without billing.view or finance.view is refused the totals (20261015000400_finance_privacy.sql, owner 15 Oct 2026),
+-- where before row-level security answered them with zeros.
 select pg_temp.act_as(:doc);
-select pg_temp.check((public.payments_summary('2001-03-01', '2001-03-31', null, null)->'totals'->>'count')::int = 0, 'a doctor (no billing.view) gets zero payment totals: row-level security hides the rows');
-select pg_temp.check(public.total_dues() = 0, 'a doctor sees no dues');
+select pg_temp.expect_error($$select public.payments_summary('2001-03-01', '2001-03-31', null, null)$$, 'NOT_ALLOWED: money totals', 'a doctor (no billing.view) is refused the payment totals');
+select pg_temp.expect_error($$select public.total_dues()$$, 'NOT_ALLOWED: money totals', 'a doctor is refused the total of pending dues');
 select pg_temp.act_as(:fd1);
 select pg_temp.check(public.payments_summary('2001-03-01', '2001-03-31', null, null)->'totals' = '{"received": 14500, "cash": 5000, "card": 2500, "bank": 7000, "refunds": 1000, "net": 13500, "count": 4}'::jsonb,
   'front desk limited to branch 1 totals only branch 1 payments');

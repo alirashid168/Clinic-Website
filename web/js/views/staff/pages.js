@@ -22,7 +22,7 @@ export async function renderDashboard(root) {
   const s = state.session.staff;
   const day = todayISO();
   if (can('jobs.view')) cvSweep ??= import('./jobs.js').then((m) => m.removeUnsentCvs()).catch(() => 0);
-  const [rows, totalDues, review, complaints, newJobs, todaysCheckups] = await Promise.all([
+  const [rows, totalDues, review, complaints, newJobs, todaysCheckups, dayPayments] = await Promise.all([
     d.dashboard(day).catch(() => []),
     can('finance.view') ? d.totalDues().catch(() => null) : null,
     isAdmin() || can('complaints.view') ? d.reviewList().catch(() => []) : [],
@@ -31,6 +31,8 @@ export async function renderDashboard(root) {
     can('jobs.view') ? d.newJobApplications().catch(() => 0) : 0,
     // today's checkups of every branch the person may see: how many there are, and whether the checkup list is switched on at all
     can('sheet.edit') && d.listDayCheckups ? d.listDayCheckups({ branchId: null, date: day }).catch(() => null) : Object.assign([], { missing: true }),
+    // today's payments one by one, for whoever may see them without seeing invoices and payments (the front desk)
+    dayPaymentsShown() ? loadDayPayments() : null,
   ]);
   let checkupCount = Array.isArray(todaysCheckups) ? todaysCheckups.length : null;
   const countText = () => (checkupCount === null ? '' : ` ${checkupCount} checkup patient${checkupCount === 1 ? '' : 's'} on today's lists so far.`);
@@ -55,6 +57,14 @@ export async function renderDashboard(root) {
   const duesPartial = !!totalDues?.truncated;
   const visible = rows.filter((r) => myBranches().some((b) => b.id === r.branch.id));
   const sum = (k) => visible.reduce((t, r) => t + (r[k] || 0), 0);
+  // Money (owner, 15 Oct 2026): the dues added up per branch only for who may see totals (finance.view, billing.view); the cash
+  // closing's "off by Rs ..." only for who may see the money (also cash.verify). The front desk's cash count is blind.
+  const seesTotals = can('finance.view') || can('billing.view');
+  const seesCash = seesTotals || can('cash.verify');
+  const seesClosings = seesCash || can('cash.close');
+  const closingBadge = (c) => (!c ? h('span', { class: 'badge badge-muted' }, 'Not closed')
+    : !seesCash || c.difference === null || c.difference === undefined ? h('span', { class: 'badge badge-ok' }, 'Closed')
+    : Number(c.difference) === 0 ? h('span', { class: 'badge badge-ok' }, 'Closed, matches') : h('span', { class: 'badge badge-dues' }, `Closed, off by ${rupees(c.difference)}`));
   mount(root,
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, ${s.full_name.split(' ')[0] === 'Dr.' ? s.full_name : s.full_name.split(' ')[0]}`), h('p', {}, shortDate(day)))),
     checkupPanel,
@@ -71,15 +81,52 @@ export async function renderDashboard(root) {
       h('h2', {}, 'Branches today'),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col', class: 'right' }, 'Patients'), h('th', { scope: 'col', class: 'right' }, 'Waiting'), h('th', { scope: 'col', class: 'right' }, 'Completed'),
-          can('billing.view') ? h('th', { scope: 'col', class: 'right' }, 'Received') : null, can('dues.view') ? h('th', { scope: 'col', class: 'right' }, "Dues on today's list") : null,
-          can('complaints.view') ? h('th', { scope: 'col', class: 'right' }, 'New complaints & suggestions') : null, h('th', { scope: 'col' }, 'Cash closing'), h('th', { scope: 'col' }, srOnly('Actions')))),
+          can('billing.view') ? h('th', { scope: 'col', class: 'right' }, 'Received') : null,
+          can('dues.view') ? h('th', { scope: 'col', class: 'right' }, seesTotals ? "Dues on today's list" : 'Patients with dues') : null,
+          can('complaints.view') ? h('th', { scope: 'col', class: 'right' }, 'New complaints & suggestions') : null, seesClosings ? h('th', { scope: 'col' }, 'Cash closing') : null,
+          h('th', { scope: 'col' }, srOnly('Actions')))),
         h('tbody', {}, visible.map((r) => h('tr', {},
           h('td', {}, h('strong', {}, r.branch.name)), h('td', { class: 'right' }, r.patients), h('td', { class: 'right' }, r.waiting), h('td', { class: 'right' }, r.completed),
           can('billing.view') ? h('td', { class: 'right' }, rupees(r.received)) : null,
-          can('dues.view') ? h('td', { class: ['right', r.dues > 0 && 'status-bad'] }, r.dues > 0 ? `${rupees(r.dues)} (${r.dues_patients})` : '–') : null,
+          can('dues.view') ? (seesTotals ? h('td', { class: ['right', r.dues > 0 && 'status-bad'] }, r.dues > 0 ? `${rupees(r.dues)} (${r.dues_patients})` : '–')
+            : h('td', { class: ['right', r.dues_patients > 0 && 'status-bad'] }, r.dues_patients || '–')) : null,
           can('complaints.view') ? h('td', { class: 'right' }, r.new_complaints ? h('a', { href: '#/staff/complaints' }, r.new_complaints) : '–') : null,
-          h('td', {}, r.closing ? h('span', { class: ['badge', Number(r.closing.difference) === 0 ? 'badge-ok' : 'badge-dues'] }, Number(r.closing.difference) === 0 ? 'Closed, matches' : `Closed, off by ${rupees(r.closing.difference)}`) : h('span', { class: 'badge badge-muted' }, 'Not closed')),
-          h('td', { class: 'right' }, h('a', { class: 'btn btn-small', href: `#/staff/sheet?branch=${r.branch.id}&date=${day}`, 'aria-label': `Open list, ${r.branch.name}` }, 'Open list')))))))));
+          seesClosings ? h('td', {}, closingBadge(r.closing)) : null,
+          h('td', { class: 'right' }, h('a', { class: 'btn btn-small', href: `#/staff/sheet?branch=${r.branch.id}&date=${day}`, 'aria-label': `Open list, ${r.branch.name}` }, 'Open list')))))))),
+    dayPayments ? dayPaymentsPanel(dayPayments) : null);
+}
+
+// ---------------------------------------------------------------- today's payments, one by one
+// The owner (15 Oct 2026): "only front desk can see the daily payments with each payment along with patient name. but not the full
+// amount". "Today's payments, one by one (no totals)" shows each payment taken today at the person's branches, newest first, with no
+// total, sum or count of rupees anywhere (the database gives the rows only: payments_today). Whoever sees invoices and payments
+// (billing.view) has the same list, with its total, on the Billing page instead.
+const METHOD_LABELS = { cash: 'Cash', card: 'Card', bank_transfer: 'Bank transfer', cheque: 'Cheque', other: 'Other' };
+const dayPaymentsShown = () => can('payments.day_list') && !can('billing.view') && !!state.data.paymentsToday;
+const loadDayPayments = () => state.data.paymentsToday().catch((e) => Object.assign([], { failed: friendlyError(e) }));
+
+function dayPaymentsPanel(first) {
+  const body = h('div', {});
+  const draw = (rows) => mount(body,
+    rows.missing ? empty("Today's payments show here once the database update has been run.")
+      : rows.failed ? empty(rows.failed)
+        : rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list day-payments' },
+          h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Time'), h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col', class: 'right' }, 'Amount'),
+            h('th', { scope: 'col' }, 'Method'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Taken by'))),
+          h('tbody', {}, rows.map((p) => h('tr', {},
+            h('td', { class: 'nowrap' }, timeOf(p.received_at)),
+            h('td', {}, can('patients.view') ? h('a', { href: `#/staff/patient/${p.patient_id}` }, p.patient_name) : p.patient_name, h('div', { class: 'muted' }, `Mr# ${p.mr_number}`)),
+            h('td', { class: ['right', 'nowrap', Number(p.amount) < 0 && 'status-bad'] }, Number(p.amount) < 0 ? `Refund ${rupees(-Number(p.amount))}` : rupees(p.amount)),
+            h('td', {}, METHOD_LABELS[p.method] || p.method),
+            h('td', {}, branchName(p.branch_id)),
+            h('td', {}, p.received_by_name || h('span', { class: 'muted' }, 'Not recorded')))))))
+          : empty('No payments yet today.'));
+  draw(first);
+  const refresh = h('button', { type: 'button', class: 'btn btn-small', onclick: async () => draw(await loadDayPayments()) }, 'Refresh');
+  return h('section', { class: 'panel day-payments-panel', style: { marginTop: '16px' } },
+    h('div', { class: 'panel-head' }, h('h2', {}, 'Payments today'), refresh),
+    h('p', { class: 'muted' }, `Each payment taken today at your ${myBranches().length > 1 ? 'branches' : 'branch'}, newest first. The totals are with accounts.`),
+    body);
 }
 
 // ---------------------------------------------------------------- queue
@@ -131,7 +178,7 @@ export async function renderBilling(root) {
   const d = state.data;
   const branchId = can('finance.view') ? null : defaultBranchId();
   const [payments, requests] = await Promise.all([
-    d.todaysPayments(branchId).catch(() => []),
+    can('billing.view') ? d.todaysPayments(branchId).catch(() => []) : [],
     can('discount.approve') ? d.discountRequests().catch(() => []) : [],
   ]);
   const total = payments.reduce((s, p) => s + Number(p.amount), 0);
@@ -158,7 +205,7 @@ export async function renderBilling(root) {
           h('td', { class: 'right nowrap' },
             h('button', { class: 'btn btn-small btn-primary', 'aria-label': `Approve ${what(r)}`, onclick: () => decide(r, true) }, 'Approve'), ' ',
             h('button', { class: 'btn btn-small', 'aria-label': `Reject ${what(r)}`, onclick: () => decide(r, false) }, 'Reject')))))))) : null,
-    h('section', { class: 'panel' },
+    can('billing.view') ? h('section', { class: 'panel' },
       h('div', { class: 'panel-head' }, h('h2', {}, 'Payments today'), h('strong', {}, rupees(total))),
       capNote(payments, 'payments'),
       payments.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
@@ -169,7 +216,7 @@ export async function renderBilling(root) {
           h('td', {}, branchName(p.branch_id)), h('td', {}, p.method.replace('_', ' ')),
           h('td', { class: 'right' }, rupees(p.amount)),
           h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${p.patient?.full_name || 'payment'} ${rupees(p.amount)}`, onclick: () => printReceipt(p, p.patient, null) }, 'Receipt')))))))
-        : empty('No payments yet today.')));
+        : empty('No payments yet today.')) : null);
 }
 
 // ---------------------------------------------------------------- Dr. Ali review list
@@ -327,6 +374,10 @@ export async function renderDoctorLog(root, params) {
   const mine = await d.myClinicianId();
   const doctors = state.ref.clinicians.filter((c) => c.is_doctor);
   const viewAll = can('doctor_log.view_all');
+  // The rupees (billed, own patients paid, the share) only for accounts and Dr. Ali (finance.view), or for a doctor on their own log with
+  // "See own doctor percentage" (owner, 15 Oct 2026). A coordinator or a shared login sees the treatments and counts; the database
+  // leaves the money out for them as well (doctor_summary).
+  const showMoney = (id) => can('finance.view') || (!!id && id === mine && can('commission.view_own'));
   // Someone who may see every doctor but has no clinician record of their own starts on the first doctor, not on an error.
   let clinicianId = params.get('doctor') || mine || (viewAll ? doctors[0]?.id : null) || null;
   const from = h('input', { type: 'date', value: params.get('from') || todayISO().slice(0, 8) + '01' });
@@ -343,16 +394,17 @@ export async function renderDoctorLog(root, params) {
       if (seq !== newest) return;
       const days = [...new Set(rows.map((r) => r.visit_date))];
       const complaints = sum?.complaints || [];
+      const money = !!sum && showMoney(clinicianId) && sum.billed !== null && sum.billed !== undefined;
       mount(out,
         capNote(rows, 'visits'),
         h('div', { class: 'stat-row', style: { marginBottom: '16px' } },
           h('div', { class: 'stat' }, h('strong', {}, rows.filter((r) => r.role === 'doctor').length), h('span', {}, 'Patients treated')),
           h('div', { class: 'stat' }, h('strong', {}, rows.filter((r) => r.role === 'checker').length), h('span', {}, 'Visits checked')),
           h('div', { class: 'stat' }, h('strong', {}, days.length), h('span', {}, 'Working days')),
-          sum ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.billed || 0)), h('span', {}, 'Billed from treated visits')) : null,
+          money ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.billed || 0)), h('span', {}, 'Billed from treated visits')) : null,
           sum ? h('div', { class: 'stat' }, h('strong', {}, sum.referred_patients || 0), h('span', {}, 'Own patients (brought in)')) : null,
-          sum ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.referred_paid || 0)), h('span', {}, 'Own patients paid')) : null,
-          sum?.rule ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.share || 0)), h('span', {}, `Your share (${Number(sum.rule.percent)}% of ${sum.rule.basis === 'referred' ? 'own patients paid' : sum.rule.basis === 'treated' ? 'billed' : 'both'})`)) : null,
+          money ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.referred_paid || 0)), h('span', {}, 'Own patients paid')) : null,
+          money && sum.rule ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum.share || 0)), h('span', {}, `Your share (${Number(sum.rule.percent)}% of ${sum.rule.basis === 'referred' ? 'own patients paid' : sum.rule.basis === 'treated' ? 'billed' : 'both'})`)) : null,
           sum ? h('div', { class: 'stat' }, h('strong', { class: complaints.length ? 'status-bad' : null }, complaints.length), h('span', {}, 'Complaints about your work')) : null),
         complaints.length ? h('section', { class: 'panel' }, h('h2', {}, 'Complaints linked to you'),
           h('div', { class: 'table-scroll' }, h('table', { class: 'list' },

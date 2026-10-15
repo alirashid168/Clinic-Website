@@ -1198,7 +1198,18 @@ export async function createSupabaseAdapter() {
         }),
         this.paymentPlans(id).catch(() => []),
       ]);
-      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents: documents || [], plans: plans || [], retainers, complaints };
+      // Someone who may take payments (billing.create) but not see invoices (billing.view) reads none of them directly (row-level
+      // security): this patient's own invoices and payments come from patient_billing (20261015000400_finance_privacy.sql).
+      const own = await this.ownBilling(id);
+      return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices: own?.invoices || invoices, payments: own?.payments || payments,
+        photos, documents: documents || [], plans: plans || [], retainers, complaints };
+    },
+    /** One patient's own invoices and payments for a payment taker without billing.view (patient_billing), else null (read them directly). */
+    async ownBilling(patientId) {
+      const s = await this.getSession().catch(() => null);
+      if (s?.kind !== 'staff' || s.perms?.has('billing.view') || !s.perms?.has('billing.create')) return null;
+      const r = await rpc('patient_billing', { p_patient: patientId });
+      return r.missing ? null : { invoices: r.data?.invoices || [], payments: r.data?.payments || [] };
     },
 
     // ------------------------------------------------------------ braces
@@ -1517,7 +1528,15 @@ export async function createSupabaseAdapter() {
       return full(inv.id);
     },
     async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null }) {
-      return check(await sb.from('payments').insert({ patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() }).select().single());
+      const row = { patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() };
+      // Reading the new payment back needs billing.view (row-level security checks a returned row as a read). Someone who may take
+      // payments without it sends the row with its own id and is answered with what was sent: the receipt needs nothing more.
+      if (!(await this.getSession().catch(() => null))?.perms?.has('billing.view')) {
+        const id = crypto.randomUUID();
+        check(await sb.from('payments').insert({ id, ...row }));
+        return { id, ...row, received_at: new Date().toISOString() };
+      }
+      return check(await sb.from('payments').insert(row).select().single());
     },
     async voidInvoice(id, reason) {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
@@ -1525,6 +1544,8 @@ export async function createSupabaseAdapter() {
     },
     // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
     async patientBilling(patientId) {
+      const own = await this.ownBilling(patientId);
+      if (own) return own;
       const [invoices, payments] = await Promise.all([
         sb.from('invoices').select('id,invoice_no,issue_date,subtotal,discount_amount,total,status').eq('patient_id', patientId).order('issue_date').then(check),
         sb.from('payments').select('id,invoice_id,amount,received_at').eq('patient_id', patientId).then(check),
@@ -1803,6 +1824,15 @@ export async function createSupabaseAdapter() {
       return check(await sb.rpc('close_cash', { p_branch: Number(branchId), p_date: date, p_counted: Number(counted), p_notes: notes || null }));
     },
     async cashClosings() { return capped(check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(201)), 200); },
+    /**
+     * The closings of the person's branches without any amount (cash_closings_blind, 20261015000400): for whoever closes the cash but
+     * does not see the money (a blind count). Rows { id, branch_id, closing_date, closed_at, closed_by_name, checked }; before the
+     * database update, an empty list marked missing.
+     */
+    async cashClosingsBlind() {
+      const r = await rpc('cash_closings_blind', { p_limit: 200 });
+      return r.missing ? Object.assign([], { missing: true }) : r.data || [];
+    },
     async verifyClosing(id) { check(await sb.from('cash_closings').update({ verified_by: await userId(), verified_at: new Date().toISOString() }).eq('id', id)); },
     // ---- report queries (Reports page): payments, invoices, advances, daily visits in a date range.
     // Lists page through every row up to the cap (then .truncated); totals should come from paymentsSummary / opdSummary.
@@ -1847,6 +1877,15 @@ export async function createSupabaseAdapter() {
       if (!r.missing) return { totals: r.data?.totals || summarizeVisits([]).totals, byDay: r.data?.byDay || [], waitByBranch: r.data?.waitByBranch || [], source: 'server', truncated: false };
       const rows = await fetchPaged(() => visitsQuery({ from, to, branchId }), 20000);
       return { ...summarizeVisits(rows), source: 'rows', truncated: !!rows.truncated };
+    },
+    /**
+     * Today's payments one by one, never a total (payments_today, 20261015000400: "Today's payments, one by one (no totals)"): rows
+     * { id, received_at, patient_id, patient_name, mr_number, amount, method, branch_id, received_by_name } of the person's branches,
+     * newest first. Before the database update, an empty list marked missing.
+     */
+    async paymentsToday({ branchId = null } = {}) {
+      const r = await rpc('payments_today', { p_branch: branchId ? Number(branchId) : null });
+      return r.missing ? Object.assign([], { missing: true }) : r.data || [];
     },
     async todaysPayments(branchId) {
       const d = todayISO();
@@ -1960,10 +1999,16 @@ export async function createSupabaseAdapter() {
     },
     async dashboard(date) {
       const day = date || todayISO();
+      // The cash closing's amounts and the dues added up per branch are for who may see the money (20261015000400): the others get
+      // whether the cash is closed (cash_closings_blind) and how many patients on the list have dues.
+      const perms = (await this.getSession().catch(() => null))?.perms || new Set();
+      const seesCash = ['finance.view', 'cash.verify', 'billing.view'].some((k) => perms.has(k));
+      const seesTotals = perms.has('finance.view') || perms.has('billing.view');
       const [branches, visits, closings] = await Promise.all([
         this.branches(),
         sb.from('visits').select('branch_id,status,patient_id').eq('visit_date', day).then(check),
-        sb.from('cash_closings').select('*').eq('closing_date', day).then(check),
+        seesCash ? sb.from('cash_closings').select('*').eq('closing_date', day).then(check)
+          : this.cashClosingsBlind().then((rows) => rows.filter((c) => c.closing_date === day)).catch(() => []),
       ]);
       let income = []; let complaints = []; let dues = {};
       try { income = check(await sb.from('branch_daily_income').select('*').eq('day', day)); } catch { income = []; }
@@ -1975,7 +2020,7 @@ export async function createSupabaseAdapter() {
         return { branch: b, patients: vs.length, completed: vs.filter((v) => v.status === 'completed').length,
           waiting: vs.filter((v) => v.status === 'waiting').length,
           received: Number(income.find((i) => i.branch_id === b.id)?.net || 0),
-          dues_patients: withDues.length, dues: withDues.reduce((s, pid) => s + dues[pid], 0),
+          dues_patients: withDues.length, dues: seesTotals ? withDues.reduce((s, pid) => s + dues[pid], 0) : null,
           new_complaints: complaints.filter((c) => c.branch_id === b.id).length,
           closing: closings.find((c) => c.branch_id === b.id) || null };
       });

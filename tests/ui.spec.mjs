@@ -1138,6 +1138,178 @@ await step('accountant: P&L, expense entry and cash verification', async () => {
   await shot(p3, '05-accounts');
 });
 
+// ------------------------------------------------------------- the clinic's money: Dr. Ali and accounts only
+// The owner (15 Oct 2026): "no one can see the overall finances of the clinic except me and accounts. no assistant can see the income,
+// only front desk can see the daily payments with each payment along with patient name. but not the full amount". One page, the
+// grid set as the clinic has it live, then each role in turn (the demo keeps its data while the page is open).
+// Every "Rs 1,234" in the page's main area outside the elements that may show money (a patient's own dues, a single payment).
+const rupeesShown = (pg, allowed = null) => pg.locator('main').evaluate((main, allowedSel) => {
+  const out = [];
+  const walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (/Rs\s?[\d,]+/.test(n.textContent) && !(allowedSel && n.parentElement.closest(allowedSel))) out.push(n.textContent.trim());
+  }
+  return out;
+}, allowed);
+const pfin = await newPage();
+await step('money: the access list has "Today\'s payments, one by one (no totals)", on for the front desk and the accountant; Dr. Ali sets the grid as the clinic has it', async () => {
+  await loginAs(pfin, 'Dr. Ali Rashid');
+  await pfin.goto(BASE + '#/staff/admin?tab=access');
+  await pfin.waitForSelector('table.perm-grid');
+  const box = (role) => pfin.getByLabel(`${role}: Today's payments, one by one (no totals)`, { exact: true });
+  assert.deepEqual(await Promise.all(['Front desk', 'Assistant', 'Doctor', 'Clinic coordinator', 'Accountant'].map((r) => box(r).isChecked())), [true, false, false, false, true],
+    'on for front desk and accountant, off for assistant, doctor and coordinator');
+  // Live today: "View invoices and payments", "Create invoices and take payments" and "Give discounts" are for accounts and Dr. Ali.
+  for (const label of ['Front desk: View invoices and payments', 'Front desk: Create invoices and take payments', 'Front desk: Give discounts within cap', 'Clinic coordinator: View invoices and payments']) {
+    await pfin.getByLabel(label, { exact: true }).uncheck();
+    await pfin.waitForSelector(`.toast:has-text("${label} removed.")`);
+  }
+});
+await step('money: the front desk sees today\'s payments of its branch one by one (patient, amount, method, who took it) and no total anywhere on its pages', async () => {
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Front desk \\(North Nazimabad\\)');
+  const panel = pfin.locator('.day-payments-panel');
+  await panel.locator('table.day-payments tbody tr').first().waitFor();
+  const rows = await panel.locator('table.day-payments tbody tr').evaluateAll((trs) => trs.map((tr) => [...tr.children].slice(1).map((td) => td.innerText.replace(/\s+/g, ' ').trim())));
+  assert.deepEqual(rows, [
+    ['Kinza Rauf Mr# 9825', 'Rs 8,000', 'Card', 'North Nazimabad', 'Accountant (sample)'],
+    ['Mariam Akhtar Mr# 9824', 'Rs 2,500', 'Cash', 'North Nazimabad', 'Accountant (sample)'],
+  ], 'each payment of today at North Nazimabad, newest first (not Gulshan\'s or Lahore\'s)');
+  assert.deepEqual(await panel.locator('thead th').allInnerTexts(), ['Time', 'Patient', 'Amount', 'Method', 'Branch', 'Taken by']);
+  assert.equal(await panel.locator('tfoot').count(), 0, 'no total row');
+  assert.equal((await panel.innerText()).match(/Rs [\d,]+/g).length, rows.length, 'one amount per payment and no sum');
+  assert.deepEqual(await rupeesShown(pfin, '.day-payments td'), [], 'Today: no rupees outside the single payments (no "Received today", no dues added up)');
+  assert.equal(await pfin.locator('.stat:has-text("Received today"), .stat:has-text("Total pending dues")').count(), 0);
+  assert.deepEqual(await pfin.locator('h2:text("Branches today") + .table-scroll thead th').allInnerTexts(),
+    ['Branch', 'Patients', 'Waiting', 'Completed', 'Patients with dues', 'Cash closing', 'Actions'], 'the branch table counts patients with dues, it does not add up their dues');
+  assert.equal(await pfin.locator('.topnav a:text-is("Billing")').count(), 0, 'no Billing page (no "View invoices and payments")');
+  // The Aaj ki List: each patient's dues in P.P (the $$ flag), nothing added up.
+  await pfin.goto(BASE + '#/staff/sheet');
+  await pfin.waitForSelector('table.sheet tbody tr');
+  assert.ok(await pfin.locator('table.sheet td.pp .pp-due').count(), 'a patient\'s dues still show in P.P');
+  assert.deepEqual(await rupeesShown(pfin, 'td.pp'), [], 'Aaj ki List: no rupees but a patient\'s own dues');
+  // A patient who paid today: no invoice or payment list on the profile (those are for "View invoices and payments").
+  await pfin.goto(BASE + '#/staff/patients?q=Mariam');
+  await pfin.locator('table.list tbody tr a:text("Mariam Akhtar")').click();
+  const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
+  await money.waitFor();
+  assert.match(await money.innerText(), /No dues[\s\S]*No invoices\./);
+  assert.doesNotMatch(await money.innerText(), /Rs|received/, 'no payment or amount of the patient on the profile');
+  // Reports: no "Highest dues" (every patient's dues added up by branch).
+  await pfin.goto(BASE + '#/staff/reports?group=patients&tab=dues');
+  await pfin.waitForSelector('.report-tabs .tab');
+  assert.ok(!(await pfin.locator('.report-tabs .tab').allInnerTexts()).some((t) => /dues/i.test(t)), 'no "Highest dues" report');
+});
+await step('money: the front desk\'s cash closing is a blind count: no expected cash, no difference, "Saved. Accounts will check it."', async () => {
+  await pfin.goto(BASE + '#/staff/accounts?tab=cash');
+  await pfin.getByLabel('Cash counted').waitFor();
+  assert.doesNotMatch(await pfin.locator('main').innerText(), /Cash payments recorded today|Expected|Difference/);
+  await pfin.getByLabel('Cash counted').fill('5000');
+  await pfin.getByRole('button', { name: 'Close cash for today' }).click();
+  await pfin.waitForSelector('.toast:has-text("Saved. Accounts will check it.")');
+  const list = pfin.locator('table.cash-closings-blind');
+  await list.locator('tbody tr').first().waitFor();
+  assert.deepEqual(await list.locator('thead th').allInnerTexts(), ['Date', 'Branch', 'Closed by', 'Accounts']);
+  assert.match(await list.locator('tbody tr').first().innerText(), /North Nazimabad\s+Front desk \(North Nazimabad\)\s+Waiting for accounts/);
+  assert.deepEqual(await rupeesShown(pfin), [], 'no rupees on the cash closing page');
+  // Closing twice is stopped before it is sent.
+  await pfin.getByLabel('Cash counted').fill('100');
+  await pfin.getByRole('button', { name: 'Close cash for today' }).click();
+  await pfin.locator('.field-error, [role="alert"]', { hasText: 'is closed already' }).first().waitFor();
+  await pfin.goto(BASE + '#/staff/today');
+  await pfin.locator('h2:text("Branches today") + .table-scroll tbody tr .badge', { hasText: /^Closed$/ }).waitFor();
+  assert.deepEqual(await rupeesShown(pfin, '.day-payments td'), [], 'Today says "Closed", never how much it was off by');
+});
+await step('money: the accountant and Dr. Ali still see everything: income, totals, reports and the cash difference', async () => {
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Accountant');
+  await pfin.waitForSelector('.stat:has-text("Received today")');
+  assert.match(await pfin.locator('.stat:has-text("Received today") strong').innerText(), /^Rs [\d,]+$/);
+  const head = await pfin.locator('h2:text("Branches today") + .table-scroll thead th').allInnerTexts();
+  assert.ok(head.includes('Received') && head.includes("Dues on today's list"), head.join('|'));
+  await pfin.locator('h2:text("Branches today") + .table-scroll tbody tr:has-text("North Nazimabad") .badge', { hasText: 'Closed, off by Rs 2,500' }).waitFor();
+  assert.equal(await pfin.locator('.day-payments-panel').count(), 0, 'the list one by one is the front desk\'s; accounts have Billing');
+  await pfin.goto(BASE + '#/staff/billing');
+  await pfin.locator('.panel-head:has(h2:text("Payments today")) strong', { hasText: 'Rs 19,000' }).waitFor();
+  await pfin.goto(BASE + '#/staff/accounts?tab=cash');
+  const row = pfin.locator('table.list tbody tr:has-text("North Nazimabad")').first();
+  await row.waitFor();
+  assert.match(await row.innerText(), /Rs 2,500\s+Rs 5,000\s+Rs 2,500/, 'expected 2,500 (today\'s cash), counted 5,000, difference 2,500');
+  await row.getByRole('button', { name: /Verify/ }).click();
+  await pfin.locator('.modal').getByRole('button', { name: 'Verify closing' }).click();
+  await pfin.waitForSelector('.toast:has-text("Verified.")');
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Dr. Ali Rashid');
+  await pfin.waitForSelector('.stat:has-text("Total pending dues")');
+  assert.ok(await pfin.locator('.stat:has-text("Received today")').count());
+  await pfin.goto(BASE + '#/staff/reports?group=patients');
+  await pfin.waitForSelector('.report-tabs .tab');
+  assert.ok((await pfin.locator('.report-tabs .tab').allInnerTexts()).some((t) => /Highest dues/.test(t)), 'Dr. Ali has "Highest dues"');
+});
+await step('money: the assistant and the doctor see no rupees but a patient\'s dues; the doctor\'s own log keeps their own share', async () => {
+  for (const who of ['Assistant', 'Dr. Bushra']) {
+    await tryAnotherRole(pfin);
+    await loginAs(pfin, who);
+    await pfin.locator('h2:text("Branches today")').waitFor();
+    assert.deepEqual(await rupeesShown(pfin), [], `${who}: no rupees on Today`);
+    const head = await pfin.locator('h2:text("Branches today") + .table-scroll thead th').allInnerTexts();
+    assert.ok(!head.includes('Received') && !head.includes('Cash closing') && head.includes('Patients with dues'), `${who}: ${head.join('|')}`);
+    assert.equal(await pfin.locator('.day-payments-panel').count(), 0, `${who}: no list of payments`);
+    // A braces patient who owes 15,000: the dues (the hold on treatment) show, the invoices and payments do not.
+    await pfin.goto(BASE + '#/staff/patients?q=Hamza');
+    await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
+    const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
+    await money.waitFor();
+    assert.match(await money.innerText(), /Rs 15,000 pending[\s\S]*No invoices\./, `${who}: the dues, and no invoices`);
+    assert.doesNotMatch(await money.innerText(), /payments ·|received/, `${who}: no payments`);
+  }
+  await pfin.goto(BASE + '#/staff/log');
+  await pfin.locator('.stat:has-text("Patients treated")').waitFor();
+  assert.ok(await pfin.locator('.stat:has-text("Your share")').count(), 'the doctor\'s own log keeps the share ("See own doctor percentage")');
+});
+await step('money: the coordinator\'s doctor log has the treatments and counts, no rupees', async () => {
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Clinic coordinator');
+  await pfin.goto(BASE + '#/staff/log');
+  await pfin.locator('label:has-text("Doctor") select').selectOption({ label: 'Dr. Hina (sample)' });
+  await pfin.locator('table.list tbody tr:has-text("Areeba Siddiqui")').waitFor();
+  assert.equal(await pfin.locator('.stat:has-text("Patients treated") strong').innerText(), '1');
+  assert.ok(await pfin.locator('.stat:has-text("Own patients (brought in)")').count(), 'the count of own patients stays');
+  assert.equal(await pfin.locator('.stat:has-text("Billed"), .stat:has-text("Own patients paid"), .stat:has-text("share")').count(), 0, 'no billed amount, payments or share');
+  assert.deepEqual(await rupeesShown(pfin), [], 'no rupees on the coordinator\'s doctor log');
+  await pfin.goto(BASE + '#/staff/today');
+  await pfin.locator('h2:text("Branches today")').waitFor();
+  assert.deepEqual(await rupeesShown(pfin), [], 'no rupees on the coordinator\'s Today page');
+});
+await step('money: with "Create invoices and take payments" ticked (still no "View invoices and payments") the front desk takes a payment, sees only that patient\'s invoices, and no totals', async () => {
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Dr. Ali Rashid');
+  await pfin.goto(BASE + '#/staff/admin?tab=access');
+  await pfin.getByLabel('Front desk: Create invoices and take payments', { exact: true }).check();
+  await pfin.waitForSelector('.toast:has-text("Front desk: Create invoices and take payments allowed.")');
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Front desk \\(North Nazimabad\\)');
+  await pfin.goto(BASE + '#/staff/patients?q=Hamza');
+  await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
+  const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
+  await money.locator('table.list tbody tr').first().waitFor();
+  assert.match(await money.innerText(), /INV-2026-\d+[\s\S]*Rs 15,000 unpaid/, 'the patient\'s own invoice, with what is unpaid');
+  await pfin.getByRole('button', { name: 'Take payment' }).click();
+  const m = pfin.locator('.modal:has(h2:has-text("Take payment · Hamza Qureshi"))');
+  await m.getByLabel('For invoice').waitFor();
+  assert.match(await m.getByLabel('For invoice').locator('option:checked').innerText(), /Rs 15,000 unpaid/, 'the payment form matches the money to the unpaid invoice');
+  await m.getByLabel('Amount').fill('5000');
+  await m.getByRole('button', { name: 'Save payment' }).click();
+  await pfin.waitForSelector('.toast:has-text("Payment of Rs 5,000 saved.")');
+  await money.locator('strong', { hasText: 'Rs 10,000 pending' }).waitFor();
+  await pfin.goto(BASE + '#/staff/today');
+  await pfin.locator('table.day-payments tbody tr:has-text("Hamza Qureshi")').waitFor();
+  assert.match(await pfin.locator('table.day-payments tbody tr:has-text("Hamza Qureshi")').innerText(), /Rs 5,000\s+Cash\s+North Nazimabad\s+Front desk \(North Nazimabad\)/);
+  assert.deepEqual(await rupeesShown(pfin, '.day-payments td'), [], 'still no total on Today');
+  assert.equal(await pfin.locator('.topnav a:text-is("Billing")').count(), 0, 'and still no Billing page');
+});
+await pfin.close();
+
 // ------------------------------------------------------------- admin
 const p4 = await newPage();
 await step('admin: access list checkboxes change permissions', async () => {

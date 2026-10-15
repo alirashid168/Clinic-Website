@@ -25,6 +25,10 @@ const TABS = {
   accounts: [['expenses', 'Expenses by category'], ['cash', 'Cash closings'], ['lab', 'Lab and retainer costs']],
   hr: [['doctors', 'Doctors'], ['logins', 'Logins']],
 };
+// A report of the clinic's money in a family others may open (owner, 15 Oct 2026): only for who sees the totals. "Highest dues" adds up
+// every patient's dues by branch (the database refuses it to anyone without finance.view as well: clinic_report).
+const MONEY_TABS = { 'patients/dues': () => can('finance.view') };
+const tabsFor = (group) => TABS[group].filter(([key]) => MONEY_TABS[`${group}/${key}`]?.() ?? true);
 // Reports that take a search box, a payment-mode filter, or no period at all (they show the position today).
 const SEARCHABLE = ['financial/transactions', 'financial/summary', 'financial/methods', 'financial/procedures', 'financial/doctors', 'financial/pending', 'financial/advance', 'financial/void', 'financial/refunds', 'financial/discounts', 'patients/dues', 'hr/doctors'];
 const BY_MODE = ['financial/transactions', 'financial/summary'];
@@ -66,7 +70,7 @@ export async function renderReports(root, params) {
   const groups = GROUPS.filter((g) => g[2]());
   if (!groups.length) { mount(root, h('div', { class: 'page-head' }, h('h1', {}, 'Reports')), empty('No reports are available for your account.')); return; }
   let group = groups.some((g) => g[0] === params.get('group')) ? params.get('group') : groups[0][0];
-  let tab = (TABS[group].find((t) => t[0] === params.get('tab')) || TABS[group][0])[0];
+  let tab = (tabsFor(group).find((t) => t[0] === params.get('tab')) || tabsFor(group)[0])[0];
   const today = todayISO();
   const defaults = { financial: today.slice(0, 8) + '01', accounts: today.slice(0, 8) + '01', patients: `${Number(today.slice(0, 4)) - 1}${today.slice(4, 8)}01`, opd: addDaysISO(today, -29), hr: today.slice(0, 8) + '01', inventory: today };
 
@@ -316,7 +320,9 @@ export async function renderReports(root, params) {
 
     'hr/doctors': async () => {
       const rows = (await report('doctors')).filter((r) => !q() || String(r.name).toLowerCase().includes(q())).map((r) => ({ ...r, group: r.group ? `Group ${r.group}` : '' }));
-      return [table('Doctors', 'Completed visits in the period: treated, checked (as the checker group) and assisted, and the days each doctor worked. Open a doctor\'s own log under More → Doctor log.', rows, [['Doctor', 'name', 'text'], ['Group', 'group', 'text'], ['Treated', 'treated', 'num'], ['Checked', 'checked', 'num'], ['Assisted', 'assisted', 'num'], ['Days', 'days', 'num'], ['Billed (treated)', 'billed', 'money']], 'doctors', { treated: total(rows, 'treated'), checked: total(rows, 'checked'), assisted: total(rows, 'assisted'), billed: total(rows, 'billed') })];
+      // What the doctors billed is the clinic's money: only for finance.view (the HR family also opens for "See every doctor's daily log").
+      const billed = can('finance.view');
+      return [table('Doctors', 'Completed visits in the period: treated, checked (as the checker group) and assisted, and the days each doctor worked. Open a doctor\'s own log under More → Doctor log.', rows, [['Doctor', 'name', 'text'], ['Group', 'group', 'text'], ['Treated', 'treated', 'num'], ['Checked', 'checked', 'num'], ['Assisted', 'assisted', 'num'], ['Days', 'days', 'num'], ...(billed ? [['Billed (treated)', 'billed', 'money']] : [])], 'doctors', { treated: total(rows, 'treated'), checked: total(rows, 'checked'), assisted: total(rows, 'assisted'), ...(billed ? { billed: total(rows, 'billed') } : {}) })];
     },
     'hr/logins': async () => {
       if (!isAdmin()) return [empty('Only Dr. Ali can see the login log.')];
@@ -337,7 +343,7 @@ export async function renderReports(root, params) {
   const caption = () => {
     const key = `${group}/${tab}`;
     const when = group === 'inventory' || AS_OF_TODAY.includes(key) ? `as of ${shortDate(today)}` : `${shortDate(from.value)} – ${shortDate(to.value)}`;
-    const parts = [groups.find((g) => g[0] === group)?.[1], TABS[group].find((t) => t[0] === tab)?.[1], when, branch.value && !ALL_BRANCHES.includes(key) ? branchName(Number(branch.value)) : 'All branches'];
+    const parts = [groups.find((g) => g[0] === group)?.[1], tabsFor(group).find((t) => t[0] === tab)?.[1], when, branch.value && !ALL_BRANCHES.includes(key) ? branchName(Number(branch.value)) : 'All branches'];
     if (BY_MODE.includes(key) && method.value) parts.push(METHOD_LABEL[method.value]);
     if (SEARCHABLE.includes(key) && q()) parts.push(`Search: "${search.value.trim()}"`);
     return h('p', { class: 'report-caption print-only' }, parts.filter(Boolean).join(' · '));
@@ -356,12 +362,12 @@ export async function renderReports(root, params) {
   // Two tab strips: the report family, then the report. A strip updates in place when a tab is
   // picked, so keyboard focus stays on it; only the report strip is rebuilt, when the family changes.
   const groupTabs = tabbed('Report family', groups.map(([key, label]) => [key, label]), group, (key) => {
-    group = key; tab = TABS[group][0][0]; from.value = defaults[group]; to.value = today;
+    group = key; tab = tabsFor(group)[0][0]; from.value = defaults[group]; to.value = today;
     drawReportTabs(); drawFilters(); load();
   });
   groupTabs.el.classList.add('report-groups');
   function drawReportTabs() {
-    const reportTabs = tabbed('Report', TABS[group], tab, (key) => { tab = key; drawFilters(); load(); });
+    const reportTabs = tabbed('Report', tabsFor(group), tab, (key) => { tab = key; drawFilters(); load(); });
     reportTabs.el.classList.add('report-tabs');
     reportTabs.panel.append(filters, body);
     mount(groupTabs.panel, reportTabs.el, reportTabs.panel);

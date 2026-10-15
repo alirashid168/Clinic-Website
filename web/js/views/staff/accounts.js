@@ -159,9 +159,13 @@ async function expenses(root) {
 }
 
 // ---------------------------------------------------------------- cash closing
+// A blind count (owner, 15 Oct 2026: nobody but Dr. Ali and accounts sees the clinic's money): whoever closes the cash without seeing
+// the money (no cash.verify, billing.view or finance.view: the front desk) enters what they counted, and is never shown the cash
+// expected or the difference, here or in the list of closings. Accounts see expected, counted and the difference, and verify.
 async function cash(root) {
   const d = state.data;
   const branches = myBranches();
+  const seesCash = can('cash.verify') || can('billing.view') || can('finance.view');
   const out = h('div', {});
   let closingsHeading = null; // the page is redrawn after a closing or a verification: focus goes to the list, which still exists
   let verified = false;
@@ -173,31 +177,50 @@ async function cash(root) {
       } },
     ], { onClose: () => { if (verified) { verified = false; closingsHeading?.focus(); } } });
   async function load() {
-    const closings = await d.cashClosings().catch(() => []);
+    const closings = await (seesCash ? d.cashClosings() : d.cashClosingsBlind()).catch(() => []);
     const today = todayISO();
     const closeForm = can('cash.close') ? await (async () => {
       const branch = select(branches.map((b) => ({ value: b.id, label: b.name })), defaultBranchId());
       const expected = h('strong', {});
       const counted = h('input', { type: 'number', min: 0, step: 1, placeholder: 'Cash counted in the drawer (Rs)' });
-      const notes = h('input', { placeholder: 'Notes, if it does not match' });
-      const refresh = async () => { try { expected.textContent = rupees(await d.expectedCash(branch.value, today)); } catch { expected.textContent = '–'; } };
+      const notes = h('input', { placeholder: seesCash ? 'Notes, if it does not match' : 'Notes for accounts (optional)' });
+      const refresh = async () => { if (!seesCash) return; try { expected.textContent = rupees(await d.expectedCash(branch.value, today)); } catch { expected.textContent = '–'; } };
       branch.addEventListener('change', refresh);
       await refresh();
       const panel = h('section', { class: 'panel' },
         h('h2', {}, `Close today's cash · ${shortDate(today)}`),
-        h('p', {}, 'Cash payments recorded today: ', expected),
+        seesCash ? h('p', {}, 'Cash payments recorded today: ', expected) : h('p', {}, 'Count the cash in the drawer and enter the amount. Accounts check it against the day\'s payments.'),
         h('div', { class: 'form-grid' }, field('Branch', branch), field('Cash counted', counted, null, { required: true }), field('Notes', notes)),
         h('button', { class: 'btn btn-primary', onclick: busy(async () => {
           clearFieldErrors(panel);
           if (counted.value === '') { showFormErrors(panel, [{ input: counted, message: 'Enter the cash you counted.' }]); return; }
+          if (closings.some((c) => c.branch_id === Number(branch.value) && c.closing_date === today)) {
+            showFormErrors(panel, [{ input: branch, message: `Today's cash at ${branchName(Number(branch.value))} is closed already.` }]); return;
+          }
           const c = await d.closeCash(branch.value, today, Number(counted.value), notes.value);
-          toast(Number(c.difference) === 0 ? 'Cash closed. It matches.' : `Cash closed. Difference ${rupees(c.difference)} sent to the accountant.`, Number(c.difference) === 0 ? 'ok' : 'error', 6000);
+          if (!seesCash || c.difference === null || c.difference === undefined) toast('Saved. Accounts will check it.', 'ok', 6000);
+          else toast(Number(c.difference) === 0 ? 'Cash closed. It matches.' : `Cash closed. Difference ${rupees(c.difference)} sent to the accountant.`, Number(c.difference) === 0 ? 'ok' : 'error', 6000);
           await load();
           closingsHeading?.focus();
         }) }, 'Close cash for today'));
       return panel;
     })() : null;
     closingsHeading = h('h2', { tabindex: '-1' }, 'Recent closings');
+    if (!seesCash) {
+      // The blind list: the day, the branch, who closed it and whether accounts have checked it. No amount, and no notes (a note may
+      // say how much was short).
+      mount(out, closeForm,
+        h('section', { class: 'panel' },
+          closingsHeading,
+          closings.missing ? empty('The closings show here once the database update has been run.')
+            : closings.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list cash-closings-blind' },
+              h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Closed by'), h('th', { scope: 'col' }, 'Accounts'))),
+              h('tbody', {}, closings.map((c) => h('tr', {},
+                h('td', { class: 'nowrap' }, shortDate(c.closing_date)), h('td', {}, branchName(c.branch_id)), h('td', {}, c.closed_by_name || ''),
+                h('td', {}, c.checked ? h('span', { class: 'badge badge-ok' }, 'Checked') : h('span', { class: 'badge badge-muted' }, 'Waiting for accounts')))))))
+              : empty('No cash closings yet.')));
+      return;
+    }
     mount(out, closeForm,
       h('section', { class: 'panel' },
         closingsHeading,

@@ -1,0 +1,241 @@
+// The clinic's money is for Dr. Ali and accounts (owner, 15 Oct 2026: "no one can see the overall finances of the clinic except me and
+// accounts. no assistant can see the income, only front desk can see the daily payments with each payment along with patient name. but
+// not the full amount"). The permission grid, the demo adapter (which follows the database's rules of
+// supabase/migrations/20261015000400_finance_privacy.sql) and the live adapter's requests. Made-up people only.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
+import { setMaxListeners } from 'node:events';
+
+// ---- a browser-like page
+const store = new Map<string, string>();
+(globalThis as any).localStorage = {
+  getItem: (k: string) => (store.has(k) ? store.get(k) : null),
+  setItem: (k: string, v: unknown) => { store.set(k, String(v)); },
+  removeItem: (k: string) => { store.delete(k); },
+  clear: () => store.clear(),
+};
+const page = new EventTarget();
+setMaxListeners(0, page);
+(globalThis as any).window = page;
+Object.defineProperty(globalThis, 'navigator', { value: { userAgent: 'test', onLine: true }, configurable: true, writable: true });
+registerHooks({
+  resolve(spec, ctx, nextResolve) {
+    if (spec.startsWith('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@')) {
+      return { url: 'data:text/javascript,export const createClient = (...a) => globalThis.__fakeCreateClient(...a);', shortCircuit: true };
+    }
+    return nextResolve(spec, ctx);
+  },
+});
+const { createSupabaseAdapter } = await import('../web/js/data/supabase.js');
+const { createDemoAdapter } = await import('../web/js/data/demo.js');
+const { todayISO } = await import('../web/js/ui/dom.js');
+const { PERMISSIONS, defaultGrid, hasPermission } = await import('../web/js/lib/permissions.js');
+
+const ROLES = ['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'];
+
+test('permission grid: "Today\'s payments, one by one (no totals)" sits under Billing, on for the front desk and the accountant (as the database)', () => {
+  const p = PERMISSIONS.find((x: any) => x.key === 'payments.day_list');
+  assert.equal(p.label, "Today's payments, one by one (no totals)");
+  assert.equal(p.category, 'Billing');
+  assert.deepEqual(ROLES.filter((r) => hasPermission(r, 'payments.day_list', defaultGrid())), ['front_desk', 'accountant', 'admin']);
+  const keys = PERMISSIONS.map((x: any) => x.key);
+  assert.equal(keys.indexOf('payments.day_list'), keys.indexOf('billing.view') + 1, 'next to "View invoices and payments" in the access list');
+});
+
+// ======================================================================================= the demo adapter
+/** A demo page with the grid as the clinic has it live: invoices, payments and discounts are for accounts and Dr. Ali. */
+async function demoLive() {
+  const d: any = createDemoAdapter();
+  await d.signInDemo('s-admin');
+  for (const [role, key] of [['front_desk', 'billing.view'], ['front_desk', 'billing.create'], ['front_desk', 'discount.give'], ['coordinator', 'billing.view']]) {
+    await d.setRolePermission(role, key, false);
+  }
+  return d;
+}
+const as = async (d: any, id: string) => { await d.signOut(); await d.signInDemo(id); return d; };
+
+test('demo: today\'s payments one by one: the desk sees its branch\'s, each with the patient, amount, method and who took it; never a total', async () => {
+  const d = await as(await demoLive(), 's-fd-nn');
+  const rows = await d.paymentsToday();
+  assert.deepEqual(rows.map((r: any) => [r.patient_name, r.mr_number, r.amount, r.method, r.branch_id, r.received_by_name]), [
+    ['Kinza Rauf', '9825', 8000, 'card', 2, 'Accountant (sample)'],
+    ['Mariam Akhtar', '9824', 2500, 'cash', 2, 'Accountant (sample)'],
+  ], 'North Nazimabad only, newest first');
+  assert.deepEqual(Object.keys(rows[0]).sort(), ['amount', 'branch_id', 'id', 'method', 'mr_number', 'patient_id', 'patient_name', 'received_at', 'received_by_name'],
+    'rows only: no total, sum or count');
+  await assert.rejects(() => d.paymentsToday({ branchId: 1 }), /only at the branches you work at/);
+  await assert.rejects(() => d.todaysPayments(null), /row-level security/, 'not the billing list (with its total)');
+  for (const id of ['s-asst', 's-doc', 's-coord']) {
+    await as(d, id);
+    await assert.rejects(() => d.paymentsToday(), /NOT_ALLOWED: today's payments need/, id);
+  }
+  await as(d, 's-acct');
+  assert.deepEqual([...new Set((await d.paymentsToday()).map((r: any) => r.branch_id))].sort(), [1, 2, 4], 'the accountant: every branch with payments today');
+});
+
+test('demo: money totals refuse everyone but accounts and Dr. Ali; the Today rows carry no amounts for them', async () => {
+  const d = await demoLive();
+  for (const id of ['s-fd-nn', 's-asst', 's-doc', 's-coord']) {
+    await as(d, id);
+    await assert.rejects(() => d.totalDues(), /NOT_ALLOWED: money totals/, `${id}: total dues`);
+    await assert.rejects(() => d.paymentsSummary({ from: todayISO(), to: todayISO() }), /row-level security/, `${id}: payment totals`);
+    await assert.rejects(() => d.report('pnl_trend', todayISO(), todayISO()), /row-level security/, `${id}: reports`);
+    const nn = (await d.dashboard(todayISO())).find((r: any) => r.branch.id === 2);
+    assert.equal(nn.received, 0, `${id}: nothing received shown`);
+    assert.equal(nn.dues, null, `${id}: the dues are not added up`);
+    assert.equal(nn.dues_patients, 2, `${id}: how many patients on the list have dues`);
+  }
+  await as(d, 's-acct');
+  assert.ok(await d.totalDues() > 0);
+  const nn = (await d.dashboard(todayISO())).find((r: any) => r.branch.id === 2);
+  assert.equal(nn.received, 10500, 'the accountant: what came in at North Nazimabad today');
+  assert.equal(nn.dues, 30000, 'and the dues on its list, added up');
+});
+
+test('demo: the cash closing is a blind count for the desk; accounts see expected, counted and the difference', async () => {
+  const d = await as(await demoLive(), 's-fd-nn');
+  assert.equal(await d.expectedCash(2, todayISO()), 0, 'the desk cannot add up the day\'s cash');
+  const c = await d.closeCash(2, todayISO(), 3000, 'Counted twice');
+  assert.equal(c.counted_cash, 3000);
+  assert.equal(c.expected_cash, null, 'not told the expected cash');
+  assert.equal(c.difference, null, 'not told the difference');
+  assert.deepEqual(await d.cashClosings(), [], 'the table with the amounts is not for the desk');
+  const blind = await d.cashClosingsBlind();
+  assert.deepEqual(blind.map((r: any) => [r.branch_id, r.closing_date, r.closed_by_name, r.checked]), [[2, todayISO(), 'Front desk (North Nazimabad)', false]]);
+  assert.deepEqual(Object.keys(blind[0]).sort(), ['branch_id', 'checked', 'closed_at', 'closed_by_name', 'closing_date', 'id'], 'no amount and no note');
+  const today = (await d.dashboard(todayISO())).find((r: any) => r.branch.id === 2);
+  assert.equal(today.closing.difference, undefined, 'Today: closed, without how much it was off by');
+  await as(d, 's-asst');
+  await assert.rejects(() => d.cashClosingsBlind(), /NOT_ALLOWED/);
+  await as(d, 's-acct');
+  const [row] = await d.cashClosings();
+  assert.deepEqual([row.expected_cash, row.counted_cash, row.difference], [2500, 3000, 500], 'expected = today\'s cash at North Nazimabad');
+});
+
+test('demo: the doctor dashboard\'s rupees only for accounts, Dr. Ali, or the doctor on their own', async () => {
+  const d = await demoLive();
+  const bushra = (await d.clinicians()).find((c: any) => c.display_name === 'Dr. Bushra (sample)').id;
+  const from = todayISO().slice(0, 8) + '01';
+  const money = (s: any) => [s.billed, s.referred_paid, s.share, s.rule];
+  await as(d, 's-coord');
+  const coord = await d.doctorSummary(bushra, from, todayISO());
+  assert.deepEqual(money(coord), [null, null, null, null], 'the coordinator: no money');
+  assert.equal(coord.referred_patients, 2, 'the coordinator: the counts');
+  await as(d, 's-doc');
+  assert.notEqual((await d.doctorSummary(bushra, from, todayISO())).rule, null, 'the doctor on their own, with "See own doctor percentage"');
+  await as(d, 's-admin');
+  await d.setRolePermission('doctor', 'commission.view_own', false);
+  await as(d, 's-doc');
+  assert.deepEqual(money(await d.doctorSummary(bushra, from, todayISO())), [null, null, null, null], 'without it: no money on their own either');
+  await as(d, 's-acct');
+  assert.equal(typeof (await d.doctorSummary(bushra, from, todayISO())).billed, 'number', 'the accountant');
+});
+
+test('demo: a patient\'s invoices and payments: none for the assistant; one patient\'s own at their branch for a desk that may take payments', async () => {
+  const d = await demoLive();
+  const hamza = (await d.searchPatients('Hamza'))[0];
+  await as(d, 's-asst');
+  const p = await d.getPatient(hamza.id);
+  assert.deepEqual([p.invoices.length, p.payments.length, p.plans.length, p.dues], [0, 0, 0, 15000], 'the assistant: only the dues');
+  await assert.rejects(() => d.patientBilling(hamza.id), /NOT_ALLOWED/);
+  await as(d, 's-admin');
+  await d.setRolePermission('front_desk', 'billing.create', true);
+  await as(d, 's-fd-nn');
+  const own = await d.patientBilling(hamza.id);
+  assert.equal(own.invoices.length, 1, 'the desk that may take payments: that patient\'s invoice');
+  await d.recordPayment({ patient_id: hamza.id, branch_id: 2, amount: 5000, method: 'cash' });
+  assert.equal((await d.getPatient(hamza.id)).dues, 10000, 'the payment is taken');
+  assert.ok((await d.paymentsToday()).some((r: any) => r.patient_name === 'Hamza Qureshi' && r.amount === 5000 && r.received_by_name === 'Front desk (North Nazimabad)'));
+  await assert.rejects(() => d.createInvoice({ patient_id: hamza.id, branch_id: 2, items: [{ description: 'Sample', quantity: 1, unit_price: 100 }] }), /row-level security/,
+    'a new invoice still needs "View invoices and payments" (as the database: save_invoice reads it back)');
+  await assert.rejects(() => d.totalDues(), /NOT_ALLOWED: money totals/, 'and still no totals');
+});
+
+// ======================================================================================= the live adapter
+function fakeClient(answer: (table: string, ops: any[]) => any) {
+  const f: any = { requests: [] as any[], rpcs: [] as any[], rpcAnswer: (_n: string, _a: any): any => ({ data: null, error: null, status: 200 }) };
+  f.from = (table: string) => {
+    const ops: any[] = [];
+    const b: any = new Proxy({}, {
+      get(_t, name) {
+        if (name === 'then') return (res: any, rej: any) => { f.requests.push({ table, ops }); return Promise.resolve(answer(table, ops)).then(res, rej); };
+        return (...a: any[]) => { ops.push([String(name), ...a]); return b; };
+      },
+    });
+    return b;
+  };
+  f.client = () => ({
+    auth: {
+      storageKey: 'sb-test-auth-token',
+      async getSession() { return { data: { session: { access_token: 'jwt-u1', user: { id: 'u1' } } }, error: null }; },
+      async getUser() { return { data: { user: { id: 'u1' } }, error: null }; },
+      async signOut() { return { error: null }; },
+      onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+      stopAutoRefresh() {},
+    },
+    from: f.from,
+    rpc: (name: string, args: any) => { f.rpcs.push({ name, args }); const r: any = Promise.resolve(f.rpcAnswer(name, args)); r.abortSignal = () => r; return r; },
+    channel() { const ch: any = { on: () => ch, subscribe: () => ch }; return ch; },
+    removeChannel() {},
+    functions: { invoke: async () => ({ data: null, error: null }) },
+    storage: { from: () => ({}) },
+  });
+  return f;
+}
+/** A live page signed in as a staff member with these permissions (getSession is answered without asking the login server). */
+async function livePage(perms: string[], answer: (table: string, ops: any[]) => any = () => ({ data: [], error: null, status: 200 })) {
+  const f = fakeClient(answer);
+  (globalThis as any).__fakeCreateClient = () => f.client();
+  const data: any = await createSupabaseAdapter();
+  data.getSession = async () => ({ kind: 'staff', staff: { id: 'u1', role: 'front_desk', active: true }, perms: new Set(perms) });
+  return { f, data };
+}
+
+test('live: today\'s payments and the blind closings come from the database functions; before the update they say missing', async () => {
+  const { f, data } = await livePage(['payments.day_list', 'cash.close']);
+  f.rpcAnswer = (name: string) => ({ data: name === 'payments_today' ? [{ id: 'y1', patient_name: 'Sample Payer', amount: 2500 }] : [{ id: 'c1', checked: false }], error: null, status: 200 });
+  assert.deepEqual(await data.paymentsToday(), [{ id: 'y1', patient_name: 'Sample Payer', amount: 2500 }]);
+  await data.paymentsToday({ branchId: '2' });
+  assert.deepEqual(await data.cashClosingsBlind(), [{ id: 'c1', checked: false }]);
+  assert.deepEqual(f.rpcs, [{ name: 'payments_today', args: { p_branch: null } }, { name: 'payments_today', args: { p_branch: 2 } }, { name: 'cash_closings_blind', args: { p_limit: 200 } }]);
+  const old = await livePage(['payments.day_list', 'cash.close']);
+  old.f.rpcAnswer = () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' }, status: 404 });
+  assert.equal((await old.data.paymentsToday()).missing, true);
+  assert.equal((await old.data.cashClosingsBlind()).missing, true);
+});
+
+test('live: the desk\'s Today asks for the closings without amounts and does not add up the dues; accounts read the closings themselves', async () => {
+  const visits = [{ branch_id: 2, status: 'waiting', patient_id: 'pa' }, { branch_id: 2, status: 'completed', patient_id: 'pb' }];
+  const answer = (table: string) => ({ data: table === 'branches' ? [{ id: 2, name: 'North Nazimabad', active: true }] : table === 'visits' ? visits : [], error: null, status: 200 });
+  const desk = await livePage(['cash.close', 'dues.view', 'payments.day_list'], answer);
+  desk.f.rpcAnswer = (name: string) => ({ data: name === 'dues_for' ? [{ patient_id: 'pa', dues: 4000 }, { patient_id: 'pb', dues: 0 }]
+    : name === 'cash_closings_blind' ? [{ id: 'c1', branch_id: 2, closing_date: todayISO(), checked: false }] : [], error: null, status: 200 });
+  const [row] = await desk.data.dashboard(todayISO());
+  assert.deepEqual([row.dues, row.dues_patients, row.closing?.id], [null, 1, 'c1']);
+  assert.ok(!desk.f.requests.some((r: any) => r.table === 'cash_closings'), 'the desk never reads the cash_closings table');
+  const acct = await livePage(['finance.view', 'billing.view', 'cash.verify', 'dues.view'], answer);
+  acct.f.rpcAnswer = (name: string) => ({ data: name === 'dues_for' ? [{ patient_id: 'pa', dues: 4000 }] : [], error: null, status: 200 });
+  const [a] = await acct.data.dashboard(todayISO());
+  assert.equal(a.dues, 4000);
+  assert.ok(acct.f.requests.some((r: any) => r.table === 'cash_closings'), 'accounts read the closings with their amounts');
+  assert.ok(!acct.f.rpcs.some((r: any) => r.name === 'cash_closings_blind'));
+});
+
+test('live: a desk that may take payments without seeing invoices: the payment goes in without being read back, and the patient\'s own invoices come from patient_billing', async () => {
+  const { f, data } = await livePage(['billing.create']);
+  f.rpcAnswer = (name: string, args: any) => ({ data: name === 'patient_billing' ? { invoices: [{ id: 'i1', patient_id: args.p_patient }], payments: [] } : null, error: null, status: 200 });
+  assert.deepEqual(await data.patientBilling('pt-1'), { invoices: [{ id: 'i1', patient_id: 'pt-1' }], payments: [] });
+  assert.deepEqual(f.rpcs.at(-1), { name: 'patient_billing', args: { p_patient: 'pt-1' } });
+  const pay = await data.recordPayment({ patient_id: 'pt-1', branch_id: '2', amount: '5000', method: 'cash' });
+  const insert = f.requests.find((r: any) => r.table === 'payments');
+  assert.ok(insert.ops.some((o: any) => o[0] === 'insert' && o[1].id === pay.id && o[1].amount === 5000 && o[1].branch_id === 2), 'sent with its own id');
+  assert.ok(!insert.ops.some((o: any) => o[0] === 'select'), 'not asked back (row-level security would refuse the read)');
+  assert.equal(typeof pay.received_at, 'string', 'the receipt has its time');
+  // With billing.view: read straight from the tables and the new payment read back, as before.
+  const acct = await livePage(['billing.view', 'billing.create'], (table: string, ops: any[]) => ({
+    data: ops.some((o: any) => o[0] === 'single') ? { id: 'y9', table } : [], error: null, status: 200 }));
+  await acct.data.patientBilling('pt-1');
+  assert.ok(!acct.f.rpcs.some((r: any) => r.name === 'patient_billing'));
+  assert.deepEqual(await acct.data.recordPayment({ patient_id: 'pt-1', branch_id: 2, amount: 100 }), { id: 'y9', table: 'payments' });
+});
