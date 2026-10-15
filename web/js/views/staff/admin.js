@@ -82,9 +82,13 @@ async function access(root) {
 // ---------------------------------------------------------------- staff
 async function staff(root, redraw) {
   const d = state.data;
-  const [list, gridData, logins] = await Promise.all([d.staffList(), d.permissionGrid(), isAdmin() ? d.staffLogins().catch(() => null) : null]);
+  const [all, gridData, logins] = await Promise.all([d.staffList(), d.permissionGrid(), isAdmin() ? d.staffLogins().catch(() => null) : null]);
   const { permissions, grid, overrides } = gridData;
+  // Deleted accounts (kept because records carry their names) are not on the list: they are under "Deleted accounts" below it.
+  const list = all.filter((s) => !s.deleted_at);
+  const deleted = all.filter((s) => s.deleted_at);
   const lastLogin = (id) => { const row = logins?.staff?.find((x) => x.id === id); return row?.last_sign_in_at ? when(row.last_sign_in_at) : 'Never'; };
+  const isMe = (s) => s.id === state.session?.staff?.id;
 
   // Readable passwords to hand over at the desk: no look-alike letters (l/1, O/0).
   const newPassword = () => {
@@ -267,6 +271,51 @@ async function staff(root, redraw) {
       { label: `Switch off ${s.full_name}`, danger: true, onClick: async () => { try { await d.deactivateStaff(s.id); toast('Account switched off.', 'ok'); await redraw(); } catch (e) { toast(friendlyError(e), 'error'); return false; } } },
     ], { destructive: true });
 
+  // Delete: the dialog first asks what the website has with this account on it, and says what Delete will do. The server asks again
+  // when Delete is pressed and decides (admin-users delete_staff): an account with no records is removed for good; one with records
+  // is switched off and kept under "Deleted accounts", so the names on its records stay.
+  const counted = (parts) => parts.map((p) => `${Number(p.count).toLocaleString('en-US')} ${Number(p.count) === 1 ? p.one || p.label : p.label}`).join(', ');
+  const remove = async (s) => {
+    const rec = await d.staffRecords(s.id);
+    const total = Number(rec?.total) || 0;
+    const doctors = state.ref.clinicians.filter((c) => c.staff_id === s.id).map((c) => c.display_name);
+    const seen = !logins ? '' : logins.staff?.find((x) => x.id === s.id)?.last_sign_in_at ? ` (last logged in ${lastLogin(s.id)})` : ' (never logged in)';
+    const body = total === 0
+      ? h('div', {},
+        h('p', {}, `${s.full_name} has no records on the website${seen}. Delete removes the login for good, and ${s.email} can then be given to someone else.`),
+        doctors.length ? h('p', {}, `${doctors.join(', ')} stays in the doctors list for visits; only the login goes.`) : null)
+      : h('div', {},
+        h('p', {}, `The website has records with ${s.full_name}'s name on them: ${counted(rec.parts || [])}.`),
+        h('p', {}, `These records keep ${s.full_name}'s name, so the account cannot be removed for good. Delete switches it off and takes it off this list. You can bring it back from "Deleted accounts" at the bottom of this page.`));
+    modal(`Delete ${s.full_name}'s account?`, body, [
+      { label: 'Cancel' },
+      { label: `Delete ${s.full_name}`, danger: true, onClick: async () => {
+        try {
+          const res = await d.deleteStaff(s.id);
+          toast(res?.result === 'removed' ? `${s.full_name}'s login was removed for good.`
+            : res?.fallback ? `The login could not be removed for good, so ${s.full_name} was switched off and moved to Deleted accounts.`
+              : `${s.full_name} was switched off and moved to Deleted accounts.`, 'ok', 6000);
+          await redraw();
+        } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      } },
+    ], { destructive: true });
+  };
+
+  // Bring back: off the deleted list and onto the list above, still switched off.
+  const restore = (s) => busy(async () => {
+    await d.restoreStaff(s.id);
+    toast(`${s.full_name} is back on the list, still switched off. Press Switch on when they need to log in again.`, 'ok', 8000);
+    redraw();
+  });
+  const deletedList = deleted.length ? h('details', { class: 'form-more deleted-accounts' },
+    h('summary', {}, `Deleted accounts (${deleted.length})`),
+    h('p', { class: 'muted' }, 'Switched off and kept, because records on the website carry their names. Bring back puts an account on the list above, still switched off.'),
+    h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Name'), h('th', { scope: 'col' }, 'Email'), h('th', { scope: 'col' }, 'Role'), h('th', { scope: 'col' }, 'Deleted'), h('th', { scope: 'col' }, srOnly('Actions')))),
+      h('tbody', {}, deleted.map((s) => h('tr', {},
+        h('td', {}, s.full_name), h('td', {}, s.email), h('td', {}, ROLE_LABELS[s.role]), h('td', { class: 'nowrap' }, shortDate(dayOf(s.deleted_at))),
+        h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Bring back ${s.full_name}`, onclick: restore(s) }, 'Bring back')))))))) : null;
+
   mount(root, h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', {}, 'Staff accounts'), h('button', { class: 'btn btn-primary btn-small', onclick: add }, 'New staff account')),
     h('p', { class: 'muted' }, 'Staff who forget their password cannot reset it by email. Open "Login and password" on their row and set a new one.'),
@@ -279,7 +328,8 @@ async function staff(root, redraw) {
         h('td', {}, !s.restrict_to_branches ? 'All' : s.branch_ids?.length ? branchList(s.branch_ids.map(Number)) : 'None (locked out)'),
         logins ? h('td', { class: 'nowrap muted' }, lastLogin(s.id)) : null,
         h('td', {}, s.role !== 'admin' && Object.keys(overrides[s.id] || {}).length ? h('span', { class: 'badge badge-warn' }, 'Personal changes') : null),
-        h('td', { class: 'right nowrap' },
+        // The buttons may wrap onto a second line: on a laptop screen one line of six pushes Delete out of sight (the table scrolls).
+        h('td', { class: 'right' },
           s.role !== 'admin' ? h('button', { class: 'btn btn-small', 'aria-label': `Personal access, ${s.full_name}`, onclick: () => personal(s) }, 'Personal access') : null, ' ',
           // Not on an admin row (admin always has every branch and the one admin role) nor on your own row (the database refuses a non-admin changing their own branches or role).
           s.role !== 'admin' && s.id !== state.session?.staff?.id ? [
@@ -289,7 +339,10 @@ async function staff(root, redraw) {
           s.active && (s.role !== 'admin' || isAdmin()) ? h('button', { class: 'btn btn-small', 'aria-label': `Login and password, ${s.full_name}`, onclick: () => loginDetails(s) }, 'Login and password') : null, ' ',
           s.role === 'admin' ? null : s.active
             ? h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Switch off ${s.full_name}`, onclick: () => switchOff(s) }, 'Switch off')
-            : h('button', { class: 'btn btn-small', 'aria-label': `Switch on ${s.full_name}`, onclick: busy(async () => { await d.reactivateStaff(s.id); toast('Account switched back on.', 'ok'); redraw(); }) }, 'Switch on')))))))));
+            : h('button', { class: 'btn btn-small', 'aria-label': `Switch on ${s.full_name}`, onclick: busy(async () => { await d.reactivateStaff(s.id); toast('Account switched back on.', 'ok'); redraw(); }) }, 'Switch on'), ' ',
+          // Not on an admin row (an admin account is never deleted) nor on your own.
+          s.role !== 'admin' && !isMe(s) ? h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Delete ${s.full_name}`, onclick: busy(() => remove(s)) }, 'Delete') : null)))))),
+    deletedList));
 }
 
 // ---------------------------------------------------------------- settings
