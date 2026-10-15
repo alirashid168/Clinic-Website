@@ -3,6 +3,7 @@ import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select
 import { state, can, branchName, isAdmin, clinicianName, myBranches, defaultBranchId } from '../../state.js';
 import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
+import { xrayUploadModal, deleteDocumentModal } from './common.js';
 import { portalLoginModal } from './portal-login.js';
 import { retainerStatuses, checkOverdue } from '../../lib/records.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt, editInvoiceModal, editPaymentModal } from './invoice.js';
@@ -75,6 +76,8 @@ export async function renderPatient(root, id) {
   const reload = async () => {
     try { await renderPatient(root, id); } catch (err) { console.error(err); toast('Saved, but this page could not refresh itself. Reload the page to see the latest.', 'error'); }
   };
+  // X-rays come from their own table, loaded beside the record (null: they could not be loaded; [] for a role without xrays.view).
+  const xraysLoad = d.patientXrays ? d.patientXrays(id).catch(() => null) : Promise.resolve([]);
   let p;
   try { p = await d.getPatient(id); } catch (e) {
     // Every page has one h1, the error state too. PGRST116 is "no row for this id".
@@ -83,6 +86,7 @@ export async function renderPatient(root, id) {
       empty(missing ? 'This patient record could not be found. The link may be wrong, or the record may have been removed.' : friendlyError(e), h('a', { class: 'btn', href: '#/staff/patients' }, '← Patients')));
     return;
   }
+  const xrays = await xraysLoad;
   const g = p.braces_case ? await d.bracesGuidance(id).catch(() => null) : null;
   const bc = p.braces_case;
   const balances = Object.fromEntries(invoiceBalances(p.invoices, p.payments).map((i) => [i.id, i]));
@@ -291,6 +295,35 @@ export async function renderPatient(root, id) {
     return link;
   };
 
+  // X-ray tiles, from the X-ray store (bucket "xrays"): signed with the list like photos, signed again once when an image fails to load
+  // or a full-size link is clicked near its expiry. { day, at, el } so they sort in with the photos, newest first.
+  const xrayTiles = (xrays || []).map((x) => {
+    const img = h('img', { alt: `X-ray (${x.kind || 'X-ray'})`, loading: 'lazy', decoding: 'async', src: x.thumb_url || x.url || null });
+    const link = h('a', { href: x.url || null, target: '_blank', rel: 'noopener' }, img);
+    freshLinkOnClick(link, x, { bucket: 'xrays' });
+    img.addEventListener('error', async () => {
+      if (img.dataset.resigned || !d.signedUrls || !x.storage_path) return;
+      img.dataset.resigned = '1';
+      try {
+        const f = (await d.signedUrls([x.storage_path], { bucket: 'xrays' }))?.get?.(x.storage_path);
+        if (f) { x.url = link.href = f; x.url_expires_at = Date.now() + SIGNED_FOR_MS; img.src = f; }
+      } catch { /* the broken image stays; reloading the page signs everything again */ }
+    });
+    return { day: x.taken_on, at: x.created_at, el: h('figure', { class: 'xray-tile' }, link,
+      h('figcaption', {}, h('span', { class: 'badge badge-muted' }, 'X-ray'), ' ', [shortDate(x.taken_on), x.kind, x.notes].filter(Boolean).join(' · '))) };
+  });
+
+  // The owner (15 Oct 2026): "there should be a upload picture and upload x ray button on all patient profile and consent form upload
+  // button with add or delete option too". Each button shows only to people who may use it: pictures and X-rays need photos.upload
+  // (X-rays also xrays.view, or the X-ray saved could not be shown back), consent forms patients.edit or photos.upload (the front desk
+  // takes them). The same buttons sit in the Photos and X-rays and the Documents panels.
+  const mayAddDocuments = can('patients.edit') || can('photos.upload');
+  const pictureButton = (cls) => can('photos.upload') ? h('button', { class: cls, onclick: () => photoUploadModal(p, { picture: true, onDone: reload }) }, 'Upload picture') : null;
+  const xrayButton = (cls) => can('photos.upload') && can('xrays.view') ? h('button', { class: cls, onclick: () => xrayUploadModal(p, { onDone: reload }) }, 'Upload X-ray') : null;
+  const consentButton = (cls) => mayAddDocuments ? h('button', { class: cls, onclick: () => documentUploadModal(p, { consent: true, onDone: reload }) }, 'Upload consent form') : null;
+  const uploadRow = [pictureButton('btn'), xrayButton('btn'), consentButton('btn')].some(Boolean)
+    ? h('div', { class: 'inline profile-uploads', style: { marginBottom: '12px' } }, pictureButton('btn'), xrayButton('btn'), consentButton('btn')) : null;
+
   const mh = p.medical_history || {};
   const medicalLine = [...(mh.conditions || []), mh.allergies ? `Allergies: ${mh.allergies}` : null, mh.medications ? `Medicines: ${mh.medications}` : null, mh.notes].filter(Boolean).join(' · ');
   // The note of the latest visit that has one (the visits come newest first), as the Aaj ki List's row dialog writes it.
@@ -318,6 +351,13 @@ export async function renderPatient(root, id) {
       loginState.replaceChildren('could not check (', friendlyError(e), ') ', h('button', { type: 'button', class: 'link-btn', onclick: loadLoginLine }, 'Try again'));
     }
   };
+
+  // The patient's invoices, payments and installment plans (owner, 15 Oct 2026: the clinic's money is for Dr. Ali and accounts, and "yes
+  // the front desk takes the payment"): with "View invoices and payments", or with "Create invoices and take payments" alone (the front
+  // desk: this patient's own at its branches, 20261015000500_front_desk_billing.sql), who also makes invoices and plans and prints the
+  // bill and receipts. The rest of the staff see the dues only. No total across patients here either way.
+  const seesBills = can('billing.view') || can('billing.create');
+  const makesBills = can('billing.create');
 
   mount(root,
     h('p', {}, h('a', { href: '#/staff/patients' }, '← Patients')),
@@ -347,13 +387,13 @@ export async function renderPatient(root, id) {
           await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); await reload();
         }) }, 'Invite to patient portal') : null,
         resetSlot,
-        can('photos.upload') ? h('button', { class: 'btn', onclick: () => photoUploadModal(p, { onDone: reload }) }, 'Upload photos') : null,
-        can('billing.create') ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
+        makesBills ? h('button', { class: 'btn', onclick: () => newInvoiceModal(p, { onDone: reload }) }, 'New invoice') : null,
         can('billing.create') ? h('button', { class: 'btn btn-primary', onclick: () => paymentModal(p, { dues: p.dues, invoices: p.invoices, payments: p.payments, onDone: reload }) }, 'Take payment') : null)),
     p.flag ? h('div', { class: 'alert alert-warning inline', style: { justifyContent: 'space-between' } },
       h('span', {}, h('strong', {}, 'Next appointment with Dr. Ali Rashid. '), p.flag.reason),
       can('flags.clear') ? h('button', { class: 'btn btn-small', 'aria-label': `Clear flag for ${p.full_name}`, onclick: clearFlag }, 'Clear flag') : null)
       : can('flags.raise') ? h('p', {}, h('button', { class: 'link-btn', onclick: () => flagForAliModal(p, reload) }, 'Flag: next appointment with Dr. Ali Rashid')) : null,
+    uploadRow,
     h('div', { class: 'grid-2' },
       h('section', { class: 'panel' },
         h('div', { class: 'panel-head' }, h('h2', {}, 'Braces'),
@@ -364,7 +404,8 @@ export async function renderPatient(root, id) {
           guidancePanel(g)) : h('p', { class: 'muted' }, 'No active braces case.')),
       h('section', { class: 'panel' },
         h('div', { class: 'panel-head' }, h('h2', {}, 'Money'), can('dues.view') ? h('strong', { class: p.dues > 0 ? 'status-bad' : 'status-ok' }, p.dues > 0 ? `${rupees(p.dues)} pending` : 'No dues') : null),
-        p.invoices.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
+        !seesBills ? h('p', { class: 'muted' }, 'Invoices and payments are with accounts.')
+        : p.invoices.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
           h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Invoice'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col', class: 'right' }, 'Amount'), h('th', { scope: 'col' }, srOnly('Actions')))),
           h('tbody', {}, p.invoices.map((i) => {
             const bal = balances[i.id];
@@ -377,7 +418,7 @@ export async function renderPatient(root, id) {
                 h('button', { class: 'btn btn-small', 'aria-label': `Edit invoice ${i.invoice_no}`, onclick: () => editInvoiceModal(i, p, { onDone: reload }) }, 'Edit'), ' ',
                 h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Void invoice ${i.invoice_no}`, onclick: () => voidInvoice(i) }, 'Void')) : h('td', {}));
           })))) : h('p', { class: 'muted' }, 'No invoices.'),
-        p.payments.length ? h('details', { style: { marginTop: '10px' } },
+        seesBills && p.payments.length ? h('details', { style: { marginTop: '10px' } },
           h('summary', { class: 'muted', style: { cursor: 'pointer' } }, `${p.payments.length} payments · ${rupees(p.payments.reduce((s, x) => s + Number(x.amount), 0))} received`),
           h('div', { class: 'table-scroll' }, h('table', { class: 'list', style: { marginTop: '6px' } },
             h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Method'), h('th', { scope: 'col', class: 'right' }, 'Amount'), h('th', { scope: 'col' }, srOnly('Receipt')))),
@@ -385,14 +426,21 @@ export async function renderPatient(root, id) {
               h('td', { class: 'nowrap' }, shortDate(dayOf(pay.received_at))),
               h('td', {}, pay.method.replace('_', ' '), pay.invoice_id ? h('div', { class: 'muted' }, p.invoices.find((i) => i.id === pay.invoice_id)?.invoice_no || '') : null),
               h('td', { class: ['right', Number(pay.amount) < 0 && 'status-bad'] }, rupees(pay.amount)),
+<<<<<<< billing-desk
               h('td', { class: 'right nowrap' },
                 can('billing.edit') ? h('button', { class: 'btn btn-small', 'aria-label': `Edit payment, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)} ${pay.method.replace('_', ' ')}`, onclick: () => editPaymentModal(pay, p, { onDone: reload }) }, 'Edit') : null, ' ',
                 h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
         h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
           can('billing.create') ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null),
         (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
+=======
+              h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
+        seesBills ? h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
+          makesBills ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null) : null,
+        !seesBills ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
+>>>>>>> golive
           planTable(plan, p.payments),
-          can('billing.create') && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
+          makesBills && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
           : h('p', { class: 'muted' }, 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'))),
     h('section', { class: 'panel' },
       h('h2', {}, 'Visits'),
@@ -402,22 +450,27 @@ export async function renderPatient(root, id) {
           h('td', { class: 'nowrap' }, shortDate(v.visit_date)), h('td', {}, branchName(v.branch_id)), h('td', {}, capFirst(v.treatment_label)),
           h('td', {}, v.braces_month || ''), h('td', {}, v.staff.map((s) => s.role === 'checker' ? `✓ ${s.name}` : s.name).join(', ')),
           h('td', {}, v.details_text || '', v.notes ? h('div', { class: 'muted', style: { fontSize: '12px' } }, v.notes) : null), h('td', {}, STATUS_LABELS[v.status])))))) : empty('No visits yet.')),
-    h('section', { class: 'panel' },
-      h('h2', {}, 'Photos and X-rays'),
-      photoItems.length ? h('div', { class: 'photo-grid' }, photoItems.map(({ ph, link }) => h('figure', {},
+    h('section', { class: 'panel photos-panel' },
+      h('div', { class: 'panel-head' }, h('h2', {}, 'Photos and X-rays'), h('div', { class: 'inline' }, pictureButton('btn btn-small'), xrayButton('btn btn-small'))),
+      xrays === null ? h('p', { class: 'muted' }, 'The X-rays could not be loaded just now. Reload the page to try again.') : null,
+      photoItems.length || xrayTiles.length ? h('div', { class: 'photo-grid' }, [...photoItems.map(({ ph, link }) => ({ day: ph.taken_on, at: ph.created_at, el: h('figure', {},
         link,
         h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label, ph.kind === 'raw' ? 'raw (staff only)' : 'edited (patient sees it)', ph.public_ok ? 'website ok' : null].filter(Boolean).join(' · '),
           isAdmin() && ph.kind === 'edited' && ph.public_ok ? h('div', {}, h('button', { class: 'link-btn', style: { fontSize: '12px' }, onclick: busy(async () => {
             await d.publishPhoto(ph); toast('Added to the website gallery.', 'ok');
-          }) }, 'Publish on website')) : null)))) : empty('No photos yet.')),
+          }) }, 'Publish on website')) : null)) })), ...xrayTiles]
+        .sort((a, b) => String(b.day || '').localeCompare(String(a.day || '')) || String(b.at || '').localeCompare(String(a.at || ''))).map((t) => t.el))
+        : empty('No photos or X-rays yet.')),
     h('section', { class: 'panel' },
       h('div', { class: 'inline', style: { justifyContent: 'space-between', marginBottom: '8px' } }, h('h2', { style: { margin: 0 } }, 'Documents'),
-        can('patients.edit') || can('photos.upload') ? h('button', { class: 'btn btn-small', onclick: () => documentUploadModal(p, { onDone: reload }) }, 'Add document') : null),
-      (p.documents || []).length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
-        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Type'), h('th', { scope: 'col' }, 'Title'), h('th', { scope: 'col' }, srOnly('Open')))),
+        h('div', { class: 'inline' }, consentButton('btn btn-small'),
+          mayAddDocuments ? h('button', { class: 'btn btn-small', onclick: () => documentUploadModal(p, { onDone: reload }) }, 'Add document') : null)),
+      (p.documents || []).length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list documents-list' },
+        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Type'), h('th', { scope: 'col' }, 'Title'), h('th', { scope: 'col' }, srOnly(mayAddDocuments ? 'Open or delete' : 'Open')))),
         h('tbody', {}, p.documents.map((doc) => h('tr', {},
           h('td', { class: 'nowrap' }, shortDate(doc.added_on)), h('td', {}, DOCUMENT_KINDS[doc.kind] || doc.kind), h('td', {}, doc.title),
-          h('td', { class: 'right' }, doc.url ? documentLink(doc) : h('span', { class: 'muted' }, 'Not available'))))))) : empty('No documents yet. Signed consent forms and ID copies go here.')),
+          h('td', { class: 'right' }, h('span', { class: 'inline', style: { justifyContent: 'flex-end' } }, doc.url ? documentLink(doc) : h('span', { class: 'muted' }, 'Not available'),
+            mayAddDocuments ? h('button', { class: 'btn btn-small btn-danger', 'aria-label': `Delete ${doc.title || 'document'}`, onclick: () => deleteDocumentModal(p, doc, { onDone: reload }) }, 'Delete') : null))))))) : empty('No documents yet. Signed consent forms and ID copies go here.')),
     p.retainers.length ? h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('h2', {}, 'Retainers'), h('a', { href: `#/staff/retainers?city=${p.retainers[0].city_id}` }, 'Open the Retainer Record')),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Impression'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, 'Retainer date'), h('th', { scope: 'col' }, 'Arch'), h('th', { scope: 'col' }, 'Next check'))),
         h('tbody', {}, p.retainers.map((r) => {

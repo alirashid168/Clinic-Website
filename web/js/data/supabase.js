@@ -690,6 +690,44 @@ export async function createSupabaseAdapter() {
     return out;
   }
 
+  /** The row of a table whose file is at storagePath (null when there is none, or the person may not see it). */
+  async function rowAtPath(table, storagePath) {
+    return check(await sb.from(table).select('*').eq('storage_path', storagePath).maybeSingle());
+  }
+
+  /**
+   * A file into a private bucket and its row into a table, once per idempotency key (one per file, kept across retries): the key
+   * fixes the path, so "already exists" from Storage means an earlier attempt uploaded the file, and "duplicate key" on the row
+   * (storage_path is unique) means an earlier attempt saved the row but its answer was lost. Either way the row already there is
+   * answered: never a second file or row, never the same database error on every retry. Used for X-rays and documents.
+   */
+  async function uploadOnce({ tag, bucket, table, key, path, file, fields }) {
+    const prior = key ? partial.get(tag + key) : null;
+    if (prior?.row) return prior.row;
+    const at = prior?.path || path;
+    if (!prior?.uploaded) {
+      const { error } = await sb.storage.from(bucket).upload(at, file, { contentType: file.type || undefined, upsert: false });
+      const duplicate = error && key && (String(error.statusCode || error.status) === '409' || /already exists|duplicate/i.test(error.message || ''));
+      if (error && !duplicate) check({ error });
+      if (key) partial.set(tag + key, { path: at, uploaded: true });
+      if (duplicate) {
+        const existing = await rowAtPath(table, at);
+        if (existing) { partial.set(tag + key, { path: at, uploaded: true, row: existing }); return existing; }
+      }
+    }
+    const res = await sb.from(table).insert({ ...fields, storage_path: at }).select().single();
+    const row = (res.error?.code === '23505' && await rowAtPath(table, at)) || check(res);
+    if (key) partial.set(tag + key, { path: at, uploaded: true, row });
+    return row;
+  }
+
+  // X-ray links signed earlier on this page, reused while they have more than 10 minutes left: the same link lets the browser answer
+  // from its cache, so the profile does not download every X-ray again each time it refreshes after a save.
+  const xrayLinks = new Map();
+  // Set once public.delete_patient_document has answered on this page (the database update 20261015001000 is there).
+  let documentDeleteReady = false;
+  const documentDeleteMissing = () => plainError('Deleting documents needs the database update of 15 Oct (20261015001000_patient_documents_delete.sql). Ask Dr. Ali to apply it. Nothing was deleted.', 'DOCUMENTS_DELETE_MISSING');
+
   // Set the first time saving a photo row says photos has no thumb_path column (audit migration not applied yet).
   let photosLackThumbPath = false;
 
@@ -817,7 +855,8 @@ export async function createSupabaseAdapter() {
 
   async function duesFor(ids) {
     if (!ids.length) return {};
-    const rows = check(await callRpc('dues_for', { p_patients: ids }));
+    // A hundred at a time: the database answers at most 500 patients a call for whoever does not see the totals (20261015000400).
+    const rows = await byIdChunks(ids, async (part) => check(await callRpc('dues_for', { p_patients: part })));
     return Object.fromEntries(rows.map((r) => [r.patient_id, Number(r.dues)]));
   }
   async function flagsFor(ids) {
@@ -1204,6 +1243,28 @@ export async function createSupabaseAdapter() {
       ]);
       return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents: documents || [], plans: plans || [], retainers, complaints };
     },
+    /**
+     * A patient's X-rays (the xrays table; files in the private "xrays" bucket), newest first. Each carries url (the original),
+     * thumb_url (240 px when IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); re-sign with
+     * signedUrls([storage_path], { bucket: 'xrays' }). [] for a role without xrays.view (the row policy shows them none).
+     * Links signed earlier on this page are reused while they have more than 10 minutes left (xrayLinks).
+     */
+    async patientXrays(id) {
+      const rows = check(await sb.from('xrays').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).order('created_at', { ascending: false }));
+      const now = Date.now();
+      const paths = rows.map((r) => r.storage_path).filter((p) => !((xrayLinks.get(p)?.expires || 0) - now > 10 * 60 * 1000));
+      const [urls, resized] = await Promise.all([
+        signedUrls(paths, { bucket: 'xrays' }).catch(() => new Map()),
+        IMAGE_TRANSFORMS ? signedUrls(paths, { bucket: 'xrays', width: 240 }).catch(() => null) : null,
+      ]);
+      const expires = now + SIGNED_URL_TTL * 1000;
+      for (const p of paths) if (urls.get(p)) xrayLinks.set(p, { url: urls.get(p), thumb: resized?.get(p) || urls.get(p), expires });
+      for (const x of rows) {
+        const link = xrayLinks.get(x.storage_path);
+        x.url = link?.url || null; x.thumb_url = link?.thumb || x.url; x.url_expires_at = link?.expires || expires;
+      }
+      return rows;
+    },
 
     // ------------------------------------------------------------ braces
     async bracesGuidance(patientId) {
@@ -1439,7 +1500,8 @@ export async function createSupabaseAdapter() {
         photosLackThumbPath = true; // remembered until the page is reloaded, so later uploads neither store a copy nor retry
         res = await insertRow(null);
       }
-      const row = check(res);
+      // "Duplicate key" (storage_path is unique): an earlier attempt saved the row but its answer was lost; answer that row.
+      const row = (key && res.error?.code === '23505' && await rowAtPath('photos', path)) || check(res);
       if (key) partial.set('photo:' + key, { path, uploaded: true, row });
       return row;
     },
@@ -1452,14 +1514,50 @@ export async function createSupabaseAdapter() {
       return sb.storage.from('public-cases').getPublicUrl(name).data.publicUrl;
     },
     // Consent forms, ID copies, reports: private "patient-documents" bucket, one folder per patient.
-    async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
+    // Pass { idempotencyKey } (one per file, kept across retries, see uploadOnce): pressing Save again after a failure neither uploads
+    // the file twice nor records it twice. A consent form comes back with the patient's treatment_consent_at as the record has it after
+    // the save (the database ticks "Consent signed", 20261015001000), so the page says it is ticked only when it is.
+    async uploadDocument({ patientId, file, kind = 'other', title, addedOn, idempotencyKey = null }) {
+      const key = idempotencyKey || null;
       const ext = (file.name.split('.').pop() || 'pdf').toLowerCase();
       const slug = (title || file.name.replace(/\.[^.]+$/, '')).replace(/\W+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'document';
-      const path = `${patientId}/${addedOn || todayISO()}_${slug}_${crypto.randomUUID().slice(0, 8)}.${ext}`;
-      check(await sb.storage.from('patient-documents').upload(path, file, { contentType: file.type || undefined, upsert: false }));
-      return check(await sb.from('patient_documents').insert({
-        patient_id: patientId, kind, title: title || file.name, storage_path: path, added_on: addedOn || todayISO(), uploaded_by: await userId(),
-      }).select().single());
+      const path = `${patientId}/${addedOn || todayISO()}_${slug}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
+      const row = await uploadOnce({ tag: 'document:', bucket: 'patient-documents', table: 'patient_documents', key, path, file,
+        fields: { patient_id: patientId, kind, title: title || file.name, added_on: addedOn || todayISO(), uploaded_by: await userId() } });
+      if (kind !== 'consent') return row;
+      const { data } = await sb.from('patients').select('treatment_consent_at').eq('id', patientId).maybeSingle();
+      return { ...row, treatment_consent_at: data?.treatment_consent_at ?? null };
+    },
+    /**
+     * Deletes a document: its file first, then its row (public.delete_patient_document, 20261015001000), so a failure in between
+     * leaves the row on the record to delete again, never a file nobody can find. { clearConsent } also unticks "Consent signed"
+     * when this was the last consent form. Resolves { deleted, consent_cleared, consent_forms_left }.
+     * The function must be there before the file goes (an admin may remove files already): the first time on a page it is asked
+     * about no document (nil id: deleted = false, nothing changes), and without it nothing is touched.
+     */
+    async deleteDocument(doc, { clearConsent = false } = {}) {
+      if (!documentDeleteReady) {
+        const probe = await rpc('delete_patient_document', { p_document: '00000000-0000-0000-0000-000000000000', p_clear_consent: false });
+        if (probe.missing) throw documentDeleteMissing();
+        documentDeleteReady = true;
+      }
+      check(await sb.storage.from('patient-documents').remove([doc.storage_path]));
+      const res = await rpc('delete_patient_document', { p_document: doc.id, p_clear_consent: !!clearConsent });
+      if (res.missing) throw documentDeleteMissing();
+      return res.data;
+    },
+    /**
+     * An X-ray into the xrays table, its file in the private "xrays" bucket (<patient_id>/<date>_<kind>_<key>.<ext>, which the
+     * patient may read as their own). Pass { idempotencyKey } (one per file, kept across retries, see uploadOnce): pressing
+     * Upload again after a failure neither uploads the file twice nor records it twice, and finishes when the row was saved already.
+     */
+    async uploadXray({ patientId, visitId = null, file, kind = 'OPG', takenOn = null, notes = null, idempotencyKey = null }) {
+      const key = idempotencyKey || null;
+      const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+      const day = takenOn || todayISO();
+      const path = `${patientId}/${day}_${(kind || 'X-ray').replace(/\W+/g, '-').replace(/^-|-$/g, '')}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
+      return uploadOnce({ tag: 'xray:', bucket: 'xrays', table: 'xrays', key, path, file,
+        fields: { patient_id: patientId, visit_id: visitId || null, kind: kind || 'OPG', taken_on: day, notes: notes || null, uploaded_by: await userId() } });
     },
 
     // ------------------------------------------------------------ billing
@@ -1531,6 +1629,7 @@ export async function createSupabaseAdapter() {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").
       check(await sb.from('invoices').update({ status: 'void', void_reason: reason?.trim() || null }).eq('id', id));
     },
+<<<<<<< billing-desk
     /**
      * Changes an issued invoice's lines, discounts and note in one database call (edit_invoice, 20261015000900_billing_desk.sql): all or
      * nothing, with the discount limits and their approval. The same edit sent again changes nothing, so a retry after a lost answer is safe.
@@ -1556,12 +1655,19 @@ export async function createSupabaseAdapter() {
       return rows[0];
     },
     // Invoices and payments only (no photos): what the payment form needs to match money to invoices.
+=======
+    // Invoices and payments only (no photos): what the payment form needs to match money to invoices. With "See $$ pending dues
+    // flag", the patient's dues as they are now too (dues_for counts every branch; the front desk reads only its own branches'
+    // payments, 20261015000500, so the form fills in no more than the dues).
+>>>>>>> golive
     async patientBilling(patientId) {
-      const [invoices, payments] = await Promise.all([
+      const seesDues = !!(await this.getSession().catch(() => null))?.perms?.has('dues.view');
+      const [invoices, payments, dues] = await Promise.all([
         sb.from('invoices').select('id,invoice_no,issue_date,subtotal,discount_amount,total,status').eq('patient_id', patientId).order('issue_date').then(check),
         sb.from('payments').select('id,invoice_id,amount,received_at').eq('patient_id', patientId).then(check),
+        seesDues ? duesFor([patientId]).then((d) => d[patientId] ?? 0).catch(() => undefined) : undefined,
       ]);
-      return { invoices, payments };
+      return { invoices, payments, dues };
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
@@ -1835,6 +1941,23 @@ export async function createSupabaseAdapter() {
       return check(await sb.rpc('close_cash', { p_branch: Number(branchId), p_date: date, p_counted: Number(counted), p_notes: notes || null }));
     },
     async cashClosings() { return capped(check(await sb.from('cash_closings').select('*').order('closing_date', { ascending: false }).limit(201)), 200); },
+    /**
+     * The closings of the person's branches without any amount (cash_closings_blind, 20261015000400): for whoever closes the cash but
+     * does not see the money (a blind count). Rows { id, branch_id, closing_date, closed_at, closed_by_name, checked }. Before the
+     * database update the closer still reads the table itself (the old "view closings" policy): the same rows from the columns
+     * without any amount, so Today still says Closed or Not closed and a second closing is still stopped. If that fails too, an
+     * empty list marked missing.
+     */
+    async cashClosingsBlind() {
+      const r = await rpc('cash_closings_blind', { p_limit: 200 });
+      if (!r.missing) return r.data || [];
+      try {
+        const rows = check(await sb.from('cash_closings').select('id,branch_id,closing_date,closed_at,verified_at,verified_by')
+          .order('closing_date', { ascending: false }).limit(200));
+        return rows.map((c) => ({ id: c.id, branch_id: c.branch_id, closing_date: c.closing_date, closed_at: c.closed_at, closed_by_name: null,
+          checked: !!(c.verified_at || c.verified_by) }));
+      } catch { return Object.assign([], { missing: true }); }
+    },
     async verifyClosing(id) { check(await sb.from('cash_closings').update({ verified_by: await userId(), verified_at: new Date().toISOString() }).eq('id', id)); },
     // ---- report queries (Reports page): payments, invoices, advances, daily visits in a date range.
     // Lists page through every row up to the cap (then .truncated); totals should come from paymentsSummary / opdSummary.
@@ -1879,6 +2002,15 @@ export async function createSupabaseAdapter() {
       if (!r.missing) return { totals: r.data?.totals || summarizeVisits([]).totals, byDay: r.data?.byDay || [], waitByBranch: r.data?.waitByBranch || [], source: 'server', truncated: false };
       const rows = await fetchPaged(() => visitsQuery({ from, to, branchId }), 20000);
       return { ...summarizeVisits(rows), source: 'rows', truncated: !!rows.truncated };
+    },
+    /**
+     * Today's payments one by one, never a total (payments_today, 20261015000400: "Today's payments, one by one (no totals)"): rows
+     * { id, received_at, patient_id, patient_name, mr_number, amount, method, branch_id, received_by_name } of the person's branches,
+     * newest first. Before the database update, an empty list marked missing.
+     */
+    async paymentsToday({ branchId = null } = {}) {
+      const r = await rpc('payments_today', { p_branch: branchId ? Number(branchId) : null });
+      return r.missing ? Object.assign([], { missing: true }) : r.data || [];
     },
     async todaysPayments(branchId) {
       const d = todayISO();
@@ -2005,13 +2137,20 @@ export async function createSupabaseAdapter() {
     },
     async dashboard(date) {
       const day = date || todayISO();
+      // What came in, the cash closing's amounts and the dues added up per branch are for who may see the money (20261015000400): the
+      // others get whether the cash is closed (cash_closings_blind) and how many patients on the list have dues. (The front desk reads
+      // its branch's payments one by one to bill, 20261015000500: the branch's income is still not asked for, nor given, for it.)
+      const perms = (await this.getSession().catch(() => null))?.perms || new Set();
+      const seesCash = ['finance.view', 'cash.verify', 'billing.view'].some((k) => perms.has(k));
+      const seesTotals = perms.has('finance.view') || perms.has('billing.view');
       const [branches, visits, closings] = await Promise.all([
         this.branches(),
         sb.from('visits').select('branch_id,status,patient_id').eq('visit_date', day).then(check),
-        sb.from('cash_closings').select('*').eq('closing_date', day).then(check),
+        seesCash ? sb.from('cash_closings').select('*').eq('closing_date', day).then(check)
+          : this.cashClosingsBlind().then((rows) => rows.filter((c) => c.closing_date === day)).catch(() => []),
       ]);
       let income = []; let complaints = []; let dues = {};
-      try { income = check(await sb.from('branch_daily_income').select('*').eq('day', day)); } catch { income = []; }
+      if (seesTotals) { try { income = check(await sb.from('branch_daily_income').select('*').eq('day', day)); } catch { income = []; } }
       try { complaints = check(await sb.from('complaints').select('branch_id').eq('status', 'new')); } catch { complaints = []; }
       try { dues = await duesFor([...new Set(visits.map((v) => v.patient_id))]); } catch { dues = {}; }
       return branches.map((b) => {
@@ -2020,7 +2159,7 @@ export async function createSupabaseAdapter() {
         return { branch: b, patients: vs.length, completed: vs.filter((v) => v.status === 'completed').length,
           waiting: vs.filter((v) => v.status === 'waiting').length,
           received: Number(income.find((i) => i.branch_id === b.id)?.net || 0),
-          dues_patients: withDues.length, dues: withDues.reduce((s, pid) => s + dues[pid], 0),
+          dues_patients: withDues.length, dues: seesTotals ? withDues.reduce((s, pid) => s + dues[pid], 0) : null,
           new_complaints: complaints.filter((c) => c.branch_id === b.id).length,
           closing: closings.find((c) => c.branch_id === b.id) || null };
       });
