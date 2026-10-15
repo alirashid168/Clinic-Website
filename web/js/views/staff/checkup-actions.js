@@ -52,6 +52,7 @@ export const canRegisterCheckup = () => can('patients.create') && can('sheet.edi
 // are the columns of migration 20261011000300.
 const OTHER = '__other';
 const YES_NO = [['yes', 'Yes'], ['no', 'No']];
+const tooLong = (v) => Array.from(v || '').length > 300; // doctors and checkup_for hold at most 300 characters (the checkups table)
 const asYesNo = (v) => (v === true ? 'yes' : v === false ? 'no' : null);
 
 // A question answered with radio buttons: a fieldset whose legend is the question. value() is the chosen value, or null.
@@ -167,8 +168,9 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
   arrangeDoctors();
   branch.addEventListener('change', arrangeDoctors);
   const ali = choiceQuestion('Did Dr. Ali recommend your treatment?', YES_NO, asYesNo(row?.ali_recommended), { required: needAnswers });
-  // (the plain word "Checkup" that marks a checkup row in the sheet is no answer: filling in the form asks it)
-  const forNow = fill && /^checkup$/i.test(String(row.checkup_for ?? '').trim()) ? null : row?.checkup_for;
+  // (the plain word "Checkup" that marks a checkup row in the sheet is no answer: filling in the form asks it. The spellings the import
+  // reads as that word too, as private.aaj_is_checkup_text does: "Check up", "Chek up", "Check-up", "Checkups".)
+  const forNow = fill && /^\s*ch[ea]{1,2}c?k?[- ]?ups?\s*$/i.test(String(row.checkup_for ?? '')) ? null : row?.checkup_for;
   const checkupFor = choiceChecks('What was your checkup for?', CHECKUP_FOR_CHOICES, forNow, { otherLabel: 'Other: what was the checkup for?', required: !editing });
   const pricing = choiceQuestion('Did you understand the pricing details?', Object.entries(PRICING_LABELS), row?.pricing_understood || null, { required: needAnswers });
   const wants = choiceQuestion('Would you like to start the treatment?', YES_NO, asYesNo(row?.wants_treatment), { required: needAnswers });
@@ -205,10 +207,13 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
     if (!editing && !branchValue()) out.push({ input: branch, message: 'Choose the branch.' });
     if (!editing && digitsOf(phone.value).length < 10) out.push({ input: phone, message: PHONE_HINT });
     if (!editing && !arrival && !doctor.ticked()) out.push({ input: doctor.firstShown(), message: 'Choose who did the checkup.' });
-    if (doctor.otherBox.checked && !doctor.other.value.trim()) out.push({ input: doctor.other, message: 'Write who did the checkup.' });
+    // (on arrival these two questions wait for the form: an Other ticked but left empty is no answer then, and is left out)
+    if (!arrival && doctor.otherBox.checked && !doctor.other.value.trim()) out.push({ input: doctor.other, message: 'Write who did the checkup.' });
+    else if (tooLong(doctor.value())) out.push({ input: doctor.otherBox.checked ? doctor.other : doctor.firstShown(), message: 'Too long: the ticked doctors and the Other text together can have at most 300 characters.' });
     if (ask && ali.value() === null) out.push({ input: ali.first, message: 'Choose whether Dr. Ali recommended the treatment.' });
     if (!editing && !arrival && !checkupFor.ticked()) out.push({ input: checkupFor.firstShown(), message: 'Choose what the checkup was for.' });
-    if (checkupFor.otherBox.checked && !checkupFor.other.value.trim()) out.push({ input: checkupFor.other, message: 'Write what the checkup was for.' });
+    if (!arrival && checkupFor.otherBox.checked && !checkupFor.other.value.trim()) out.push({ input: checkupFor.other, message: 'Write what the checkup was for.' });
+    else if (tooLong(checkupFor.value())) out.push({ input: checkupFor.otherBox.checked ? checkupFor.other : checkupFor.firstShown(), message: 'Too long: the ticked choices and the Other text together can have at most 300 characters.' });
     if (ask && !pricing.value()) out.push({ input: pricing.first, message: 'Choose whether the pricing was understood.' });
     if (ask && wants.value() === null) out.push({ input: wants.first, message: 'Choose whether they want to start the treatment.' });
     if (ask && !plan.value.trim()) out.push({ input: plan, message: 'Write when they want to start, or why not.' });
@@ -218,17 +223,21 @@ export function checkupQuestions({ row = null, branchId = null, branchFixed = fa
   return { el, name, phone, branch, values, errors };
 }
 
-// The form is a whole interview, filled in on phones all day: Escape, the × or a tap on the strip around the dialog asks before the
-// answers are thrown away. snapshot() is what the form holds; nothing is asked while it holds what it opened with.
-function discardGuard(snapshot) {
+// The form is a whole interview, filled in on phones all day, and the patient may have left by the time it is lost: every way of leaving
+// it (Cancel, Escape, the ×, a tap on the strip around the dialog, Back, a link, a reload or closing the tab) asks before the answers are
+// thrown away, with "Keep filling in" focused. snapshot() is what the form holds; nothing is asked while it holds what it opened with, or
+// once it is saved (saved()). -> the modal's { unsaved, confirmDismiss } (dom.js).
+function discardGuard(snapshot, saved = () => false) {
   const start = snapshot();
-  return () => snapshot() === start || new Promise((resolve) => {
+  const unsaved = () => !saved() && snapshot() !== start;
+  const confirmDismiss = () => !unsaved() || new Promise((resolve) => {
     let discard = false;
-    modal('Discard this checkup form?', h('p', {}, 'The answers typed in it are not saved.'), [
+    modal('Discard this checkup form?', h('p', {}, 'Your answers are not saved.'), [
       { label: 'Keep filling in' },
       { label: 'Discard', danger: true, onClick: () => { discard = true; } },
     ], { destructive: true, onClose: () => resolve(discard) });
   });
+  return { unsaved, confirmDismiss };
 }
 
 // Is the name typed in the form the person of checkup c, which has the same phone? The phone alone is not enough: a parent's phone is often
@@ -361,7 +370,13 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
           return h('div', { class: 'dup-line' },
             h('span', {}, h('strong', {}, samePhone ? 'This person already has a patient file: ' : 'A patient file with the same name exists: '), mrLine(p), samePhone ? '.' : '. Same person?'),
             fixedDay
-              ? h('button', { type: 'button', class: 'btn btn-small', onclick: () => { done = true; resolve({ patient: p }); dialog?.close(); } }, `Add Mr# ${p.mr_number} to the list instead`)
+              ? h('button', { type: 'button', class: 'btn btn-small', onclick: async () => {
+                // (the name and phone are in the patient file already: asked only when an answer of the form would be thrown away)
+                if (!dialog || !(await dialog.mayLeave(answersGuard.confirmDismiss))) return;
+                done = true;
+                resolve({ patient: p });
+                dialog.close();
+              } }, `Add Mr# ${p.mr_number} to the list instead`)
               : h('a', { class: 'btn btn-small', href: `#/staff/patient/${p.id}` }, 'Open the patient file'));
         })) : null);
     };
@@ -406,8 +421,10 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
     };
 
     const snapshot = () => JSON.stringify([q.values(), dateIn?.value, followUp?.value, details.value, notes.value]);
+    const guard = discardGuard(snapshot, () => done);
+    const answersGuard = discardGuard(() => JSON.stringify([{ ...q.values(), patient_name: '', phone: '' }, details.value, notes.value]), () => done);
     dialog = modal('Add a checkup patient', body, [
-      { label: 'Cancel' },
+      { label: 'Cancel', dismiss: true },
       ...(arrival ? [{ label: 'Add as Waiting (form later)', onClick: addOnArrival }] : []),
       { label: 'Add checkup patient', primary: true, onClick: async () => {
         const errors = q.errors();
@@ -442,7 +459,7 @@ export function checkupFormModal({ branchId, date, fixedDay = false, onSaved } =
           resolve(row);
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ], { onClose: () => { done = true; resolve(null); }, confirmDismiss: discardGuard(snapshot) });
+    ], { onClose: () => { done = true; resolve(null); }, ...guard });
   });
 }
 
@@ -455,8 +472,9 @@ export function checkupAnswersModal(row) {
   return new Promise((resolve) => {
     const q = checkupQuestions({ row, fill: true, branchId: row.branch_id, branchFixed: true });
     const body = h('div', {}, h('p', { class: 'muted' }, 'Ask the patient these questions after the checkup. The answers go on this checkup, also on the Checkups page.'), q.el);
+    let done = false;
     modal(`Checkup form: ${row.patient_name}`, body, [
-      { label: 'Cancel' },
+      { label: 'Cancel', dismiss: true },
       { label: 'Save the answers', primary: true, onClick: async () => {
         const errors = q.errors();
         if (errors.length) return showFormErrors(body, errors);
@@ -465,10 +483,11 @@ export function checkupAnswersModal(row) {
         try {
           const saved = Object.keys(changes).length ? await state.data.updateCheckup(row.id, changes) : row;
           if (!saved) toast(`${row.patient_name} is no longer on the list.`, 'error');
+          done = true;
           resolve(saved || false);
         } catch (e) { toast(friendlyError(e), 'error'); return false; }
       } },
-    ], { onClose: () => resolve(null), confirmDismiss: discardGuard(() => JSON.stringify(q.values())) });
+    ], { onClose: () => resolve(null), ...discardGuard(() => JSON.stringify(q.values()), () => done) });
   });
 }
 

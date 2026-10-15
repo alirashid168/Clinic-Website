@@ -13,7 +13,9 @@
 -- day's Completed checkup patients, and an "End the day" on an earlier day would save a copy that does not match the page.
 -- Everything else in the two functions is as in 20261012000100, and so are their rights (set again below).
 --
--- Needs 20261011000300_checkup_form_2.sql and 20261012000100_day_list_history.sql first. Safe to run more than once.
+-- Needs 20261011000300_checkup_form_2.sql and 20261012000100_day_list_history.sql first. Safe to run more than once, but only after
+-- 20261012000100: running that file again puts its own two functions back (with the imported answers on the lists), so run this
+-- one again after it.
 -- =============================================================================
 
 -- The checkup patients shown on a day's list: the exact-day rows of that branch (never the old list's month rows, never an answer

@@ -73,7 +73,7 @@ const realDay = (y, m, d) => m >= 1 && m <= 12 && d >= 1 && d <= 31 && new Date(
 /**
  * The Timestamp cell -> { date: 'YYYY-MM-DD', local: 'YYYY-MM-DD HH:MM:SS', iso: 'YYYY-MM-DDTHH:MM:SS+05:00' }, or null when it cannot be read.
  * Google writes M/D/YYYY H:MM:SS in Karachi time (the form's own time zone; Pakistan keeps +05:00 all year). Also read: the one answer
- * typed by hand as "9\1\2026     14.21.1" (backslashes, a run of spaces, dots in the time: 1 Sep 2026 14:21:01), no seconds, AM / PM,
+ * typed by hand as "8\27\2026     16.05.9" (backslashes, a run of spaces, dots in the time: 27 Aug 2026 16:05:09), no seconds, AM / PM,
  * YYYY-MM-DD HH:MM:SS, and an Excel date number (the tab downloaded as .xlsx).
  */
 export function formTimestamp(v) {

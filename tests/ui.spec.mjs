@@ -36,8 +36,11 @@ async function newPage(viewport = { width: 1366, height: 860 }, options = {}) {
 async function step(name, fn) {
   try { await fn(); passed++; console.log('ok -', name); } catch (e) {
     console.log('FAIL -', name, '\n   ', e.message.split('\n')[0]); process.exitCode = 1;
-    // Close any dialog the failed step left open, so it cannot block the next step.
-    for (const pg of browser.contexts().flatMap((c) => c.pages())) await pg.keyboard.press('Escape').catch(() => {});
+    // Close any dialog the failed step left open, so it cannot block the next step (a checkup form with answers asks first: Discard).
+    for (const pg of browser.contexts().flatMap((c) => c.pages())) {
+      await pg.keyboard.press('Escape').catch(() => {});
+      await pg.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click({ timeout: 1000 }).catch(() => {});
+    }
   }
 }
 const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: `${SHOTS}/${name}.png`, fullPage: false }); };
@@ -177,6 +180,8 @@ const doctorGroup = (m) => m.getByRole('group', { name: /^Who did your checkup/ 
 const forGroup = (m) => m.getByRole('group', { name: /^What was your checkup for/ });
 const tickLabels = (group) => group.getByRole('checkbox').evaluateAll((els) => els.map((e) => e.labels[0].textContent.trim()));
 const ticked = (group) => group.getByRole('checkbox', { checked: true }).evaluateAll((els) => els.map((e) => e.labels[0].textContent.trim()));
+// Would a reload or closing the tab get the browser's "Leave site?" question now (a beforeunload listener that cancels)?
+const reloadAsks = (pg) => pg.evaluate(() => { const e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return e.defaultPrevented; });
 async function fillCheckupForm(m, { name, phone, checkupFor = 'General checkup', forOther = null, doctorOther = null, doctorCount = 1, ali = 'Yes', pricing = 'Yes', wants = 'Yes', plan = 'Next month' }) {
   await m.getByLabel(/^Patient full name/).fill(name);
   if (phone !== undefined) await m.getByLabel(/^Mobile number/).fill(phone);
@@ -257,6 +262,14 @@ await step('front desk: a checkup patient whose phone belongs to a patient file 
   const text = await m.locator('.alert-warning').innerText();
   const mr = text.match(/Mr# (\d+)/)[1];
   const before = await page.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: `Mr# ${mr}` }).count();
+  // an answer of the form would be thrown away: asked first (the name and the phone alone are in the patient file already)
+  await doctorGroup(m).getByRole('checkbox').first().check();
+  await m.getByRole('button', { name: `Add Mr# ${mr} to the list instead` }).click();
+  const ask = page.locator('.modal', { hasText: 'Discard this checkup form?' });
+  await ask.getByRole('button', { name: 'Keep filling in' }).click();
+  await ask.waitFor({ state: 'detached' });
+  assert.equal(await m.getByLabel(/^Patient full name/).inputValue(), 'Dup Check Person', 'the form stays');
+  await doctorGroup(m).getByRole('checkbox').first().uncheck();
   await m.getByRole('button', { name: `Add Mr# ${mr} to the list instead` }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   await page.waitForFunction(([n, count]) => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')].filter((t) => t.textContent.includes(`Mr# ${n}`)).length === count, [mr, before + 1]);
@@ -333,6 +346,7 @@ await step('front desk: the same phone number twice on one day\'s list is flagge
   await second.getByLabel(/^Mobile number/).press('Tab');
   await page.waitForFunction(() => !document.querySelector('.modal .alert-warning'));
   await second.getByRole('button', { name: 'Cancel' }).click();
+  await page.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   const row = checkupRow(page, 'Twice Typed Person');
   await row.getByRole('button', { name: /Checkup options/ }).click();
@@ -437,6 +451,13 @@ await step('Today page: the checkup form says what is missing; "Other" opens a t
   await m.locator('.field-error:has-text("Write who did the checkup.")').waitFor();
   assert.ok(await m.locator('.field-error:has-text("Write what the checkup was for.")').count());
   assert.equal(await m.locator('.field-error:has-text("Dr. Ali recommended")').count(), 0, 'a choice clears the error of its question');
+  // the ticked choices and the Other text are kept together in the list's 300 characters
+  await m.getByLabel(/^Other: what was the checkup for/).fill('x'.repeat(295));   // ("Braces, " and 295 letters: 303)
+  await forGroup(m).getByLabel('Braces', { exact: true }).check();
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await m.locator('.field-error:has-text("Too long: the ticked choices and the Other text together can have at most 300 characters.")').waitFor();
+  await forGroup(m).getByLabel('Braces', { exact: true }).uncheck();
+  await m.getByLabel(/^Other: what was the checkup for/).fill('');
   // a form with answers in it is not thrown away by Escape or the × without asking; "Keep filling in" keeps every answer
   const ask = page.locator('.modal', { hasText: 'Discard this checkup form?' });
   await page.keyboard.press('Escape');
@@ -447,6 +468,7 @@ await step('Today page: the checkup form says what is missing; "Other" opens a t
   assert.deepEqual(await ticked(doctorGroup(m)), ['Other'], 'the answers are still there');
   assert.ok(await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).getByLabel('No', { exact: true }).isChecked());
   await m.getByRole('button', { name: 'Close' }).click();
+  assert.deepEqual([await ask.locator('h2').innerText(), await ask.locator('.modal-body').innerText()], ['Discard this checkup form?', 'Your answers are not saved.']);
   await ask.getByRole('button', { name: 'Discard' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   // an untouched form closes at once
@@ -454,6 +476,86 @@ await step('Today page: the checkup form says what is missing; "Other" opens a t
   await m.waitFor();
   await page.keyboard.press('Escape');
   await page.waitForSelector('.modal', { state: 'detached' });
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.waitFor();
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+});
+// The form is filled in on phones all day, and the patient may have left by the time the answers are lost: Cancel, the phone's Back, a link
+// (a menu link, or "Open the patient file" in the form's warning) and a reload ask too. "Keep filling in" keeps the page, its address and
+// every answer; Discard goes where the person was going.
+await step('Today page: Cancel, Back, a menu link, "Open the patient file" and a reload ask before typed answers are thrown away; Discard then goes on', async () => {
+  await page.locator('.topnav .menu:has-text("Aaj ki List") > button').click();
+  await page.locator('.topnav .menu-list a:text-is("Aaj ki List")').click();
+  await page.waitForSelector('table.sheet tbody tr');
+  await page.locator('.topnav a:has-text("Today")').click();
+  const panel = page.locator('section.today-checkup');
+  await panel.waitFor();
+  const m = page.locator('.modal').first();
+  const ask = page.locator('.modal', { hasText: 'Discard this checkup form?' });
+  const hash = () => page.evaluate(() => location.hash);
+  const menuLink = () => page.evaluate(() => document.querySelector('.topnav .menu-list a[href="#/staff/checkups"]').click());   // (out of reach of a tap under the dialog)
+  const keep = async (how) => {
+    await ask.waitFor();
+    assert.match(await ask.innerText(), /Your answers are not saved\./, how);
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Keep filling in', `${how}: the safe choice has focus`);
+    await ask.getByRole('button', { name: 'Keep filling in' }).click();
+    await ask.waitFor({ state: 'detached' });
+    assert.equal(await m.getByLabel(/^Patient full name/).inputValue(), 'Leave Test Person', `${how}: the answers are still there`);
+    assert.ok(await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).getByLabel('Yes', { exact: true }).isChecked(), how);
+    assert.equal(await hash(), '#/staff/today', `${how}: still on the Today page`);
+  };
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.waitFor();
+  assert.equal(await reloadAsks(page), false, 'an untouched form: a reload is not asked about');
+  await m.getByLabel(/^Patient full name/).fill('Leave Test Person');
+  await m.getByRole('group', { name: /^Did Dr\. Ali recommend your treatment/ }).getByLabel('Yes', { exact: true }).check();
+  assert.equal(await reloadAsks(page), true, "typed answers: a reload or closing the tab gets the browser's own question");
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await keep('Cancel');
+  await page.goBack();
+  await ask.waitFor();
+  await page.goBack();   // Back again while it asks: still one question
+  await page.waitForTimeout(200);
+  assert.equal(await ask.count(), 1, 'one question at a time');
+  await keep('Back');
+  await menuLink();
+  await keep('a menu link');
+  await m.getByLabel(/^Mobile number/).fill('03010734521');   // (a phone that has a patient file: the warning offers to open it)
+  await m.getByLabel(/^Mobile number/).press('Tab');
+  await m.getByRole('link', { name: 'Open the patient file' }).click();
+  await keep('Open the patient file');
+  assert.equal(await page.locator('.modal').count(), 1, 'only the form is open');
+  // Discard after Back: the page Back was going to (the Aaj ki List); Forward comes back to Today, so the history is as it was
+  await page.goBack();
+  await ask.getByRole('button', { name: 'Discard' }).click();
+  await page.waitForSelector('table.sheet tbody tr');
+  assert.match(await hash(), /^#\/staff\/sheet/);
+  assert.equal(await page.locator('.modal').count(), 0);
+  assert.equal(await reloadAsks(page), false, 'the form is gone: a reload is not asked about');
+  await page.goForward();
+  await panel.waitFor();
+  assert.equal(await hash(), '#/staff/today');
+  // Discard after a menu link: that page
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Leave Test Person');
+  await menuLink();
+  await ask.getByRole('button', { name: 'Discard' }).click();
+  await page.waitForSelector('h1:has-text("Checkups")');
+  assert.match(await hash(), /^#\/staff\/checkups/);
+  assert.equal(await page.locator('.modal').count(), 0);
+  // Discard after Cancel: closed, nothing saved
+  await page.locator('.topnav a:has-text("Today")').click();
+  await panel.waitFor();
+  const count = async () => Number((await panel.innerText()).match(/(\d+) checkup patients? on today/)[1]);
+  const before = await count();
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Leave Test Person');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await ask.getByRole('button', { name: 'Discard' }).click();
+  await page.waitForSelector('.modal', { state: 'detached' });
+  assert.equal(await count(), before, 'nothing was added');
+  assert.equal(await hash(), '#/staff/today');
 });
 await step('Today page: a checkup saved from the form is on the Checkups page with its answers, and on the branch\'s Aaj ki List for today', async () => {
   const before = Number((await page.locator('section.today-checkup').innerText()).match(/(\d+) checkup patients? on today/)[1]);
@@ -463,6 +565,8 @@ await step('Today page: a checkup saved from the form is on the Checkups page wi
     ali: 'Yes', pricing: 'Needs clearer explanation', wants: 'Yes', plan: 'After Eid, in installments' });
   await m.getByRole('button', { name: 'Add checkup patient' }).click();
   await page.waitForSelector('.toast:has-text("Form Two Person added as a checkup patient.")');
+  assert.equal(await page.locator('.modal').count(), 0, 'saved without a question');
+  assert.equal(await reloadAsks(page), false, 'and a reload is not asked about');
   assert.match(await page.locator('section.today-checkup').innerText(), new RegExp(`${before + 1} checkup patients? on today's lists so far`), 'the count on the Today page goes up');
   await page.goto(BASE + '#/staff/checkups?q=Form%20Two%20Person');
   const row = page.locator('table.checkup-table tbody tr[data-id]', { hasText: 'Form Two Person' });
@@ -566,7 +670,7 @@ await step('Today page: two names on one phone on one day (a parent\'s phone) ar
   await fillCheckupForm(m, { name: 'Sample Son Review', checkupFor: 'Extraction', wants: 'No', plan: 'Son plan' });
   assert.match(await warning.innerText(), /Sample Mother Review \(0300 5550990\)\. You typed Sample Son Review: another person on the same phone \(often a family member\) is added as a checkup of their own\. Its checkup form is already filled in: saving these answers on it would replace them\./);
   assert.ok(await warning.getByRole('button', { name: 'Replace the answers on this checkup: Sample Mother Review' }).count(), 'the warning\'s button says it would replace');
-  await warning.scrollIntoViewIfNeeded();
+  await warning.scrollIntoViewIfNeeded().catch(() => {});   // (only for the picture: a late duplicate check may draw the warning again)
   await shot(page, 'family-1-warning');
   await m.getByRole('button', { name: 'Add checkup patient' }).click();
   const ask = page.locator('.modal', { hasText: 'on this phone number' });
@@ -609,8 +713,8 @@ await step('Aaj ki List: a checkup typed in on arrival gets its answers with "Fi
   await page.evaluate(async () => {
     const { state } = await import('/js/state.js');
     const { localISO } = await import('/js/ui/dom.js');
-    for (const [name, phone] of [['Arrival Typed Person', '0300 5550962'], ['Arrival Second Person', '0300 5550963']]) {
-      await state.data.addCheckup({ checkup_date: localISO(), branch_id: 2, patient_name: name, phone, checkup_for: 'Checkup', day_status: 'waiting', follow_up: 'Not Contacted' });
+    for (const [name, phone, typed] of [['Arrival Typed Person', '0300 5550962', 'Check up'], ['Arrival Second Person', '0300 5550963', 'Checkup']]) {
+      await state.data.addCheckup({ checkup_date: localISO(), branch_id: 2, patient_name: name, phone, checkup_for: typed, day_status: 'waiting', follow_up: 'Not Contacted' });
     }
   });
   await page.goto(BASE + '#/staff/sheet');
@@ -626,7 +730,14 @@ await step('Aaj ki List: a checkup typed in on arrival gets its answers with "Fi
   await m.locator('.field-error').first().waitFor();
   assert.deepEqual(await m.locator('.field-error').allInnerTexts(), ['Choose who did the checkup.', 'Choose whether Dr. Ali recommended the treatment.', 'Choose what the checkup was for.',
     'Choose whether the pricing was understood.', 'Choose whether they want to start the treatment.', 'Write when they want to start, or why not.'],
-    'every question of the form is asked (the word "Checkup" typed on arrival is no answer to "What was your checkup for?")');
+    'every question of the form is asked ("Check up" typed on arrival, a spelling of the word Checkup, is no answer to "What was your checkup for?")');
+  // its Cancel asks too once something is ticked
+  await doctorGroup(m).getByRole('checkbox').first().check();
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  const ask = page.locator('.modal', { hasText: 'Discard this checkup form?' });
+  await ask.getByRole('button', { name: 'Keep filling in' }).click();
+  await ask.waitFor({ state: 'detached' });
+  assert.equal((await ticked(doctorGroup(m))).length, 1, 'the tick is still there');
   await fillCheckupForm(m, { name: 'Arrival Typed Person', checkupFor: 'Root canal', ali: 'Yes', pricing: 'No', wants: 'Yes', plan: 'This Saturday' });
   await m.getByRole('button', { name: 'Save the answers' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
@@ -671,6 +782,7 @@ await step('Aaj ki List: a checkup patient who has just come in is put on today\
     'only the name and the phone are asked on arrival');
   await m.getByLabel(/^Patient full name/).fill('Arrival Walk In Person');
   await m.getByLabel(/^Mobile number/).fill('0300 5550964');
+  await doctorGroup(m).getByLabel('Other', { exact: true }).check();   // ticked but left empty: no answer yet, so it does not stop the arrival
   await shot(page, 'r30-aaj-arrival-form');
   await m.getByRole('button', { name: 'Add as Waiting (form later)' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
@@ -702,6 +814,7 @@ await step('Aaj ki List: a checkup patient who has just come in is put on today\
   await ask.getByRole('button', { name: 'Go back' }).click();
   await ask.waitFor({ state: 'detached' });
   await m.getByRole('button', { name: 'Cancel' }).click();
+  await page.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   assert.equal(await checkupRow(page, 'Arrival Walk In Person').count(), 1, 'still one row');
   // after the checkup: Options -> "Fill in the checkup form" asks every question and makes the row Completed
@@ -2294,6 +2407,7 @@ await step('the checkup form: the doctors of the branch\'s city (and of no city)
   await shot(pk, 'r31-form-390-doctors');
   await pk.setViewportSize({ width: 1366, height: 860 });
   await m.getByRole('button', { name: 'Cancel' }).click();
+  await pk.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click();
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
 await step('the form never guesses the branch: someone who works at every branch without a home branch chooses it (Today page); the Checkups page starts at the branch it is filtered on', async () => {
@@ -2329,6 +2443,7 @@ await step("Checkups page: \"+ Add checkup patient\" flags a phone number alread
   await pk.waitForFunction(() => !document.querySelector('.modal')?.textContent.includes('Already on the list for'));
   assert.match(await m.innerText(), /Goes on the Checkups page, and on that branch's Aaj ki List for today \(another day can be chosen under More\)\./);
   await m.getByRole('button', { name: 'Cancel' }).click();
+  await pk.locator('.modal', { hasText: 'Discard this checkup form?' }).getByRole('button', { name: 'Discard' }).click();
   await pk.waitForSelector('.modal', { state: 'detached' });
 });
 await step('Checkups page: "Register" gives a patient file and an Mr#; the row then links to the patient and offers no second Register', async () => {
@@ -2451,7 +2566,7 @@ await step('Admin -> Import -> "6. Checkup Form 2.0 answers": the Form Responses
   const csv = [
     'Timestamp,Patient Full Name,Which Branch did you visit?,Mobile Number,Who did your Checkup?,Did Dr. Ali recommend your treatment?,What was your checkup for?,Did you understand the pricing details?,Would you like to start the treatment?,If yes then when? If no then why not?,REMINDERS',
     '8/21/2026 19:25:03,Form Test Alpha,RJ Mall - Karachi,0300-5550811,Dr. Hina (sample),Yes,General Checkup,Yes,Yes,Next month,done',
-    '9\\1\\2026     14.21.1,Form Test Bravo,DHA Phase 6 - Karachi,3005550812,Someone (sample),No,"Braces, Scaling and Polishing",Needs More Clear Explanation,No,Too far from home,not on whatsapp',
+    '8\\27\\2026     16.05.9,Form Test Bravo,DHA Phase 6 - Karachi,3005550812,Someone (sample),No,"Braces, Scaling and Polishing",Needs More Clear Explanation,No,Too far from home,not on whatsapp',
     '9/2/2026 10:00:00,Form Test Charlie,Lahore - Gulberg,0300-5550813,,Yes,Crown/Bridge,Form Test Someone,Lahore - Gulberg,,',
     '3/10/2026 11:00:00,Import Test Beta,Lahore - Gulberg,0300-5550202,,Yes,Braces,Yes,Yes,After Eid,treatment started',
     `${today},Form Test Today,RJ Mall - Karachi,0300-5550815,,Yes,Braces,Yes,Yes,Soon,`,

@@ -6,7 +6,7 @@
 //
 // The public pages render straight away and fill in their data when
 // state.ready resolves. Login, portal and staff code load only when visited.
-import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink } from './ui/dom.js';
+import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink, unsavedWork, confirmLeave } from './ui/dom.js';
 import { state } from './state.js';
 import { authChangeHandler, endedNotice, startRecheck, RECHECK_EVENT } from './auth-watch.js';
 import { CONFIG } from './config.js';
@@ -445,8 +445,29 @@ window.addEventListener('unhandledrejection', (e) => {
   toast(friendlyError(e.reason, { audience: state.session?.kind === 'staff' ? 'staff' : 'public' }), 'error');
 });
 
+// A dialog holding unsaved work (the checkup form) asks before the page changes ("Discard this checkup form?"). A link (in the dialog, or
+// a menu link) waits for the answer. Back or Forward has already moved when the browser says so: the address goes back to the page on
+// screen as a new history entry (so the next Back goes where this one went), and the other listeners (the staff menu) are not told.
+// "Discard" then closes the dialogs and goes where the person was going. A logout never asks (it closes the dialogs first).
+async function leaveFor(go) {
+  if (!(await confirmLeave())) return;
+  closeAllModals();
+  go();
+}
+document.addEventListener('click', (e) => {
+  const link = e.target instanceof Element ? e.target.closest('a[href^="#"]') : null;
+  if (!link || e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || link.target === '_blank' || !unsavedWork()) return;
+  e.preventDefault();
+  leaveFor(() => { location.href = link.href; });
+});
+
 showMessagesFromBeforeReload();
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', (e) => {
+  if (!unsavedWork()) { route(); return; }
+  e.stopImmediatePropagation();
+  history.pushState(null, '', e.oldURL);
+  leaveFor(() => history.back());
+});
 route();
 
 state.ready.then(() => {

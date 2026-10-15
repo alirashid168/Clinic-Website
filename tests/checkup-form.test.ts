@@ -41,10 +41,10 @@ test('headings: every column is found by its heading, in any order, with a byte-
   assert.deepEqual(detectFormColumns(null), {});
 });
 
-test('timestamps: M/D/YYYY H:MM:SS in Karachi time, the hand-typed "9\\1\\2026     14.21.1", AM / PM, no seconds, ISO and Excel numbers', () => {
+test('timestamps: M/D/YYYY H:MM:SS in Karachi time, the hand-typed "8\\27\\2026     16.05.9", AM / PM, no seconds, ISO and Excel numbers', () => {
   assert.deepEqual(formTimestamp('8/12/2026 19:25:03'), { date: '2026-08-12', local: '2026-08-12 19:25:03', iso: '2026-08-12T19:25:03+05:00' });
   assert.deepEqual(formTimestamp('10/11/2026 18:51:00'), { date: '2026-10-11', local: '2026-10-11 18:51:00', iso: '2026-10-11T18:51:00+05:00' }, 'month first, as Google writes it');
-  assert.deepEqual(formTimestamp('9\\1\\2026     14.21.1'), { date: '2026-09-01', local: '2026-09-01 14:21:01', iso: '2026-09-01T14:21:01+05:00' }, 'backslashes, spaces, dots: 1 Sep 2026');
+  assert.deepEqual(formTimestamp('8\\27\\2026     16.05.9'), { date: '2026-08-27', local: '2026-08-27 16:05:09', iso: '2026-08-27T16:05:09+05:00' }, 'backslashes, spaces, dots: 27 Aug 2026');
   assert.equal(formTimestamp(' 9/1/2026 9:05 ')?.local, '2026-09-01 09:05:00', 'no seconds');
   assert.equal(formTimestamp('9/1/2026 6:51:00 PM')?.local, '2026-09-01 18:51:00');
   assert.equal(formTimestamp('9/1/2026 12:10:00 am')?.local, '2026-09-01 00:10:00');
@@ -142,7 +142,7 @@ test('"Who did your Checkup?": a doctor on the website\'s list is written as the
 const FIXTURE: any[][] = [
   HEADER,
   /* R2  */ ['8/12/2026 19:25:03', 'Sample Alpha', 'RJ Mall - Karachi', '0300-5550301', 'Dr. Sample Hina (sample)', 'Yes', 'Braces', 'Yes', 'Yes', 'Next month', 'done'],
-  /* R3  */ ['9\\1\\2026     14.21.1', 'Sample  Bravo ', 'DHA Phase 6 - Karachi', '3005550302', 'Other doctor', 'No', 'General Checkup', 'Needs More Clear Explanation', 'No', 'Too costly for now', 'not on whatsapp'],
+  /* R3  */ ['8\\27\\2026     16.05.9', 'Sample  Bravo ', 'DHA Phase 6 - Karachi', '3005550302', 'Other doctor', 'No', 'General Checkup', 'Needs More Clear Explanation', 'No', 'Too costly for now', 'not on whatsapp'],
   /* R4  */ ['9/2/2026 10:00:00', 'Sample Charlie', 'Lahore - Gulberg', '0300-5550303', 'Dr. Sample Rabia (sample)', 'Yes', 'Crown/Bridge', 'Sample Person', 'Lahore - Gulberg', '', 'treatment started'],
   /* R5  */ ['9/3/2026 11:00:00', '', 'RJ Mall - Karachi', '0300-5550304', '', 'Yes', 'Braces', 'Yes', 'Yes', '', ''],
   /* R6  */ ['someday', 'Sample Delta', 'North Nazimabad - Karachi', '0300-5550305', '', 'Yes', 'Braces', 'Yes', 'Yes', '', ''],
@@ -169,7 +169,7 @@ test('the whole tab: rows for the database, skipped rows with the reason, and th
     ali_recommended: true, pricing_understood: 'yes', wants_treatment: true, treatment_plan: 'Next month', follow_up: 'Follow-up Sent', notes: null,
   });
   assert.deepEqual(read.rows[1], {
-    row: 3, submitted_at: '2026-09-01T14:21:01+05:00', name: 'Sample Bravo', phone: '03005550302', branch: 'DHA', doctors: 'Other doctor', checkup_for: 'General checkup',
+    row: 3, submitted_at: '2026-08-27T16:05:09+05:00', name: 'Sample Bravo', phone: '03005550302', branch: 'DHA', doctors: 'Other doctor', checkup_for: 'General checkup',
     ali_recommended: false, pricing_understood: 'needs_explanation', wants_treatment: false, treatment_plan: 'Too costly for now', follow_up: 'No Response',
     notes: 'Reminder: not on whatsapp',
   }, 'the hand-typed time, a name with extra spaces, a phone that lost its 0, an old branch spelling');
@@ -231,12 +231,12 @@ test('a shifted row (a second person typed into the answer columns): "If yes the
 test('the tab as Google downloads it (CSV with quotes, commas inside answers, CRLF), and a file that is not the form', () => {
   const csv = [HEADER.map((x) => `"${x}"`).join(','),
     '8/12/2026 19:25:03,Sample Quote,RJ Mall - Karachi,0300-5550311,"Dr. Sample Hina (sample)",Yes,"Braces, Scaling and Polishing",Yes,Yes,"After the exams, in December",done',
-    '9\\1\\2026     14.21.1,Sample Slash,North Nazimabad - Karachi,0300-5550312,,No,Implant,No,No,"says ""too far""",',
+    '8\\27\\2026     16.05.9,Sample Slash,North Nazimabad - Karachi,0300-5550312,,No,Implant,No,No,"says ""too far""",',
     ''].join('\r\n');
   const read = readFormResponses(parseCSV(csv), { clinicians: CLINICIANS });
   assert.deepEqual(read.rows.map((r: any) => [r.name, r.submitted_at, r.branch, r.checkup_for, r.treatment_plan]), [
     ['Sample Quote', '2026-08-12T19:25:03+05:00', 'GUL', 'Braces, Scaling and polishing', 'After the exams, in December'],
-    ['Sample Slash', '2026-09-01T14:21:01+05:00', 'NN', 'Implant', 'says "too far"'],
+    ['Sample Slash', '2026-08-27T16:05:09+05:00', 'NN', 'Implant', 'says "too far"'],
   ]);
   const old = readFormResponses([['Month', 'Patient Name', 'Phone'], ['Dec 2024', 'Sample', '0300']]);
   assert.deepEqual([old.headerAt, old.missing, old.rows.length], [-1, ['Timestamp', 'Patient Full Name'], 0]);
