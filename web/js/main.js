@@ -380,8 +380,15 @@ function scheduleIdle() {
 }
 
 function onActivity(e) {
-  // Without a limit, activity is still noted here: a limit set later (Admin → Settings) counts from the last activity, not from the login.
-  if (!idleApplies()) { lastActive = Date.now(); return; }
+  // Without a limit, activity is still noted: a limit set later (Admin → Settings) counts from the last activity, not from the login.
+  // It is shared with the other tabs too, so a tab still running an older copy of the website (which reads 0 as 30 minutes)
+  // sees that this tab is in use and does not end the login all the tabs share.
+  if (!idleApplies()) {
+    const now = Date.now();
+    lastActive = now;
+    if (!signingOut && state.session?.kind === 'staff') shareActivity(now);
+    return;
+  }
   if (e?.type === 'visibilitychange' && document.visibilityState !== 'visible') return;
   // Inside the warning, its own buttons decide (so "Log out now" is not taken as activity).
   if (warning && e?.target instanceof Node && warning.dialog.contains(e.target)) return;
@@ -421,10 +428,10 @@ function warnIdle() {
 }
 
 // What the person is told after a logout they did not ask for (the wording is in auth-watch.js).
-// With no limit here (never), an idle logout of another tab (an older copy of the website) is told without a number of minutes.
+// With no limit here (never: idleMinutes 0), an idle logout of another tab (an older copy of the website) is told without a number of minutes.
 const noticeFor = (reason) => {
   const limit = idleLimitMs();
-  return endedNotice(reason === 'idle' && !limit ? null : reason, { patient: state.session?.kind === 'patient', idleMinutes: Math.max(1, Math.round(limit / 60000)) });
+  return endedNotice(reason, { patient: state.session?.kind === 'patient', idleMinutes: limit ? Math.max(1, Math.round(limit / 60000)) : 0 });
 };
 
 async function idleSignOut() {

@@ -304,6 +304,8 @@ test('endedNotice words each reason (staff are told to contact Dr. Ali, patients
   assert.equal(endedNotice('account_gone', { patient: true }), 'You were logged out because this account no longer exists. Please contact the clinic.');
   assert.equal(endedNotice('idle', { idleMinutes: 30 }), 'You were logged out because there was no activity for 30 minutes.');
   assert.equal(endedNotice('idle', { idleMinutes: 1 }), 'You were logged out because there was no activity for 1 minute.');
+  // This tab never logs out for no activity (0): another tab's idle logout (an older copy of the website) gets the general words.
+  assert.equal(endedNotice('idle', { idleMinutes: 0 }), endedNotice(null));
   assert.equal(endedNotice(null), 'You were logged out. Your login ended in another tab or window, or it expired. Please log in again.');
   assert.equal(endedNotice(undefined as any), endedNotice(null));
 });

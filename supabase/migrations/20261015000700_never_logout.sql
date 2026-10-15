@@ -8,8 +8,14 @@
 -- until the person presses Log out in the name menu (still there for a shared computer). 5 to 720 still logs staff out after that
 -- many minutes, and Admin -> Settings can choose either ("Never" or "After N minutes").
 --
--- UPDATE THE WEBSITE FIRST. An older copy of the website reads 0 as 30 minutes, so running this before the new website is live
--- would log staff out after 30 minutes instead of the 720 set for now.
+-- UPDATE THE WEBSITE FIRST, THEN RELOAD IT EVERYWHERE. An older copy of the website reads 0 as 30 minutes, so running this before
+-- the new website is live would log staff out after 30 minutes instead of the 720 set for now. A tab that was already open keeps
+-- the older copy until it is reloaded (and picks up the new setting within a few minutes), so:
+--   1. Put the new website live.
+--   2. On every staff computer, reload each open tab of the website (Ctrl+F5), or close it and open it again.
+--   3. Then run this file (or choose "Never" in Admin -> Settings).
+--
+-- Number 20261015000700 (not 000600): 000600 is taken by the invoice note work.
 --
 -- Safe to run more than once.
 -- HOW TO APPLY: Supabase dashboard -> SQL Editor -> paste this whole file -> Run.

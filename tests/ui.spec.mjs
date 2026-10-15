@@ -8060,6 +8060,9 @@ await step('No activity with Never (0, or no value): days later still signed in,
     assert.equal(await stillThere(pnever).count(), 0, `${minutes ?? 'no value'}: no warning`);
     assert.equal(await pnever.locator('.topbar').count(), 1, `${minutes ?? 'no value'}: still signed in`);
     assert.equal(await pnever.locator('#toasts .toast', { hasText: 'logged out' }).count(), 0, `${minutes ?? 'no value'}: no logout notice`);
+    // The activity is still shared with the other tabs, so a tab running an older copy of the website (0 read as 30 minutes) does not end the login.
+    const sharedAgo = await pnever.evaluate(() => Date.now() - Number(localStorage.getItem('staff-last-active')));
+    assert.ok(sharedAgo >= 0 && sharedAgo < 5000, `${minutes ?? 'no value'}: the key press is shared with other tabs (${sharedAgo} ms ago)`);
   }
   // Four days after the login, a limit set now starts from the last activity (the key press above), not from the login.
   await liveLike(pnever, 5);
