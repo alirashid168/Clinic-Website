@@ -67,6 +67,18 @@ const NOW_KEY = 'desk-name-now';
 const TOUCH_EVERY_MS = 60 * 1000; // how often the time of last use is written while the person works
 let inMemory = null; // { staffId, name, at }
 
+// How long a name holds without use. With an idle logout (Admin -> Settings, in minutes) that time: the logout ends the name
+// anyway. Without one (0 = never log out, coming with 20261015000600_never_logout.sql; a missing or broken setting is the same)
+// 12 hours: the next shift is asked again, while a reload or the next page within the shift never asks.
+export const DESK_NAME_UNUSED_MS = 12 * 60 * 60 * 1000;
+const positive = (n) => Number.isFinite(n) && n > 0;
+/** True when the idle logout setting (minutes) logs anyone out at all: a positive number. 0, missing or broken: never. */
+export const idleLogoutOn = (timeoutMinutes) => positive(Number(timeoutMinutes));
+/** How long a desk name holds without use, for the idle logout setting in minutes: that time when it is on, otherwise 12 hours. */
+export const deskNameMaxAgeMs = (timeoutMinutes) => (idleLogoutOn(timeoutMinutes) ? Number(timeoutMinutes) * 60 * 1000 : DESK_NAME_UNUSED_MS);
+// A time limit that is not a positive number of ms (0 would drop the name at every reload) counts as the 12 hours.
+const limitOf = (maxAgeMs) => (positive(maxAgeMs) ? maxAgeMs : DESK_NAME_UNUSED_MS);
+
 /** The name kept by this tab (or by an earlier page of it) for the login staffId: { name, at }, or null. */
 function kept(staffId) {
   try {
@@ -106,13 +118,28 @@ export function touchDeskName(now = Date.now()) {
 
 /**
  * When a page starts with a name kept by an earlier page of the tab (a reload, or a tab the browser restored): that name holds only
- * if it was used within maxAgeMs (the clinic's idle logout time), otherwise it is forgotten and the popup asks again. A name this
- * page was given itself is never dropped here (the idle logout ends it).
+ * if it was used within maxAgeMs (deskNameMaxAgeMs: the clinic's idle logout time, or 12 hours when there is none), otherwise it is
+ * forgotten and the popup asks again. A name this page holds already is never dropped here (the idle logout ends it; with no idle
+ * logout, deskNameUnused below).
  */
 export function dropStaleDeskName(staffId, maxAgeMs, now = Date.now()) {
   if (!staffId || inMemory?.staffId === staffId) return;
   const k = kept(staffId);
-  if (k && !(now - k.at <= maxAgeMs)) forgetDeskName();
+  if (k && !(now - k.at <= limitOf(maxAgeMs))) forgetDeskName();
+}
+
+/**
+ * With no idle logout nothing ends a name in a page that stays open (a computer left on overnight would carry the evening's name
+ * into the morning). True when the name this page holds for staffId was not used for maxAgeMs: shell.js then asks again.
+ */
+export function deskNameUnused(staffId, maxAgeMs, now = Date.now()) {
+  return !!staffId && inMemory?.staffId === staffId && !(now - inMemory.at <= limitOf(maxAgeMs));
+}
+
+/** In how many ms the name this page holds for staffId stops holding if it is not used (0: it has already), or null for no name. */
+export function deskNameExpiresIn(staffId, maxAgeMs, now = Date.now()) {
+  if (!staffId || inMemory?.staffId !== staffId) return null;
+  return Math.max(0, inMemory.at + limitOf(maxAgeMs) - now);
 }
 
 /**

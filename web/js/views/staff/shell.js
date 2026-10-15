@@ -9,8 +9,8 @@ import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce, unsave
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
-import { askDeskName, changeDeskName, needsDeskName, syncDeskName } from './desk-name.js';
-import { deskNameFor, deskLabel, dropStaleDeskName, touchDeskName, deskNameFromOtherTab } from '../../lib/desk-name.js';
+import { askDeskName, changeDeskName, endDeskName, needsDeskName, syncDeskName } from './desk-name.js';
+import { deskNameFor, deskLabel, dropStaleDeskName, touchDeskName, deskNameFromOtherTab, deskNameMaxAgeMs, deskNameUnused, deskNameExpiresIn, idleLogoutOn } from '../../lib/desk-name.js';
 import { arrangeNav, loadArrangement, openArrangeMenu } from './nav-arrange.js';
 
 const lazy = (load, name) => (...args) => load().then((m) => m[name](...args));
@@ -224,12 +224,21 @@ export async function renderStaff(root, path, params, signOut) {
 
   // A shared login shows the name of the person at the desk with it ("Front desk Islamabad · Ayesha"); "Change name" is for the next person.
   // A name kept from before this page (a reload, or a tab the browser restored after a power cut) holds only if it was used within
-  // the idle logout time; while the person works, that time is kept fresh.
+  // the idle logout time, or within 12 hours when there is no idle logout (Admin -> Settings: 0 is never; a missing setting is the
+  // same); while the person works, that time is kept fresh.
+  const idleMinutes = state.ref.settings?.session_timeout_minutes;
+  const deskMaxAge = deskNameMaxAgeMs(idleMinutes);
+  // With no idle logout nothing else ends a name in a page that stays open: this page watches for 12 hours without use.
+  const watchDesk = s.shared_login && !idleLogoutOn(idleMinutes);
   if (s.shared_login) {
-    dropStaleDeskName(s.id, (Number(state.ref.settings?.session_timeout_minutes) || 30) * 60 * 1000);
+    dropStaleDeskName(s.id, deskMaxAge);
+    // A page opened with no click or key after such a gap (the browser's Back button): that name stops before the page is drawn.
+    if (watchDesk && deskNameUnused(s.id, deskMaxAge) && !(await endDeskName(s))) return;
+    if (signal.aborted) return;
     for (const type of ['pointerdown', 'keydown']) on(document, type, () => touchDeskName());
   }
   syncDeskName(s);
+  let rewatchDesk = () => {};
   const nameLabels = [];
   // (the name in <bdi>, so an Urdu name and the login around it each keep their own direction; in the top bar a long login is cut
   // short, not the person's name: app.css)
@@ -238,6 +247,7 @@ export async function renderStaff(root, path, params, signOut) {
   const showDeskName = (desk) => {
     for (const el of nameLabels) mount(el, labelParts(desk));
     userBtn.setAttribute('aria-label', `Account menu, ${deskLabel(s.full_name, desk)}`);
+    rewatchDesk();
   };
   // Resolves true once a name is given, false when the popup closed without one (the person moved on, or logged out).
   const askName = () => new Promise((resolve) => askDeskName({ staff: s, signOut, onName: (desk) => { showDeskName(desk); resolve(true); }, onGone: () => resolve(false) }));
@@ -248,6 +258,30 @@ export async function renderStaff(root, path, params, signOut) {
     if (desk) setTimeout(() => { if (!unsavedWork()) window.dispatchEvent(new HashChangeEvent('hashchange')); }, 0);
   } });
   deskTab = s.shared_login ? { staffId: s.id, change: changeName } : null;
+  // No idle logout (see watchDesk): 12 hours after the name was last used (the evening's name on a computer left on overnight) the
+  // popup asks again, as "Change name" does. The first click or key after a computer slept through that time opens it too, and is
+  // not used under the old name; so does coming back to the tab.
+  if (watchDesk) {
+    let timer = null;
+    const expire = () => { clearTimeout(timer); timer = null; changeName(); };
+    rewatchDesk = () => {
+      clearTimeout(timer);
+      const left = deskNameExpiresIn(s.id, deskMaxAge);
+      if (left === null || signal.aborted) return; // no name: the popup is asking (watched again once a name is given)
+      timer = setTimeout(() => (deskNameUnused(s.id, deskMaxAge) ? expire() : rewatchDesk()), Math.min(left + 1000, 2 ** 31 - 1));
+    };
+    signal.addEventListener('abort', () => clearTimeout(timer));
+    for (const type of ['pointerdown', 'keydown', 'click']) {
+      window.addEventListener(type, (e) => {
+        if (!deskNameUnused(s.id, deskMaxAge)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        expire();
+      }, { signal, capture: true });
+    }
+    on(document, 'visibilitychange', () => { if (document.visibilityState === 'visible' && deskNameUnused(s.id, deskMaxAge)) expire(); });
+    rewatchDesk();
+  }
   const userBtn = h('button', { type: 'button', class: 'nav-link', 'aria-expanded': 'false', 'aria-controls': 'user-menu-list', 'aria-label': `Account menu, ${deskLabel(s.full_name, deskNameFor(s.id))}` },
     nameLabel({ class: ['user-name', s.shared_login ? 'has-desk-name' : ''] }), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
   const userList = h('div', { class: 'menu-list', id: 'user-menu-list' },

@@ -69,14 +69,14 @@ export function askDeskName({ staff, signOut, onName, onGone }) {
 }
 
 /**
- * "Change name" (a new person at the desk): the edits the person before typed that are still waiting (the Aaj ki List's offline
- * typing) are sent first, with their name, and the queues stop, as at a logout; whatever cannot go now waits on this computer under
- * their name (lib/desk-name.js editOwner) and goes out only when that name is given on this login here again. Then the name stops,
- * and the popup asks for the new one over the page on screen (which cannot be used until a name is given; shell.js draws it again
- * for the new person after that). Also run when another tab of this browser took a new name (shell.js).
+ * The name at the desk stops (a new person, or a name not used for too long): the edits the person before typed that are still
+ * waiting (the Aaj ki List's offline typing) are sent first, with their name, and the queues stop, as at a logout; whatever cannot go
+ * now waits on this computer under their name (lib/desk-name.js editOwner) and goes out only when that name is given on this login
+ * here again. Then the name is forgotten. -> false when nothing was done: a change already under way, or a logout or another login
+ * while the edits were being sent.
  */
-export async function changeDeskName({ staff, signOut, onName }) {
-  if (changing) return;
+export async function endDeskName(staff) {
+  if (changing) return false;
   changing = true;
   const before = deskNameFor(staff.id);
   let left = null;
@@ -84,13 +84,23 @@ export async function changeDeskName({ staff, signOut, onName }) {
     const autosave = await import('../../lib/autosave.js');
     left = await autosave.clearForUser({ flush: true, timeoutMs: FLUSH_WAIT_MS });
   } catch (e) { console.error(e); } finally { changing = false; }
-  // (a logout or another login while the edits were being sent: nothing left to ask)
-  if (state.session?.staff?.id !== staff.id) return;
+  // (a logout or another login while the edits were being sent: nothing left to end)
+  if (state.session?.staff?.id !== staff.id) return false;
   forgetDeskName();
   state.data?.setDeskName?.(staff.id, null);
-  onName?.(null);
   const waiting = (left?.pending || 0) + (left?.failed || 0);
   if (waiting && before) toast(`${waiting} change${waiting === 1 ? '' : 's'} typed by ${before} could not be sent yet. ${waiting === 1 ? 'It waits' : 'They wait'} on this computer for ${before}, until that name is given on this login here again.`, 'info', 12000);
+  return true;
+}
+
+/**
+ * "Change name" (a new person at the desk): the name stops (endDeskName), and the popup asks for the new one over the page on screen
+ * (which cannot be used until a name is given; shell.js draws it again for the new person after that). Also run when another tab of
+ * this browser took a new name, and when the name was not used for 12 hours with no idle logout (shell.js).
+ */
+export async function changeDeskName({ staff, signOut, onName }) {
+  if (!(await endDeskName(staff))) return;
+  onName?.(null);
   askDeskName({ staff, signOut, onName });
 }
 

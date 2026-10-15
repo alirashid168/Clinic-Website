@@ -29,7 +29,7 @@ export const state = {
   endedReason: null, // 'switched_off' / 'account_gone' when this tab had a login on screen and it was found, while loading, to be of such an account: main.js says why
   ready: null,
   dataError: null,
-  ref: { branches: [], cities: [], clinicians: [], treatments: [], categories: [], settings: {} },
+  ref: { branches: [], cities: [], clinicians: [], groups: [], treatments: [], categories: [], settings: {} },
 };
 
 // Each read gives up by itself (20 s in the data layer), but loading the library and then the
@@ -86,10 +86,11 @@ export async function loadPublicRef() {
 
 export async function loadStaffRef() {
   const d = state.data;
-  const [clinicians, treatments, categories, settings] = await Promise.all([
-    d.clinicians(), d.treatments(), d.expenseCategories().catch(() => []), d.settings().catch(() => ({})),
+  // (groups: the doctor groups of Clinic setup, for the Aaj ki List's Group drop-down; without them it offers Groups 1 to 3)
+  const [clinicians, treatments, categories, settings, groups] = await Promise.all([
+    d.clinicians(), d.treatments(), d.expenseCategories().catch(() => []), d.settings().catch(() => ({})), d.doctorGroups().catch(() => []),
   ]);
-  Object.assign(state.ref, { clinicians, treatments, categories, settings });
+  Object.assign(state.ref, { clinicians, treatments, categories, settings, groups });
 }
 
 export const can = (key) => !!state.session?.perms?.has(key) || state.session?.staff?.role === 'admin';

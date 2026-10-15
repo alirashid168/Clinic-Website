@@ -3,14 +3,16 @@
 // reading it back follows the same rules as the database's private.request_desk_name() (20261015000300_desk_names.sql): anything that
 // is not a clean name is null, never an error. The name is kept per tab and per login, never handed to another login, and the
 // storage helpers keep working (in memory) when the browser blocks storage. A kept name that was not used for longer than the idle
-// logout time is dropped (a tab restored after a power cut); another tab taking a new name is noticed; and the offline typing of a
-// shared login is kept per login and name (editOwner), so the next person never sends it.
+// logout time is dropped (a tab restored after a power cut); with no idle logout (0 = never, a missing or broken setting) that time
+// is 12 hours, in an open page too; another tab taking a new name is noticed; and the offline typing of a shared login is kept per
+// login and name (editOwner), so the next person never sends it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DESK_NAME_MIN, DESK_NAME_MAX, DESK_NAME_HEADER, SUGGESTIONS_KEPT, cleanDeskName, encodeDeskName, decodeDeskName, withDeskName, deskLabel,
   withSuggestion, deskNameFor, keepDeskName, forgetDeskName, deskNameSuggestions, rememberDeskName,
   touchDeskName, dropStaleDeskName, deskNameFromOtherTab, editOwner,
+  DESK_NAME_UNUSED_MS, idleLogoutOn, deskNameMaxAgeMs, deskNameUnused, deskNameExpiresIn,
 } from '../web/js/lib/desk-name.js';
 
 const URDU = 'عائشہ نمونہ'; // "Ayesha Namuna" (a made-up name), 11 characters
@@ -169,6 +171,47 @@ test('a name kept by an earlier page holds only within the idle logout time; wor
   forgetDeskName();
   touchDeskName(at0 + 40 * 60 * 1000);
   assert.equal(g.sessionStorage.getItem('desk-name'), null, 'nothing to keep fresh after logout');
+  delete g.sessionStorage;
+});
+
+test('no idle logout (0 = never, coming with never-logout; missing or broken the same): a name holds 12 hours without use', () => {
+  const HOUR = 60 * 60 * 1000;
+  assert.equal(DESK_NAME_UNUSED_MS, 12 * HOUR);
+  for (const [setting, on, ms] of [[720, true, 12 * HOUR], [30, true, HOUR / 2], ['45', true, 45 * 60 * 1000], [0, false, 12 * HOUR], ['0', false, 12 * HOUR],
+    [null, false, 12 * HOUR], [undefined, false, 12 * HOUR], ['', false, 12 * HOUR], ['soon', false, 12 * HOUR], [-5, false, 12 * HOUR], [Infinity, false, 12 * HOUR]] as const) {
+    assert.equal(idleLogoutOn(setting), on, `idle logout on for ${String(setting)}`);
+    assert.equal(deskNameMaxAgeMs(setting), ms, `how long a name holds for ${String(setting)}`);
+  }
+  g.sessionStorage = storage();
+  const keptBy = (name: string, at: number) => { forgetDeskName(); g.sessionStorage.setItem('desk-name', JSON.stringify({ staffId: 's-fd-isb', name, at })); };
+  const now = Date.now();
+  keptBy('Sadia', now - 11 * HOUR);
+  dropStaleDeskName('s-fd-isb', deskNameMaxAgeMs(0), now);
+  assert.equal(deskNameFor('s-fd-isb'), 'Sadia', 'a reload within the shift (11 hours) keeps it');
+  keptBy('Sadia', now - 13 * HOUR);
+  dropStaleDeskName('s-fd-isb', deskNameMaxAgeMs(0), now);
+  assert.equal(deskNameFor('s-fd-isb'), null, 'the next shift (13 hours later) is asked again');
+  keptBy('Sadia', now - 2 * HOUR);
+  dropStaleDeskName('s-fd-isb', 0, now);
+  assert.equal(deskNameFor('s-fd-isb'), 'Sadia', 'a limit of 0 ms is not "drop at every reload": it counts as 12 hours');
+  dropStaleDeskName('s-fd-isb', Number.NaN, now);
+  assert.equal(deskNameFor('s-fd-isb'), 'Sadia');
+  // In an open page (nothing else ends the name when nobody is logged out for no activity).
+  forgetDeskName();
+  assert.equal(deskNameUnused('s-fd-isb', 12 * HOUR), false, 'no name: nothing to stop');
+  assert.equal(deskNameExpiresIn('s-fd-isb', 12 * HOUR), null);
+  keepDeskName('s-fd-isb', 'Mehak');
+  const at0 = JSON.parse(g.sessionStorage.getItem('desk-name')).at;
+  assert.equal(deskNameUnused('s-fd-isb', 12 * HOUR, at0 + 11 * HOUR), false, 'the next page within the shift never asks');
+  assert.equal(deskNameExpiresIn('s-fd-isb', 12 * HOUR, at0 + 11 * HOUR), HOUR);
+  assert.equal(deskNameUnused('s-other', 12 * HOUR, at0 + 13 * HOUR), false, 'only the login on screen');
+  assert.equal(deskNameUnused('s-fd-isb', 12 * HOUR, at0 + 13 * HOUR), true, 'a computer left on overnight: asked again');
+  assert.equal(deskNameExpiresIn('s-fd-isb', 12 * HOUR, at0 + 13 * HOUR), 0);
+  assert.equal(deskNameUnused('s-fd-isb', 0, at0 + 11 * HOUR), false, '0 ms counts as 12 hours here too');
+  touchDeskName(at0 + 10 * HOUR);
+  assert.equal(deskNameUnused('s-fd-isb', 12 * HOUR, at0 + 13 * HOUR), false, 'working keeps it fresh');
+  assert.equal(deskNameUnused('s-fd-isb', 12 * HOUR, at0 + 23 * HOUR), true);
+  forgetDeskName();
   delete g.sessionStorage;
 });
 

@@ -321,7 +321,7 @@ export async function renderReports(root, params) {
     'hr/logins': async () => {
       if (!isAdmin()) return [empty('Only Dr. Ali can see the login log.')];
       const got = await d.staffLogins().catch((e) => { toast(friendlyError(e), 'error'); return { staff: [], events: [] }; });
-      const staff = got.staff.map((s) => ({ ...s, role_label: ROLE_LABELS[s.role] || s.role, status: s.active ? 'On' : 'Off' }));
+      const staff = got.staff.map((s) => ({ ...s, role_label: ROLE_LABELS[s.role] || s.role, status: s.deleted_at ? 'Deleted' : s.active ? 'On' : 'Off' }));
       const events = got.events.filter((e) => dayOf(e.at) >= from.value && dayOf(e.at) <= to.value).map((e) => ({ ...e, who: e.name || '', role_label: e.role ? ROLE_LABELS[e.role] || e.role : e.kind === 'patient' ? 'Patient' : '' }));
       return [table('Staff accounts', 'Last sign-in comes from the login system itself.', staff, [['Name', 'full_name', 'text'], ['Login', 'email', 'text'], ['Role', 'role_label', 'text'], ['Account', 'status', 'text'], ['Last sign-in', 'last_sign_in_at', 'datetime'], ['Sign-ins (30 days)', 'sign_ins_30d', 'num']], 'staff_logins'),
         table('Sign-ins in the period', null, events, [['When', 'at', 'datetime'], ['Who', 'who', 'text'], ['Role', 'role_label', 'text'], ['Device', 'user_agent', 'text']], 'sign_ins')];

@@ -35,6 +35,27 @@ const fail = (msg) => { throw new Error(msg); };
 const formError = (field, message, code = 'FORM_INVALID') => Object.assign(new Error(`${code}: ${message}`), { code, field });
 // Same wording as the admin-users Edge Function: a staff login name never has the shape of a patient username.
 const PATIENT_SHAPE_ERROR = 'That login name has the shape of a patient login (a name, a dash and a number). Choose a staff name such as reception@' + CONFIG.STAFF_EMAIL_DOMAIN + '.';
+// The columns that store a staff id, with the Delete dialog's words: the list of private.staff_record_columns()
+// (20261015000200_staff_delete.sql), with the demo's own name for four of the tables.
+const STAFF_RECORD_COLUMNS = [
+  ['visits', 'created_by', 'visits', 'visit'], ['visits', 'updated_by', 'visits last changed', 'visit last changed'],
+  ['visits', 'dues_override_by', 'dues holds overridden', 'dues hold overridden'], ['visits', 'protocol_override_by', 'braces rule overrides', 'braces rule override'],
+  ['payments', 'received_by', 'payments', 'payment'], ['invoices', 'created_by', 'invoices', 'invoice'], ['invoices', 'discount_approved_by', 'discounts approved', 'discount approved'],
+  ['discount_requests', 'requested_by', 'discount requests', 'discount request'], ['discount_requests', 'decided_by', 'discount requests decided', 'discount request decided'],
+  ['payment_plans', 'created_by', 'installment plans', 'installment plan'], ['expenses', 'created_by', 'expenses', 'expense'],
+  ['cash_closings', 'closed_by', 'cash closings', 'cash closing'], ['cash_closings', 'verified_by', 'cash closings verified', 'cash closing verified'],
+  ['patients', 'created_by', 'patients registered', 'patient registered'], ['braces_cases', 'created_by', 'braces cases', 'braces case'],
+  ['checkups', 'created_by', 'checkup patients', 'checkup patient'], ['day_closings', 'closed_by', 'days ended', 'day ended'],
+  ['retainer_cases', 'created_by', 'retainer records', 'retainer record'], ['lab_cases', 'created_by', 'lab work cases', 'lab work case'],
+  ['inventory_moves', 'created_by', 'stock entries', 'stock entry'], ['photos', 'uploaded_by', 'photos', 'photo'], ['xrays', 'uploaded_by', 'X-rays', 'X-ray'],
+  ['documents', 'uploaded_by', 'documents', 'document'], ['patient_flags', 'raised_by', 'patient flags raised', 'patient flag raised'],
+  ['patient_flags', 'cleared_by', 'patient flags cleared', 'patient flag cleared'], ['reminders', 'created_by', 'reminders made', 'reminder made'],
+  ['reminders', 'assigned_to', 'reminders assigned', 'reminder assigned'], ['complaints', 'resolved_by', 'complaints resolved', 'complaint resolved'],
+  ['complaint_messages', 'author_staff', 'complaint replies', 'complaint reply'], ['visit_ratings', 'followed_up_by', 'rating follow-ups', 'rating follow-up'],
+  ['job_applications', 'updated_by', 'job applications updated', 'job application updated'], ['job_events', 'by_staff', 'job application notes', 'job application note'],
+  ['staff', 'deactivated_by', 'staff accounts switched off', 'staff account switched off'], ['staff', 'deleted_by', 'staff accounts deleted', 'staff account deleted'],
+  ['audit', 'actor', 'changes in the audit log', 'change in the audit log'],
+];
 // A labelled placeholder "progress photo" (a drawn smile, not a real picture) for the sample patient.
 function samplePhoto(label, bg) {
   const teeth = [-84, -60, -36, -12, 12, 36, 60].map((x, i) => `<rect x="${200 + x - 10}" y="${150 + Math.abs(i - 3) * 6}" width="22" height="${30 - Math.abs(i - 3) * 4}" rx="6" fill="#fffdf7" stroke="#d9cbb8"/>`).join('');
@@ -90,17 +111,20 @@ function seed() {
     { id: 4, code: 'LHR', name: 'Gulberg Lahore', city_id: 2, address: 'Al Hafeez Business Avenue, Gulberg 3, Lahore', active: true, opened_on: '2021-11-03' },
     { id: 5, code: 'ISB', name: 'Islamabad', city_id: 3, address: 'Giga Downtown, DHA Phase II, Islamabad', active: true, opened_on: '2025-11-25' },
   ];
-  const doc = (name, group, region, is_doctor = true) => ({ id: uid(), display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
+  // Fixed ids, not uid(), so each sample clinician is the same person on every load. On the Aaj ki List each of them has
+  // a Doctor Name colour of their own (lib/tones.js: eleven people, fourteen colours).
+  const doc = (n, name, group, region, is_doctor = true) => ({ id: `00000000-0000-4000-8000-0000000c${n}`, display_name: name, doctor_group_id: group, region, is_doctor, aliases: [], staff_id: null, active: true });
   // Fictional clinicians: one or two per braces group and region, enough to try every rule.
   db.clinicians = [
-    doc('Dr. Ali Rashid', null, null),
-    doc('Dr. Amna (sample)', 1, 'KHI'), doc('Dr. Bushra (sample)', 1, 'KHI'),
-    doc('Dr. Hina (sample)', 2, 'KHI'), doc('Dr. Iqra (sample)', 2, null),
-    doc('Dr. Nida (sample)', 3, 'KHI'), doc('Dr. Rabia (sample)', 3, 'KHI'), doc('Dr. Saba (sample)', 3, 'LHR'),
-    doc('Dr. Tania (sample)', null, 'ISB'),
-    doc('Assistant Uzma (sample)', null, 'KHI', false), doc('Assistant Zara (sample)', null, 'KHI', false),
+    doc('0104', 'Dr. Ali Rashid', null, null),
+    doc('0205', 'Dr. Amna (sample)', 1, 'KHI'), doc('0306', 'Dr. Bushra (sample)', 1, 'KHI'),
+    doc('0403', 'Dr. Hina (sample)', 2, 'KHI'), doc('0503', 'Dr. Iqra (sample)', 2, null),
+    doc('0605', 'Dr. Nida (sample)', 3, 'KHI'), doc('0700', 'Dr. Rabia (sample)', 3, 'KHI'), doc('0806', 'Dr. Saba (sample)', 3, 'LHR'),
+    doc('0905', 'Dr. Tania (sample)', null, 'ISB'),
+    doc('1006', 'Assistant Uzma (sample)', null, 'KHI', false), doc('1102', 'Assistant Zara (sample)', null, 'KHI', false),
   ];
   const cl = (name) => db.clinicians.find((c) => c.display_name === name).id;
+  db.doctor_groups = [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
 
   db.treatments = ['Monthly', 'Bonding', 'Upper Bonding', 'Lower Bonding', 'Bracket Fix', 'Braces Checkup', 'Braces Scaling', 'Braces Off',
     'Retainer Impression', 'Retainer Pick', 'Retainer Followup', 'Checkup', 'Followup', 'Scaling', 'Filling', 'RCT', 'Extraction',
@@ -126,6 +150,9 @@ function seed() {
     { id: 's-doc', full_name: 'Dr. Bushra (sample)', email: 'demo.doctor@example.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false, clinician_id: cl('Dr. Bushra (sample)') },
     { id: 's-coord', full_name: 'Clinic coordinator (sample)', email: 'demo.coordinator@example.com', role: 'coordinator', active: true, branch_ids: [], restrict_to_branches: false },
     { id: 's-acct', full_name: 'Accountant (sample)', email: 'demo.accounts@example.com', role: 'accountant', active: true, branch_ids: [], restrict_to_branches: false },
+    // For Delete on Staff accounts: a doctor whose name is on a few records (further down), and a desk login nobody ever used.
+    { id: 's-saba', full_name: 'Dr. Saba (sample)', email: 'demo.doctor2@example.com', role: 'doctor', active: true, branch_ids: [], restrict_to_branches: false },
+    { id: 's-weekend', full_name: 'Weekend reception (sample)', email: 'demo.weekend@example.com', role: 'front_desk', active: true, branch_ids: [], restrict_to_branches: false },
     // A shared login (20261015000300_desk_names.sql): whoever is at the Islamabad desk types their name after signing in.
     { id: 's-fd-isb', full_name: 'Front desk Islamabad', email: 'demo.frontdesk.isb@example.com', role: 'front_desk', active: true, branch_ids: [5], restrict_to_branches: true, home_branch_id: 5, shared_login: true },
   ];
@@ -134,6 +161,7 @@ function seed() {
   db.desk_names = [[12, 'Sadia (sample)', '09:02'], [9, 'Mehak (sample)', '14:30'], [6, 'Sadia (sample)', '09:10'], [2, 'Hina (sample)', '10:45']]
     .map(([n, name, time]) => ({ id: uid(), staff_id: 's-fd-isb', name, entered_at: new Date(`${daysAgo(n)}T${time}:00+05:00`).toISOString() }));
   db.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').staff_id = 's-doc';
+  db.clinicians.find((c) => c.display_name === 'Dr. Saba (sample)').staff_id = 's-saba';
   db.clinicians.find((c) => c.display_name === 'Dr. Ali Rashid').staff_id = 's-admin';
 
   // Made-up patients
@@ -207,6 +235,7 @@ function seed() {
     tokenCount[branch] = (tokenCount[branch] || 0) + (status === 'scheduled' ? 0 : 1);
     const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: today, token_no: status === 'scheduled' ? null : tokenCount[branch],
       status, treatment_label: label, braces_case_id: month ? bc.id : null, braces_month: month, details_text: details,
+      doctor_group_id: month && protocolFor(month).treatingGroups.length === 1 ? protocolFor(month).treatingGroups[0] : null,
       photo_required: month ? protocolFor(month).photoRequired : false, photos_uploaded: status === 'completed',
       checker_required: month ? protocolFor(month).checkerGroup !== null : false, checked_by: status === 'completed' ? cl('Dr. Bushra (sample)') : null,
       checked_in_at: today + 'T13:' + String(10 + db.visits.length % 40).padStart(2, '0') + ':00', created_at: new Date().toISOString(), notes: null };
@@ -236,6 +265,10 @@ function seed() {
     { id: uid(), patient_id: db.patients[11].id, kind: 'appointment', due_date: daysAgo(-2), note: 'Monthly due', status: 'open' },
     { id: uid(), patient_id: db.patients[18].id, kind: 'followup', due_date: daysAgo(1), note: 'Post-RCT check', status: 'contacted' },
   ];
+  // Dr. Saba (sample)'s records: three visits she added, two payments she took and a reminder she made. Delete keeps her account.
+  db.visits.filter((v) => v.status === 'completed').slice(0, 3).forEach((v) => { v.created_by = 's-saba'; });
+  db.payments.slice(0, 2).forEach((p) => { p.received_by = 's-saba'; });
+  db.reminders[1].created_by = 's-saba';
   db.visit_ratings = [{ visit_id: db.visits[0].id, patient_id: db.patients[0].id, stars: 2, comment: 'Long wait', created_at: daysAgo(3) }];
   // The first patient is the sample account shown by the "See a sample patient account" button:
   // a next appointment, two labelled progress photos and a message that got a reply.
@@ -360,7 +393,9 @@ export function createDemoAdapter() {
     const p = patient(v.patient_id);
     return { ...clone(v), patient: { id: p.id, mr_number: p.mr_number, full_name: p.full_name, phone: p.phone, medical_history: clone(p.medical_history) || {}, photo_consent_public: !!p.photo_consent_public },
       staff: db.visit_staff.filter((s) => s.visit_id === v.id).map((s) => ({ ...s, name: clinician(s.clinician_id)?.display_name })),
-      dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id) };
+      dues: dues(v.patient_id), see_dr_ali: !!activeFlag(v.patient_id),
+      // As in the database: invoices are seen with billing.view only, so without it no visit has one.
+      has_invoice: can('billing.view') && db.invoices.some((i) => i.visit_id === v.id && i.status !== 'void') };
   };
 
   // Checkups (patients without a patient file): which rows this person may see, how a row is shown, and the Checkups page's filters.
@@ -428,6 +463,8 @@ export function createDemoAdapter() {
       const rule = protocolFor(v.braces_month);
       v.photo_required = rule.photoRequired && v.braces_month <= LAST_DEFINED_MONTH;
       v.checker_required = rule.checkerGroup !== null;
+      // The database's default: a month treated by one group only gets that group.
+      if (v.doctor_group_id == null && rule.treatingGroups.length === 1) v.doctor_group_id = rule.treatingGroups[0];
     }
     if (!prev || prev.status !== v.status) {
       if (v.status === 'waiting' && !v.checked_in_at) v.checked_in_at = new Date().toISOString();
@@ -475,7 +512,7 @@ export function createDemoAdapter() {
     },
     async staffLogins() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can see the login log');
-      return { staff: db.staff.map((s) => ({ id: s.id, full_name: s.full_name, email: s.email, role: s.role, active: s.active, last_sign_in_at: s.last_sign_in_at || null,
+      return { staff: db.staff.map((s) => ({ id: s.id, full_name: s.full_name, email: s.email, role: s.role, active: s.active, deleted_at: s.deleted_at || null, last_sign_in_at: s.last_sign_in_at || null,
           sign_ins_30d: (db.login_events || []).filter((e) => e.name === s.full_name).length })), events: clone(db.login_events || []) };
     },
     // Staff and the sample patient sign in from the list of demo accounts; a login a staff member made for a patient also works here.
@@ -582,6 +619,7 @@ export function createDemoAdapter() {
     async branches() { return clone(db.branches.filter((b) => b.active)); },
     async cities() { return clone(db.cities); },
     async clinicians() { return clone(db.clinicians.filter((c) => c.active)); },
+    async doctorGroups() { return clone(db.doctor_groups); },
     async treatments() { return clone(db.treatments.filter((t) => t.active)); },
     async expenseCategories() { return clone(db.expense_categories); },
     async settings() { return clone(db.settings); },
@@ -730,13 +768,82 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ visits
     // By token, then by when the row was added and by its id, as the live adapter asks the database (rows with no token and one
     // created_at, such as an imported day's, keep the order the History's copy has: lib/day-list.js orderDayList).
-    async listVisits({ branchId, date }) {
+    // (patientId: that patient's visits of the day only, as the live adapter)
+    async listVisits({ branchId, date, patientId }) {
       need('sheet.view');
-      return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && branchOk(v.branch_id))
+      return db.visits.filter((v) => (!branchId || v.branch_id === Number(branchId)) && v.visit_date === date && (!patientId || v.patient_id === patientId) && branchOk(v.branch_id))
         .sort((a, b) => (a.token_no ?? 999) - (b.token_no ?? 999) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
           || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map(enrichVisit);
     },
     subscribeVisits() { return () => {}; },
+    // A busy day to try the Aaj ki List with (the list's "?demo=busy", demo only): 120 more made-up patients on one branch's
+    // list for the day, in every state of a day half done. Names "Sample Patient 001" to "120", Mr# from 7001, phones
+    // 0300 555 3001 onwards; once per branch and day. (Sample Patient 111 has all three flags: medical history, Dr. Ali, a note.)
+    async fillBusyDay({ branchId, date = todayISO() }) {
+      need('sheet.view');
+      const branch = Number(branchId);
+      db.busy_days ||= [];
+      if (!db.branches.some((b) => b.id === branch) || !branchOk(branch) || db.busy_days.includes(`${branch}|${date}`)) return 0;
+      const base = 7000 + 200 * db.busy_days.length;
+      db.busy_days.push(`${branch}|${date}`);
+      const doctorsIn = (g) => db.clinicians.filter((c) => c.is_doctor && c.doctor_group_id === g);
+      const anyDoctor = db.clinicians.filter((c) => c.is_doctor);
+      const assistants = db.clinicians.filter((c) => !c.is_doctor);
+      const other = ['Retainer Pick', 'Checkup', 'Scaling', 'RCT', 'Bracket Fix', 'Followup', 'Filling', 'Extraction', 'Hygiene Appointment'];
+      const otherDetails = ['Scaling done', 'RCT 2nd sitting', 'Filling UR6', 'Retainer given', 'X-ray advised', 'Bracket rebond LL3'];
+      const wire = (m) => (m < 3 ? '012' : m < 4 ? '014' : m < 8 ? '016' : '018');
+      const invoice = (patientId, visitId, amount, issued, paid) => {
+        const inv = { id: uid(), invoice_no: 'INV-' + date.slice(0, 4) + '-' + String(db.invoices.length + 1).padStart(6, '0'), patient_id: patientId, branch_id: branch,
+          visit_id: visitId, issue_date: issued, subtotal: amount, discount_amount: 0, total: amount, status: 'issued', template_key: 'classic',
+          items: [{ description: visitId ? 'Visit (sample)' : 'Braces instalment (sample)', quantity: 1, unit_price: amount }] };
+        db.invoices.push(inv);
+        if (paid) db.payments.push({ id: uid(), patient_id: patientId, invoice_id: inv.id, branch_id: branch, amount: paid, method: 'cash', received_at: issued + 'T15:00:00' });
+      };
+      let token = Math.max(0, ...db.visits.filter((v) => v.branch_id === branch && v.visit_date === date && v.token_no).map((v) => v.token_no));
+      for (let i = 1; i <= 120; i++) {
+        const p = { id: uid(), mr_number: String(base + i), full_name: `Sample Patient ${String(i).padStart(3, '0')}`, phone: '0300555' + String(3000 + base - 7000 + i),
+          email: null, first_branch_id: branch, referral_source: 'Walk-in', photo_consent_public: false, created_at: daysAgo(200), notes: null, portal_user_id: null,
+          medical_history: i % 23 === 0 || i === 111 ? { conditions: ['Diabetes'], allergies: i % 2 ? 'Penicillin' : '' } : {} };
+        db.patients.push(p);
+        const status = i <= 70 ? 'completed' : i <= 80 ? 'in_treatment' : i <= 112 ? 'waiting' : 'scheduled';
+        const done = status === 'completed';
+        const month = i % 3 ? ((i * 7) % 18) + 1 : null;
+        const rule = month ? protocolFor(month) : null;
+        let bc = null;
+        if (month) {
+          bc = { id: uid(), patient_id: p.id, start_date: daysAgo(month * 30), extraction_plan: ['undecided', 'extraction', 'non_extraction'][i % 3],
+            extractions_done: false, kit_name: 'Sample kit A', total_fee: 60000, status: 'active', treatment_plan_by_dr_ali: 'Standard plan' };
+          db.braces_cases.push(bc);
+        }
+        const group = rule ? rule.treatingGroups[i % rule.treatingGroups.length] : [1, 2, 3, null][i % 4];
+        const v = { id: uid(), patient_id: p.id, branch_id: branch, visit_date: date, token_no: status === 'scheduled' ? null : ++token, status,
+          treatment_label: month ? 'Monthly' : other[i % other.length], braces_case_id: bc?.id ?? null, braces_month: month, doctor_group_id: group,
+          details_text: done ? (month ? `U L ${wire(month)} PC refresh` : otherDetails[i % otherDetails.length]) : '',
+          photo_required: !!rule?.photoRequired, photos_uploaded: done && !!rule?.photoRequired, checker_required: rule ? rule.checkerGroup !== null : false, checked_by: null,
+          checked_in_at: status === 'scheduled' ? null : `${date}T${String(12 + Math.floor(i / 20)).padStart(2, '0')}:${String((i * 7) % 60).padStart(2, '0')}:00`,
+          created_at: new Date().toISOString(), notes: i % 29 === 0 || i === 111 ? 'Wants an evening slot next time' : null };
+        // Sample Patient 099 came from the Google Sheet with "Group 4", a group Clinic setup does not have: the sync keeps the
+        // visit in no group and the sheet's words in sheet_cells (as the live database does).
+        if (i === 99) v.sheet_cells = { group: { t: 'Group 4', v: null } };
+        db.visits.push(v);
+        if (done || status === 'in_treatment' || i % 9 === 0) {
+          const pool = group ? doctorsIn(group) : anyDoctor;
+          db.visit_staff.push({ visit_id: v.id, clinician_id: pool[i % pool.length].id, role: 'doctor' });
+          if (i % 5 === 0) db.visit_staff.push({ visit_id: v.id, clinician_id: assistants[i % assistants.length].id, role: 'assistant' });
+        }
+        if (done && rule?.checkerGroup) {
+          const checker = doctorsIn(rule.checkerGroup)[i % doctorsIn(rule.checkerGroup).length];
+          v.checked_by = checker.id;
+          db.visit_staff.push({ visit_id: v.id, clinician_id: checker.id, role: 'checker' });
+        }
+        // Dues on some patients (an older instalment part paid), and an invoice for most of today's finished visits.
+        const owe = i % 7 === 0 ? 11500 : i % 11 === 0 ? 20000 : i % 13 === 0 ? 500 : 0;
+        if (owe) invoice(p.id, null, owe + 5000, daysAgo(40), 5000);
+        if ((done || status === 'in_treatment') && i % 6) invoice(p.id, v.id, 3000, date, 3000);
+        if (i % 37 === 0) db.patient_flags.push({ id: uid(), patient_id: p.id, kind: 'see_dr_ali', reason: 'Sample: check the bite', raised_by: 's-asst', raised_at: daysAgo(1) + 'T16:00:00', cleared_at: null });
+      }
+      return 120;
+    },
     async addVisit(row) {
       need('sheet.edit');
       if (!branchOk(row.branch_id)) fail('new row violates row-level security policy (branch)');
@@ -1559,17 +1666,66 @@ export function createDemoAdapter() {
       need('users.manage');
       if (!row.email?.endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Staff emails must end with @' + CONFIG.STAFF_EMAIL_DOMAIN);
       if (isPatientLoginName(row.email, CONFIG.STAFF_EMAIL_DOMAIN)) fail(PATIENT_SHAPE_ERROR);
-      if (db.staff.some((s) => s.email === row.email)) fail('A staff account with this email already exists.');
+      const taken = db.staff.find((s) => s.email === row.email);
+      if (taken?.deleted_at) fail(`That login email belongs to a deleted account (${taken.full_name}). Bring it back from Deleted accounts, or pick another email.`);
+      if (taken) fail('A staff account with this email already exists.');
       const { password, ...rest } = row;
       if (password != null && String(password).length < 8) fail('The password needs at least 8 characters.');
       const s = { id: uid(), active: true, shared_login: false, restrict_to_branches: !!row.branch_ids?.length, branch_ids: (row.branch_ids || []).map(Number), ...rest };
       db.staff.push(s); audit('staff', 'INSERT', s);
+      // As the admin-users function does: the doctor or assistant chosen gets this login.
+      const linked = row.clinician_id && db.clinicians.find((c) => c.id === row.clinician_id);
+      if (linked) linked.staff_id = s.id;
       return clone(s);
     },
     async deactivateStaff(id) {
       need('users.manage');
       if (id === me().id) fail('You cannot switch off your own account.');
-      const s = db.staff.find((x) => x.id === id); s.active = false; s.deactivated_at = new Date().toISOString(); audit('staff', 'UPDATE', s);
+      const s = db.staff.find((x) => x.id === id); s.active = false; s.deactivated_at = new Date().toISOString(); s.deactivated_by = me().id; audit('staff', 'UPDATE', s);
+    },
+    // Delete on Staff accounts, by the same rules as the admin-users function (delete_staff / restore_staff) and public.staff_records().
+    async staffRecords(id) {
+      if (!can('users.manage')) fail('Only Dr. Ali can see what a staff account has on the website');
+      const s = db.staff.find((x) => x.id === id);
+      // The demo keeps some who-columns as the person's name (payments, cash closings, the audit log), so the name counts too.
+      const mine = (v) => v != null && (v === id || (s && v === s.full_name));
+      // Most first, but the audit log (the last column) always last, as the database does: every saved change writes an audit row too.
+      const last = STAFF_RECORD_COLUMNS.length - 1;
+      const parts = STAFF_RECORD_COLUMNS.map(([table, col, label, one], sort) => ({ label, one, sort,
+        count: (db[table] || []).filter((r) => mine(r[col]) && !(table === 'staff' && r.id === id)).length }))
+        .filter((p) => p.count > 0).sort((a, b) => (a.sort === last) - (b.sort === last) || b.count - a.count || a.sort - b.sort).map(({ sort, ...p }) => p);
+      return { total: parts.reduce((t, p) => t + p.count, 0), parts, last_sign_in_at: s?.last_sign_in_at || null };
+    },
+    async deleteStaff(id) {
+      if (!can('users.manage')) fail('Only Dr. Ali can delete staff accounts.');
+      if (id === me().id) fail('You cannot delete your own account.');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      if (s.role === 'admin') fail('An admin account cannot be deleted.');
+      if (s.deleted_at) fail(`${s.full_name} is already in Deleted accounts.`);
+      const now = new Date().toISOString();
+      // Switched off first, as Switch off does; then counted. Nothing at all: the login goes for good, a linked doctor stays without it.
+      if (s.active) Object.assign(s, { active: false, deactivated_at: now, deactivated_by: me().id });
+      const { total } = await this.staffRecords(id);
+      if (total > 0) {
+        Object.assign(s, { deleted_at: now, deleted_by: me().id }); audit('staff', 'ARCHIVE_LOGIN', s);
+        return { ok: true, result: 'archived', total };
+      }
+      for (const c of db.clinicians) if (c.staff_id === id) c.staff_id = null;
+      audit('staff', 'DELETE_LOGIN', s);
+      db.staff = db.staff.filter((x) => x.id !== id);
+      // Its personal ticks, its menu order and the names typed at its desk go with it (on delete cascade in the database).
+      delete db.overrides[id];
+      delete db.menu_prefs[id];
+      db.desk_names = db.desk_names.filter((r) => r.staff_id !== id);
+      return { ok: true, result: 'removed', total: 0 };
+    },
+    async restoreStaff(id) {
+      if (!can('users.manage')) fail('Only Dr. Ali can bring back staff accounts.');
+      const s = db.staff.find((x) => x.id === id);
+      if (!s) fail('Staff account not found.');
+      if (!s.deleted_at) fail(`${s.full_name} is not in Deleted accounts.`);
+      Object.assign(s, { deleted_at: null, deleted_by: null }); audit('staff', 'RESTORE_LOGIN', s);
     },
     async updateStaffLogin(id, { email, password }) {
       need('users.manage');
@@ -1611,7 +1767,13 @@ export function createDemoAdapter() {
       s.role = role;
       audit('staff', 'UPDATE', s);
     },
-    async reactivateStaff(id) { need('users.manage'); db.staff.find((x) => x.id === id).active = true; },
+    async reactivateStaff(id) {
+      need('users.manage');
+      const s = db.staff.find((x) => x.id === id);
+      // As the database (staff_deleted_is_switched_off): a deleted account comes back with Bring back first.
+      if (s.deleted_at) fail(`${s.full_name} is in Deleted accounts. Bring the account back first, then switch it on.`);
+      s.active = true;
+    },
     async setSetting(key, value) { if (me()?.role !== 'admin') fail('Only admin can change settings'); db.settings[key] = value; },
     async discountCaps() { return clone(db.discount_caps); },
     async setDiscountCap(role, maxPercent, maxAmount) {
@@ -1676,9 +1838,9 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ clinic setup (admin)
     async setupLists() {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');
-      db.doctor_groups ||= [{ id: 1, name: 'Group 1', description: 'Senior: photo months, extraction decisions' }, { id: 2, name: 'Group 2', description: 'Checks Group 3 months' }, { id: 3, name: 'Group 3', description: 'Routine monthly visits' }];
       db.doctor_commission_rules ||= [];
-      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories, staff: db.staff.filter((s) => s.active), commission_rules: db.doctor_commission_rules });
+      return clone({ branches: db.branches, cities: db.cities, clinicians: db.clinicians, groups: db.doctor_groups, treatments: db.treatments, categories: db.expense_categories,
+        staff: db.staff.map(({ id, full_name, role, active, deleted_at }) => ({ id, full_name, role, active, deleted_at: deleted_at ?? null })), commission_rules: db.doctor_commission_rules });
     },
     async saveSetupRow(table, row) {
       if (me()?.role !== 'admin') fail('Only Dr. Ali can change the clinic setup');

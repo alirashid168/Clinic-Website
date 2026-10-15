@@ -91,18 +91,22 @@ export function combobox({ wrap, input, popup, listLabel, search, option, onPick
     }
   });
   wrap.addEventListener('focusout', (e) => { if (!wrap.contains(e.relatedTarget)) close(); });
-  return { close };
+  return { close, open: run };
 }
 
-/** Search-as-you-type patient picker (an ARIA combobox). */
-export function patientSearch({ placeholder = 'Search name, Mr# or phone', label = placeholder, onPick, onNew }) {
+/**
+ * Search-as-you-type patient picker (an ARIA combobox). onEnter(text) is optional: it runs on Enter when no option is
+ * chosen and resolves to true when it dealt with the text; otherwise the text comes back with the matches to choose from.
+ * The box is emptied at once on Enter, so the next one can be typed while the last is still being dealt with.
+ */
+export function patientSearch({ placeholder = 'Search name, Mr# or phone', label = placeholder, onPick, onNew, onEnter }) {
   const input = h('input', { type: 'search', placeholder, autocomplete: 'off', 'aria-label': label });
   const box = h('div', { class: 'suggestions', hidden: true });
   // The .suggestions box is the positioned popup; the listbox sits inside it with the "no match" note.
   const wrap = h('div', { style: { position: 'relative', flex: '1 1 280px', maxWidth: '420px' } }, input, box);
   const allowNew = !!onNew && can('patients.create');
   const isNew = (p) => p.newName !== undefined;
-  combobox({
+  const ctl = combobox({
     wrap, input, popup: box, listLabel: 'Matching patients',
     search: async (q) => [...(await state.data.searchPatients(q)).slice(0, 12), ...(allowNew ? [{ newName: q }] : [])],
     option: (p) => (isNew(p)
@@ -116,6 +120,13 @@ export function patientSearch({ placeholder = 'Search name, Mr# or phone', label
       announce(`Selected: ${p.full_name}, Mr# ${p.mr_number}`);
       onPick(p);
     },
+    // (Something typed meanwhile is never overwritten: then it says that nothing was added.)
+    onEnter: onEnter ? async (text) => {
+      if (!text) return;
+      input.value = '';
+      if (await onEnter(text)) return;
+      if (!input.value.trim()) { input.value = text; ctl.open(); } else toast(`Nothing was added for "${text}". Search for it again to choose the patient.`, 'error', 8000);
+    } : undefined,
     note: (q, items) => (items.length ? null : h('div', { class: 'muted', style: { padding: '10px' } }, 'No patient found.')),
     count: (items) => {
       const n = items.filter((p) => !isNew(p)).length;
@@ -132,21 +143,36 @@ export function patientSearch({ placeholder = 'Search name, Mr# or phone', label
  * Enter or leaving the control; a pick from the open list (mouse, touch) commits
  * at once; Escape undoes a provisional change. onCommit(value, previous) runs
  * once per real change; onPreview(value) runs whenever the shown value changes.
- * Returns { set(value) } to move the committed value (e.g. revert after a failed save).
+ * Only a real leave commits on blur: Chrome also fires blur when the control is
+ * taken out of the page (a redraw) and when another window takes the focus, and
+ * neither saves a provisional change. (A select can have two options with one
+ * value, such as the Aaj ki List's group the sheet names and "No group": Escape
+ * goes back to the option that was chosen, not just to its value.)
+ * Returns { set(value), pending() }: set moves the committed value (e.g. revert
+ * after a failed save); pending() is true while a value is chosen and not saved.
  */
 export function commitOnFinish(el, onCommit, onPreview) {
   let committed = el.value;
+  let committedAt = el.selectedIndex; // (undefined for a date input)
   let fromKey = false;
   const finish = () => {
     fromKey = false;
+    committedAt = el.selectedIndex;
     if (el.value === committed) return;
     const previous = committed;
     committed = el.value;
     onCommit(committed, previous);
   };
   el.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') finish();
-    else if (e.key === 'Escape' && el.value !== committed) { e.preventDefault(); e.stopPropagation(); el.value = committed; onPreview?.(committed); }
+    // (Enter saves and nothing else: Chrome on Windows would also open a select's list, which then takes the next Tab and
+    //  turns the letters typed next into a pick from it.)
+    if (e.key === 'Enter') { e.preventDefault(); finish(); }
+    else if (e.key === 'Escape' && (el.value !== committed || el.selectedIndex !== committedAt)) {
+      e.preventDefault(); e.stopPropagation();
+      el.value = committed;
+      if (committedAt !== undefined && el.value === committed) el.selectedIndex = committedAt;
+      onPreview?.(committed);
+    }
     else if (e.key.length === 1 || /^(Arrow|Page|Home|End|Backspace|Delete)/.test(e.key)) {
       // On Windows these change a closed select at once, firing `change` within this same task.
       // Backspace and Delete do the same to a date input (clearing a part empties it), so clearing
@@ -156,8 +182,9 @@ export function commitOnFinish(el, onCommit, onPreview) {
     }
   });
   el.addEventListener('change', () => { onPreview?.(el.value); if (!fromKey) finish(); });
-  el.addEventListener('blur', finish);
-  return { set: (value) => { committed = value; el.value = value; onPreview?.(value); } };
+  // (looked at once the blur is over: the control being removed is still in the page while its blur runs)
+  el.addEventListener('blur', () => queueMicrotask(() => { if (el.isConnected && document.activeElement !== el) finish(); }));
+  return { set: (value) => { committed = value; el.value = value; committedAt = el.selectedIndex; onPreview?.(value); }, pending: () => el.value !== committed };
 }
 
 /** New patient form with branch dropdown and duplicate check. Resolves with the created patient. */

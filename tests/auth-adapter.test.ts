@@ -73,6 +73,7 @@ function fakeClient() {
     updates: [] as any[], listeners: new Set<Function>(), fetchOption: null as any,
     signInResult: { data: {}, error: null } as any,
     invokes: [] as any[], invokeAnswer: { data: null, error: null } as any, userUpdates: [] as any[], resets: [] as any[],
+    rpcAnswer: null as any, // set: a function (name, args) giving what a database function answers; otherwise an empty list
   };
   f.emit = (event: string, session: any = null) => { for (const cb of [...f.listeners]) cb(event, session); };
   f.auth = {
@@ -108,7 +109,7 @@ function fakeClient() {
   };
   f.client = (options: any) => {
     f.fetchOption = options?.global?.fetch;
-    const rpc = () => { const r: any = Promise.resolve({ data: [], error: null }); r.abortSignal = () => r; return r; };
+    const rpc = (name: string, args: any) => { const r: any = Promise.resolve(f.rpcAnswer ? f.rpcAnswer(name, args) : { data: [], error: null }); r.abortSignal = () => r; return r; };
     return { auth: f.auth, from: f.from, rpc, functions: { invoke: async (name: string, opts: any) => { f.invokes.push([name, opts.body]); return typeof f.invokeAnswer === 'function' ? f.invokeAnswer() : f.invokeAnswer; } }, storage: { from: () => ({}) } };
   };
   return f;
@@ -1125,4 +1126,37 @@ test('"Unknown action" from a function that was not redeployed becomes "Update t
   }
   f.invokeAnswer = { data: { error: 'This patient already has a portal login.' }, error: null };
   await assert.rejects(calls[0], /already has a portal login/, 'other messages are left as they are');
+});
+
+test('Delete on Staff accounts: staffRecords asks staff_records, and a database without it says which update is missing; delete/restore go to admin-users', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  const asked: any[] = [];
+  f.rpcAnswer = (name: string, args: any) => { asked.push([name, args]); return { data: { total: 2, parts: [{ label: 'visits', one: 'visit', count: 2 }], last_sign_in_at: null }, error: null }; };
+  assert.deepEqual(await data.staffRecords('s-1'), { total: 2, parts: [{ label: 'visits', one: 'visit', count: 2 }], last_sign_in_at: null });
+  assert.deepEqual(asked, [['staff_records', { p_staff: 's-1' }]]);
+  f.rpcAnswer = () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function public.staff_records(p_staff) in the schema cache' }, status: 404 });
+  await assert.rejects(() => data.staffRecords('s-1'),(e: any) => e.code === 'STAFF_DELETE_MISSING' && /20261015000200_staff_delete\.sql first\. Nothing was changed\./.test(e.message));
+
+  f.invokeAnswer = { data: { ok: true, result: 'archived', total: 2 }, error: null };
+  assert.deepEqual(await data.deleteStaff('s-1'), { ok: true, result: 'archived', total: 2 });
+  f.invokeAnswer = { data: { ok: true }, error: null };
+  await data.restoreStaff('s-1');
+  assert.deepEqual(f.invokes.slice(-2), [['admin-users', { action: 'delete_staff', user_id: 's-1' }], ['admin-users', { action: 'restore_staff', user_id: 's-1' }]]);
+  // A function that was not redeployed with the website.
+  for (const call of [() => data.deleteStaff('s-1'), () => data.restoreStaff('s-1')]) {
+    f.invokeAnswer = { data: null, error: Object.assign(new Error('Edge Function returned a non-2xx status code'), { name: 'FunctionsHttpError', context: { status: 400, json: async () => ({ error: 'Unknown action' }) } }) };
+    await assert.rejects(call, (e: any) => e.message === 'Update the admin-users function first.' && e.status === 400);
+  }
+});
+
+test('admin-users: no answer at all reads as the browser\'s own words (friendlyError\'s "no internet"), and a gateway status travels with the error', async () => {
+  fresh();
+  const { f, data } = await openTab();
+  // functions-js: a fetch that rejected is a FunctionsFetchError carrying the TypeError.
+  f.invokeAnswer = { data: null, error: Object.assign(new Error('Failed to send a request to the Edge Function'), { name: 'FunctionsFetchError', context: new TypeError('Failed to fetch') }) };
+  await assert.rejects(() => data.deleteStaff('s-1'), (e: any) => e.message === 'Failed to fetch');
+  // A gateway in front of the function gave up: its page is not JSON, but its status says what happened.
+  f.invokeAnswer = { data: null, error: Object.assign(new Error('Edge Function returned a non-2xx status code'), { name: 'FunctionsHttpError', context: { status: 504, json: async () => { throw new SyntaxError('Unexpected token <'); } } }) };
+  await assert.rejects(() => data.restoreStaff('s-1'), (e: any) => e.status === 504);
 });

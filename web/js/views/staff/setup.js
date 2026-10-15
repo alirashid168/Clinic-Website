@@ -21,7 +21,7 @@ function editor({ title, help, rows, columns, onSave, addLabel = 'Add', fixedId 
     const inputs = {};
     for (const c of columns) {
       const v = row?.[c.key];
-      if (c.type === 'select') inputs[c.key] = select(c.options(), v ?? c.default ?? '');
+      if (c.type === 'select') inputs[c.key] = select(c.options(row), v ?? c.default ?? '');
       else if (c.type === 'check') inputs[c.key] = h('input', { type: 'checkbox', checked: row ? !!v : c.default !== false });
       else if (c.type === 'list') inputs[c.key] = h('input', { value: (v || []).join(', '), placeholder: c.placeholder || '' });
       else inputs[c.key] = h('input', { type: c.type || 'text', value: v ?? c.default ?? '', placeholder: c.placeholder || '', step: c.step, min: c.min, disabled: !!(row && c.lockOnEdit) });
@@ -183,8 +183,12 @@ export async function renderSetup(root) {
   const save = (table) => async (row) => { await d.saveSetupRow(table, row); await refresh(); };
   const cityName = (id) => lists.cities.find((c) => c.id === id)?.name || '';
   const groupName = (id) => lists.groups.find((g) => g.id === id)?.name || '';
+  // The table names every login, also one that is switched off or deleted; the drop-down offers only logins that are on and not
+  // deleted, plus the one the row has now (so saving the row never drops its login without being asked).
   const staffName = (id) => lists.staff.find((s) => s.id === id)?.full_name || '';
-  const doctorStaff = () => [{ value: '', label: 'No login yet' }, ...lists.staff.filter((s) => s.role === 'doctor' || s.role === 'admin').map((s) => ({ value: s.id, label: s.full_name }))];
+  const doctorStaff = (row) => [{ value: '', label: 'No login yet' }, ...lists.staff
+    .filter((s) => (s.role === 'doctor' || s.role === 'admin') && ((s.active && !s.deleted_at) || s.id === row?.staff_id))
+    .map((s) => ({ value: s.id, label: s.deleted_at ? `${s.full_name} (deleted)` : s.active ? s.full_name : `${s.full_name} (switched off)` }))];
   const records = await recordEditors(d, refresh);
 
   mount(root,

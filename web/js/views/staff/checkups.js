@@ -11,7 +11,7 @@ import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { editOwner } from '../../lib/desk-name.js';
 import { FOLLOW_UP_STATUSES, SOURCE_LABELS, PRICING_LABELS, monthLabel, checkupsToSheet, yesNo } from '../../lib/checkups.js';
 import { loadSheetJS } from '../../lib/sheetjs.js';
-import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupQuestions, discardGuard, canRemoveCheckup, whyNoRemove, canRegisterCheckup, registeredMr } from './checkup-actions.js';
+import { followUpSelect, registerCheckupModal, removeCheckupModal, checkupFormModal, checkupAnswersModal, formLater, checkupQuestions, discardGuard, canRemoveCheckup, whyNoRemove, canRegisterCheckup, registeredMr } from './checkup-actions.js';
 
 const QUEUE_KEY = 'checkups-pending-v1';
 const PAGE_SIZE = 50;
@@ -235,9 +235,23 @@ export async function renderCheckups(root, params, signal) {
       h('td', { class: 'cell-td' }, notes),
       h('td', { class: 'muted' }, sourceText(c)),
       h('td', {}, h('div', { class: 'row-actions' },
+        // someone put on a day's list as they came in: the checkup form after the checkup, as "Fill in form" on their row of the Aaj ki List
+        formLater(c) ? h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Fill in form for ${who}`, dataset: { focus: 'form' }, onclick: () => fillForm(c) }, 'Fill in form') : null,
         !c.patient_id && canRegisterCheckup()
           ? h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Register ${who} as a patient`, dataset: { focus: 'register' }, onclick: () => registerCheckupModal(c, { onDone: () => load() }) }, 'Register') : null,
         canEdit ? h('button', { type: 'button', class: 'btn btn-small', 'aria-haspopup': 'dialog', 'aria-label': `Edit ${who}`, dataset: { focus: 'edit' }, onclick: () => editModal(c) }, 'Edit') : null)));
+  }
+
+  // "Fill in form": the nine questions (checkupAnswersModal), which make the checkup Completed; the cursor goes to the row's Edit then
+  // (its "Fill in form" is gone).
+  async function fillForm(c) {
+    const saved = await checkupAnswersModal(c);
+    if (saved === false) { load(); return; } // it is gone
+    if (!saved) return;
+    toast(`Answers saved on ${saved.patient_name}'s checkup.`, 'ok');
+    await load();
+    const a = document.activeElement;
+    if (!a || a === document.body || a.matches('h1') || !a.isConnected) tbody.querySelector(`tr[data-id="${saved.id}"] [data-focus="edit"]`)?.focus();
   }
 
   // The same questions as "+ Add checkup patient", filled in; city, treatment details and the fee under "More". Answers are added here after

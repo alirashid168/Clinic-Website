@@ -289,7 +289,7 @@ function timedFetch(input, init = {}, hooks = {}) {
 // Database functions that only read. They are sent as POST, which timedFetch leaves alone, so callRpc gives them
 // the same time limit as a GET. Saving functions (save_invoice, close_cash, merge_patients, imports ...) have none.
 const READ_RPCS = new Set(['payments_summary', 'opd_summary', 'total_dues', 'clinic_report', 'doctor_summary', 'dues_for',
-  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins', 'day_list_history', 'day_list_copy']);
+  'find_possible_duplicates', 'next_braces_month', 'braces_guidance', 'patient_duplicates', 'staff_logins', 'staff_records', 'day_list_history', 'day_list_copy']);
 // How long to wait for the server to confirm a logout before ending it on this computer alone.
 const SIGNOUT_TIMEOUT_MS = 4000;
 
@@ -877,8 +877,12 @@ export async function createSupabaseAdapter() {
     const { data, error } = await sb.functions.invoke('admin-users', { body });
     if (error) {
       let message = error.message;
+      // No answer at all (the connection dropped, maybe after the request went out): the browser's own words ("Failed to fetch"),
+      // which friendlyError turns into plain advice, instead of the library's "Failed to send a request to the Edge Function".
+      if (error.name === 'FunctionsFetchError') message = error.context?.message || 'Failed to fetch';
       try { const sent = await error.context?.json?.(); if (sent?.error) message = sent.error; } catch { /* keep the generic text */ }
-      throw new Error(oldFunction(message));
+      // The status goes with it, so a gateway's 502/503/504 reads as "did not answer in time" (friendlyError checks e.status).
+      throw Object.assign(new Error(oldFunction(message)), { status: error.context?.status });
     }
     if (data?.error) throw new Error(oldFunction(data.error));
     return data;
@@ -897,15 +901,24 @@ export async function createSupabaseAdapter() {
     return Object.fromEntries(rows.map((r) => [r.patient_id, r]));
   }
 
+  // The visits (of a list) that have an invoice that is not void: the Invoice column of the Aaj ki List. Without billing.view
+  // the invoices are not visible (row-level security), so this is empty and the list does not show the column.
+  async function invoicedFor(visitIds) {
+    if (!visitIds.length) return new Set();
+    const rows = await byIdChunks(visitIds, (part) => sb.from('invoices').select('visit_id, status').in('visit_id', part).then(check));
+    return new Set(rows.filter((r) => r.status !== 'void').map((r) => r.visit_id));
+  }
+
   const VISIT_SELECT = '*, patient:patients(id,mr_number,full_name,phone,medical_history,photo_consent_public), visit_staff(clinician_id, role, clinician:clinicians(display_name))';
   async function enrichVisits(rows) {
     const ids = [...new Set(rows.map((r) => r.patient_id))];
-    const [dues, flags] = await Promise.all([duesFor(ids), flagsFor(ids)]);
+    const [dues, flags, invoiced] = await Promise.all([duesFor(ids), flagsFor(ids), invoicedFor(rows.map((r) => r.id))]);
     return rows.map((v) => ({
       ...v,
       staff: (v.visit_staff || []).map((s) => ({ clinician_id: s.clinician_id, role: s.role, name: s.clinician?.display_name })),
       dues: dues[v.patient_id] ?? 0,
       see_dr_ali: !!flags[v.patient_id],
+      has_invoice: invoiced.has(v.id),
     }));
   }
   async function visitById(id) {
@@ -1174,6 +1187,7 @@ export async function createSupabaseAdapter() {
     async branches() { return check(await sb.from('branches').select('*').eq('active', true).order('sort_order')); },
     async cities() { return check(await sb.from('cities').select('*').order('id')); },
     async clinicians() { return check(await sb.from('clinicians').select('*').eq('active', true).order('display_name')); },
+    async doctorGroups() { return check(await sb.from('doctor_groups').select('*').order('id')); },
     async treatments() { return check(await sb.from('treatments').select('*').eq('active', true).order('sort_order')); },
     async expenseCategories() { return check(await sb.from('expense_categories').select('*').eq('active', true).order('sort_order')); },
     async settings() {
@@ -1317,10 +1331,12 @@ export async function createSupabaseAdapter() {
     // ------------------------------------------------------------ visits
     // By token, then by when the row was added and by its id: rows with no token and one created_at (an imported day's) keep one order,
     // the same as the History's copy of that day (private.day_list_rows in 20261012000100_day_list_history.sql).
-    async listVisits({ branchId, date }) {
+    // (patientId: that patient's visits of the day only, a small read: the Aaj ki List asks it before an Mr# adds a row)
+    async listVisits({ branchId, date, patientId }) {
       let q = sb.from('visits').select(VISIT_SELECT).eq('visit_date', date).order('token_no', { ascending: true, nullsFirst: false })
         .order('created_at', { ascending: true }).order('id', { ascending: true });
       if (branchId) q = q.eq('branch_id', Number(branchId));
+      if (patientId) q = q.eq('patient_id', patientId);
       return enrichVisits(check(await q));
     },
     // Live updates: calls onChange the moment any visit at this branch (or a
@@ -1350,7 +1366,7 @@ export async function createSupabaseAdapter() {
         if (patch.dues_override_by === true) patch.dues_override_by = uid;
         if (patch.protocol_override_by === true) patch.protocol_override_by = uid;
       }
-      delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff;
+      delete patch.patient; delete patch.staff; delete patch.dues; delete patch.see_dr_ali; delete patch.visit_staff; delete patch.has_invoice;
       check(await sb.from('visits').update(patch).eq('id', id));
       return visitById(id);
     },
@@ -2032,6 +2048,19 @@ export async function createSupabaseAdapter() {
       check(await sb.from('staff').update({ active: true, deactivated_at: null }).eq('id', id));
       await sb.functions.invoke('admin-users', { body: { action: 'unban_user', user_id: id } });
     },
+    /**
+     * What the website has with this staff id on it (public.staff_records): { total, parts: [{ label, one, count }] }, most first.
+     * Only for the dialog: Delete asks the server again (delete_staff), and the server decides.
+     */
+    async staffRecords(id) {
+      const r = await rpc('staff_records', { p_staff: id });
+      if (r.missing) throw plainError('STAFF_DELETE_MISSING: Deleting staff accounts needs the database update 20261015000200_staff_delete.sql first. Nothing was changed.', 'STAFF_DELETE_MISSING');
+      return r.data;
+    },
+    /** Delete on Admin -> Staff accounts: { result: 'removed' | 'archived', total, fallback? } (admin-users delete_staff). */
+    async deleteStaff(id) { return adminUsers({ action: 'delete_staff', user_id: id }); },
+    /** Bring back from "Deleted accounts": the deleted mark goes, the account stays switched off (admin-users restore_staff). */
+    async restoreStaff(id) { await adminUsers({ action: 'restore_staff', user_id: id }); },
     async setSetting(key, value) { check(await sb.from('app_settings').update({ value, updated_at: new Date().toISOString() }).eq('key', key)); },
     async discountCaps() {
       const rows = check(await sb.from('discount_caps').select('*'));
@@ -2096,10 +2125,11 @@ export async function createSupabaseAdapter() {
         sb.from('doctor_groups').select('*').order('id').then(check),
         sb.from('treatments').select('*').order('sort_order').order('name').then(check),
         sb.from('expense_categories').select('*').order('sort_order').order('name').then(check),
-        sb.from('staff').select('id,full_name,role,active').order('full_name').then(check),
+        sb.from('staff').select('*').order('full_name').then(check),
         sb.from('doctor_commission_rules').select('*').order('percent', { ascending: false }).then(check).catch(() => []),
       ]);
-      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.filter((s) => s.active), commission_rules: rules };
+      // Every account, so a doctor's login keeps its name in the table; the Login drop-down offers only accounts that are on and not deleted.
+      return { branches, cities, clinicians, groups, treatments, categories, staff: staff.map(({ id, full_name, role, active, deleted_at }) => ({ id, full_name, role, active, deleted_at: deleted_at ?? null })), commission_rules: rules };
     },
     async saveSetupRow(table, row) {
       const tables = ['branches', 'clinicians', 'doctor_groups', 'treatments', 'expense_categories', 'doctor_commission_rules'];
