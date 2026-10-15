@@ -331,7 +331,7 @@ registerHooks({
   },
 });
 (globalThis as any).__navState = { session: { staff: { id: 's-later' } }, data: {} };
-const { arrangedMenu, myArrangement } = await import('../web/js/views/staff/nav-arrange.js');
+const { arrangedMenu, myArrangement, loadArrangement } = await import('../web/js/views/staff/nav-arrange.js');
 
 test('through shell.js\'s hook: a page added to menu() later is in its default place for someone who saved an arrangement before it existed', () => {
   // Saved with today's menu: Patients first, Stock pinned, Billing and the Coordinator drop-down taken off.
@@ -370,5 +370,69 @@ test('through shell.js\'s hook: a page added to menu() later is in its default p
   } finally {
     store.delete('staff-menu:s-later');
     if (had) Object.defineProperty(globalThis, 'location', had); else delete (globalThis as any).location;
+  }
+});
+
+// ======================================================================================= saved before the database update was run
+// Until 20261012000300 is run, Save keeps the arrangement on this computer only and says it will follow the person once the update
+// is run. loadArrangement (at every sign-in) keeps that promise: no row in the database but an arrangement on this computer, so
+// it is sent up, in the background, until a sign-in finds the row.
+test('a menu kept on this computer before 20261012000300 was run is sent up at the next sign-in, until the database has it', async () => {
+  const st = (globalThis as any).__navState;
+  const was = { session: st.session, data: st.data };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const saves: string[][] = [];
+  let row: string[] | null = null;
+  let notRunYet = true;
+  st.session = { staff: { id: 's-early' } };
+  st.data = {
+    async myMenuArrangement() { return row; },
+    async saveMyMenuArrangement(list: string[]) {
+      saves.push(list);
+      if (notRunYet) throw Object.assign(new Error('MENU_PREFS_MISSING: the menu cannot be saved in the database until its update is run.'), { code: 'MENU_PREFS_MISSING' });
+      row = list;
+    },
+  };
+  try {
+    store.set('staff-menu:s-early', JSON.stringify(['stock', '-billing']));
+    await loadArrangement();
+    await settle();
+    assert.deepEqual(saves, [['stock', '-billing']], 'tried once at this sign-in');
+    assert.deepEqual(myArrangement(), ['stock', '-billing'], 'the update not run yet: still drawn from the copy, nothing lost');
+    notRunYet = false; // the owner runs the update
+    await loadArrangement();
+    await settle();
+    assert.deepEqual(saves, [['stock', '-billing'], ['stock', '-billing']]);
+    assert.deepEqual(row, ['stock', '-billing'], 'now in the database, so it follows the person to other computers');
+    await loadArrangement();
+    await settle();
+    assert.equal(saves.length, 2, 'a sign-in that finds the row sends nothing');
+    row = ['patients']; // saved on another computer since
+    await loadArrangement();
+    await settle();
+    assert.deepEqual(myArrangement(), ['patients'], 'the database\'s row replaces the copy');
+    assert.equal(saves.length, 2);
+    // Someone else on this computer with nothing worth sending: no copy, or the clinic's own menu ([]).
+    st.session = { staff: { id: 's-never' } };
+    row = null;
+    for (const copy of [null, '[]']) {
+      if (copy === null) store.delete('staff-menu:s-never'); else store.set('staff-menu:s-never', copy);
+      await loadArrangement();
+      await settle();
+      assert.equal(saves.length, 2, `no row and copy ${copy}: nothing sent`);
+    }
+    // The sign-in never waits for the sending (a slow or hanging connection).
+    store.set('staff-menu:s-never', JSON.stringify(['stock']));
+    st.data.saveMyMenuArrangement = () => { saves.push(['hangs']); return new Promise(() => {}); };
+    const started = Date.now();
+    await loadArrangement({ wait: 2000 });
+    assert.ok(Date.now() - started < 1000, 'loadArrangement answered without waiting for the save');
+    await settle();
+    assert.deepEqual(saves.at(-1), ['hangs']);
+  } finally {
+    store.delete('staff-menu:s-early');
+    store.delete('staff-menu:s-never');
+    st.session = was.session;
+    st.data = was.data;
   }
 });

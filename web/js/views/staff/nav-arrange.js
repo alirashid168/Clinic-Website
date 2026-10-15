@@ -6,6 +6,7 @@
 // follows them to any computer, plus a copy on this computer (localStorage, per staff id) so the menu draws at once. The row
 // is read again at every sign-in (loadArrangement) and its answer replaces the copy. Until that database update is run the
 // website works as before: the default menu for everyone, and Save keeps the arrangement on this computer only (it says so).
+// The first sign-in after the update is run sends such a copy up, so it then follows the person as Save promised.
 // The copy holds only page keys, nothing about patients, so it is left behind at logout like the other per-person settings.
 import { h, modal, toast, announce } from '../../ui/dom.js';
 import { state } from '../../state.js';
@@ -14,7 +15,9 @@ import { menuEntries, topKeys, arrangeMenu, arrangementFor, cleanArrangement } f
 const COPY_KEY = (staffId) => `staff-menu:${staffId}`;
 const LONG_BAR = 9; // more entries than this on the top bar: the dialog warns that it may not fit on a small laptop
 const inMemory = new Map(); // staff id -> arrangement, for a browser that blocks storage
+const onlyHere = new Set(); // staff ids whose arrangement on this computer is not in the database yet (Save then goes through unchanged)
 let loadGen = 0; // a sign-in's read that answers after a Save must not undo it
+let sending = Promise.resolve(); // a copy that is being sent up (loadArrangement): a Save waits for it, so it is never overtaken
 
 function readCopy(staffId) {
   try {
@@ -37,14 +40,24 @@ export function myArrangement() {
 /**
  * After a sign-in: reads the person's saved arrangement from the database into the copy on this computer. Never fails, and
  * waits at most `wait` ms (shell.js loads it beside the staff lists it already waits for): a slower answer is kept for the next
- * page. No row (never saved, or the database update not run yet) keeps the copy as it is.
+ * page. No row (never saved, or the database update not run yet) keeps the copy as it is, and a copy that is not the default
+ * was saved while the update was not run: it is sent up once, in the background (while the update is still not run it stays
+ * on this computer only, and the next sign-in tries again).
  */
 export function loadArrangement({ wait = 2500 } = {}) {
   const id = state.session?.staff?.id;
   if (!id || typeof state.data?.myMenuArrangement !== 'function') return Promise.resolve();
   const gen = ++loadGen;
   const load = state.data.myMenuArrangement()
-    .then((list) => { if (list !== null && gen === loadGen && state.session?.staff?.id === id) keep(id, cleanArrangement(list)); })
+    .then((list) => {
+      if (gen !== loadGen || state.session?.staff?.id !== id) return;
+      if (list !== null) { onlyHere.delete(id); keep(id, cleanArrangement(list)); return; }
+      const copy = readCopy(id) ?? inMemory.get(id);
+      if (!copy?.length) return;
+      onlyHere.add(id);
+      sending = state.data.saveMyMenuArrangement(copy)
+        .then(() => { onlyHere.delete(id); }, () => { /* not run yet, or no connection: kept on this computer, tried again next time */ });
+    })
     .catch(() => { /* no connection or no answer: the copy on this computer is used */ });
   let timer;
   return Promise.race([load, new Promise((resolve) => { timer = setTimeout(resolve, wait); })]).finally(() => clearTimeout(timer));
@@ -102,14 +115,17 @@ function fitTopBar(nav, build, signal) {
 async function saveArrangement(list) {
   const id = state.session?.staff?.id;
   loadGen++;
+  await sending;
   try {
     await state.data.saveMyMenuArrangement(list);
   } catch (e) {
     if (e?.code !== 'MENU_PREFS_MISSING') throw e;
     keep(id, list);
+    onlyHere.add(id);
     return { here: true };
   }
   keep(id, list);
+  onlyHere.delete(id);
   return { here: false };
 }
 
@@ -136,9 +152,13 @@ export function openArrangeMenu(menu) {
   const button = (key, action, text, label, onclick, stuck = null) => {
     // The name says which page ("Move up: Patients"), starting with the words on the button. One that cannot act (Move up on the
     // first row) only looks disabled: it keeps focus, so one Enter too many says why instead of moving the page back down.
+    // The second click of a double-click is left alone, focus included: after the first one another page's button may be under
+    // the pointer, and a double-click would move that one too (or move the same page back).
+    const act = stuck ? () => announce(stuck) : onclick;
     const b = h('button', {
       type: 'button', class: 'btn btn-small', 'aria-disabled': stuck ? 'true' : null,
-      onclick: stuck ? () => announce(stuck) : onclick, 'aria-label': `${text}: ${label}`,
+      onmousedown: (ev) => { if (ev.detail > 1) ev.preventDefault(); },
+      onclick: (ev) => { if (!(ev?.detail > 1)) act(ev); }, 'aria-label': `${text}: ${label}`,
     }, text);
     buttons.set(`${key} ${action}`, b);
     return b;
@@ -155,12 +175,16 @@ export function openArrangeMenu(menu) {
     const i = ids.indexOf(id);
     return { next: [...ids.slice(i + 1), ...ids.slice(0, i).reverse()], y: buttons.get(id).getBoundingClientRect().top };
   };
-  const move = (key, by) => {
+  // A mouse click on Move up / Move down keeps the moved page's button under the pointer (the dialog scrolls by the row's shift,
+  // as far as it can), so the next click moves the same page again instead of the one that took its place.
+  const move = (key, by, ev) => {
     const i = top.indexOf(key);
     const j = i + by;
     if (i < 0 || j < 0 || j >= top.length) return;
+    const id = `${key} ${by < 0 ? 'up' : 'down'}`;
+    const place = ev?.detail ? { next: [id], y: buttons.get(id).getBoundingClientRect().top } : null;
     [top[i], top[j]] = [top[j], top[i]];
-    draw({ focus: [`${key} ${by < 0 ? 'up' : 'down'}`], moved: key });
+    draw({ focus: [id], moved: key, place });
     announce(`${name(byKey.get(key))}: number ${j + 1} of ${top.length} on the top bar.`);
   };
   const toMore = (key, ev) => {
@@ -188,8 +212,8 @@ export function openArrangeMenu(menu) {
         h('span', { class: 'arrange-name' }, name(e),
           e.kind === 'group' ? h('small', {}, inside.length ? inside.join(', ') : 'Empty: all its pages are on the top bar themselves') : null),
         h('span', { class: 'arrange-actions' },
-          button(key, 'up', 'Move up', name(e), () => move(key, -1), i === 0 ? `${name(e)} is already first on the top bar.` : null),
-          button(key, 'down', 'Move down', name(e), () => move(key, 1), i === top.length - 1 ? `${name(e)} is already last on the top bar.` : null),
+          button(key, 'up', 'Move up', name(e), (ev) => move(key, -1, ev), i === 0 ? `${name(e)} is already first on the top bar.` : null),
+          button(key, 'down', 'Move down', name(e), (ev) => move(key, 1, ev), i === top.length - 1 ? `${name(e)} is already last on the top bar.` : null),
           button(key, 'more', 'Put in More', name(e), (ev) => toMore(key, ev))));
     }));
     if (!top.length) topList.append(h('li', { class: 'arrange-row muted' }, 'Nothing on the top bar: everything is under More.'));
@@ -218,7 +242,8 @@ export function openArrangeMenu(menu) {
     count.classList.toggle('alert-warning', top.length > LONG_BAR);
     if (top.length > LONG_BAR) count.textContent += ' That is a long top bar: on a small laptop screen the last ones will be under More.';
 
-    // After a mouse click that sent a page to the other list: the next button of the same kind, moved under the pointer.
+    // After a mouse click: the button to stay under the pointer (the moved page's own, or after a page went to the other list
+    // the next button of the same kind), the dialog scrolled to bring it there.
     const stay = place?.next.map((k) => buttons.get(k)).find(Boolean);
     if (stay) {
       stay.focus({ preventScroll: true });
@@ -249,7 +274,9 @@ export function openArrangeMenu(menu) {
     } },
     { label: 'Cancel' },
     { label: 'Save', primary: true, onClick: async () => {
-      if (top.length === start.length && top.every((k, i) => k === start[i])) { toast('Nothing changed.'); return false; }
+      // Unchanged but kept on this computer only: Save tries the database again (its update may have been run since).
+      const unchanged = top.length === start.length && top.every((k, i) => k === start[i]);
+      if (unchanged && !onlyHere.has(state.session?.staff?.id)) { toast('Nothing changed.'); return false; }
       const { here } = await saveArrangement(arrangementFor(entries, top));
       toast(here ? 'Menu saved on this computer. It will follow you to other computers once the database update for it is run.' : 'Menu saved. It follows you to any computer you log in on.', 'ok');
       // Only the menus are drawn again: the page stays as it is, with anything typed on it and where it was scrolled to.

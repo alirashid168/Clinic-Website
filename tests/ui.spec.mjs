@@ -1692,6 +1692,38 @@ await step('Arrange my menu: in the name menu above "Change password"; the dialo
 });
 const movedRows = (pg) => arrangeDialog(pg).locator('.arrange-moved .arrange-name').evaluateAll((els) => els.map((el) => el.firstChild.textContent.trim()));
 const saidInDialog = (pg, text) => pg.waitForFunction((want) => [...document.querySelectorAll('.modal [role="status"]')].some((r) => r.textContent === want), text);
+await step('Arrange my menu: a double-click on "Move up" moves the page one place, and clicks at one spot keep moving the same page', async () => {
+  const d = arrangeDialog(pn);
+  // Many people double-click every button. After the first click the next page's button is under the pointer: the second click
+  // must not move that one (which put both pages back where they were).
+  await d.getByRole('button', { name: 'Move up: Patients', exact: true }).dblclick();
+  assert.deepEqual(await topRows(pn), ['Today', 'Patients', 'Aaj ki List drop-down', 'Billing', 'Reports drop-down', 'Coordinator drop-down']);
+  assert.deepEqual(await movedRows(pn), ['Patients']);
+  assert.equal(await focusedName(pn), 'Move up: Patients', 'focus stays on the moved page, not on the button the second click landed on');
+  await saidInDialog(pn, 'Patients: number 2 of 6 on the top bar.');
+  await d.getByRole('button', { name: 'Move down: Patients', exact: true }).dblclick();
+  assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
+  assert.deepEqual(await movedRows(pn), ['Patients']);
+  assert.equal(await focusedName(pn), 'Move down: Patients');
+  await d.getByRole('button', { name: 'Move up: Billing', exact: true }).dblclick();
+  assert.deepEqual(await topRows(pn), ['Today', 'Aaj ki List drop-down', 'Billing', 'Patients', 'Reports drop-down', 'Coordinator drop-down']);
+  // Single clicks at one spot: the dialog scrolls with the moved page, so its button stays under the pointer.
+  const clicksAt = async (name, times) => {
+    const box = await d.getByRole('button', { name, exact: true }).boundingBox();
+    for (let n = 0; n < times; n++) await pn.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    assert.equal(await focusedName(pn), name);
+    const now = await d.getByRole('button', { name, exact: true }).boundingBox();
+    assert.ok(Math.abs(now.y - box.y) <= 2, `${name} is still under the pointer (moved ${Math.round(now.y - box.y)} px)`);
+  };
+  await clicksAt('Move down: Today', 2);
+  assert.deepEqual((await topRows(pn)).slice(0, 4), ['Aaj ki List drop-down', 'Billing', 'Today', 'Patients']);
+  assert.deepEqual(await movedRows(pn), ['Today']);
+  await clicksAt('Move up: Today', 2);
+  assert.deepEqual((await topRows(pn)).slice(0, 4), ['Today', 'Aaj ki List drop-down', 'Billing', 'Patients']);
+  await d.getByRole('button', { name: 'Move down: Billing', exact: true }).dblclick();
+  assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS, 'back to the clinic\'s order');
+  await d.locator('.modal-body').evaluate((el) => { el.scrollTop = 0; });
+});
 await step('Arrange my menu: "Move up" moves a page up, its row stands out and focus stays on it, also with the keyboard; one Enter too many does not move it back', async () => {
   const d = arrangeDialog(pn);
   await d.getByRole('button', { name: 'Move up: Patients', exact: true }).click();
@@ -1916,6 +1948,46 @@ await step('Arrange my menu: with the Reports drop-down under More, the long Mor
   assert.ok(at.y >= 0 && at.y + at.height <= 625, `"Audit log" is on screen with focus (at ${Math.round(at.y)})`);
   await last.click();
   await pnShort.waitForFunction(() => location.hash === '#/staff/admin?tab=audit');
+});
+// Before 20261012000300 is run (the owner runs it by hand in the SQL Editor), Save keeps the menu on this computer only and says
+// it will follow the person once the update is run. The stand-in below answers like supabase.js does then: no row, and Save
+// fails with MENU_PREFS_MISSING.
+const pnEarly = await newPage();
+const savedInDatabase = (pg) => pg.evaluate(async () => (await import('/js/state.js')).state.data.myMenuArrangement());
+await step('Arrange my menu before its database update is run: kept on this computer, then in the database once the update is run (at Save, or by itself at the next login)', async () => {
+  await pnEarly.goto(BASE + '#/login/staff');
+  await pnEarly.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    await state.ready;
+    window.realMenuCalls = { myMenuArrangement: state.data.myMenuArrangement, saveMyMenuArrangement: state.data.saveMyMenuArrangement };
+    state.data.myMenuArrangement = async () => null;
+    state.data.saveMyMenuArrangement = async () => { throw Object.assign(new Error('MENU_PREFS_MISSING: the menu cannot be saved in the database until its update is run.'), { code: 'MENU_PREFS_MISSING' }); };
+  });
+  await pnEarly.getByRole('button', { name: /Dr\. Ali Rashid/ }).click();
+  await pnEarly.waitForSelector('.topbar');
+  await openArrange(pnEarly);
+  await arrangeDialog(pnEarly).getByRole('button', { name: 'Put on the top bar: Stock', exact: true }).click();
+  await arrangeDialog(pnEarly).getByRole('button', { name: 'Save', exact: true }).click();
+  await arrangeDialog(pnEarly).waitFor({ state: 'detached' });
+  await pnEarly.waitForSelector('.toast:has-text("Menu saved on this computer. It will follow you to other computers once the database update for it is run.")');
+  assert.deepEqual(await barLabels(pnEarly), [...ADMIN_BAR.slice(0, -1), 'Stock', 'More']);
+  // The update is run. Save with nothing changed now puts the menu in the database (not "Nothing changed.").
+  await pnEarly.evaluate(async () => { Object.assign((await import('/js/state.js')).state.data, window.realMenuCalls); });
+  assert.equal(await savedInDatabase(pnEarly), null);
+  await openArrange(pnEarly);
+  await arrangeDialog(pnEarly).getByRole('button', { name: 'Save', exact: true }).click();
+  await arrangeDialog(pnEarly).waitFor({ state: 'detached' });
+  await pnEarly.waitForSelector('.toast:has-text("Menu saved. It follows you to any computer you log in on.")');
+  assert.ok((await savedInDatabase(pnEarly)).includes('stock'), 'in the database');
+  // Without a Save: a reload starts the demo afresh (logged out, no row in its data, the update "run") with the copy still on this
+  // computer. The login sends it up by itself, in the background.
+  await pnEarly.reload();
+  await loginAs(pnEarly, 'Dr. Ali Rashid');
+  assert.deepEqual(await barLabels(pnEarly), [...ADMIN_BAR.slice(0, -1), 'Stock', 'More']);
+  let row = null;
+  for (let n = 0; n < 50 && !row; n++) { row = await savedInDatabase(pnEarly); if (!row) await pnEarly.waitForTimeout(100); }
+  assert.ok(row?.includes('stock'), `sent up at the login (the database has ${JSON.stringify(row)})`);
+  await shot(pnEarly, '26-menu-sent-up-after-update');
 });
 
 // ------------------------------------------------------------- the Checkups page (admin), Download Excel, the checkup list import
