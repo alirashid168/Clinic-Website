@@ -888,7 +888,9 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
    (.sheet-slot holds both, and on a laptop it is a box of its own: below). */
 .sheet-slot { display: contents; }
 .sheet-bars { flex: 1 0 100%; order: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
-.sheet-bars:not(:has(> :not([hidden]))) { display: none; }
+/* (no connection: on a phone the staff pages' banner above the top bar says it; on a laptop this line does, below) */
+.sheet-bars > .sheet-offline { display: none; }
+.sheet-bars:not(:has(> :not([hidden], .sheet-offline))) { display: none; }
 .sheet-bars > .alert, .sheet-page > .day-end-live > .alert { margin: 0; padding: var(--space-2) var(--space-3); }
 .sheet-bars > .alert { padding-block: 3px; }
 .sheet-bars > .alert-warning { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1174,8 +1176,15 @@ table.sheet td.pp { text-align: right; }
   .sheet-subhead { position: relative; z-index: 5; }
   .sheet-slot { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); overflow: hidden; }
   .sheet-slot > .sheet-new-rows { flex: 0 100 auto; }
-  .sheet-bars { flex: 0 1 auto; min-width: auto; display: flex; gap: var(--space-1); }
+  /* (min-width 0: the bars are never wider than the slot, whatever the length of a warning; each one cuts its own words,
+     a warning first, before the words of the Undo and of the changes not saved) */
+  .sheet-bars { flex: 0 1 auto; min-width: 0; display: flex; gap: var(--space-1); }
   .sheet-bars > .alert { flex: 0 1 auto; min-width: auto; height: 26px; padding: 0 var(--space-2); font-size: var(--fs-sm); line-height: 26px; }
+  .sheet-bars > .alert-warning { flex-shrink: 4; }
+  /* No connection: said here, on the line of the counts; the banner above the top bar would push the list down. */
+  .sheet-bars > .sheet-offline { display: block; }
+  .sheet-bars:has(> .sheet-offline:not([hidden])) { display: flex; }
+  body:has(.sheet-page) .offline-banner { display: none; }
   /* (the words shrink to a letter or two, so a bar is never narrower than its buttons: one line, cut with an ellipsis) */
   .sheet-bars > .alert-info > span:first-child, .sheet-fails-summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; white-space: normal; overflow-wrap: anywhere; }
   .sheet-bars > .sheet-fails { display: flex; align-items: center; }

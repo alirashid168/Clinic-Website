@@ -2880,14 +2880,15 @@ await step('busy day: while the cursor rests in a cell, the note counts every ne
   const n0 = await shown();
   const first = await addElsewhere();
   await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '1 new row, it appears when you leave the list');
-  // a reload with no new row (another row changed elsewhere, drawn again where it is): the note stays, the row still waits
+  // a reload with no new row (another row's status changed elsewhere, drawn again where it is): the new row still waits,
+  // and the note counts the changed row too (it goes to its place with them)
   await elsewhere({ [waiting[7]]: 'in_treatment' });
   await pb.waitForFunction((n) => [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.querySelector('.name-text')?.textContent === n)?.querySelector('select[aria-label^="Status for"]').value === 'in_treatment', waiting[7], { timeout: 4000 });
-  assert.equal(await note(), '1 new row, it appears when you leave the list', 'the note stays while the row waits');
+  assert.equal(await note(), '1 new row and 1 row with a new status: they go to their place when you leave the list', 'the note stays while the row waits');
   assert.equal(await shown(), n0, 'not on the list yet');
   // a second patient: two rows wait
   const second = await addElsewhere();
-  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '2 new rows, they appear when you leave the list', null, { timeout: 4000 });
+  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '2 new rows and 1 row with a new status: they go to their place when you leave the list', null, { timeout: 4000 });
   assert.equal(await shown(), n0);
   assert.ok(await treatment.evaluate((el) => el === document.activeElement), 'the cursor is still in the cell');
   // the cursor leaves the list: both come in, and the note goes
@@ -3287,6 +3288,255 @@ await step('busy day at 1366x768: the bars that come and go (the Undo of a remov
   await pb.waitForTimeout(300);
   assert.equal(await wrapTop(), top0, 'the list is where it was');
   await shot(pb, '24-sheet-bars-line');
+});
+// (a waiting row of the list with empty Treatment Details, that no step above needs as it is)
+const emptyDetails = () => pb.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')]
+  .filter((t) => t.querySelector('select[aria-label^="Status for"]').value === 'waiting' && !t.querySelector('input[aria-label^="Treatment details for"]').value)
+  .map((t) => t.querySelector('.name-text').textContent)
+  .filter((name) => { const n = Number(name.replace('Sample Patient ', '')); return n % 7 && n % 11 && n % 13 && ![87, 88, 89, 94, 95, 97, 100].includes(n); }));
+const rowNamed = (name) => pb.locator('table.sheet tbody tr', { has: pb.locator(`.name-text:text-is("${name}")`) });
+const detailsSaved = (name) => pb.evaluate(async (who) => {
+  const { state } = await import('/js/state.js');
+  const { localISO } = await import('/js/ui/dom.js');
+  return (await state.data.listVisits({ branchId: 1, date: localISO() })).find((v) => v.patient.full_name === who)?.details_text ?? null;
+}, name);
+await step('busy day at 1366x768 and 1280x720: with the app\'s own long wording in the warning, every bar on the line of the counts starts inside its room and the Undo, Try again and Show buttons take the click; Tab out of the open list of changes not saved closes it; with no connection the list does not move and the line of the counts says so', async () => {
+  await pb.mouse.move(5, 5);
+  for (const [width, height] of [[1366, 768], [1280, 720]]) {
+    await pb.setViewportSize({ width, height });
+    await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 0; });
+    const wrapTop = () => pb.locator('.sheet-wrap').evaluate((w) => Math.round(w.getBoundingClientRect().top));
+    const top0 = await wrapTop();
+    // (every bar on screen starts at or right of the slot's left edge, and every button of the bars is what a click there hits)
+    const fits = () => pb.evaluate(() => {
+      const slot = document.querySelector('.sheet-slot').getBoundingClientRect();
+      const bars = [...document.querySelectorAll('.sheet-bars > .alert')].filter((b) => b.getClientRects().length);
+      const buttons = [...document.querySelectorAll('.sheet-bars button')].filter((b) => b.getClientRects().length);
+      return {
+        outside: bars.filter((b) => b.getBoundingClientRect().left < slot.left - 0.5).map((b) => b.className),
+        covered: buttons.filter((b) => { const r = b.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) !== b; }).map((b) => b.textContent),
+        buttons: buttons.map((b) => b.textContent),
+      };
+    });
+    await pb.evaluate(async () => {
+      const { state } = await import('/js/state.js');
+      const d = state.data;
+      window.__realDayCheckups ||= d.listDayCheckups;
+      d.listDayCheckups = async () => { throw Object.assign(new Error('Gateway Timeout'), { status: 504 }); };
+      document.dispatchEvent(new CustomEvent('sheet-reload'));
+    });
+    const warn = pb.locator('.sheet-bars .alert-warning', { hasText: 'did not answer in time' });
+    await warn.waitFor({ timeout: 10000 });
+    assert.deepEqual(await fits(), { outside: [], covered: [], buttons: [] }, `${width}: the warning alone`);
+    // the Undo of a doctor taken off a row (the first row in sight with a doctor)
+    const name = await pb.evaluate(() => {
+      const w = document.querySelector('.sheet-wrap').getBoundingClientRect();
+      const tr = [...document.querySelectorAll('table.sheet tbody tr[data-id]')].find((t) => { const r = t.getBoundingClientRect(); return r.top > w.top + 30 && r.bottom < w.bottom - 10 && t.querySelector('.person .chip-remove') && t.querySelector('.name-text'); });
+      return tr.querySelector('.name-text').textContent;
+    });
+    const row = rowNamed(name);
+    await row.locator('.person').first().hover();
+    await row.locator('.person .chip-remove').first().click();
+    const undoBar = pb.locator('.sheet-bars .alert-info', { hasText: `removed from ${name}.` });
+    await undoBar.waitFor();
+    await pb.mouse.move(5, 5);
+    assert.deepEqual(await fits(), { outside: [], covered: [], buttons: ['Undo'] }, `${width}: the warning and the Undo`);
+    // a typed change the server refuses, in the same row
+    await pb.evaluate(async () => {
+      const { state } = await import('/js/state.js');
+      const d = state.data;
+      window.__realUpdateVisit ||= d.updateVisit;
+      d.updateVisit = async (id, changes) => { if ('details_text' in changes) throw new Error('Sample: the server refused this change'); return window.__realUpdateVisit.call(d, id, changes); };
+    });
+    await row.locator('input[aria-label^="Treatment details for"]').click();
+    await pb.keyboard.press('End');
+    await pb.keyboard.type(' x');
+    const fails = pb.locator('#sheet-save-failures');
+    await fails.waitFor({ timeout: 10000 });
+    await pb.locator('input[aria-label="Find on this list"]').focus();
+    assert.deepEqual(await fits(), { outside: [], covered: [], buttons: ['Try again', 'Show', 'Undo'] }, `${width}: the warning, the Undo and the changes not saved`);
+    assert.equal(await wrapTop(), top0, `${width}: the list did not move`);
+    // the list of the changes not saved, opened with the keyboard, closes once Tab has left it (it would cover what Tab reaches)
+    await fails.getByRole('button', { name: 'Show' }).focus();
+    await pb.keyboard.press('Enter');
+    assert.ok(await fails.locator('.sheet-fails-list').isVisible(), 'the list is open');
+    for (let i = 0; i < 8 && await fails.evaluate((el) => el.contains(document.activeElement)); i++) await pb.keyboard.press('Tab');
+    assert.ok(!(await fails.evaluate((el) => el.contains(document.activeElement))), 'Tab has left the list');
+    assert.ok(await fails.locator('.sheet-fails-list').isHidden(), 'and it closed');
+    await fails.getByRole('button', { name: 'Show' }).click();
+    await fails.getByRole('button', { name: `Discard: ${name}, Treatment details` }).click();
+    await pb.locator('.modal').getByRole('button', { name: 'Discard', exact: true }).click();
+    await fails.waitFor({ state: 'hidden' });
+    await pb.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.updateVisit = window.__realUpdateVisit; });
+    await undoBar.getByRole('button', { name: 'Undo' }).click();
+    await undoBar.waitFor({ state: 'hidden' });
+    // no connection: the banner of the staff pages would push the list down, so the line of the counts says it
+    await pb.context().setOffline(true);
+    const offline = pb.locator('.sheet-bars .sheet-offline');
+    await offline.waitFor();
+    assert.match(await offline.innerText(), /^No internet connection/);
+    assert.ok(await pb.locator('.offline-banner').isHidden(), 'no banner above the top bar on this page');
+    assert.equal(await wrapTop(), top0, `${width}: the list did not move when the connection dropped`);
+    assert.deepEqual((await fits()).outside, [], `${width}: the bars with no connection`);
+    await pb.context().setOffline(false);
+    await offline.waitFor({ state: 'hidden' });
+    assert.equal(await wrapTop(), top0, `${width}: nor when it came back`);
+    await pb.evaluate(async () => {
+      const { state } = await import('/js/state.js');
+      state.data.listDayCheckups = window.__realDayCheckups;
+      document.activeElement?.blur();
+      document.dispatchEvent(new CustomEvent('sheet-reload'));
+    });
+    await warn.waitFor({ state: 'hidden' });
+  }
+  await pb.setViewportSize({ width: 1366, height: 768 });
+});
+await step('busy day: a status picked with the mouse and the cursor left on its chip: a note says the row waits, and once nothing has been pressed for 15 seconds it goes to its place, the cursor still on its chip and the list not scrolled', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 0; });
+  await pb.waitForFunction(sortedLikeTheSheet, null, { timeout: 15000 });
+  const name = (await spareWaiting())[3];
+  const at = () => pb.evaluate((who) => [...document.querySelectorAll('table.sheet tbody tr[data-id]')].findIndex((t) => t.querySelector('.name-text')?.textContent === who), name);
+  const before = await at();
+  const status = rowNamed(name).locator('select[aria-label^="Status for"]');
+  await status.click();
+  await status.selectOption('in_treatment');
+  const picked = Date.now();
+  await pb.mouse.move(5, 5);
+  const note = pb.locator('.sheet-new-rows');
+  await pb.waitForFunction(() => document.querySelector('.sheet-new-rows').textContent === '1 row with a new status goes to its place when you leave the list');
+  const scrolled = await pb.evaluate(() => document.querySelector('.sheet-wrap').scrollTop);
+  await pb.waitForTimeout(8000);
+  assert.equal(await at(), before, 'still in its place 8 seconds after');
+  await pb.waitForFunction(([b]) => {
+    const i = [...document.querySelectorAll('table.sheet tbody tr[data-id]')].findIndex((t) => t.contains(document.activeElement));
+    return i > b;
+  }, [before], { timeout: 12000 });
+  assert.ok(Date.now() - picked >= 14000, 'not before the 15 seconds: ' + (Date.now() - picked));
+  assert.ok(await status.evaluate((el) => el === document.activeElement), 'the cursor is on its chip, in its new place');
+  assert.equal(await status.inputValue(), 'in_treatment');
+  assert.ok(await pb.evaluate(sortedLikeTheSheet), 'sorted like the sheet');
+  assert.equal(await note.innerText(), '', 'the note has gone');
+  assert.equal(await pb.evaluate(() => document.querySelector('.sheet-wrap').scrollTop), scrolled, 'the list did not scroll');
+  await pb.evaluate(() => document.activeElement?.blur());
+});
+await step('busy day: quick-tap: a tap, the list reloaded while the dialog is open (the row is drawn again behind it), more taps and Done: the cell has every tap, and typing in it carries on from them', async () => {
+  await pb.evaluate(() => document.activeElement?.blur());
+  const name = (await emptyDetails())[0];
+  const row = rowNamed(name);
+  const details = row.locator('input[aria-label^="Treatment details for"]');
+  await row.locator('.quick-tap').click();
+  await pb.locator('.modal button:text-is("U L")').click();
+  for (let i = 0; i < 30 && (await detailsSaved(name)) !== 'U L'; i++) await pb.waitForTimeout(200);
+  await pb.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
+  // another computer writes a note on the same visit and the list is told (or the 20-second check finds it): the row is
+  // drawn again behind the dialog
+  await row.evaluate((tr) => { tr.dataset.before = 'yes'; });
+  await pb.evaluate(async (who) => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const v = (await state.data.listVisits({ branchId: 1, date: localISO() })).find((x) => x.patient.full_name === who);
+    await state.data.updateVisit(v.id, { notes: 'Sample: called ahead' });
+    document.dispatchEvent(new CustomEvent('sheet-reload'));
+  }, name);
+  await pb.waitForFunction((who) => { const tr = [...document.querySelectorAll('table.sheet tbody tr')].find((t) => t.querySelector('.name-text')?.textContent === who); return tr && !tr.dataset.before; }, name, { timeout: 25000 });
+  await pb.locator('.modal button:text-is("018")').click();
+  await pb.locator('.modal button:text-is("PC")').click();
+  await pb.locator('.modal').getByRole('button', { name: 'Done' }).click();
+  await pb.waitForSelector('.modal', { state: 'detached' });
+  assert.equal(await details.inputValue(), 'U L 018 PC', 'the cell has every tap');
+  await details.click();
+  await pb.keyboard.press('End');
+  await pb.keyboard.type(' refresh');
+  for (let i = 0; i < 30 && (await detailsSaved(name)) !== 'U L 018 PC refresh'; i++) await pb.waitForTimeout(200);
+  assert.equal(await detailsSaved(name), 'U L 018 PC refresh', 'saved with every tap and the typing after them');
+  await pb.evaluate(() => document.activeElement?.blur());
+});
+await step('busy day, slow server, no live update: a reload that read the list before a typed change reached the database, and answers after it was saved, does not put the old text back when the list is drawn', async () => {
+  // (a page of its own: the queue of typed changes starts empty, so the save goes out at its usual time)
+  const ps = await newPage({ width: 1366, height: 768 });
+  await loginAs(ps, 'Front desk \\(Gulshan\\)');
+  await ps.goto(BASE + '#/staff/sheet?demo=busy');
+  await ps.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr').length >= 120);
+  await ps.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    const real = { listVisits: d.listVisits, updateVisit: d.updateVisit };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    window.__t = { reads: [], saved: [] };
+    // (a save is in the database 100 ms after it is sent and answers 100 ms later; the list is read at once and answers 900 ms later)
+    d.updateVisit = async (...a) => { await wait(100); const out = await real.updateVisit.apply(d, a); window.__t.saved.push(Date.now()); await wait(100); return out; };
+    d.listVisits = async (args) => { const list = await real.listVisits.call(d, args); if (!args.patientId) { const at = Date.now(); await wait(900); window.__t.reads.push([at, Date.now()]); } return list; };
+    document.activeElement?.blur();
+  });
+  const name = await ps.evaluate(() => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')]
+    .find((t) => t.querySelector('select[aria-label^="Status for"]').value === 'waiting' && !t.querySelector('input[aria-label^="Treatment details for"]').value).querySelector('.name-text').textContent);
+  const details = ps.locator('table.sheet tbody tr', { has: ps.locator(`.name-text:text-is("${name}")`) }).locator('input[aria-label^="Treatment details for"]');
+  await details.click();
+  await ps.keyboard.type('U L 016 PC', { delay: 40 });
+  await ps.waitForTimeout(80);
+  await ps.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload'))); // (the 20-second check)
+  await ps.waitForTimeout(2000);
+  const t = await ps.evaluate(() => window.__t);
+  assert.ok(t.reads.length && t.saved.length && t.reads[0][0] < t.saved[0] && t.reads[0][1] > t.saved[0] + 100, 'the reload read the list before the save and answered after it: ' + JSON.stringify(t));
+  assert.equal(await ps.locator('.save-status').innerText(), 'All changes saved');
+  await ps.locator('h1').click(); // (the person leaves the list: it is drawn once the 5 seconds after the last key are over)
+  await ps.waitForTimeout(6500);
+  assert.equal(await details.inputValue(), 'U L 016 PC', 'the cell keeps what was typed');
+  await details.click();
+  await ps.keyboard.press('End');
+  await ps.keyboard.type(' refresh');
+  const saved = () => ps.evaluate(async (who) => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    return (await state.data.listVisits({ branchId: 1, date: localISO() })).find((v) => v.patient.full_name === who)?.details_text;
+  }, name);
+  for (let i = 0; i < 30 && (await saved()) !== 'U L 016 PC refresh'; i++) await ps.waitForTimeout(200);
+  assert.equal(await saved(), 'U L 016 PC refresh', 'saved with the typing after it, the earlier text kept');
+  await ps.close();
+});
+await step('busy day: a quiet reload with nothing new draws nothing; after a click on a Token cell, a change from another computer draws the list again, and Tab goes on in that row (no jump to the first row, no scrolling); scrolling with the mouse wheel holds the list like a key or a click', async () => {
+  await pb.mouse.move(5, 5);
+  await pb.evaluate(() => { document.activeElement?.blur(); document.querySelector('.sheet-wrap').scrollTop = 1000; });
+  await pb.waitForTimeout(5500); // (the 5 seconds after the last key or click in the list)
+  const mark = () => pb.evaluate(() => { for (const tr of document.querySelectorAll('table.sheet tbody tr')) tr.dataset.mark = 'yes'; });
+  const marked = () => pb.evaluate(() => document.querySelectorAll('table.sheet tbody tr[data-mark]').length);
+  await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload'))); // (what the steps above changed is drawn)
+  await pb.waitForTimeout(1000);
+  await mark();
+  await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload')));
+  await pb.waitForTimeout(1000);
+  assert.ok((await marked()) >= 120, 'the rows on screen are the ones drawn before: ' + (await marked()));
+  // a click on the Token cell of a row in the middle of the screen, then another computer marks a waiting patient No show
+  const name = await pb.evaluate(() => {
+    const w = document.querySelector('.sheet-wrap').getBoundingClientRect();
+    const trs = [...document.querySelectorAll('table.sheet tbody tr[data-id]:not(.is-checkup)')].filter((t) => { const r = t.getBoundingClientRect(); return r.top > w.top + 200 && r.bottom < w.bottom - 100; });
+    return trs[0].querySelector('.name-text').textContent;
+  });
+  await rowNamed(name).locator('td:has(> .token)').click();
+  const scrolled = await pb.evaluate(() => document.querySelector('.sheet-wrap').scrollTop);
+  await elsewhere({ [(await spareWaiting())[0]]: 'no_show' });
+  await pb.waitForFunction(() => !document.querySelector('table.sheet tbody tr[data-mark]'), null, { timeout: 12000 }); // (drawn again)
+  await pb.keyboard.press('Tab');
+  assert.deepEqual(await pb.evaluate(() => [document.activeElement?.closest('tr')?.querySelector('.name-text')?.textContent, document.activeElement?.dataset.focus]), [name, 'status'], 'Tab goes to the Status of that row');
+  assert.equal(await pb.evaluate(() => document.querySelector('.sheet-wrap').scrollTop), scrolled, 'the list did not scroll');
+  await pb.evaluate(() => document.activeElement?.blur());
+  // the wheel: a click in the list, a change from another computer, then the list scrolled with the wheel for 7 seconds:
+  // nothing is drawn while the wheel turns, and the list is drawn once it has stopped for 5 seconds
+  await pb.waitForTimeout(5500);
+  const box = await pb.locator('.sheet-wrap').boundingBox();
+  await pb.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await rowNamed(name).locator('td:has(> .token)').click();
+  await mark();
+  await elsewhere({ [(await spareWaiting())[0]]: 'no_show' });
+  const started = Date.now();
+  for (let i = 0; Date.now() - started < 7000; i++) { await pb.mouse.wheel(0, i % 2 ? -50 : 50); await pb.waitForTimeout(250); }
+  assert.ok((await marked()) >= 100, 'not drawn while the wheel turns: ' + (await marked()));
+  const stopped = Date.now();
+  await pb.waitForFunction(() => document.querySelectorAll('table.sheet tbody tr[data-mark]').length < 10, null, { timeout: 10000 });
+  assert.ok(Date.now() - stopped >= 3500, 'drawn once the wheel had stopped for a while: ' + (Date.now() - stopped));
+  assert.ok(await pb.evaluate(sortedLikeTheSheet), 'sorted like the sheet');
+  await pb.mouse.move(5, 5);
 });
 await step('busy day on a phone (390px, touch, 44px rows): every chip\'s × is in sight and takes the tap, and a name cut short is whole in the tooltip', async () => {
   const pt = await newPage({ width: 390, height: 844 }, { isMobile: true, hasTouch: true });

@@ -127,6 +127,9 @@ let queue = null;
 let queueUser = null;
 let saveUI = null; // the save-status display of the Aaj ki List on screen, if any
 let hadProblem = false;
+// Typed changes the server has confirmed: a reload whose answer comes back after one of them may have read the list before
+// it was saved, so its answer is not used (renderSheet's load).
+let typedSaved = 0;
 
 const currentUser = () => state.session?.staff?.id || null;
 const failedEdits = () => (Array.isArray(queue?.failed) ? queue.failed : []);
@@ -172,6 +175,7 @@ function getQueue() {
           // null = the checkup was removed meanwhile (or is not visible any more): nothing is left to save, the list is refreshed.
           if ((await state.data.updateCheckup(edit.rowId, edit.changes)) === null) document.dispatchEvent(new CustomEvent('sheet-reload'));
         } else await state.data.updateVisit(edit.rowId, edit.changes);
+        typedSaved++;
       } catch (e) {
         // Lost connection or no answer: the queue retries quietly (with backoff, and gives up after a few tries).
         // Anything else is the server's "no".
@@ -243,28 +247,41 @@ export async function renderSheet(root, params, signal) {
 
   // ---- When the rows move (owner, 11 Oct 2026: a row must never jump away under the cursor).
   // Only draw() sorts the list; a save in one row draws that row alone, in its place, with its number (redrawRow). draw()
-  // never runs by itself while the person is working in the table: the cursor (focus) is in it, a key or a press (mouse,
-  // pen or finger) in it was less than QUIET_MS ago, or a dialog is open. A mouse that only rests on the rows is not
-  // working in it. A reload meanwhile (a live update, the 20-second check, a dialog's change) keeps what it brought: a row
+  // never runs by itself while the person is working in the table: a key, a press (mouse, pen or finger) or the mouse
+  // wheel in the list (its scroll bar too) was less than QUIET_MS ago, the cursor (focus) is in it, or a dialog is open. A
+  // mouse that only rests on the rows is not working in it. The cursor left resting in the table holds the list for
+  // IDLE_MS after the last key or press (so the list is sorted when the person has stopped, as the owner wants it), unless
+  // it is in typed text that is not saved yet or a status or group chosen and not saved yet: those hold it until they are
+  // saved. A reload meanwhile (a live update, the 20-second check, a dialog's change) keeps what it brought: a row
   // changed on another computer is drawn again where it is (not the row with the cursor; that one is drawn again at the
-  // first reload after the cursor has left it, drawnData), a new row waits (a short note says how many rows wait,
-  // newRowsNote), and the whole list is drawn and sorted as soon as the person is done: whenFree looks again when the
-  // cursor leaves the table and when the quiet time is over. A redraw never scrolls the list or the page (draw).
+  // first reload after the cursor has left it, drawnData), a new row and a row whose status changed wait (a short note
+  // says how many rows wait, newRowsNote), and the whole list is drawn and sorted as soon as the person is done: whenFree
+  // looks again when the cursor leaves the table and when the quiet time is over. A redraw never scrolls the list or the
+  // page, and the cursor stays on the same control (draw).
   // (The person's own changes to what the list shows, a filter, another day or branch, or a patient they remove, draw it at
   // once: they are at the toolbar or a dialog then. A patient they add is drawn at once from the add line, and waits like a
   // new row from elsewhere if they have gone back into the table meanwhile: drawAdded.)
-  // Nothing above the list changes its height by itself on a laptop either: the Undo bar, a warning and the changes not
-  // saved come on the line of the counts (app.css .sheet-slot), so they never move the rows.
+  // Nothing above the list changes its height by itself on a laptop either: the Undo bar, a warning, the changes not saved
+  // and no connection come on the line of the counts (app.css .sheet-slot), so they never move the rows.
   const QUIET_MS = 5000;
-  let lastTouch = 0; // the last key or press in the table
+  const IDLE_MS = 15000;
+  let lastTouch = 0; // the last key, press or wheel in the list (the listeners are on .sheet-wrap, where the page is put together)
+  const touched = () => { lastTouch = Date.now(); };
   let drawHeld = false; // the list waits to be drawn and sorted again
   let reloadHeld = false; // a reload in the background came back older than a change made here: asked again when the person is done
   let freeTimer = null;
-  for (const ev of ['keydown', 'pointerdown', 'input']) sheetTable.addEventListener(ev, () => { lastTouch = Date.now(); });
+  // The status and group chips of the rows on screen (commitOnFinish of each): a choice made with the arrow keys is not
+  // saved until Enter or leaving the chip.
+  const choices = new WeakMap();
+  const choosing = (el) => !!choices.get(el)?.pending();
   // How long until the person is done with the table (0: done now).
   function waitMs() {
-    if (document.querySelector('.modal') || sheetTable.contains(document.activeElement)) return 1000;
-    return Math.max(0, QUIET_MS - (Date.now() - lastTouch));
+    if (document.querySelector('.modal')) return 1000;
+    const quiet = Date.now() - lastTouch;
+    const el = document.activeElement;
+    if (!sheetTable.contains(el)) return Math.max(0, QUIET_MS - quiet);
+    if (el === unsavedCell || choosing(el)) return 1000;
+    return Math.max(0, IDLE_MS - quiet);
   }
   function whenFree() {
     clearTimeout(freeTimer);
@@ -284,11 +301,12 @@ export async function renderSheet(root, params, signal) {
   }
 
   // Where each row was sorted when the list was last drawn (keyOf -> { rank, token }, see draw), the data each row on screen
-  // was drawn from (keyOf -> JSON: draw, replaceRow; a reload draws again the rows whose data is not that any more), which
-  // day and branch the rows on screen are for (drawnKey; rowsKey: the ones in `rows`), and the row the add line last put
-  // the cursor in (keyOf; onKey).
+  // was drawn from (keyOf -> JSON: draw, replaceRow; a reload draws again the rows whose data is not that any more) and
+  // their order (drawnOrder), which day and branch the rows on screen are for (drawnKey; rowsKey: the ones in `rows`), and
+  // the row the add line last put the cursor in (keyOf; onKey).
   let placed = new Map();
   let drawnData = new Map();
+  let drawnOrder = '';
   let drawnKey = '';
   let rowsKey = '';
   let fromAddLine = null;
@@ -335,10 +353,12 @@ export async function renderSheet(root, params, signal) {
   }
   showFails(false);
   failBox.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !failList.hidden) { e.preventDefault(); e.stopPropagation(); showFails(false); failToggle.focus(); } });
-  // (only where the list opens over the rows: on a phone it is in the page's flow, and closing it would move what was tapped)
-  document.addEventListener('pointerdown', (e) => {
-    if (!failList.hidden && getComputedStyle(failList).position === 'absolute' && !failBox.contains(e.target) && !e.target.closest?.('.modal-backdrop')) showFails(false);
-  }, { signal: life.signal });
+  // It closes when the person goes on elsewhere: a click outside it, or Tab out of it (it would cover the control Tab goes
+  // to), but not for its Discard dialog. (Only where the list opens over the rows: on a phone it is in the page's flow, and
+  // closing it would move what was tapped.)
+  const goneFromFails = (el) => !failList.hidden && getComputedStyle(failList).position === 'absolute' && !failBox.contains(el) && !el.closest?.('.modal-backdrop');
+  document.addEventListener('pointerdown', (e) => { if (goneFromFails(e.target)) showFails(false); }, { signal: life.signal });
+  failBox.addEventListener('focusout', (e) => { if (e.relatedTarget && goneFromFails(e.relatedTarget)) showFails(false); });
   const discard = (f) => modal('Discard this change?', h('p', {}, `${describeEdit(f.edit)} will not be saved. This cannot be undone.`), [
     { label: 'Keep it' },
     { label: 'Discard', danger: true, onClick: () => { q.discardFailed(f.key); announce('Change discarded.'); } },
@@ -525,7 +545,8 @@ export async function renderSheet(root, params, signal) {
   // the rows on screen (drawnKey) is a new list whatever asked for it: a reload in the background asked while another day
   // was on its way takes the place of that load (below), and its answer must not leave the old day's rows on screen.
   // An answer is the list as it was when it was asked for. Only the last one asked for is used (the day or branch may have
-  // changed meanwhile), and not one asked for before a change made on this screen (listVersion): it would take that change
+  // changed meanwhile), and not one asked for before a change made on this screen (listVersion) or that comes back after a
+  // typed change was saved (typedSaved: it may have read the list before that save reached it): it would take that change
   // off the screen again (a patient just added by Mr#, with the cursor in their row; a cell typed and saved), so the list is
   // asked for again (a reload in the background: once the person is done). Typed changes still on their way to the server
   // are put on the rows that come back.
@@ -536,12 +557,13 @@ export async function renderSheet(root, params, signal) {
     const quiet = how?.quiet === true;
     const seq = ++loadSeq;
     const version = listVersion;
+    const saved = typedSaved;
     const key = `${branchId}|${date}`;
     try {
       const [visitRows, checkupRows] = await Promise.all([d.listVisits({ branchId: branchId || null, date }), loadCheckups()]);
       if (seq !== loadSeq) return;
       const newList = how === NEW_LIST || key !== drawnKey;
-      if (version !== listVersion) {
+      if (version !== listVersion || saved !== typedSaved) {
         if (quiet && !newList) { reloadHeld = true; whenFree(); } else await load(newList ? NEW_LIST : how);
         return;
       }
@@ -573,10 +595,18 @@ export async function renderSheet(root, params, signal) {
     markInvalid();
   }
   // How many rows the filters show that are not on screen yet (the list was not drawn since they came): all of them, not
-  // only the ones the last reload brought.
+  // only the ones the last reload brought; and how many rows on screen are not in their place any more (a new status, here
+  // or on another computer, or no longer shown by the filters).
   function noteWaiting() {
-    const shown = [...rows.filter(matches).map((r) => `v:${r.id}`), ...shownCheckups().map((c) => `c:${c.id}`)];
-    noteNewRows(shown.filter((key) => !placed.has(key)).length);
+    let fresh = 0;
+    let moved = 0;
+    for (const item of [...rows.map((row) => ({ row, checkup: false })), ...dayListCheckups(checkups, rows).map((row) => ({ row, checkup: true }))]) {
+      const shown = item.checkup ? checkupMatches(item.row) : matches(item.row);
+      const was = placed.get(keyOf(item));
+      if (!was) fresh += shown ? 1 : 0;
+      else if (!shown || movedFrom(item, was)) moved++;
+    }
+    noteNewRows(fresh, moved);
   }
 
   // The day's list as a spreadsheet file (for the clinic cloud or printing). Checkup patients are added after the
@@ -964,6 +994,7 @@ export async function renderSheet(root, params, signal) {
     };
     const groupCtl = commitOnFinish(group, (value) => changeGroup(row, value, groupCtl), (value) => { group.className = chipSelect(groupTone(value)); unknownGroup(); });
     unknownGroup();
+    choices.set(status, ctl).set(group, groupCtl);
 
     const treatment = h('input', {
       class: 'cell-input center', value: capFirst(row.treatment_label), list: 'sheet-treatments', disabled: !canEdit, 'aria-label': `Treatment for ${who}`,
@@ -980,11 +1011,24 @@ export async function renderSheet(root, params, signal) {
         ['Wire', ['012', '014', '016', '018', '020', '17x25', '19x25']],
         ['Done', ['PC', 'O-rings', 'Refresh', 'Rebond', 'Ligature', 'Elastics', 'Cross arch', 'Ext', 'IPR', 'Bite blocks']],
       ];
-      const add = (t) => { details.value = (details.value ? details.value.replace(/\s+$/, '') + ' ' : '') + t; details.title = details.value; save(row, 'details_text', details.value); };
+      // The row can be drawn again while this is open (a reload, the echo of a tap's own save), so a tap adds to the text the
+      // list has for the row now (save keeps it up to date) and writes it in the cell the row has on screen now; closing
+      // draws the row from the list, as the row's dialog does for the note.
+      let tapped = false;
+      const add = (t) => {
+        const now = rows.find((r) => r.id === row.id) || row;
+        const text = (now.details_text ? now.details_text.replace(/\s+$/, '') + ' ' : '') + t;
+        save(row, 'details_text', text);
+        tapped = true;
+        const cell = tableBody.querySelector(`tr[data-id="${row.id}"]:not([data-kind]) [data-focus="details"]`);
+        if (cell) { cell.value = text; cell.title = text; }
+      };
       modal(`Treatment details · ${who}`, h('div', {},
         groups.map(([name, items]) => h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'field-label' }, name),
           h('div', { class: 'inline' }, items.map((t) => h('button', { type: 'button', class: 'btn btn-small', onclick: () => add(t) }, t))))),
-        h('p', { class: 'muted' }, 'Tap to add to the details; type anything else in the cell itself.')), [{ label: 'Done', primary: true }]);
+        h('p', { class: 'muted' }, 'Tap to add to the details; type anything else in the cell itself.')), [{ label: 'Done', primary: true }], {
+        onClose: () => { const now = tapped && rows.find((r) => r.id === row.id); if (now) redrawRow(now); },
+      });
     } }, h('span', { 'aria-hidden': 'true' }, '+')) : null;
     // The braces month as the sheet writes it ("07", "10 Photo"): green when the month needs photos, purple otherwise.
     const monthNo = String(row.braces_month || '').padStart(2, '0');
@@ -1062,6 +1106,7 @@ export async function renderSheet(root, params, signal) {
       disabled: !canEdit, dataset: { focus: 'status' },
     }, (c.day_status ? DAY_STATUSES : ['', ...DAY_STATUSES]).map((value) => h('option', { value, selected: value === (c.day_status || '') }, value ? STATUS_LABELS[value] : 'Not set')));
     const ctl = commitOnFinish(status, (value) => changeCheckupStatus(c, value, ctl), (value) => { status.className = chipSelect(statusTone(value)); });
+    choices.set(status, ctl);
     const text = (fieldName, label, props = {}) => h('input', {
       class: 'cell-input', value: fieldName === 'checkup_for' ? capFirst(c[fieldName]) : c[fieldName] || '', disabled: !canEdit, 'aria-label': `${label} for ${who}`, autocomplete: 'off',
       dataset: { focus: fieldName, field: fieldName }, oninput: (e) => saveCheckup(c, fieldName, e.target.value), ...props,
@@ -1133,6 +1178,28 @@ export async function renderSheet(root, params, signal) {
     }
     if (saved.caret && target?.setSelectionRange) { try { target.setSelectionRange(saved.caret[0], saved.caret[1]); } catch { /* not a text field */ } }
   }
+  // A click on a cell with no control in it (Token, #, P.P, an empty Month) leaves the cursor on no control, and the next
+  // Tab starts from the place clicked (the browser keeps it, with the caret of the selection there). A row drawn new loses
+  // that place, and the next Tab would go to the first row and scroll the list there: the place is put back in the same
+  // cell of the new row. (Chrome starts the next Tab after the element that last had the focus, so the cell has it for a
+  // moment, without scrolling; the caret goes back there too.)
+  function tabPlace() {
+    if (document.activeElement && document.activeElement !== document.body) return null;
+    const node = window.getSelection()?.anchorNode;
+    const cell = node && tableBody.contains(node) ? (node.nodeType === 1 ? node : node.parentElement).closest('td, th') : null;
+    const key = cell && rowKey(cell);
+    return key ? { key, col: [...cell.parentElement.children].indexOf(cell) } : null;
+  }
+  function putTabPlace(place) {
+    const cell = place && [...tableBody.children].find((tr) => rowKey(tr) === place.key)?.children[place.col];
+    const sel = window.getSelection();
+    if (!cell || cell.contains(sel.anchorNode) || (document.activeElement && document.activeElement !== document.body)) return;
+    cell.tabIndex = -1;
+    cell.focus({ preventScroll: true });
+    cell.blur();
+    cell.removeAttribute('tabindex');
+    sel.collapse(cell, 0);
+  }
 
   // Draw one row again after a save (make = rowEl for a visit, checkupRowEl for a checkup patient): it keeps its place and
   // its row number, whatever its status is now (only draw sorts the list; settle asks for that once the person is done).
@@ -1140,6 +1207,7 @@ export async function renderSheet(root, params, signal) {
     listVersion++; // (a change made here: a reload asked for before it would take it off the screen, see load)
     replaceRow(row, make);
     settle({ row, checkup: make === checkupRowEl });
+    noteWaiting();
     drawCounts();
     markInvalid();
   }
@@ -1164,8 +1232,10 @@ export async function renderSheet(root, params, signal) {
       countHiddenPeople(old);
     } else {
       const saved = focused ? rememberFocus() : null;
+      const place = tabPlace();
       old.replaceWith(tr);
       restoreFocus(saved);
+      putTabPlace(place);
       countHiddenPeople(tr);
     }
   }
@@ -1232,27 +1302,36 @@ export async function renderSheet(root, params, signal) {
     drawWarning();
     const inUse = [filter && !checkupsOnly, doctorFilter, groupFilter, duesOnly, bracesOnly].filter(Boolean).length;
     filterBtn.textContent = inUse ? `Filters (${inUse})` : 'Filters';
-    const saved = rememberFocus();
     const items = [...rows.filter(matches).map((row) => ({ row, checkup: false })), ...shownCheckups().map((row) => ({ row, checkup: true }))]
       .map((item) => ({ ...item, rank: rankOf(item), token: tokenOf(item) })).sort(listOrder);
     placed = new Map(items.map((item) => [keyOf(item), { rank: item.rank, token: item.token }]));
-    drawnData = new Map(items.map((item) => [keyOf(item), JSON.stringify(item.row)]));
     drawnKey = rowsKey;
-    const wrap = tableBody.closest('.sheet-wrap');
-    const scrolled = [wrap?.scrollTop, wrap?.scrollLeft, window.scrollX, window.scrollY];
-    let n = 0;
-    let done = 0;
-    const serial = (item) => (COMPLETED_OWN_COUNT && item.rank === STATUS_RANK.completed ? ++done : ++n);
-    mount(tableBody, items.length ? items.map((item) => (item.checkup ? checkupRowEl(item.row, serial(item)) : rowEl(item.row, serial(item))))
-      : h('tr', {}, h('td', { class: 'empty-cell', colspan: colgroup.children.length }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" to add them.` : 'No patients or checkups on any list for this day.'))));
-    restoreFocus(saved);
+    // Nothing to draw when the rows on screen are these, in this order, drawn from this data (the 20-second check of a quiet
+    // list, say): the rows stay as they are, with the person's place in them.
+    const order = [branchId, ...items.map(keyOf)].join(' ');
+    const json = items.map((item) => JSON.stringify(item.row));
+    if (order !== drawnOrder || items.some((item, i) => drawnData.get(keyOf(item)) !== json[i])) {
+      drawnOrder = order;
+      drawnData = new Map(items.map((item, i) => [keyOf(item), json[i]]));
+      const saved = rememberFocus();
+      const place = tabPlace();
+      const wrap = tableBody.closest('.sheet-wrap');
+      const scrolled = [wrap?.scrollTop, wrap?.scrollLeft, window.scrollX, window.scrollY];
+      let n = 0;
+      let done = 0;
+      const serial = (item) => (COMPLETED_OWN_COUNT && item.rank === STATUS_RANK.completed ? ++done : ++n);
+      mount(tableBody, items.length ? items.map((item) => (item.checkup ? checkupRowEl(item.row, serial(item)) : rowEl(item.row, serial(item))))
+        : h('tr', {}, h('td', { class: 'empty-cell', colspan: colgroup.children.length }, h('div', { class: 'empty' }, branchId ? `No patients or checkups on the list for ${branchName(branchId)} on this day yet. Use "Add a patient" to add them.` : 'No patients or checkups on any list for this day.'))));
+      restoreFocus(saved);
+      putTabPlace(place);
+      countHiddenPeople();
+      fit();
+      if (wrap) { wrap.scrollTop = scrolled[0]; wrap.scrollLeft = scrolled[1]; }
+      if (window.scrollX !== scrolled[2] || window.scrollY !== scrolled[3]) window.scrollTo(scrolled[2], scrolled[3]);
+    } else fit();
     noteNewRows(0);
     drawCounts();
     markInvalid();
-    countHiddenPeople();
-    fit();
-    if (wrap) { wrap.scrollTop = scrolled[0]; wrap.scrollLeft = scrolled[1]; }
-    if (window.scrollX !== scrolled[2] || window.scrollY !== scrolled[3]) window.scrollTo(scrolled[2], scrolled[3]);
   }
 
   // Arrow keys / Enter move between cells like a spreadsheet (Enter keeps what was typed: leaving the cell saves it), to the
@@ -1424,13 +1503,23 @@ export async function renderSheet(root, params, signal) {
     warnBox.textContent = text;
     warnBox.title = text; // (one line: the whole text is in the tooltip, and read out)
   }
+  // No internet connection (load-shedding). On a laptop the staff pages' banner above the top bar would push the list down
+  // at any moment, so app.css hides it on this page and the line of the counts says it instead (the staff pages announce
+  // it too). On a phone the banner stays and this line is not shown.
+  const OFFLINE_TEXT = 'No internet connection: typing in the cells is kept on this device. Status, group, doctor and new-patient changes need the connection.';
+  const offlineBox = h('div', { class: 'alert alert-warning sheet-offline', title: OFFLINE_TEXT, hidden: navigator.onLine }, OFFLINE_TEXT);
+  for (const ev of ['online', 'offline']) window.addEventListener(ev, () => { offlineBox.hidden = navigator.onLine; }, { signal: life.signal });
   // Rows another computer (or the Google Sheet, or an add that came back late) has put on the list while the person works in
-  // the table: they come in at their place in the order once the person is done ("When the rows move", at the top), that
-  // is once the cursor has left the list. Said quietly, in a few words, for as long as they wait (noteWaiting).
+  // the table, and rows whose status changed meanwhile: they come in at (or go to) their place in the order once the
+  // person is done ("When the rows move", at the top), that is once the cursor has left the list or rested there a while.
+  // Said quietly, in a few words, for as long as they wait (noteWaiting).
   const newRowsNote = h('span', { class: 'sheet-new-rows', role: 'status' });
-  function noteNewRows(n) {
-    const text = n ? `${n} new row${n === 1 ? ', it appears' : 's, they appear'} when you leave the list` : '';
-    if (newRowsNote.textContent !== text) newRowsNote.textContent = text;
+  function noteNewRows(fresh = 0, moved = 0) {
+    const several = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const text = fresh && moved ? `${several(fresh, 'new row')} and ${several(moved, 'row')} with a new status: they go to their place when you leave the list`
+      : fresh ? `${fresh} new row${fresh === 1 ? ', it appears' : 's, they appear'} when you leave the list`
+        : moved ? `${several(moved, 'row')} with a new status ${moved === 1 ? 'goes to its' : 'go to their'} place when you leave the list` : '';
+    if (newRowsNote.textContent !== text) { newRowsNote.textContent = text; newRowsNote.title = text; } // (cut short on a narrow line: whole in the tooltip)
   }
   // A reload in the background: live updates, the 20-second check, a save the server refused. What it brings waits to be
   // drawn while the person is working in the table (load); a hidden tab reloads when it comes back.
@@ -1497,13 +1586,12 @@ export async function renderSheet(root, params, signal) {
         h('a', { class: 'btn btn-small', href: `#/staff/queue?branch=${branchId || ''}` }, 'Queue board'),
         dayEnd.historyLink, dayEnd.button, dayEnd.hint,
         can('export.data') || can('finance.view') ? h('button', { type: 'button', class: 'btn btn-small', onclick: download }, 'Download') : null)),
-    // The bars that come and go (the changes not saved, the Undo of a removal, a warning) never cover the list or the save
-    // status. On a laptop they are on the line of the counts, in the room between the counts and the save status, with the
-    // note of new rows (app.css .sheet-slot): one line that never changes its height, so they never move the rows (the
-    // changes not saved take the save status's place there). On a phone they are on lines of their own under the counts,
-    // in the page's flow. The note of an ended day is under the
-    // list on a laptop, above the add line.
-    h('div', { class: 'sheet-subhead' }, countsBox, h('div', { class: 'sheet-slot' }, newRowsNote, h('div', { class: 'sheet-bars' }, failBox, undoBox, warnBox)), saveStatus),
+    // The bars that come and go (the changes not saved, the Undo of a removal, a warning, no connection) never cover the
+    // list or the save status. On a laptop they are on the line of the counts, in the room between the counts and the save
+    // status, with the note of new rows (app.css .sheet-slot): one line that never changes its height, so they never move
+    // the rows (the changes not saved take the save status's place there). On a phone they are on lines of their own under
+    // the counts, in the page's flow. The note of an ended day is under the list on a laptop, above the add line.
+    h('div', { class: 'sheet-subhead' }, countsBox, h('div', { class: 'sheet-slot' }, newRowsNote, h('div', { class: 'sheet-bars' }, failBox, undoBox, warnBox, offlineBox)), saveStatus),
     dayEnd.note,
     statusHint,
     h('datalist', { id: 'sheet-treatments' }, state.ref.treatments.map((t) => h('option', { value: t.name }))),
@@ -1529,6 +1617,9 @@ export async function renderSheet(root, params, signal) {
           heading('Contact No'),
           heading('Reminder Status', { title: 'Reminder Status: empty on the sheet too, until the clinic starts using it' }))),
         tableBody)));
+  // Working in the list ("When the rows move", at the top): a key, a press or the mouse wheel anywhere in its box, which
+  // holds its scroll bar too (scrolling to the next patient is working in it).
+  for (const ev of ['keydown', 'pointerdown', 'input', 'wheel']) sheetTable.parentElement.addEventListener(ev, touched, { passive: true });
   // On a laptop or bigger screen the list fills the window to its bottom edge, so the header row stays at the top and the
   // add line at the bottom while the rows scroll; app.css sizes .sheet-page from where it starts (--sheet-top).
   function fit() {

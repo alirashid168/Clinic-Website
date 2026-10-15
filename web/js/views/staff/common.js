@@ -148,7 +148,8 @@ export function patientSearch({ placeholder = 'Search name, Mr# or phone', label
  * neither saves a provisional change. (A select can have two options with one
  * value, such as the Aaj ki List's group the sheet names and "No group": Escape
  * goes back to the option that was chosen, not just to its value.)
- * Returns { set(value) } to move the committed value (e.g. revert after a failed save).
+ * Returns { set(value), pending() }: set moves the committed value (e.g. revert
+ * after a failed save); pending() is true while a value is chosen and not saved.
  */
 export function commitOnFinish(el, onCommit, onPreview) {
   let committed = el.value;
@@ -183,7 +184,7 @@ export function commitOnFinish(el, onCommit, onPreview) {
   el.addEventListener('change', () => { onPreview?.(el.value); if (!fromKey) finish(); });
   // (looked at once the blur is over: the control being removed is still in the page while its blur runs)
   el.addEventListener('blur', () => queueMicrotask(() => { if (el.isConnected && document.activeElement !== el) finish(); }));
-  return { set: (value) => { committed = value; el.value = value; committedAt = el.selectedIndex; onPreview?.(value); } };
+  return { set: (value) => { committed = value; el.value = value; committedAt = el.selectedIndex; onPreview?.(value); }, pending: () => el.value !== committed };
 }
 
 /** New patient form with branch dropdown and duplicate check. Resolves with the created patient. */
