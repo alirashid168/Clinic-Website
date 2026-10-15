@@ -403,7 +403,9 @@ export function createDemoAdapter() {
   // { viaFunction: true }: a row the live site's admin-users Edge Function writes itself, which never gets the header (no name).
   let desk = null; // { staffId, name }
   const deskName = () => (me()?.shared_login && desk?.staffId === me().id ? desk.name : null);
-  const audit = (table, action, row, { viaFunction = false } = {}) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', desk_name: viaFunction ? null : deskName(), at: new Date().toISOString() });
+  // { before }: the row as it was, for an edit (Edit invoice / Edit payment show the old and new values).
+  const audit = (table, action, row, { viaFunction = false, before = null } = {}) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient',
+    desk_name: viaFunction ? null : deskName(), at: new Date().toISOString(), old_data: before ? clone(before) : null, new_data: action === 'DELETE' ? null : clone(row) });
   // The clinic's money (20261015000400_finance_privacy.sql): totals for finance.view or billing.view; the cash closing's amounts for
   // finance.view, cash.verify or billing.view; the rest of the staff are refused, or get rows without amounts.
   const seesTotals = () => can('finance.view') || can('billing.view');
@@ -413,11 +415,6 @@ export function createDemoAdapter() {
   const karachiDay = (ts) => (/(Z|[+-]\d\d:?\d\d)$/.test(String(ts)) ? localISO(new Date(ts)) : String(ts).slice(0, 10));
   // Cash taken at a branch on a day (public.expected_cash: cash payments minus cash refunds, every row whoever asks).
   const cashIn = (branchId, date) => db.payments.filter((p) => p.branch_id === Number(branchId) && p.method === 'cash' && karachiDay(p.received_at) === date).reduce((s, p) => s + p.amount, 0);
-<<<<<<< billing-desk
-  const audit = (table, action, row, before = null) => db.audit.unshift({ table_name: table, action, row_id: row?.id, actor: me()?.full_name || 'patient', at: new Date().toISOString(),
-    old_data: before ? clone(before) : null, new_data: action === 'DELETE' ? null : clone(row) });
-=======
->>>>>>> golive
   const patient = (id) => db.patients.find((p) => p.id === id);
   // An invoice line as invoice_items keeps it (with its discount, its price-list item and who did it), and the database's line rules.
   const lineRow = (it) => ({ description: it.description, quantity: Number(it.quantity || 1), unit_price: Number(it.unit_price), discount_amount: Number(it.discount_amount || 0),
@@ -1398,7 +1395,7 @@ export function createDemoAdapter() {
       if (!reason) fail('A reason is required to void an invoice');
       const inv = db.invoices.find((i) => i.id === id);
       const before = clone(inv);
-      inv.status = 'void'; inv.void_reason = reason; audit('invoices', 'UPDATE', inv, before);
+      inv.status = 'void'; inv.void_reason = reason; audit('invoices', 'UPDATE', inv, { before });
     },
     /** As edit_invoice (20261015000900_billing_desk.sql): an issued invoice's lines, discounts and note, with the discount limits. */
     async editInvoice(id, { items, discount_amount = 0, discount_reason = null, notes = null }) {
@@ -1421,7 +1418,7 @@ export function createDemoAdapter() {
       const sameLines = JSON.stringify(inv.items.map(lineRow).map((x) => JSON.stringify(x)).sort()) === JSON.stringify(items.map(lineRow).map((x) => JSON.stringify(x)).sort());
       if (sameLines && off === inv.discount_amount && why === (inv.discount_reason || null) && note === (inv.notes || null)) return clone(inv);
       if (!sameLines) {
-        for (const it of inv.items) audit('invoice_items', 'DELETE', it, it);
+        for (const it of inv.items) audit('invoice_items', 'DELETE', it, { before: it });
         inv.items = items.map((it) => ({ id: uid(), ...lineRow(it) }));
         for (const it of inv.items) audit('invoice_items', 'INSERT', it);
       }
@@ -1433,7 +1430,7 @@ export function createDemoAdapter() {
         inv.status = 'pending_approval';
         db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: off, reason: why, status: 'pending', created_at: new Date().toISOString() });
       }
-      audit('invoices', 'UPDATE', inv, before);
+      audit('invoices', 'UPDATE', inv, { before });
       return clone(inv);
     },
     /** A payment's method, amount, time or note (the "edit payments" policy: billing.edit at their branches; a refund needs billing.refund). */
@@ -1448,7 +1445,7 @@ export function createDemoAdapter() {
       if (next.amount !== Number(pay.amount) && (next.amount < 0 || Number(pay.amount) < 0) && !can('billing.refund')) fail('Only staff who give refunds ("Give refunds" in the access list) change the amount of a refund or turn a payment into one.');
       const before = clone(pay);
       Object.assign(pay, next);
-      audit('payments', 'UPDATE', pay, before);
+      audit('payments', 'UPDATE', pay, { before });
       return clone(pay);
     },
     /** As cash_day_closed (20261015000900): whether the cash of a day is closed at a branch, for billing.edit at their branches. */

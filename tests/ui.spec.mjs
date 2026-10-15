@@ -8706,7 +8706,6 @@ await step('End the day after midnight: a page opened before midnight says what 
 });
 await pmid.close();
 
-<<<<<<< billing-desk
 // ------------------------------------------------------------- Bill on the Aaj ki List, the invoice form with the payment, the printed bill and
 // "Create ▾" (owner, 15 Oct 2026: "the add invoice button should be on the aaj ki list ... payment could be taken and an invoice bill printout
 // provided for the patient"; "a create button with drop down having patient, invoice and health record").
@@ -9353,7 +9352,6 @@ await step('Bill on a phone: a name beside Bill is not cut; the invoice form nam
   assert.ok(await m.getByLabel('Performed by, line 1').evaluate((s) => s.scrollWidth <= s.clientWidth + 1 && s.getBoundingClientRect().width > 250), 'the doctor box has the width of the line');
   await pp.close();
 });
-=======
 // ------------------------------------------------------------- shared logins: "Please enter your name" (the owner, 15 Oct 2026)
 // "instead of name picker, just give a popup saying please enter your name". The demo's "Front desk Islamabad" is a shared login.
 // The demo keeps its data in the page's memory, so the shared desk and Dr. Ali share one page (hash changes only). A demo login does
@@ -9677,7 +9675,6 @@ await step('shared login in two tabs: "Change name" in one tab makes the other a
   assert.equal(await accountLabel(tabA), 'Front desk Islamabad · Sample Sadia');
 });
 await twoTabs.close();
->>>>>>> golive
 
 // ------------------------------------------------------------- logging out after no activity
 // The owner (15 Oct): "please remove force log out. the google sheet stays logged in for days and days". session_timeout_minutes 0
