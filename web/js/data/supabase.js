@@ -1204,6 +1204,22 @@ export async function createSupabaseAdapter() {
       ]);
       return { ...p, dues: dues[id] ?? 0, flag: flags[id] || null, braces_case, visits, invoices, payments, photos, documents: documents || [], plans: plans || [], retainers, complaints };
     },
+    /**
+     * A patient's X-rays (the xrays table; files in the private "xrays" bucket), newest first. Each carries url (the original),
+     * thumb_url (240 px when IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); re-sign with
+     * signedUrls([storage_path], { bucket: 'xrays' }). [] for a role without xrays.view (the row policy shows them none).
+     */
+    async patientXrays(id) {
+      const rows = check(await sb.from('xrays').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).order('created_at', { ascending: false }));
+      const paths = rows.map((r) => r.storage_path);
+      const [urls, resized] = await Promise.all([
+        signedUrls(paths, { bucket: 'xrays' }).catch(() => new Map()),
+        IMAGE_TRANSFORMS ? signedUrls(paths, { bucket: 'xrays', width: 240 }).catch(() => null) : null,
+      ]);
+      const expires = Date.now() + SIGNED_URL_TTL * 1000;
+      for (const x of rows) { x.url = urls.get(x.storage_path) || null; x.thumb_url = resized?.get(x.storage_path) || x.url; x.url_expires_at = expires; }
+      return rows;
+    },
 
     // ------------------------------------------------------------ braces
     async bracesGuidance(patientId) {
@@ -1460,6 +1476,46 @@ export async function createSupabaseAdapter() {
       return check(await sb.from('patient_documents').insert({
         patient_id: patientId, kind, title: title || file.name, storage_path: path, added_on: addedOn || todayISO(), uploaded_by: await userId(),
       }).select().single());
+    },
+    /**
+     * Deletes a document: its file first, then its row (public.delete_patient_document, 20261015000700), so a failure in between
+     * leaves the row on the record to delete again, never a file nobody can find. { clearConsent } also unticks "Consent signed"
+     * when this was the last consent form. Resolves { deleted, consent_cleared, consent_forms_left }.
+     */
+    async deleteDocument(doc, { clearConsent = false } = {}) {
+      check(await sb.storage.from('patient-documents').remove([doc.storage_path]));
+      const res = await rpc('delete_patient_document', { p_document: doc.id, p_clear_consent: !!clearConsent });
+      if (res.missing) throw plainError('Deleting documents needs the database update of 15 Oct (20261015000700_patient_documents_delete.sql). Ask Dr. Ali to apply it.', 'DOCUMENTS_DELETE_MISSING');
+      return res.data;
+    },
+    /**
+     * An X-ray into the xrays table, its file in the private "xrays" bucket (<patient_id>/<date>_<kind>_<key>.<ext>, which the
+     * patient may read as their own). Pass { idempotencyKey } (one per file, kept across retries) as for uploadPhoto: pressing
+     * Upload again after a failure neither uploads the file twice nor records it twice.
+     */
+    async uploadXray({ patientId, visitId = null, file, kind = 'OPG', takenOn = null, notes = null, idempotencyKey = null }) {
+      const key = idempotencyKey || null;
+      const prior = key ? partial.get('xray:' + key) : null;
+      if (prior?.row) return prior.row;
+      const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+      const day = takenOn || todayISO();
+      const path = prior?.path || `${patientId}/${day}_${(kind || 'X-ray').replace(/\W+/g, '-').replace(/^-|-$/g, '')}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
+      if (!prior?.uploaded) {
+        const { error } = await sb.storage.from('xrays').upload(path, file, { contentType: file.type || undefined, upsert: false });
+        // Same key, same path: "already exists" means an earlier attempt uploaded it.
+        const duplicate = error && key && (String(error.statusCode || error.status) === '409' || /already exists|duplicate/i.test(error.message || ''));
+        if (error && !duplicate) check({ error });
+        if (key) partial.set('xray:' + key, { path, uploaded: true });
+        if (duplicate) {
+          const existing = check(await sb.from('xrays').select('*').eq('storage_path', path).maybeSingle());
+          if (existing) { partial.set('xray:' + key, { path, uploaded: true, row: existing }); return existing; }
+        }
+      }
+      const row = check(await sb.from('xrays').insert({
+        patient_id: patientId, visit_id: visitId || null, kind: kind || 'OPG', taken_on: day, notes: notes || null, storage_path: path, uploaded_by: await userId(),
+      }).select().single());
+      if (key) partial.set('xray:' + key, { path, uploaded: true, row });
+      return row;
     },
 
     // ------------------------------------------------------------ billing

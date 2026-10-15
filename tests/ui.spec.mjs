@@ -2571,13 +2571,113 @@ await step('edited photo upload is marked for the patient and the website', asyn
   await p7.waitForSelector('table.list tbody tr');
   await p7.click('table.list tbody tr:first-child a');
   await p7.waitForSelector('h2:has-text("Photos and X-rays")');
-  await p7.getByRole('button', { name: 'Upload photos' }).click();
+  await p7.locator('.profile-uploads').getByRole('button', { name: 'Upload picture' }).click();
   await p7.setInputFiles('.modal input[type=file]', { name: 'after.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64') });
   await p7.locator('.modal label:has-text("Edited before/after") input').check();
   await p7.locator('.modal').getByRole('button', { name: 'Upload' }).click();
   await p7.waitForSelector('.toast:has-text("uploaded")');
   await p7.waitForSelector('figcaption:has-text("edited (patient sees it)")');
 });
+
+// The owner (15 Oct 2026): "there should be a upload picture and upload x ray button on all patient profile and consent form upload
+// button with add or delete option too". The three buttons sit together near the top of every profile, each for those who may use it.
+const pu = await newPage();
+let puPatient = null; // the profile used by these steps: { url, name }
+const uploadButtons = (pg) => pg.locator('.profile-uploads button').allInnerTexts();
+const onePixel = (name) => ({ name, mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64') });
+await step('patient profile upload buttons per role: the front desk has "Upload consent form" only (at the top and in the Documents panel, beside Add document)', async () => {
+  await loginAs(pu, 'Front desk \\(North Nazimabad\\)');
+  await pu.goto(BASE + '#/staff/patients');
+  await pu.waitForSelector('table.list tbody tr');
+  await pu.click('table.list tbody tr:first-child a');
+  await pu.waitForSelector('h2:has-text("Photos and X-rays")');
+  puPatient = { url: pu.url(), name: await pu.locator('h1').innerText() };
+  assert.deepEqual(await uploadButtons(pu), ['Upload consent form']);
+  assert.equal(await pu.locator('.photos-panel button').count(), 0, 'no picture or X-ray buttons in the Photos and X-rays panel');
+  const docs = pu.locator('section.panel', { has: pu.locator('h2:has-text("Documents")') });
+  assert.deepEqual(await docs.locator('h2:has-text("Documents") + .inline button').allInnerTexts(), ['Upload consent form', 'Add document']);
+});
+await step('assistant: all three buttons; Upload X-ray saves into the X-ray store and the new X-rays show in Photos and X-rays as X-rays', async () => {
+  await tryAnotherRole(pu);
+  await loginAs(pu, 'Assistant');
+  await pu.goto(puPatient.url);
+  await pu.waitForSelector('h2:has-text("Photos and X-rays")');
+  assert.deepEqual(await uploadButtons(pu), ['Upload picture', 'Upload X-ray', 'Upload consent form']);
+  assert.deepEqual(await pu.locator('.photos-panel .panel-head button').allInnerTexts(), ['Upload picture', 'Upload X-ray'], 'the same two in the panel');
+  await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload X-ray' }).click();
+  const m = pu.locator('.modal');
+  await m.locator(`h2:has-text("Upload X-ray · ${puPatient.name}")`).waitFor();
+  const input = m.locator('input[type=file]');
+  assert.equal(await input.getAttribute('accept'), 'image/*', 'images (a phone or tablet offers the camera)');
+  assert.equal(await input.evaluate((el) => el.multiple), true, 'several at once');
+  await m.getByRole('button', { name: 'Upload' }).click();
+  await m.getByText('Choose at least one X-ray.').waitFor();
+  await input.setInputFiles([onePixel('opg-1.png'), onePixel('opg-2.png')]);
+  await m.getByLabel('Type').selectOption('Periapical (PA)');
+  await m.getByRole('button', { name: 'Upload' }).click();
+  await pu.waitForSelector('.toast:has-text("2 X-rays uploaded.")');
+  await m.waitFor({ state: 'detached' });
+  const tiles = pu.locator('.photos-panel figure.xray-tile');
+  await tiles.first().waitFor();
+  assert.equal(await tiles.count(), 2, 'both X-rays are in the panel straight away');
+  assert.match(await tiles.first().locator('figcaption').innerText(), /^X-ray .*Periapical \(PA\)/);
+  assert.equal(await tiles.first().locator('img').getAttribute('alt'), 'X-ray (Periapical (PA))');
+  assert.ok((await tiles.first().locator('img').getAttribute('src')).startsWith('data:image/png'), 'the X-ray image is shown');
+  await shot(pu, '31-patient-upload-buttons');
+});
+await step('assistant (who may not edit the patient): Upload consent form takes photos of the pages and ticks "Consent signed"', async () => {
+  await pu.waitForSelector('.badge:has-text("No treatment consent on file")');
+  await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload consent form' }).click();
+  const m = pu.locator('.modal');
+  await m.locator(`h2:has-text("Upload consent form · ${puPatient.name}")`).waitFor();
+  assert.equal(await m.getByLabel('Type').count(), 0, 'the type is fixed: a consent form');
+  assert.equal(await m.locator('input[type=file]').getAttribute('accept'), 'application/pdf,image/*');
+  await m.locator('input[type=file]').setInputFiles([onePixel('consent-page-1.png'), onePixel('consent-page-2.png')]);
+  await m.getByRole('button', { name: 'Save' }).click();
+  await pu.locator('.toast', { hasText: '2 files saved. "Consent signed" is now ticked.' }).waitFor();
+  await pu.waitForSelector('.profile-flags .badge-ok:has-text("Consent signed")');
+  const rows = pu.locator('.documents-list tbody tr');
+  assert.deepEqual(await rows.locator('td:nth-child(3)').allInnerTexts(), ['Consent and information form (1 of 2)', 'Consent and information form (2 of 2)']);
+  assert.deepEqual(await rows.locator('td:nth-child(2)').allInnerTexts(), ['Consent form', 'Consent form']);
+});
+await step('accountant: no upload buttons, no Add document or Delete, and no X-rays on the profile', async () => {
+  await tryAnotherRole(pu);
+  await loginAs(pu, 'Accountant');
+  await pu.goto(puPatient.url);
+  await pu.waitForSelector('h2:has-text("Photos and X-rays")');
+  await pu.locator('.documents-list').waitFor();
+  assert.equal(await pu.locator('.profile-uploads').count(), 0);
+  assert.equal(await pu.getByRole('button', { name: /^(Upload|Add document|Delete)/ }).count(), 0);
+  assert.equal(await pu.locator('figure.xray-tile').count(), 0, 'X-rays need xrays.view');
+});
+await step('Delete removes a document after confirming; the last consent form asks whether to untick "Consent signed"', async () => {
+  await tryAnotherRole(pu);
+  await loginAs(pu, 'Assistant');
+  await pu.goto(puPatient.url);
+  await pu.locator('.documents-list').waitFor();
+  const del = (title) => pu.locator('.documents-list').getByRole('button', { name: `Delete ${title}` });
+  const m = pu.locator('.modal');
+  await del('Consent and information form (1 of 2)').click();
+  await m.locator('h2:has-text("Delete this document?")').waitFor();
+  assert.equal(await m.locator('p').first().innerText(), `Delete Consent and information form (1 of 2) from ${puPatient.name}'s record? This cannot be undone.`);
+  assert.equal(await m.locator('input[type=checkbox]').count(), 0, 'another consent form is left: nothing to untick');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.waitFor({ state: 'detached' });
+  assert.equal(await pu.locator('.documents-list tbody tr').count(), 2, 'Cancel deletes nothing');
+  await del('Consent and information form (1 of 2)').click();
+  await m.getByRole('button', { name: 'Delete', exact: true }).click();
+  await pu.waitForSelector('.toast:has-text("Document deleted.")');
+  await m.waitFor({ state: 'detached' });
+  await pu.waitForFunction(() => document.querySelectorAll('.documents-list tbody tr').length === 1);
+  await pu.waitForSelector('.profile-flags .badge-ok:has-text("Consent signed")');
+  await del('Consent and information form (2 of 2)').click();
+  await m.getByLabel(/last consent form on the record/).check();
+  await m.getByRole('button', { name: 'Delete', exact: true }).click();
+  await pu.locator('.toast', { hasText: 'Document deleted. "Consent signed" is unticked.' }).waitFor();
+  await pu.waitForSelector('text=No documents yet.');
+  await pu.waitForSelector('.profile-flags .badge:has-text("No treatment consent on file")');
+});
+await pu.close();
 
 await step('duplicate patients: a second record with the same phone is found and merged', async () => {
   // Patient 2 in the demo has phone 03010734521 (i = 1). Register a second record with that number.
