@@ -32,12 +32,19 @@ export const pageKey = (href) => (/^#\/staff\/./.test(String(href || '')) ? Stri
 const groupKey = (key) => `menu:${key}`;
 const isLink = (m) => !m.items && !!pageKey(m.href);
 
-/** A saved arrangement as read from storage or the database: only well-formed keys, each once, at most MAX_KEYS. */
+/**
+ * A saved arrangement as read from storage or the database: only well-formed keys, each once, at most MAX_KEYS. It stops at
+ * the 60th key and looks at each entry once, so even a damaged or tampered copy with a huge list is cleaned at once.
+ */
 export function cleanArrangement(value) {
   if (!Array.isArray(value)) return [];
   const out = [];
-  for (const k of value) if (typeof k === 'string' && KEY_PATTERN.test(k) && !out.includes(k)) out.push(k);
-  return out.slice(0, MAX_KEYS);
+  const seen = new Set();
+  for (const k of value) {
+    if (out.length >= MAX_KEYS) break;
+    if (typeof k === 'string' && KEY_PATTERN.test(k) && !seen.has(k)) { seen.add(k); out.push(k); }
+  }
+  return out;
 }
 
 /**
@@ -139,9 +146,12 @@ export function atAddress(key, here) {
 /**
  * The menu in the same shape as menu(), arranged by `saved`. The clinic's own menu comes back unchanged (the same array) when
  * nothing differs from it. { spill: n } moves the last n entries of the top bar into More (a top bar too long for the screen).
- * { here } is the address on screen ('#/staff/coordinator?tab=lab'): a page with a tab on the top bar is marked as the
- * current one (key = its section, as shell.js's current() expects) only on that very tab. The pages change tabs without a
- * new address event, so nav-arrange.js marks such a link again from the address as it is then (atAddress).
+ * { here } is the address on screen ('#/staff/coordinator?tab=lab'): a page put on the top bar from a drop-down (or More) is
+ * marked as the current one (key = its section, as shell.js's current() expects) only at its own address, on that very tab.
+ * shell.js's current() also counts a section's other pages as that drop-down's (Checkups and History of Aaj ki List light
+ * up the Aaj ki List drop-down), so going by the key alone would mark "Aaj ki List (today)" as the page on screen beside
+ * Checkups. The pages change tabs without a new address event, so nav-arrange.js marks a link with a tab again from the
+ * address as it is then (atAddress). The clinic's own top-bar links keep shell.js's rule (Patients on a patient's file).
  */
 export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
   const entries = menuEntries(menu);
@@ -154,7 +164,7 @@ export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
   const pinned = (e) => {
     const { path, params } = parse(e.key);
     const tab = [...params.keys()].length > 0;
-    const current = !tab || atAddress(e.key, here);
+    const current = (e.group === null && !tab) || atAddress(e.key, here);
     return { ...e.item, label: barLabel(entries, e), key: current ? (e.item.key || path) : `page:${e.key}` };
   };
   const out = [];

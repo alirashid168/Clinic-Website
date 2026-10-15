@@ -224,8 +224,25 @@ export async function renderStaff(root, path, params, signOut) {
   // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
   const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
+  // A sub-heading (a drop-down put under More with "Arrange my menu") heads a group of its own that ends at the next line or
+  // sub-heading: the pages after it are More's own, not that drop-down's, to the eye (they are not indented under it) and to
+  // a screen reader (the group is named after the sub-heading).
+  const drawerItems = (m) => {
+    const out = [];
+    let sub = null;
+    m.items.forEach((i, n) => {
+      if (i.divider) sub = null;
+      else if (i.heading) {
+        const id = `drawer-group-${m.key}-${n}`;
+        sub = h('div', { class: 'drawer-subgroup', role: 'group', 'aria-labelledby': id }, h('div', { class: 'nav-group nav-subgroup', id }, i.heading));
+        out.push(sub);
+      } else if (sub) sub.append(drawerLink(i));
+      else out.push(drawerLink(i));
+    });
+    return out;
+  };
   const drawerEntry = (m) => (m.items
-    ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), m.items.filter((i) => !i.divider).map((i) => (i.heading ? h('div', { class: 'nav-group nav-subgroup' }, i.heading) : drawerLink(i))))
+    ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), drawerItems(m))
     : drawerLink(m, current(m.key)));
   const drawerLinks = h('div', { class: 'drawer-links' }); // its entries: arrangeNav, below
   const drawer = h('nav', { class: 'sidebar', id: 'staff-drawer', 'aria-label': 'Staff navigation' },

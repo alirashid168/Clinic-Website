@@ -2,8 +2,9 @@
 // The menu below has the shape of shell.js's menu() (links, drop-downs, dividers), already cut down by permission like menu()
 // does it: menuFor(keys) keeps only the pages in `keys`. What it pins down: the clinic's menu comes back untouched, moving and
 // pinning pages, putting a drop-down under More (with its name), saved keys of removed pages or pages the person may not open
-// are skipped, pages added later appear in their default place, a top bar too long for the screen spills into More, and what
-// is saved stays within the database's limits.
+// are skipped, pages added later appear in their default place, a top bar too long for the screen spills into More, a pinned
+// page is the page on screen only at its own address, what is saved stays within the database's limits, and a huge damaged
+// copy on this computer costs no time.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
@@ -81,11 +82,35 @@ test('moving a page up changes the order of the top bar and nothing else', () =>
 
 test('pinning a page from More puts it on the top bar as a link and takes it out of More', () => {
   const m = ADMIN();
-  const out = arrangeMenu(m, arrangementFor(menuEntries(m), [...DEFAULT_TOP, 'stock']));
+  const out = arrangeMenu(m, arrangementFor(menuEntries(m), [...DEFAULT_TOP, 'stock']), { here: '#/staff/stock' });
   assert.deepEqual(bar(out), ['Today', 'Aaj ki List ▾', 'Patients', 'Billing', 'Reports ▾', 'Coordinator ▾', 'Stock', 'More ▾']);
   assert.deepEqual(more(out), ['Complaints', '---', 'Staff accounts', 'Audit log']);
   const stock = out.find((x: Item) => x.label === 'Stock');
-  assert.deepEqual([stock.href, stock.key, stock.items], ['#/staff/stock', 'stock', undefined]);
+  assert.deepEqual([stock.href, stock.key, stock.items], ['#/staff/stock', 'stock', undefined], 'on the Stock page it is the current page');
+  assert.equal(arrangeMenu(m, [...DEFAULT_TOP, 'stock'], { here: '#/staff/complaints' }).find((x: Item) => x.label === 'Stock').key, 'page:stock', 'elsewhere it is not');
+});
+
+test('a page pinned from a drop-down is the current page only at its own address, not on the other pages that light up its drop-down', () => {
+  // shell.js's current() counts Checkups (and History of Aaj ki List) as the Aaj ki List drop-down's section ('sheet'): the
+  // pinned Aaj ki List page, whose key is also 'sheet', must not light up with them.
+  const m = ADMIN();
+  const saved = [...DEFAULT_TOP, 'sheet', 'checkups', 'queue'];
+  const keyOf = (here: string, label: string) => arrangeMenu(m, saved, { here }).find((x: Item) => x.label === label && !x.items).key;
+  assert.equal(keyOf('#/staff/checkups', 'Aaj ki List (today)'), 'page:sheet', 'on Checkups the Aaj ki List link is not the page on screen');
+  assert.equal(keyOf('#/staff/checkups', 'Checkups'), 'checkups');
+  assert.equal(keyOf('#/staff/checkups?q=0300', 'Checkups'), 'checkups', 'a search in the address is still the Checkups page');
+  assert.equal(keyOf('#/staff/sheet', 'Aaj ki List (today)'), 'sheet');
+  assert.equal(keyOf('#/staff/sheet?date=2026-10-14', 'Aaj ki List (today)'), 'sheet');
+  assert.equal(keyOf('#/staff/queue', 'Aaj ki List (today)'), 'page:sheet');
+  assert.equal(keyOf('#/staff/sheet', 'Queue board'), 'page:queue');
+  // On every page at most one pinned link carries a section key that shell.js's current() maps the page to.
+  const sectionOf: Record<string, string[]> = { sheet: ['sheet'], checkups: ['checkups', 'sheet'], queue: ['queue'] };
+  for (const [page, keys] of Object.entries(sectionOf)) {
+    const lit = arrangeMenu(m, saved, { here: `#/staff/${page}` }).filter((x: Item) => !x.items && keys.includes(x.key)).map((x: Item) => x.label);
+    assert.ok(lit.length <= 1, `on ${page} only one link is the page on screen: ${lit.join(', ')}`);
+  }
+  // The clinic's own top-bar links keep shell.js's rule: Patients stays lit on a patient's file.
+  assert.equal(arrangeMenu(m, ['patients', 'today', 'stock'], { here: '#/staff/patient/p1' }).find((x: Item) => x.label === 'Patients').key, 'patients');
 });
 
 test('a drop-down put in More keeps its name there; a top-bar page taken off goes first in More', () => {
@@ -128,7 +153,7 @@ test('the Aaj ki List page on the top bar beside the Aaj ki List drop-down reads
   const out = arrangeMenu(m, arrangementFor(e, ['today', 'sheet', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator']));
   assert.deepEqual(bar(out), ['Today', 'Aaj ki List (today)', 'Aaj ki List ▾', 'Patients', 'Billing', 'Reports ▾', 'Coordinator ▾', 'More ▾']);
   unique(out);
-  const page = out.find((x: Item) => x.label === 'Aaj ki List (today)');
+  const page = arrangeMenu(m, arrangementFor(e, ['today', 'sheet', 'menu:sheet']), { here: '#/staff/sheet' }).find((x: Item) => x.label === 'Aaj ki List (today)');
   assert.deepEqual([page.href, page.key, page.items], ['#/staff/sheet', 'sheet', undefined], 'a plain link to the Aaj ki List page');
   assert.deepEqual(out.find((x: Item) => x.items && x.key === 'sheet').items.map((i: Item) => i.label), ['Queue board', 'Checkups'],
     'the drop-down keeps its name and the rest of its pages');
@@ -239,6 +264,18 @@ test('cleanArrangement: only well-formed keys, each once, at most 60', () => {
   assert.deepEqual(cleanArrangement({ top: ['today'] }), []);
   assert.deepEqual(cleanArrangement(['today', 'today', '', 'a'.repeat(81), '-billing', 3, null, 'x y', 'admin?tab=import']), ['today', '-billing', 'admin?tab=import']);
   assert.equal(cleanArrangement(Array.from({ length: 70 }, (_, i) => `p${i}`)).length, MAX_KEYS);
+});
+
+test('cleanArrangement: a damaged or tampered list of 100,000 keys is cleaned at once (it stops at the 60th key)', () => {
+  const distinct = Array.from({ length: 100_000 }, (_, i) => `k${i}`);
+  const repeated = Array.from({ length: 100_000 }, (_, i) => `k${i % 59}`); // never reaches 60 different keys: every entry is looked at
+  const junk = Array.from({ length: 100_000 }, (_, i) => (i % 2 ? 7 : 'two words'));
+  const started = performance.now();
+  assert.deepEqual(cleanArrangement(distinct), distinct.slice(0, MAX_KEYS));
+  assert.deepEqual(cleanArrangement(repeated), distinct.slice(0, 59));
+  assert.deepEqual(cleanArrangement(junk), []);
+  const took = performance.now() - started;
+  assert.ok(took < 1000, `cleaned in ${Math.round(took)} ms`);
 });
 
 test('anything at the top level that is neither a link nor a drop-down keeps its place on an arranged bar', () => {
@@ -407,6 +444,22 @@ test('through shell.js\'s hook: a page added to menu() later is in its default p
   } finally {
     store.delete('staff-menu:s-later');
     if (had) Object.defineProperty(globalThis, 'location', had); else delete (globalThis as any).location;
+  }
+});
+
+test('a copy on this computer far longer than Save ever writes is not even read: the default menu, at once', () => {
+  try {
+    store.set('staff-menu:s-later', JSON.stringify(Array.from({ length: 100_000 }, (_, i) => `k${i}`)));
+    const started = performance.now();
+    assert.deepEqual(myArrangement(), []);
+    assert.ok(performance.now() - started < 500, 'no time spent on it');
+    // The longest list Save can write (60 keys of 81 characters) is read as it is.
+    const longest = Array.from({ length: MAX_KEYS }, (_, i) => `-${'p'.repeat(78)}${String(i).padStart(2, '0')}`);
+    assert.ok(longest.every((k) => KEY_PATTERN.test(k)));
+    store.set('staff-menu:s-later', JSON.stringify(longest));
+    assert.deepEqual(myArrangement(), longest);
+  } finally {
+    store.delete('staff-menu:s-later');
   }
 });
 

@@ -13,6 +13,10 @@ import { state } from '../../state.js';
 import { menuEntries, topKeys, arrangeMenu, arrangementFor, cleanArrangement, barLabel, atAddress, pageKey } from '../../lib/menu-arrange.js';
 
 const COPY_KEY = (staffId) => `staff-menu:${staffId}`;
+// The longest copy Save can write is about 5,000 characters (60 keys of at most 81). Anything much longer was not written by
+// this page (damaged, or planted by someone else on a shared computer) and is not even read: the menu is drawn from it on
+// every page change, so a huge one would freeze each one.
+const MAX_COPY = 6000;
 const LONG_BAR = 9; // more entries than this on the top bar: the dialog warns that it may not fit on a small laptop
 const inMemory = new Map(); // staff id -> arrangement, for a browser that blocks storage
 const onlyHere = new Set(); // staff ids whose arrangement on this computer is not in the database yet (Save then goes through unchanged)
@@ -22,7 +26,7 @@ let sending = Promise.resolve(); // a copy that is being sent up (loadArrangemen
 function readCopy(staffId) {
   try {
     const text = localStorage.getItem(COPY_KEY(staffId));
-    return text === null ? null : cleanArrangement(JSON.parse(text));
+    return text === null || text.length > MAX_COPY ? null : cleanArrangement(JSON.parse(text));
   } catch { return null; } // blocked storage or a damaged copy: the menu falls back to the default
 }
 function keep(staffId, list) {
@@ -190,18 +194,23 @@ export function openArrangeMenu(menu) {
   const rest = h('div', { class: 'arrange-rest' });
   const count = h('p', { class: 'arrange-count' });
   let buttons = new Map(); // `${key} ${action}` -> the button, to keep focus on the same row after a change
+  let pointer = 'mouse'; // what pressed a button last: 'mouse', 'touch' or 'pen' (from its pointerdown)
+  // The second click of a double-click: only with a mouse. A browser counts quick taps on a touch screen the same way (Chrome:
+  // 1, 2, 3, then 1 again), and every tap there is meant (nobody double-taps a button), so each one acts.
+  const doubleClick = (ev) => ev?.detail === 2 && (ev.pointerType || pointer) === 'mouse';
 
   const button = (key, action, text, label, onclick, stuck = null) => {
     // The name says which page ("Move up: Patients"), starting with the words on the button. One that cannot act (Move up on the
     // first row) only looks disabled: it keeps focus, so one Enter too many says why instead of moving the page back down.
-    // The second click of a double-click is left alone, focus included, so a double-click does one thing (as most people who
-    // double-click a button mean). The clicks of a quick series after it act again: under the pointer is still the same page's
-    // Move up (or the next page's Put on the top bar), and a person clicking fast wants it to go on moving.
+    // The second click of a mouse double-click is left alone, focus included, so a double-click does one thing (as most people
+    // who double-click a button mean). The clicks of a quick series after it act again: under the pointer is still the same
+    // page's Move up (or the next page's Put on the top bar), and a person clicking fast wants it to go on moving.
     const act = stuck ? () => announce(stuck) : onclick;
     const b = h('button', {
       type: 'button', class: 'btn btn-small', 'aria-disabled': stuck ? 'true' : null,
-      onmousedown: (ev) => { if (ev.detail === 2) ev.preventDefault(); },
-      onclick: (ev) => { if (ev?.detail !== 2) act(ev); }, 'aria-label': `${text}: ${label}`,
+      onpointerdown: (ev) => { pointer = ev.pointerType || 'mouse'; },
+      onmousedown: (ev) => { if (doubleClick(ev)) ev.preventDefault(); },
+      onclick: (ev) => { if (!doubleClick(ev)) act(ev); }, 'aria-label': `${text}: ${label}`,
     }, text);
     buttons.set(`${key} ${action}`, b);
     return b;

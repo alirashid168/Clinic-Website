@@ -790,6 +790,10 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 .topbar :is(.nav-link, .icon-btn, .wordmark, .topsearch input) { scroll-margin-top: calc(-1 * (var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--space-4))); }
 .menu-heading { padding: var(--space-2) var(--space-3) var(--space-1); font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
 .nav-subgroup { padding-left: var(--space-4); }
+/* In the phone drawer such a drop-down's pages sit under its name, and a line ends them: More's own pages come after it,
+   back at the usual indent. */
+.drawer-subgroup { border-bottom: 1px solid var(--on-dark-line); padding-bottom: var(--space-1); margin-bottom: var(--space-1); }
+.drawer-group .drawer-subgroup .nav-link { padding-left: var(--space-7); }
 .drawer-links { display: flex; flex-direction: column; gap: var(--space-1); }
 .sidebar .drawer-arrange { align-self: flex-start; margin: var(--space-2) var(--space-2) var(--space-3); color: var(--on-dark-strong); font-size: var(--fs-sm); }
 /* After a click the dialog itself keeps the clicked button under the pointer (keepAt): the browser's own scroll anchoring would

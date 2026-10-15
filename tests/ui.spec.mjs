@@ -2172,6 +2172,90 @@ await step('Arrange my menu: with Reminders and Lab work on the top bar, changin
   await pnTabs.keyboard.press('Escape');
 });
 await pnTabs.close();
+// Checkups and History of Aaj ki List light up the Aaj ki List drop-down (they are its section): a page put on the top bar from that
+// drop-down is still the page on screen only at its own address, so two links never both say they are the page on screen.
+const pnSection = await newPage({ width: 1600, height: 900 });
+await step('Arrange my menu: with Aaj ki List, Checkups and History of Aaj ki List on the top bar, only the page on screen is marked (bar and drawer)', async () => {
+  await pnSection.goto(BASE + '#/login/staff');
+  await pnSection.evaluate(() => localStorage.setItem('staff-menu:s-admin', JSON.stringify(['today', 'sheet', 'checkups', 'day-history', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator'])));
+  await loginAs(pnSection, 'Dr. Ali Rashid');
+  const marked = (sel) => pnSection.locator(sel).evaluateAll((els) => els.filter((a) => a.getAttribute('aria-current') === 'page' || a.classList.contains('current')).map((a) => a.textContent.trim()));
+  for (const [hash, heading, label] of [['#/staff/checkups', 'Checkups', 'Checkups'], ['#/staff/day-history', 'History of Aaj ki List', 'History of Aaj ki List'], ['#/staff/sheet', 'Aaj ki List', 'Aaj ki List (today)']]) {
+    await pnSection.goto(BASE + hash);
+    await pnSection.waitForSelector(`h1:text-is("${heading}")`);
+    assert.deepEqual(await marked('.topnav > a'), [label], `on ${hash} one link on the bar is the page on screen`);
+    assert.deepEqual(await marked('#staff-drawer .drawer-links > a'), [label], `on ${hash} one link in the drawer is too`);
+  }
+  // On a phone the drawer opens on Checkups, the page on screen.
+  await pnSection.goto(BASE + '#/staff/checkups');
+  await pnSection.waitForSelector('h1:text-is("Checkups")');
+  await pnSection.setViewportSize({ width: 390, height: 844 });
+  await pnSection.locator('.menu-toggle').click();
+  await pnSection.waitForSelector('#staff-drawer.open');
+  assert.deepEqual((await pnSection.locator('#staff-drawer a[aria-current="page"]').allTextContents()).map((t) => t.trim()), ['Checkups']);
+  assert.equal(await pnSection.evaluate(() => document.activeElement.textContent.trim()), 'Checkups', 'focus starts on the page on screen');
+  await pnSection.keyboard.press('Escape');
+});
+await pnSection.close();
+// A touch screen: the dialog's buttons act on every tap. Chrome counts quick taps at one spot like the clicks of a double-click
+// (1, 2, 3, then 1 again); only a mouse double-click is left alone at its second click.
+const pnTouch = await newPage({ width: 390, height: 844 }, { isMobile: true, hasTouch: true });
+await step('Arrange my menu on a touch screen: quick taps at one spot all count; a mouse double-click still moves a page once', async () => {
+  await loginAs(pnTouch, 'Dr. Ali Rashid');
+  await pnTouch.locator('.menu-toggle').click();
+  await pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")').click();
+  await arrangeDialog(pnTouch).waitFor();
+  const where = async () => (await topRows(pnTouch)).indexOf('Coordinator drop-down');
+  assert.equal(await where(), 5);
+  // Real taps, quick and at one spot: the moved page's button stays under the finger, and each tap moves it one more place.
+  const up = arrangeDialog(pnTouch).getByRole('button', { name: 'Move up: Coordinator drop-down', exact: true });
+  await up.scrollIntoViewIfNeeded();
+  const box = await up.boundingBox();
+  for (let n = 0; n < 4; n++) await pnTouch.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+  await pnTouch.waitForFunction(() => document.querySelectorAll('.modal ol.arrange-list > li')[1]?.textContent.includes('Coordinator drop-down'), null, { timeout: 3000 })
+    .catch(async () => assert.fail(`four taps: Coordinator is at row ${(await where()) + 1}, not 2`));
+  // Taps carrying the counts 1, 2 and 3 (as the browser sends a tap: pointerdown, mousedown and a click with the count), each on the
+  // button under the finger by then: three taps, three places.
+  const tap = (label, count) => pnTouch.evaluate(([name, n]) => {
+    const b = document.querySelector(`.modal button[aria-label="${name}"]`);
+    b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true }));
+    b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, detail: n }));
+    b.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, detail: n, pointerType: 'touch' }));
+  }, [label, count]);
+  for (const n of [1, 2, 3]) await tap('Move down: Coordinator drop-down', n);
+  assert.equal(await where(), 4, 'taps counted 1, 2, 3: three places down');
+  // A mouse double-click (the clicks counted 1 and 2) moves it once.
+  await arrangeDialog(pnTouch).getByRole('button', { name: 'Move up: Coordinator drop-down', exact: true }).dblclick();
+  assert.equal(await where(), 3, 'a mouse double-click: one place');
+  await pnTouch.keyboard.press('Escape');
+  await arrangeDialog(pnTouch).waitFor({ state: 'detached' });
+});
+// A drop-down put under More is a group of its own in the phone drawer, so More's own pages do not look (or sound) like its pages.
+await step('Arrange my menu on a phone: with the Coordinator drop-down under More, the drawer keeps its pages in a group of their own; Stock is not one of them', async () => {
+  await pnTouch.locator('.menu-toggle').click();
+  await pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")').click();
+  await arrangeDialog(pnTouch).waitFor();
+  await arrangeDialog(pnTouch).getByRole('button', { name: 'Put in More: Coordinator drop-down', exact: true }).click();
+  await saveArrange(pnTouch);
+  await pnTouch.locator('.menu-toggle').click();
+  await pnTouch.waitForSelector('#staff-drawer.open');
+  const more = pnTouch.getByRole('group', { name: 'More', exact: true });
+  const coordinator = more.getByRole('group', { name: 'Coordinator', exact: true });
+  assert.deepEqual((await coordinator.locator('a').allTextContents()).map((t) => t.trim()), ['Reminders', 'Drop-offs', 'Lab work', 'Retainers', 'Low ratings']);
+  const stock = more.locator(':scope > a:text-is("Stock")');
+  assert.equal(await stock.count(), 1, 'Stock is one of More\'s own pages');
+  assert.equal(await coordinator.locator('a:text-is("Stock")').count(), 0, 'not a Coordinator page');
+  // To the eye: the Coordinator pages are indented under their name, More's own pages are back at the usual indent. (Both are
+  // measured at once, from the group's edge: the drawer may still be sliding in.)
+  const indents = await more.evaluate((g) => {
+    const at = (a) => a.getBoundingClientRect().left - g.getBoundingClientRect().left + parseFloat(getComputedStyle(a).paddingLeft);
+    return { coordinator: at(g.querySelector('.drawer-subgroup a')), stock: at([...g.querySelectorAll(':scope > a')].find((a) => a.textContent.trim() === 'Stock')) };
+  });
+  assert.ok(indents.coordinator > indents.stock + 8, `the Coordinator pages are further in than Stock (${indents.coordinator} and ${indents.stock} px)`);
+  await shot(pnTouch, '27-drawer-more-groups');
+  await pnTouch.keyboard.press('Escape');
+});
+await pnTouch.close();
 
 // ------------------------------------------------------------- the Checkups page (admin), Download Excel, the checkup list import
 // (Made-up names and phones only. Each page has its own in-memory demo data: the same page is used from the import to the
