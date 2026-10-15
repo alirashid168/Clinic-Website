@@ -3,13 +3,13 @@
 // controls, the right keyboard for numbers. Every field is checked here first (lib/public-forms.js) and again by the database.
 //
 // An error is shown under its field and focus moves to the first one; a refusal from the database is shown the same way.
-// After sending, the form is replaced by a thank-you that repeats nothing the visitor typed. A hidden "website" box catches
-// bots (people never see it, screen readers skip it).
+// After sending, the form is replaced by a thank-you that repeats nothing the visitor typed. A hidden box catches bots
+// (people never see it, screen readers and the Tab key skip it, and no autofill fills it in).
 import { h, mount, field, select, showFormErrors, clearFieldErrors, setFieldError, announce, friendlyError } from '../ui/dom.js';
 import { state } from '../state.js';
 import { header, footer, waLink } from './public.js';
 import {
-  POSITIONS, QUALIFICATIONS, FEEDBACK_KINDS, FEEDBACK_TOPICS, CV_ACCEPT, LIMITS, FIRST_GRADUATION_YEAR, lastGraduationYear,
+  POSITIONS, QUALIFICATIONS, FEEDBACK_KINDS, FEEDBACK_TOPICS, CV_ACCEPT, LIMITS, HONEYPOT,
   checkJobApplication, checkFeedback, cvFileInfo, normalizePhone, normalizeCnic, formatPhone, submitProblem,
 } from '../lib/public-forms.js';
 
@@ -36,10 +36,13 @@ function page(root, title, intro, privacy, body) {
   return wrap;
 }
 
-/** The hidden box only bots fill in. */
+/**
+ * The hidden box only bots fill in. Its name and id are ones no browser or password manager fills in by itself (not
+ * "website", "url" or "homepage"), so a person's form is never dropped because an autofill wrote in it.
+ */
 function honeypot() {
-  const id = newId('website');
-  const input = h('input', { type: 'text', id, name: 'website', tabindex: '-1', autocomplete: 'off' });
+  const id = newId('trap');
+  const input = h('input', { type: 'text', id, name: HONEYPOT, tabindex: '-1', autocomplete: 'off', 'aria-hidden': 'true' });
   return { input, el: h('div', { class: 'hp-field', 'aria-hidden': 'true' }, h('label', { for: id }, 'Leave this box empty'), input) };
 }
 
@@ -115,7 +118,8 @@ export async function renderJoin(root) {
     email: h('input', { type: 'email', autocomplete: 'email', inputmode: 'email', maxlength: LIMITS.email + 20 }),
     cnic: h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', placeholder: '12345-1234567-1', maxlength: 20 }),
     position: select([{ value: '', label: 'Choose a job' }, ...POSITIONS], ''),
-    qualification: h('input', { type: 'text', autocomplete: 'off', maxlength: LIMITS.qualification + 20, list: newId('qualifications') }),
+    qualification: select([{ value: '', label: 'Choose your degree' }, ...QUALIFICATIONS], ''),
+    qualification_other: h('input', { type: 'text', autocomplete: 'off', maxlength: LIMITS.qualification + 20 }),
     graduation_year: h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', maxlength: 4, placeholder: 'For example 2021' }),
     experience: h('input', { type: 'text', autocomplete: 'off', maxlength: LIMITS.experience + 20, placeholder: 'For example: 2 years at a clinic' }),
     branch: branchSelect('any', 'Any branch'),
@@ -123,7 +127,14 @@ export async function renderJoin(root) {
     message: h('textarea', { rows: 4, maxlength: LIMITS.jobMessage + 50 }),
     consent: h('input', { type: 'checkbox' }),
   };
-  const qualificationList = h('datalist', { id: inputs.qualification.getAttribute('list') }, QUALIFICATIONS.map((q) => h('option', { value: q })));
+  // "Other" in the degree list opens a box for the degree itself, right under the list: the word "Other" is never sent.
+  const otherDegree = field('Your degree or qualification', inputs.qualification_other, 'For example BA, BSc, BCom or MBA.', { required: true });
+  const otherChosen = () => inputs.qualification.value === 'Other';
+  const showOtherDegree = () => { otherDegree.hidden = !otherChosen(); };
+  showOtherDegree();
+  inputs.qualification.addEventListener('change', showOtherDegree);
+  // An error about the degree belongs in the box the visitor types it in, once "Other" is chosen (also the database's answer).
+  const fieldInputs = () => ({ ...inputs, qualification: otherChosen() ? inputs.qualification_other : inputs.qualification });
   tidyOnBlur(inputs.phone, normalizePhone, formatPhone);
   tidyOnBlur(inputs.cnic, normalizeCnic);
   // A file that cannot be sent is said at once, not only after pressing Send.
@@ -143,9 +154,9 @@ export async function renderJoin(root) {
       field('CNIC number', inputs.cnic, '13 digits, with or without dashes.', { required: true })),
     h('fieldset', { class: 'form-group' }, h('legend', {}, 'The job'),
       field('Job you are applying for', inputs.position, null, { required: true }),
-      field('Degree or qualification', inputs.qualification, 'For example BDS, BDS + FCPS / MDS, a diploma or Intermediate.', { required: true }),
-      qualificationList,
-      field('Year you graduated', inputs.graduation_year, `Optional. ${FIRST_GRADUATION_YEAR} to ${lastGraduationYear()}.`),
+      field('Degree or qualification', inputs.qualification, 'Choose "Other" to type another degree.', { required: true }),
+      otherDegree,
+      field('Graduation year', inputs.graduation_year, 'Optional. The year you finished, or expect to finish.'),
       field('Experience', inputs.experience, `Optional, in a few words (up to ${LIMITS.experience} characters).`),
       field('Preferred branch', inputs.branch, null, { required: true })),
     h('fieldset', { class: 'form-group' }, h('legend', {}, 'Your CV'),
@@ -170,12 +181,12 @@ export async function renderJoin(root) {
     const file = inputs.cv.files[0] || null;
     const values = {
       full_name: inputs.full_name.value, phone: inputs.phone.value, email: inputs.email.value, cnic: inputs.cnic.value,
-      position: inputs.position.value, qualification: inputs.qualification.value, graduation_year: inputs.graduation_year.value,
-      experience: inputs.experience.value, branch: inputs.branch.value, message: inputs.message.value, consent: inputs.consent.checked,
-      website: trap.input.value,
+      position: inputs.position.value, qualification: inputs.qualification.value, qualification_other: inputs.qualification_other.value,
+      graduation_year: inputs.graduation_year.value, experience: inputs.experience.value, branch: inputs.branch.value, message: inputs.message.value,
+      consent: inputs.consent.checked, [HONEYPOT]: trap.input.value,
     };
     const { errors } = checkJobApplication(values, { cv: file });
-    if (errors.length) return showErrors(form, inputs, errors);
+    if (errors.length) return showErrors(form, fieldInputs(), errors);
     busyNow = true;
     sending(button, true, 'Sending…', 'Send my application');
     announce('Sending your application…');
@@ -189,7 +200,7 @@ export async function renderJoin(root) {
     } catch (err) {
       if (!submitProblem(err)) console.error(err); // a refusal of the form itself is not a fault
       if (submitProblem(err)?.field === 'cv') uploaded = null; // that file is not usable: choose or upload it again
-      showProblem(form, inputs, alert, err, 'job');
+      showProblem(form, fieldInputs(), alert, err, 'job');
     } finally {
       busyNow = false;
       if (button.isConnected) sending(button, false, 'Sending…', 'Send my application');
@@ -251,7 +262,7 @@ export async function renderFeedback(root) {
     clearFieldErrors(form);
     const values = {
       kind: kinds.find((k) => k.checked)?.value || '', topic: inputs.topic.value, branch: inputs.branch.value, message: inputs.message.value,
-      name: inputs.name.value, phone: inputs.phone.value, mr: inputs.mr.value, contact_me: inputs.contact_me.checked, website: trap.input.value,
+      name: inputs.name.value, phone: inputs.phone.value, mr: inputs.mr.value, contact_me: inputs.contact_me.checked, [HONEYPOT]: trap.input.value,
     };
     const { errors, data } = checkFeedback(values);
     if (errors.length) return showErrors(form, inputs, errors);

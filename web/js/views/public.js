@@ -1,5 +1,5 @@
-// Public website: home (hero smile card + four doors with a line to the two forms under them + Meet Dr. Ali + his week
-// and the clinics + the two form buttons), our results and the visitor page. The parts that need no data render at
+// Public website: home (hero smile card + four doors with the two form buttons under them + Meet Dr. Ali + his week
+// and the clinics + a section on the two forms), our results and the visitor page. The parts that need no data render at
 // once; the schedule, results and clinic cards fill in when the database answers.
 import { h, mount, srOnly, extLink, announce, modal } from '../ui/dom.js';
 import { state } from '../state.js';
@@ -158,8 +158,9 @@ function resultsSection(cases, { limit, reviews } = {}) {
 }
 
 /**
- * The two buttons the owner asked for (11 Oct 2026): "Join our team" and "Complaints & suggestions", each opening its own
- * page (#/join, #/feedback), with one line on who sees what is sent.
+ * The two forms the owner asked for (11 Oct 2026), "Join our team" and "Complaints & suggestions", once more after the clinics:
+ * each opening its own page (#/join, #/feedback) with a line on what it is for, and one line on who sees what is sent. (Their
+ * two buttons are under the doors at the top.)
  */
 function formsSection() {
   const card = (href, title, text, action) => h('a', { class: 'forms-card', href },
@@ -261,10 +262,11 @@ export async function renderHome(root) {
           h('a', { class: 'door', href: '#/visitor' }, h('strong', {}, 'Visitor'), h('span', {}, 'Braces options, treatments and how to start')),
           h('a', { class: 'door', href: '#/results' }, h('strong', {}, 'Our results'), h('span', {}, 'Smile makeovers, veneers, braces and more')),
           h('a', { class: 'door', href: '#/login/staff' }, h('strong', {}, 'Employee'), h('span', {}, 'Staff login for all branches'))),
-        // The two forms, right under the doors (their big buttons are further down, after the clinics).
-        h('p', { class: 'hero-forms' },
-          h('span', {}, 'Looking for a job? ', h('a', { href: '#/join' }, 'Join our team')),
-          h('span', {}, 'Something to tell us? ', h('a', { href: '#/feedback' }, 'Complaints & suggestions'))),
+        // The two buttons the owner asked for (11 Oct 2026), right under the doors, so they are found on the first screen or just
+        // after it, without scrolling past Dr. Ali, his week and the clinics (12 Oct). The section after the clinics says more.
+        h('div', { class: 'hero-forms' },
+          h('a', { class: 'btn btn-lg hero-btn', href: '#/join' }, 'Join our team'),
+          h('a', { class: 'btn btn-lg hero-btn', href: '#/feedback' }, 'Complaints & suggestions')),
         h('p', { class: 'hero-demo' }, 'New here? ', h('a', { href: '#/patient/demo' }, 'See a sample patient account'), ' to find out what you get.'))),
     h('main', { id: 'main' },
       meet.el,

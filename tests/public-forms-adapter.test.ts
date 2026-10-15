@@ -2,10 +2,11 @@
 // for supabase-js (the real library is loaded from a CDN in the browser), and the demo adapter (web/js/data/demo.js), which must
 // follow the same rules as the database. Every name, phone and file here is made up. What it pins down:
 //   live:  the CV upload sends a copy typed by the file's ending (supabase-js takes the type from the file and drops the
-//          contentType option, and the bucket refuses 'application/octet-stream' or 'image/jpg'); a refused upload's words;
+//          contentType option, and the bucket refuses 'application/octet-stream' or 'image/jpg'), or by its type when the
+//          name has no ending, with no caching; a refused upload's words;
 //          the inbox asks for open complaints and recent resolved ones, each capped, filtered by source on the server;
-//          deleting a website form, and "not removed" when the database refused.
-//   demo:  the same inbox rules, and only an admin deletes, only a website form.
+//          deleting a website form, and "not removed" when the database refused; the Today page's count of New applications.
+//   demo:  the same inbox rules, and only an admin deletes, only a website form; the count of New applications; the hidden box.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
@@ -88,6 +89,8 @@ test('live: the CV is sent as a copy that carries the type of its ending, whatev
     ['photo.jpg', 'image/jpg', 'image/jpeg'],                         // how some phones name a JPG
     ['scan.JPEG', 'image/jpeg', 'image/jpeg'],
     ['cv.pdf', 'application/pdf', 'application/pdf'],
+    ['document', 'application/pdf', 'application/pdf'],               // a phone's file with no name ending, known by its type
+    ['IMG-20261012-WA0003', 'image/jpg', 'image/jpeg'],
   ];
   for (const [name, type, want] of cases) {
     const file = new File(['%PDF-1.4 a made-up CV'], name, { type });
@@ -96,11 +99,12 @@ test('live: the CV is sent as a copy that carries the type of its ending, whatev
     assert.equal(up.bucket, 'job-cvs');
     assert.equal(up.path, path);
     assert.match(path, UUID_PATH, name);
+    assert.ok(path.endsWith('.' + Object.entries(CV_TYPES).find(([, t]) => t === want)![0]), `${name}: the ending of its type (${path})`);
     assert.ok(up.body instanceof Blob, name);
     assert.equal(up.body.type, want, `${name} typed "${type}" is uploaded as ${want}`);
     assert.equal(up.body.size, file.size);
     assert.equal(await up.body.text(), '%PDF-1.4 a made-up CV', 'the very same bytes');
-    assert.deepEqual(up.options, { contentType: want, upsert: false }, 'never an overwrite');
+    assert.deepEqual(up.options, { cacheControl: '0', contentType: want, upsert: false }, 'never an overwrite, and no cache keeps a copy');
   }
   assert.equal(new Set(f.uploads.map((u: any) => u.path)).size, cases.length, 'a new random name every time');
 });
@@ -177,6 +181,20 @@ test('live: deleting a website form; "not removed" when the database refused (no
   await assert.rejects(data.deleteComplaint('c2'), (e: any) => e.code === 'NOT_REMOVED' && /only Dr\. Ali \(admin\) can delete a website form/.test(e.message));
 });
 
+test('live: the Today page asks how many applications are New: a count only, no rows; nothing when the database is not updated yet', async () => {
+  let answer: any = { data: null, count: 3, error: null };
+  const { f, data } = await openPage(() => answer);
+  assert.equal(await data.newJobApplications(), 3);
+  const { table, ops } = f.requests[0];
+  assert.equal(table, 'job_applications');
+  assert.ok(has(ops, 'select', 'id', { count: 'exact', head: true }), 'head: true, so no row is sent');
+  assert.ok(has(ops, 'eq', 'status', 'new'));
+  answer = { data: null, count: null, error: null };
+  assert.equal(await data.newJobApplications(), 0);
+  answer = { data: null, count: null, error: { message: 'relation "public.job_applications" does not exist', code: '42P01' } };
+  await assert.rejects(data.newJobApplications(), (e: any) => e.code === 'JOBS_MISSING');
+});
+
 // ======================================================================================= the demo adapter
 async function demoAs(id: string) {
   const d: any = createDemoAdapter();
@@ -193,6 +211,23 @@ test('demo: the inbox narrows by source like the database, newest first', async 
   assert.ok(portal.length >= 1 && portal.every((c: any) => (c.source || 'portal') === 'portal'));
   assert.equal(all.length, web.length + portal.length);
   assert.ok(all.every((c: any, i: number) => i === 0 || all[i - 1].created_at >= c.created_at), 'newest first');
+});
+
+test('demo: the number of New applications, for jobs.view only, and the hidden box under its new name', async () => {
+  const admin = await demoAs('s-admin');
+  const before = await admin.newJobApplications();
+  assert.equal(before, (await admin.jobApplications({ status: 'new' })).length);
+  assert.ok(before >= 1, 'a made-up New application');
+  const coord = await demoAs('s-coord');
+  await assert.rejects(coord.newJobApplications(), 'the clinic coordinator has no jobs.view');
+  // A feedback form with the hidden box filled is thanked and not stored; one with a "website" field (which autofill may fill) is stored.
+  const form = { kind: 'suggestion', topic: 'other', branch: 'none', message: 'A made-up suggestion for the test.', contact_me: false };
+  const count = async () => (await admin.complaints({ from: 'website' })).length;
+  const n = await count();
+  assert.deepEqual(await admin.submitFeedback({ ...form, pf_trap: 'http://spam.example' }), { ok: true });
+  assert.equal(await count(), n, 'the honeypot form was dropped');
+  assert.deepEqual(await admin.submitFeedback({ ...form, website: 'https://example.com' }), { ok: true });
+  assert.equal(await count(), n + 1, 'a filled "website" field drops nothing');
 });
 
 test('demo: only an admin deletes, and only a website form; its notes go with it', async () => {

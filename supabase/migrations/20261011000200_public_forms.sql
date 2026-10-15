@@ -24,9 +24,11 @@
 --   3. public.job_applications and its history public.job_application_events (status changes and internal notes, with
 --      who and when). Staff read them with jobs.view; nobody writes them directly (only the functions below).
 --   4. private.public_form_log, the log the rate limits count (a CV in it is used), the bucket job-cvs, its storage
---      policies, and the trigger that holds the CV upload limits.
+--      policies, the trigger that holds the CV upload limits, and private.job_cv_files, one line per CV file, which the
+--      limits count (so a visitor's question about them never reads the whole bucket).
 --   5. Form helpers (private.form_line / form_block / pk_mobile / pk_cnic / form_fail), the same rules as
---      web/js/lib/public-forms.js.
+--      web/js/lib/public-forms.js. They also remove invisible characters (zero-width ones and the direction marks and
+--      overrides), so nothing a visitor types can show on the staff pages in another order than it was typed.
 --   6. public.submit_job_application(jsonb) and public.submit_feedback(jsonb).
 --   7. public.update_job_application(uuid, text, text): staff change the status or add a note.
 --   8. public.job_cv_orphans(): CVs that no application uses (the visitor gave up, a check failed, or the form was
@@ -52,8 +54,9 @@
 -- its CV) before it is stored or dropped, the whole-website limits count that log, and a CV in it is used. So, as for a
 -- stored form, the form counts toward the limits, and its CV cannot be sent again, is not an unused CV for the upload
 -- limits, and its name can never be uploaded to again (also once the staff pages have removed the file). A form whose
--- hidden honeypot field ("website") is filled in (bots fill every box) is thanked and dropped without any check. The
--- answer is always {"ok": true}, never an id.
+-- hidden honeypot field ("pf_trap", a name no browser or password manager fills in by itself) is filled in (bots fill
+-- every box) is thanked and dropped without any check. The answer is always {"ok": true}, never an id. A field a form
+-- leaves out counts as empty (an optional one as not given, "Please contact me" as not ticked), never as an error itself.
 --
 -- Storage reads go through to_jsonb(o) (created_at, metadata.size, metadata.mimetype), so these functions do not depend
 -- on the exact columns of Supabase's storage tables when they are created; the local test stub has fewer columns.
@@ -126,10 +129,10 @@ create table if not exists public.job_applications (
   id              uuid primary key default gen_random_uuid(),
   full_name       text not null check (char_length(full_name) between 2 and 100),
   phone           text not null check (phone ~ '^03[0-9]{9}$'),
-  email           text check (email is null or (char_length(email) <= 120 and email ~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$')),
+  email           text,                                                  -- checked below (job_applications_email_check)
   position        text not null check (position in ('dentist', 'orthodontist', 'dental_hygienist', 'dental_assistant',
                                                     'clinic_coordinator', 'receptionist', 'social_media', 'other')),
-  qualification   text not null check (char_length(qualification) between 2 and 100),
+  qualification   text not null,                                         -- checked below (job_applications_qualification_check)
   graduation_year smallint check (graduation_year is null or graduation_year between 1960 and 2100),
   experience      text check (experience is null or char_length(experience) <= 300),
   branch_id       smallint references public.branches(id),               -- null = any branch
@@ -144,6 +147,15 @@ create table if not exists public.job_applications (
   updated_at      timestamptz,
   created_at      timestamptz not null default now()
 );
+-- An email address is one plain address: none of ? & = % # or a space, so the mailto: link on the staff page can only ever
+-- open an email to it (no subject, copies or text added). The word "Other" (the last choice of the degree list) is not a
+-- degree: the form asks for the degree itself instead. Named, so running this file again puts in the current rules.
+alter table public.job_applications drop constraint if exists job_applications_email_check;
+alter table public.job_applications drop constraint if exists job_applications_qualification_check;
+alter table public.job_applications
+  add constraint job_applications_email_check check (email is null or (char_length(email) <= 120
+    and email ~ '^[^@[:space:]?&=%#]+@[^@[:space:]?&=%#]+[.][^@[:space:]?&=%#]+$')),
+  add constraint job_applications_qualification_check check (char_length(qualification) between 2 and 100 and qualification !~* '^others?$');
 create index if not exists job_applications_created_idx on public.job_applications (created_at desc);
 create index if not exists job_applications_phone_idx on public.job_applications (phone, created_at);
 create index if not exists job_applications_cnic_idx on public.job_applications (cnic, created_at);
@@ -193,6 +205,21 @@ create index if not exists public_form_log_form_idx on private.public_form_log (
 revoke all on private.public_form_log from public, anon, authenticated;
 revoke all on sequence private.public_form_log_id_seq from public, anon, authenticated;
 
+-- One line per file in job-cvs: its name, size and upload time, and whether a form has sent it (stored or dropped). The
+-- triggers further down keep it for every write to storage.objects (Storage's own superuser write included), and the CV
+-- upload limits count it through its two small indexes: the uploads of the last day, and the CVs no form has sent. So the
+-- question a visitor may ask (job_cv_upload_busy) costs the same however many CVs the clinic keeps: it never reads the
+-- bucket, whose sent CVs stay for good. Only the functions in this file use it (no grants, and the schema is private).
+create table if not exists private.job_cv_files (
+  name       text primary key,                                           -- job-cvs/<name>
+  size       bigint not null default 0,                                  -- metadata.size (0 while Storage has not given it)
+  created_at timestamptz not null default now(),                         -- the file's created_at
+  sent       boolean not null default false                              -- sent with a form (submit_job_application sets it)
+);
+create index if not exists job_cv_files_created_idx on private.job_cv_files (created_at) include (size);
+create index if not exists job_cv_files_unsent_idx on private.job_cv_files (name) include (size) where not sent;
+revoke all on private.job_cv_files from public, anon, authenticated;
+
 insert into storage.buckets (id, name, public) values ('job-cvs', 'job-cvs', false)
   on conflict (id) do update set public = false;
 -- The size limit and file types are checked by Storage itself as the file arrives (Supabase always has these columns).
@@ -211,29 +238,35 @@ end $$;
 -- form used. Why an upload of p_size bytes would be refused now: 'day' (one of the day's limits, or the unused CVs; the staff
 -- pages remove unused ones once a day old), 'minute', or null (allowed). A file has at least one byte, so p_size 0 asks whether
 -- any upload is taken. A CV sent with a form is used whether the form was stored or dropped (the log has both), so the answer
--- after a form never depends on whether its phone or CNIC was used before. It reads every file of the bucket, so it is a
--- security definer function (the visitor may not see the files it counts), and only the functions below call it.
+-- after a form never depends on whether its phone or CNIC was used before. It counts private.job_cv_files, not the bucket:
+-- only the last day's lines and the unsent ones, each through its own index (a line whose sent mark lags behind, a CV a test
+-- or an admin put in an application by hand, is still seen as used). It is a security definer function (the visitor may
+-- not see what it counts), and only the functions below call it.
 create or replace function private.job_cv_upload_problem(p_size bigint default 0)
 returns text
 language sql stable security definer set search_path = public
 as $$
   select case
-           when count(*) filter (where x.at > now() - interval '1 day') >= 100
-             or coalesce(sum(x.size) filter (where x.at > now() - interval '1 day'), 0) + greatest(coalesce(p_size, 0), 1) > 200 * 1048576
-             or coalesce(sum(x.size) filter (where not x.sent), 0) + greatest(coalesce(p_size, 0), 1) > 100 * 1048576 then 'day'
-           when count(*) filter (where x.at > now() - interval '1 minute') >= 5 then 'minute'
+           when d.files >= 100
+             or d.bytes + greatest(coalesce(p_size, 0), 1) > 200 * 1048576
+             or u.bytes + greatest(coalesce(p_size, 0), 1) > 100 * 1048576 then 'day'
+           when d.minute >= 5 then 'minute'
          end
-    from (select (to_jsonb(o) ->> 'created_at')::timestamptz as at,
-                 case when (to_jsonb(o) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(o) -> 'metadata' ->> 'size')::bigint else 0 end as size,
-                 exists (select 1 from public.job_applications a where a.cv_path = o.name)
-                   or exists (select 1 from private.public_form_log l where l.cv_path = o.name) as sent
-            from storage.objects o where o.bucket_id = 'job-cvs') x
+    from (select count(*) as files, coalesce(sum(f.size), 0) as bytes,
+                 count(*) filter (where f.created_at > now() - interval '1 minute') as minute
+            from private.job_cv_files f where f.created_at > now() - interval '1 day') d,
+         (select coalesce(sum(f.size), 0) as bytes
+            from private.job_cv_files f
+           where not f.sent
+             and not exists (select 1 from public.job_applications a where a.cv_path = f.name)
+             and not exists (select 1 from private.public_form_log l where l.cv_path = f.name)) u
 $$;
 revoke all on function private.job_cv_upload_problem(bigint) from public, anon, authenticated;
 
 -- Storage asks job_cv_upload_allowed() as the visitor (the insert policy below), as a first check. After a refused upload the
 -- website asks job_cv_upload_busy(), to say "try again tomorrow" rather than "in a few minutes"; it tells only how busy the
--- whole website is, nothing about any person or file.
+-- whole website is, nothing about any person or file. Anyone may call both as often as they like: each counts only the last
+-- day's uploads and the unsent CVs (private.job_cv_files, through its indexes), never the whole bucket.
 create or replace function public.job_cv_upload_busy()
 returns text
 language sql stable security definer set search_path = public
@@ -287,6 +320,33 @@ begin
   return new;
 end $$;
 revoke all on function private.job_cvs_guard() from public, anon, authenticated;
+-- Keeps private.job_cv_files the same as the files in job-cvs: a line for a new file, the line of a removed file goes, and a
+-- change Storage may make (or a test's: an earlier upload time) is copied. After the write, so only a file that is really
+-- there has a line. The triggers below call it for job-cvs rows only (their WHEN), so other buckets never pay for it, and it
+-- runs even when job_cvs_guard is switched off (the tests do that to put in earlier uploads).
+create or replace function private.job_cv_files_track()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if tg_op <> 'INSERT' then
+    if old.bucket_id = 'job-cvs' then delete from private.job_cv_files where name = old.name; end if;
+  end if;
+  if tg_op <> 'DELETE' then
+    if new.bucket_id = 'job-cvs' then
+      insert into private.job_cv_files (name, size, created_at, sent)
+      values (new.name,
+              case when (to_jsonb(new) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(new) -> 'metadata' ->> 'size')::bigint else 0 end,
+              coalesce((to_jsonb(new) ->> 'created_at')::timestamptz, now()),
+              exists (select 1 from private.public_form_log l where l.cv_path = new.name)
+                or exists (select 1 from public.job_applications a where a.cv_path = new.name))
+      on conflict (name) do update set size = excluded.size, created_at = excluded.created_at, sent = excluded.sent;
+    end if;
+  end if;
+  return null;
+end $$;
+revoke all on function private.job_cv_files_track() from public, anon, authenticated;
+
 -- Supabase lets the postgres role add triggers on storage.objects (it has every privilege on it). Should a project ever refuse,
 -- this stops here with a plain reason instead of leaving the uploads without their limits.
 do $$
@@ -294,9 +354,30 @@ begin
   drop trigger if exists job_cvs_guard on storage.objects;
   create trigger job_cvs_guard before insert or update on storage.objects
     for each row execute function private.job_cvs_guard();
+  drop trigger if exists job_cvs_files_insert on storage.objects;
+  drop trigger if exists job_cvs_files_update on storage.objects;
+  drop trigger if exists job_cvs_files_delete on storage.objects;
+  create trigger job_cvs_files_insert after insert on storage.objects
+    for each row when (new.bucket_id = 'job-cvs') execute function private.job_cv_files_track();
+  create trigger job_cvs_files_update after update on storage.objects
+    for each row when (old.bucket_id = 'job-cvs' or new.bucket_id = 'job-cvs') execute function private.job_cv_files_track();
+  create trigger job_cvs_files_delete after delete on storage.objects
+    for each row when (old.bucket_id = 'job-cvs') execute function private.job_cv_files_track();
 exception when insufficient_privilege then
-  raise exception 'The CV upload limits need a trigger on storage.objects, and this database refused it (%). Ask Supabase support to allow it.', sqlerrm;
+  raise exception 'The CV upload limits need triggers on storage.objects, and this database refused them (%). Ask Supabase support to allow it.', sqlerrm;
 end $$;
+
+-- The files already in job-cvs when this file runs (again): the same lines the triggers keep from now on.
+delete from private.job_cv_files f
+ where not exists (select 1 from storage.objects o where o.bucket_id = 'job-cvs' and o.name = f.name);
+insert into private.job_cv_files (name, size, created_at, sent)
+select o.name,
+       case when (to_jsonb(o) -> 'metadata' ->> 'size') ~ '^[0-9]{1,12}$' then (to_jsonb(o) -> 'metadata' ->> 'size')::bigint else 0 end,
+       coalesce((to_jsonb(o) ->> 'created_at')::timestamptz, now()),
+       exists (select 1 from private.public_form_log l where l.cv_path = o.name)
+         or exists (select 1 from public.job_applications a where a.cv_path = o.name)
+  from storage.objects o where o.bucket_id = 'job-cvs'
+on conflict (name) do update set size = excluded.size, created_at = excluded.created_at, sent = excluded.sent;
 
 -- A CV that no application uses and that is more than a day old (a form still being filled in keeps its file): never sent,
 -- or sent with a form dropped over a per-phone or per-CNIC limit (it is in private.public_form_log, so it cannot be sent
@@ -331,15 +412,20 @@ create policy "job staff remove unsent cvs" on storage.objects for delete to aut
 -- ---------------------------------------------------------------------------------------------------------------
 -- 5. Form helpers (web/js/lib/public-forms.js has the same rules)
 -- ---------------------------------------------------------------------------------------------------------------
+-- Both first remove the invisible characters that can disguise text: the zero-width space, joiners and direction marks
+-- (U+200B to U+200F), the direction embeddings and overrides (U+202A to U+202E, which can make a name or a message show in
+-- another order than it was typed), the direction isolates (U+2066 to U+2069) and the byte order mark (U+FEFF).
 -- One line: control characters and runs of spaces become one space, trimmed; '' when nothing is left.
 create or replace function private.form_line(p text) returns text
 language sql immutable parallel safe
-return btrim(regexp_replace(regexp_replace(coalesce(p, ''), '[\x01-\x1f\x7f]', ' ', 'g'), '\s+', ' ', 'g'));
+return btrim(regexp_replace(regexp_replace(regexp_replace(coalesce(p, ''), '[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]', '', 'g'),
+  '[\x01-\x1f\x7f]', ' ', 'g'), '\s+', ' ', 'g'));
 
 -- Several lines: Windows and old Mac line ends become one new line, other control characters go, trimmed.
 create or replace function private.form_block(p text) returns text
 language sql immutable parallel safe
-return btrim(regexp_replace(replace(replace(coalesce(p, ''), E'\r\n', E'\n'), E'\r', E'\n'), '[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', 'g'), E' \n\t');
+return btrim(regexp_replace(regexp_replace(replace(replace(coalesce(p, ''), E'\r\n', E'\n'), E'\r', E'\n'),
+  '[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]', '', 'g'), '[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', 'g'), E' \n\t');
 
 -- A Pakistani mobile number as 03XXXXXXXXX ("0300 1234567", "+92 300 1234567", "0092...", "300 1234567"), or null.
 create or replace function private.pk_mobile(p text) returns text
@@ -387,7 +473,7 @@ begin
     perform private.form_fail(null, 'The form could not be read. Please fill it in again.');
   end if;
   -- The hidden box only bots fill in: thanked, not stored, not checked further.
-  if private.form_line(p_form ->> 'website') <> '' then return v_ok; end if;
+  if private.form_line(p_form ->> 'pf_trap') <> '' then return v_ok; end if;
 
   v_name := private.form_line(p_form ->> 'full_name');
   if v_name = '' or char_length(v_name) < 2 or v_name !~ '[[:alpha:]]' then perform private.form_fail('full_name', 'Please enter your full name.'); end if;
@@ -396,8 +482,9 @@ begin
   v_phone := private.pk_mobile(p_form ->> 'phone');
   if v_phone is null then perform private.form_fail('phone', 'Please enter a Pakistani mobile number, for example 0300 1234567.'); end if;
 
+  -- One plain address: none of ? & = % # or a space (the staff page makes a mailto: link of it).
   v_email := nullif(private.form_line(p_form ->> 'email'), '');
-  if v_email is not null and (char_length(v_email) > 120 or v_email !~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$') then
+  if v_email is not null and (char_length(v_email) > 120 or v_email !~ '^[^@[:space:]?&=%#]+@[^@[:space:]?&=%#]+[.][^@[:space:]?&=%#]+$') then
     perform private.form_fail('email', 'Please check your email address, for example name@gmail.com, or leave it empty.');
   end if;
 
@@ -407,8 +494,10 @@ begin
     perform private.form_fail('position', 'Please choose the job you are applying for.');
   end if;
 
+  -- "Other" (the last choice of the degree list) is not a degree: the form asks for the degree itself.
   v_qual := private.form_line(p_form ->> 'qualification');
-  if char_length(v_qual) < 2 then perform private.form_fail('qualification', 'Please enter your degree or qualification, for example BDS.'); end if;
+  if char_length(v_qual) < 2 then perform private.form_fail('qualification', 'Please choose your degree or qualification.'); end if;
+  if v_qual ~* '^others?$' then perform private.form_fail('qualification', 'Please type your degree or qualification, for example BA or BSc.'); end if;
   if char_length(v_qual) > 100 then perform private.form_fail('qualification', 'Please keep this under 100 characters.'); end if;
 
   v_year_text := private.form_line(p_form ->> 'graduation_year');
@@ -481,8 +570,10 @@ begin
     raise exception 'FORM_CV: Please choose your CV again.' using errcode = '22023', detail = 'cv';
   end if;
 
-  -- Logged before it is stored or dropped below: either way its CV is now used for good and it counts toward the limits above.
+  -- Logged before it is stored or dropped below: either way its CV is now used for good and it counts toward the limits above
+  -- (and it is no unused CV for the upload limits from now on).
   insert into private.public_form_log (form, cv_path) values ('job', v_cv);
+  update private.job_cv_files set sent = true where name = v_cv;
 
   -- The same phone or CNIC twice today already: thanked like any other form and not stored. This comes after every other check
   -- (the CV ones included) and after the log, so neither an answer nor anything a later form meets depends on whether the
@@ -518,7 +609,7 @@ begin
   if p_form is null or jsonb_typeof(p_form) <> 'object' or octet_length(p_form::text) > 20000 then
     perform private.form_fail(null, 'The form could not be read. Please fill it in again.');
   end if;
-  if private.form_line(p_form ->> 'website') <> '' then return v_ok; end if;
+  if private.form_line(p_form ->> 'pf_trap') <> '' then return v_ok; end if;
 
   v_kind := p_form ->> 'kind';
   if v_kind is null or v_kind not in ('complaint', 'suggestion', 'appreciation') then
@@ -544,7 +635,8 @@ begin
 
   v_name := nullif(private.form_line(p_form ->> 'name'), '');
   if char_length(v_name) > 100 then perform private.form_fail('name', 'Please keep your name under 100 characters.'); end if;
-  v_contact := (p_form -> 'contact_me') = 'true'::jsonb;
+  -- Ticked only when it is the tick itself (true); left out, null, false or anything else is not ticked.
+  v_contact := coalesce((p_form -> 'contact_me') = 'true'::jsonb, false);
   if nullif(private.form_line(p_form ->> 'phone'), '') is not null then
     v_phone := private.pk_mobile(p_form ->> 'phone');
     if v_phone is null then perform private.form_fail('phone', 'Please enter a Pakistani mobile number, for example 0300 1234567.'); end if;

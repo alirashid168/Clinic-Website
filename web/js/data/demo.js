@@ -17,7 +17,7 @@ import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLogi
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, checkupKey, checkupPhone, cleanText, monthLabel, dayListCheckups } from '../lib/checkups.js';
 import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
-import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS } from '../lib/public-forms.js';
+import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS, HONEYPOT } from '../lib/public-forms.js';
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2));
 const clone = (x) => (x === undefined ? x : JSON.parse(JSON.stringify(x)));
@@ -1127,7 +1127,7 @@ export function createDemoAdapter() {
     },
     async submitJobApplication(form) {
       const ok = { ok: true };
-      if (cleanLine(form?.website)) return ok;
+      if (cleanLine(form?.[HONEYPOT])) return ok;
       const { errors, data } = checkJobApplication(form);
       if (errors.length) throw formError(errors[0].field, errors[0].message);
       if (data.branch !== 'any' && !db.branches.some((b) => b.active && b.id === data.branch)) throw formError('branch', 'Please choose a branch, or "Any branch".');
@@ -1152,7 +1152,7 @@ export function createDemoAdapter() {
     },
     async submitFeedback(form) {
       const ok = { ok: true };
-      if (cleanLine(form?.website)) return ok;
+      if (cleanLine(form?.[HONEYPOT])) return ok;
       const { errors, data } = checkFeedback(form);
       if (errors.length) throw formError(errors[0].field, errors[0].message);
       if (data.branch !== 'none' && !db.branches.some((b) => b.active && b.id === data.branch)) throw formError('branch', 'Please choose a branch, or "Not about one branch".');
@@ -1176,6 +1176,11 @@ export function createDemoAdapter() {
           && (!branch || (branch === 'any' ? a.branch_id === null : a.branch_id === Number(branch))))
         .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
         .map((a) => ({ ...clone(a), events: clone(db.job_events.filter((e) => e.application_id === a.id).sort((x, y) => (x.created_at < y.created_at ? -1 : 1))) }));
+    },
+    /** How many applications are New (the Today page). */
+    async newJobApplications() {
+      need('jobs.view');
+      return db.job_applications.filter((a) => a.status === 'new').length;
     },
     async updateJobApplication(id, { status = null, note = null } = {}) {
       need('jobs.view');

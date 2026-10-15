@@ -48,10 +48,10 @@ create or replace function pg_temp.job(n int, extra jsonb default '{}') returns 
   select jsonb_build_object('full_name', 'Sample Applicant ' || n, 'phone', '0300 555' || lpad(n::text, 4, '0'), 'email', 'sample' || n || '@example.com',
     'position', 'dental_assistant', 'qualification', 'BDS', 'graduation_year', 2020, 'experience', 'Two years (sample)',
     'branch', (select id from public.branches where code = 'GUL'), 'cnic', '12345-' || lpad(n::text, 7, '0') || '-1',
-    'cv_path', pg_temp.cv(n), 'message', 'A sample message.', 'consent', true, 'website', '') || extra $$;
+    'cv_path', pg_temp.cv(n), 'message', 'A sample message.', 'consent', true, 'pf_trap', '') || extra $$;
 create or replace function pg_temp.fb(extra jsonb default '{}') returns jsonb language sql as $$
   select jsonb_build_object('kind', 'suggestion', 'topic', 'cleanliness', 'branch', (select id from public.branches where code = 'NN'),
-    'message', 'Please keep the waiting area cleaner (sample).', 'name', null, 'phone', null, 'mr', null, 'contact_me', false, 'website', '') || extra $$;
+    'message', 'Please keep the waiting area cleaner (sample).', 'name', null, 'phone', null, 'mr', null, 'contact_me', false, 'pf_trap', '') || extra $$;
 -- 'ok' or "<field> | <message>" (the field is the error's DETAIL), for the checks of one field at a time.
 create or replace function pg_temp.try_job(p jsonb) returns text language plpgsql as $$
 declare d text; m text;
@@ -85,6 +85,37 @@ create or replace function pg_temp.cv_bytes(p_day boolean) returns bigint langua
      and case when p_day then o.created_at > now() - interval '1 day'
               else not exists (select 1 from public.job_applications a where a.cv_path = o.name)
                    and not exists (select 1 from private.public_form_log l where l.cv_path = o.name) end $$;
+-- private.job_cv_files, which the CV upload limits count, has exactly the files of job-cvs, with their size and upload time.
+create or replace function pg_temp.cv_lines_match() returns boolean language sql as $$
+  select not exists (
+    select 1
+      from (select o.name, case when (o.metadata ->> 'size') ~ '^[0-9]{1,12}$' then (o.metadata ->> 'size')::bigint else 0 end as size, o.created_at
+              from storage.objects o where o.bucket_id = 'job-cvs') o
+      full join private.job_cv_files f on f.name = o.name
+     where o.name is null or f.name is null or f.size <> o.size or f.created_at <> o.created_at) $$;
+-- The CV upload limits as they were first written: counted over every file of the bucket. private.job_cv_upload_problem must
+-- give the very same answer while it counts only the last day's lines and the unsent ones of private.job_cv_files.
+create or replace function pg_temp.bucket_problem(p_size bigint default 0) returns text language sql as $$
+  select case
+           when count(*) filter (where x.at > now() - interval '1 day') >= 100
+             or coalesce(sum(x.size) filter (where x.at > now() - interval '1 day'), 0) + greatest(coalesce(p_size, 0), 1) > 200 * 1048576
+             or coalesce(sum(x.size) filter (where not x.sent), 0) + greatest(coalesce(p_size, 0), 1) > 100 * 1048576 then 'day'
+           when count(*) filter (where x.at > now() - interval '1 minute') >= 5 then 'minute'
+         end
+    from (select o.created_at as at,
+                 case when (o.metadata ->> 'size') ~ '^[0-9]{1,12}$' then (o.metadata ->> 'size')::bigint else 0 end as size,
+                 exists (select 1 from public.job_applications a where a.cv_path = o.name)
+                   or exists (select 1 from private.public_form_log l where l.cv_path = o.name) as sent
+            from storage.objects o where o.bucket_id = 'job-cvs') x $$;
+-- Both of the above, for one moment of the test (run as the database owner: the visitor can see neither).
+create or replace function pg_temp.cv_limits_hold(msg text) returns void language plpgsql as $$
+begin
+  perform pg_temp.check(pg_temp.cv_lines_match(), 'job_cv_files: ' || msg || ': one line per file of job-cvs, with its size and upload time');
+  perform pg_temp.check(private.job_cv_upload_problem(0) is not distinct from pg_temp.bucket_problem(0)
+                        and private.job_cv_upload_problem(1000) is not distinct from pg_temp.bucket_problem(1000)
+                        and private.job_cv_upload_problem(5242880) is not distinct from pg_temp.bucket_problem(5242880),
+    'job_cv_files: ' || msg || ': the upload limits answer as a count over the whole bucket would (' || coalesce(pg_temp.bucket_problem(0), 'null') || ')');
+end $$;
 grant execute on all functions in schema pg_temp to authenticated, anon, service_role;
 
 begin;
@@ -142,6 +173,8 @@ begin
   perform pg_temp.check(r.message = E'Line one\nLine two <script>alert(1)</script> end', 'the message is plain text: tags kept as typed, Windows line end and control character cleaned');
   perform pg_temp.check(r.cv_type = 'application/pdf' and r.cv_size = 120000 and r.branch_id = (select id from public.branches where code = 'GUL')
                         and r.position = 'dental_assistant' and r.graduation_year = 2020 and r.consent_at is not null, 'the CV type and size, branch, position, year and consent time are stored');
+  perform pg_temp.check((select sent from private.job_cv_files where name = pg_temp.cv(1)), 'job_cv_files: the CV of the stored form is marked sent');
+  perform pg_temp.cv_limits_hold('after an upload and a stored form');
 end $$;
 
 -- 3. Every field is checked on the server
@@ -185,9 +218,9 @@ select pg_temp.check((select count(*) from public.job_applications) = 1, 'none o
 -- 4. The honeypot: a form with the hidden box filled is thanked and dropped, whatever else it holds
 set role anon;
 select pg_temp.act_as('');
-select pg_temp.check(public.submit_job_application(pg_temp.job(2, '{"website": "http://spam.example"}')) = '{"ok": true}'::jsonb, 'honeypot: thanked like any other form');
-select pg_temp.check(public.submit_job_application('{"website": "x", "full_name": ""}'::jsonb) = '{"ok": true}'::jsonb, 'honeypot: thanked even when every other field is wrong');
-select pg_temp.check(public.submit_feedback('{"website": "x"}'::jsonb) = '{"ok": true}'::jsonb, 'honeypot: the feedback form is thanked the same way');
+select pg_temp.check(public.submit_job_application(pg_temp.job(2, '{"pf_trap": "http://spam.example"}')) = '{"ok": true}'::jsonb, 'honeypot: thanked like any other form');
+select pg_temp.check(public.submit_job_application('{"pf_trap": "x", "full_name": ""}'::jsonb) = '{"ok": true}'::jsonb, 'honeypot: thanked even when every other field is wrong');
+select pg_temp.check(public.submit_feedback('{"pf_trap": "x"}'::jsonb) = '{"ok": true}'::jsonb, 'honeypot: the feedback form is thanked the same way');
 reset role;
 select pg_temp.check((select count(*) from public.job_applications) = 1 and (select count(*) from public.complaints where source = 'website') = 0, 'honeypot: nothing was stored');
 
@@ -227,6 +260,7 @@ end $$;
 reset role;
 -- A file uploaded more than a day ago is not taken (and is cleanup material instead).
 update storage.objects set created_at = now() - interval '25 hours' where bucket_id = 'job-cvs' and name = pg_temp.cv(9, 'docx');
+select pg_temp.cv_limits_hold('a file whose upload time changed');
 set role anon;
 select pg_temp.act_as('');
 select pg_temp.check(pg_temp.try_job(pg_temp.job(9, jsonb_build_object('cv_path', pg_temp.cv(9, 'docx')))) like 'cv | FORM_CV: Please choose your CV again.%', 'a CV uploaded more than a day ago is refused');
@@ -331,6 +365,7 @@ alter table storage.objects disable trigger job_cvs_guard;
 insert into storage.objects (bucket_id, name, metadata, created_at)
 values ('job-cvs', pg_temp.cv(100103), jsonb_build_object('size', 100 * 1048576 - pg_temp.cv_bytes(false), 'mimetype', 'application/pdf'), now() - interval '30 hours');
 alter table storage.objects enable trigger job_cvs_guard;
+select pg_temp.cv_limits_hold('a file put in with job_cvs_guard switched off');
 set role anon;
 select pg_temp.act_as('');
 do $$
@@ -354,7 +389,11 @@ end $$;
 reset role;
 select pg_temp.check((select count(*) from public.job_applications where cv_path = pg_temp.cv(50)) = 1 and (select count(*) from public.job_applications where cv_path = pg_temp.cv(51)) = 0,
   'stored or dropped: (the first form was stored, the second dropped)');
+select pg_temp.check((select bool_and(sent) and count(*) = 2 from private.job_cv_files where name in (pg_temp.cv(50), pg_temp.cv(51))),
+  'job_cv_files: the CVs of the stored and the dropped form are both marked sent');
+select pg_temp.cv_limits_hold('after a stored and a dropped form');
 delete from storage.objects where bucket_id = 'job-cvs' and name in (pg_temp.cv(100103), pg_temp.cv(100104));
+select pg_temp.cv_limits_hold('after files were removed');
 
 -- Whole website: 5 a minute, counted from the log, so a form dropped over its phone limit counts like a stored one.
 -- (Inside one transaction every row has the same time, so the rows made above are moved back first.)
@@ -404,6 +443,7 @@ select pg_temp.check((select count(*) from public.job_applications where cv_path
 select pg_temp.later(24 * 60 + 5);
 update storage.objects set created_at = now() - interval '10 minutes' where bucket_id = 'job-cvs' and name = pg_temp.cv(35);
 insert into private.public_form_log (form, cv_path, created_at) values ('job', 'incoming/old-sample.pdf', now() - interval '3 days');
+select pg_temp.cv_limits_hold('a day later');
 set role anon;
 select pg_temp.act_as('');
 select pg_temp.check(pg_temp.try_job(pg_temp.job(35)) = 'ok', 'whole website: a day later applications are taken again');
@@ -419,6 +459,7 @@ insert into storage.objects (bucket_id, name, metadata, created_at)
 select 'job-cvs', pg_temp.cv(100000 + g), '{"size": 1000, "mimetype": "application/pdf"}', now() - interval '2 hours'
   from generate_series(1, 100 - (select count(*)::int from storage.objects where bucket_id = 'job-cvs' and created_at > now() - interval '1 day')) g;
 alter table storage.objects enable trigger job_cvs_guard;
+select pg_temp.cv_limits_hold('100 files today');
 set role anon;
 select pg_temp.act_as('');
 select pg_temp.check(public.job_cv_upload_busy() = 'day', 'CV uploads: with 100 files today it answers "day", so the website says to try again tomorrow');
@@ -439,6 +480,8 @@ values ('job-cvs', pg_temp.cv(100101), jsonb_build_object('size', 200 * 1048576 
 alter table storage.objects enable trigger job_cvs_guard;
 insert into public.job_applications (full_name, phone, position, qualification, cnic, cv_path, cv_type, cv_size)
 values ('Sample Filler', '03005550777', 'other', 'BDS', '12345-0000777-1', pg_temp.cv(100101), 'application/pdf', 1);
+-- (Put in by hand, so its line of job_cv_files is not marked sent: the limits still see the CV as used.)
+select pg_temp.cv_limits_hold('200 MB today, one CV used by an application put in by hand');
 set role anon;
 select pg_temp.act_as('');
 select pg_temp.check(public.job_cv_upload_busy() is null, 'CV uploads: 120 KB under 200 MB today, uploads are still taken');
@@ -453,6 +496,7 @@ alter table storage.objects disable trigger job_cvs_guard;
 insert into storage.objects (bucket_id, name, metadata, created_at)
 values ('job-cvs', pg_temp.cv(100102), jsonb_build_object('size', 100 * 1048576 - pg_temp.cv_bytes(false) - 120000, 'mimetype', 'application/pdf'), now() - interval '30 hours');
 alter table storage.objects enable trigger job_cvs_guard;
+select pg_temp.cv_limits_hold('120 KB under 100 MB of unused CVs');
 set role anon;
 select pg_temp.act_as('');
 select pg_temp.check(public.job_cv_upload_busy() is null, 'CV uploads: 120 KB under 100 MB of unused CVs, uploads are still taken');
@@ -563,6 +607,7 @@ begin
   perform pg_temp.check(n = 1, 'and so can the CV of a dropped form');
 end $$;
 reset role;
+select pg_temp.cv_limits_hold('after the staff pages removed CVs');
 insert into storage.objects (bucket_id, name, metadata) values ('job-cvs', pg_temp.cv(40), '{"size": 10, "mimetype": "application/pdf"}');
 set role authenticated;
 select pg_temp.act_as(current_setting('test.admin'));
@@ -736,4 +781,89 @@ reset role;
 select pg_temp.expect_error($q$insert into public.complaints (subject, body, source) values ('x', 'y', 'portal')$q$, 'complaints_who_check', 'a portal complaint must belong to a patient');
 select pg_temp.expect_error($q$insert into public.complaints (subject, body, source, kind) values ('x', 'y', 'website', 'complaint')$q$, 'complaints_who_check', 'a website form must have its topic');
 select pg_temp.expect_error($q$insert into public.complaints (subject, body, source, kind, topic, contact_me) values ('x', 'y', 'website', 'complaint', 'other', true)$q$, 'complaints_contact_check', '"please contact me" needs a phone number');
+
+-- 11. A field left out is empty, never an error; invisible characters are removed; an email address is one plain address;
+--     "Other" is not a degree; the CV upload limits stay right without reading the bucket
+select pg_temp.later(24 * 60 + 5);
+-- The cleaning both forms use: zero-width characters, direction marks, overrides and isolates and the byte order mark go.
+select pg_temp.check(private.form_line(E'Sample\u200B Na\u200Dme\u200F ') = 'Sample Name', 'form_line: zero-width characters and direction marks are removed');
+select pg_temp.check(private.form_line(E'\u202Etxet\u202C and \u2066more\u2069\uFEFF') = 'txet and more', 'form_line: a right-to-left override, an isolate and the byte order mark are removed');
+select pg_temp.check(private.form_line(E'\u200B\u200C\u200D\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\uFEFF') = '',
+  'form_line: every one of U+200B-U+200F, U+202A-U+202E, U+2066-U+2069 and U+FEFF, and nothing is left');
+select pg_temp.check(private.form_block(E'Line one\u202E\r\nLine\u200B two\u2067') = E'Line one\nLine two', 'form_block: the same, and the line end is kept');
+select pg_temp.check(private.form_line(E'Ali \u0639\u0644\u06CC \u2014 caf\u00E9') = E'Ali \u0639\u0644\u06CC \u2014 caf\u00E9', 'other text is kept as typed (Urdu letters, a dash, an accent)');
+set role anon;
+select pg_temp.act_as('');
+do $$
+declare bad text;
+begin
+  perform pg_temp.put_cv(60);
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(60, jsonb_build_object('full_name', E'\u200B\u202E\u200B'))) like 'full_name | %', 'a name of invisible characters only is no name');
+  -- The staff page makes a mailto: link of the address: nothing in it may add a subject, copies or text.
+  foreach bad in array array['sample?cc=boss@example.com', 'sample@example.com?subject=hi', 'sam&ple@example.com', 'sample=1@example.com',
+                             'sam%40ple@example.com', 'sample#x@example.com', 'sam ple@example.com'] loop
+    perform pg_temp.check(pg_temp.try_job(pg_temp.job(60, jsonb_build_object('email', bad))) like 'email | FORM_INVALID: Please check your email address%', 'email: "' || bad || '" is refused');
+  end loop;
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(60, '{"qualification": "Other"}')) like 'qualification | FORM_INVALID: Please type your degree or qualification%', '"Other" is not a degree: the form asks for the degree itself');
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(60, '{"qualification": " others "}')) like 'qualification | %', '... "others" either, however written');
+  -- Every optional field left out of the form: taken, nothing stored for them.
+  perform pg_temp.check(pg_temp.try_job(pg_temp.job(60, jsonb_build_object('full_name', E'Sample\u202E Sixty\u200B', 'qualification', 'BSc Nursing'))
+                                         - 'email' - 'graduation_year' - 'experience' - 'message' - 'pf_trap') = 'ok',
+    'a job form without email, year, experience, message or the hidden box is taken');
+  -- "Please contact me" left out, null, or anything but the tick itself is not ticked (it used to stop the form with an error).
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"message": "Every optional field left out (sample)."}') - 'name' - 'phone' - 'mr' - 'contact_me' - 'pf_trap') = 'ok',
+    'a feedback form without name, phone, Mr#, "contact me" or the hidden box is taken');
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"message": "No contact_me but a phone (sample).", "phone": "0301 5550160"}') - 'contact_me') = 'ok',
+    'a feedback form with a phone but no "contact me" field is taken');
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"message": "contact_me written as text (sample).", "contact_me": "true"}')) = 'ok', '"contact me" as the text "true" is not a tick');
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"message": "contact_me given as null (sample).", "contact_me": null}')) = 'ok', '"contact me" as null is not a tick');
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"message": "contact_me given as 1 (sample).", "contact_me": 1}')) = 'ok', '"contact me" as 1 is not a tick');
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb(jsonb_build_object('message', E'Shown \u202Ebackwards\u202C here (sample).', 'name', E'\u2067Sample Invisible\u2069'))) = 'ok',
+    'a message and name with direction overrides are taken');
+  -- The hidden box has a name no browser fills in by itself; a box called "website" (the old name, which autofill may fill) drops nothing.
+  perform pg_temp.check(pg_temp.try_fb(pg_temp.fb('{"message": "An autofilled website box (sample).", "website": "https://example.com"}')) = 'ok', 'a filled "website" field no longer drops a form');
+end $$;
+reset role;
+select pg_temp.check((select full_name = 'Sample Sixty' and qualification = 'BSc Nursing' and email is null and graduation_year is null and experience is null and message is null
+                        from public.job_applications where cv_path = pg_temp.cv(60)), 'stored: the name without its invisible characters, the optional fields empty');
+select pg_temp.check((select count(*) = 7 and bool_and(not contact_me) from public.complaints where source = 'website' and created_at = now()),
+  'stored: all seven feedback forms, "Please contact me" not ticked in any of them');
+select pg_temp.check((select contact_phone = '03015550160' from public.complaints where body = 'No contact_me but a phone (sample).'), '... the one with a phone keeps it');
+select pg_temp.check((select body = 'Shown backwards here (sample).' and contact_name = 'Sample Invisible' from public.complaints where body like 'Shown%'),
+  'stored: the message and name without the direction overrides');
+-- The table itself holds the email and degree rules.
+select pg_temp.expect_error($q$insert into public.job_applications (full_name, phone, email, position, qualification, cnic, cv_path, cv_type, cv_size)
+                               values ('Sample', '03005550000', 'a?b=c@example.com', 'other', 'BDS', '12345-0000000-1', 'incoming/z.pdf', 'application/pdf', 1)$q$,
+  'job_applications_email_check', 'the table refuses an email with ? or = in it');
+select pg_temp.expect_error($q$insert into public.job_applications (full_name, phone, position, qualification, cnic, cv_path, cv_type, cv_size)
+                               values ('Sample', '03005550000', 'other', 'Other', '12345-0000000-1', 'incoming/z.pdf', 'application/pdf', 1)$q$,
+  'job_applications_qualification_check', 'the table never stores "Other" as a degree');
+-- The question a visitor may ask (job_cv_upload_busy) never reads the bucket: it counts the last day's lines and the unsent ones of
+-- private.job_cv_files. A pile of old CVs that forms sent (a year of hiring) changes neither its answer nor what it reads.
+select pg_temp.check((select prosrc from pg_proc where oid = 'private.job_cv_upload_problem(bigint)'::regprocedure) !~ 'storage[.]objects'
+                     and (select prosrc from pg_proc where oid = 'public.job_cv_upload_busy()'::regprocedure) !~ 'storage[.]objects',
+  'job_cv_upload_busy and the limits it asks read private.job_cv_files, not storage.objects');
+select pg_temp.check(exists (select 1 from pg_indexes where schemaname = 'private' and tablename = 'job_cv_files' and indexdef like '%(created_at)%')
+                     and exists (select 1 from pg_indexes where schemaname = 'private' and tablename = 'job_cv_files' and indexdef like '%WHERE (NOT sent)%'),
+  'job_cv_files has an index for the last day''s uploads and one for the unsent CVs');
+select pg_temp.cv_limits_hold('before a year of old CVs');
+select set_config('test.busy_before', coalesce(public.job_cv_upload_busy(), 'null'), false);
+select set_config('test.unsent_before', (select count(*)::text from private.job_cv_files where not sent), false);
+insert into private.public_form_log (form, cv_path, created_at)
+select 'job', pg_temp.cv(200000 + g), now() - make_interval(days => 2 + g % 360) from generate_series(1, 400) g;
+alter table storage.objects disable trigger job_cvs_guard;
+insert into storage.objects (bucket_id, name, metadata, created_at)
+select 'job-cvs', pg_temp.cv(200000 + g), '{"size": 250000, "mimetype": "application/pdf"}', now() - make_interval(days => 2 + g % 360) from generate_series(1, 400) g;
+alter table storage.objects enable trigger job_cvs_guard;
+select pg_temp.check(coalesce(public.job_cv_upload_busy(), 'null') = current_setting('test.busy_before'), '400 old sent CVs (100 MB) do not change the answer');
+select pg_temp.check((select count(*)::text from private.job_cv_files where not sent) = current_setting('test.unsent_before')
+                     and (select count(*) from private.job_cv_files where created_at > now() - interval '1 day') < 20,
+  '... they are no unsent CVs, and outside the last day (so neither index brings them up)');
+select pg_temp.cv_limits_hold('with a year of old CVs');
+-- An upload of a name in use, refused by Storage's unique index, leaves no line behind.
+select pg_temp.expect_error(format($q$insert into storage.objects (bucket_id, name, metadata) values ('job-cvs', %L, '{"size": 1000, "mimetype": "application/pdf"}')$q$, pg_temp.cv(60)),
+  'JOB_CV_USED', 'a CV name in use cannot be uploaded again');
+select pg_temp.put_cv(61);
+select pg_temp.expect_error($q$select pg_temp.put_cv(61)$q$, 'duplicate key', 'an upload to the name of a file that is there is refused');
+select pg_temp.cv_limits_hold('after refused uploads');
 rollback;

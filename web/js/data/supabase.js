@@ -1576,9 +1576,10 @@ export async function createSupabaseAdapter() {
       const path = `incoming/${crypto.randomUUID()}.${info.ext}`;
       // supabase-js sends a File or Blob as form data with the file's own type and drops the contentType option, so a .docx the
       // browser calls '' or 'application/octet-stream' (or a JPG called 'image/jpg') would be refused by the bucket: the copy
-      // sent carries the type of its ending instead.
+      // sent carries the type of its ending instead. cacheControl '0': no cache along the way keeps a copy of a CV (Storage
+      // would otherwise tell caches to keep it for an hour).
       const body = file.slice(0, file.size, info.type);
-      const { error } = await sb.storage.from('job-cvs').upload(path, body, { contentType: info.type, upsert: false });
+      const { error } = await sb.storage.from('job-cvs').upload(path, body, { cacheControl: '0', contentType: info.type, upsert: false });
       if (error) {
         const problem = cvUploadError(error);
         // Refused by the upload limit: when today's uploads are full, the visitor is told "tomorrow", not "in a few minutes".
@@ -1614,6 +1615,14 @@ export async function createSupabaseAdapter() {
         const rows = capped(check(await q), JOBS_CAP);
         for (const r of rows) r.events = (r.events || []).sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
         return rows;
+      });
+    },
+    /** How many applications are New (the Today page): a count only, no rows. */
+    async newJobApplications() {
+      return jobsCall(async () => {
+        const res = await sb.from('job_applications').select('id', { count: 'exact', head: true }).eq('status', 'new');
+        check(res);
+        return res.count || 0;
       });
     },
     /** A new status and/or an internal note; the database stamps who and when. */

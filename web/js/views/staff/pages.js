@@ -20,11 +20,13 @@ export async function renderDashboard(root) {
   const s = state.session.staff;
   const day = todayISO();
   if (can('jobs.view')) cvSweep ??= import('./jobs.js').then((m) => m.removeUnsentCvs()).catch(() => 0);
-  const [rows, totalDues, review, complaints] = await Promise.all([
+  const [rows, totalDues, review, complaints, newJobs] = await Promise.all([
     d.dashboard(day).catch(() => []),
     can('finance.view') ? d.totalDues().catch(() => null) : null,
     isAdmin() || can('complaints.view') ? d.reviewList().catch(() => []) : [],
     can('complaints.view') ? d.complaints().catch(() => []) : [],
+    // Job applications still marked New, for those who see them (none shown before the database update has been run).
+    can('jobs.view') ? d.newJobApplications().catch(() => 0) : 0,
   ]);
   // totalDues is a number; a capped fallback may mark itself truncated.
   const duesTotal = totalDues === null ? null : Number(typeof totalDues === 'object' ? totalDues.total ?? totalDues : totalDues);
@@ -40,7 +42,8 @@ export async function renderDashboard(root) {
       can('finance.view') || can('billing.view') ? h('div', { class: 'stat' }, h('strong', {}, rupees(sum('received'))), h('span', {}, 'Received today')) : null,
       duesTotal !== null ? h('div', { class: 'stat' }, h('strong', {}, duesPartial ? `${rupees(duesTotal)}+` : rupees(duesTotal)), h('span', {}, duesPartial ? 'Total pending dues (incomplete: not every patient was counted)' : 'Total pending dues')) : null,
       review.length ? h('a', { class: 'stat', href: '#/staff/review', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, review.length), h('span', {}, 'On Dr. Ali\'s list')) : null,
-      complaints.filter((c) => c.status === 'new').length ? h('a', { class: 'stat', href: '#/staff/complaints', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, complaints.filter((c) => c.status === 'new').length), h('span', {}, 'New complaints & suggestions')) : null),
+      complaints.filter((c) => c.status === 'new').length ? h('a', { class: 'stat', href: '#/staff/complaints', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, complaints.filter((c) => c.status === 'new').length), h('span', {}, 'New complaints & suggestions')) : null,
+      newJobs ? h('a', { class: 'stat', href: '#/staff/jobs?status=new', style: { textDecoration: 'none', color: 'inherit' } }, h('strong', {}, newJobs), h('span', {}, 'New job applications')) : null),
     h('section', { class: 'panel', style: { marginTop: '16px' } },
       h('h2', {}, 'Branches today'),
       h('div', { class: 'table-scroll' }, h('table', { class: 'list' },

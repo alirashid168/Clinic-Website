@@ -7,7 +7,7 @@
 import { h, mount, toast, friendlyError, modal, field, select, empty, shortDate, timeOf, phoneLink, showFormErrors } from '../../ui/dom.js';
 import { state, branchName } from '../../state.js';
 import { capNote } from './common.js';
-import { POSITIONS, POSITION_LABELS, JOB_STATUSES, JOB_STATUS_LABELS, LIMITS, formatPhone } from '../../lib/public-forms.js';
+import { POSITIONS, POSITION_LABELS, JOB_STATUSES, JOB_STATUS_LABELS, LIMITS, formatPhone, mailtoHref } from '../../lib/public-forms.js';
 
 const STATUS_BADGE = { new: 'badge-dues', contacted: 'badge-warn', interview: 'badge-photo', hired: 'badge-ok', rejected: 'badge-muted' };
 const when = (ts) => (ts ? `${shortDate(ts)}, ${timeOf(ts)}` : '');
@@ -105,6 +105,8 @@ export async function renderJobs(root, params) {
     const statusPick = select(JOB_STATUSES, a.status, {});
     const note = h('textarea', { rows: 3, maxlength: LIMITS.note + 50, placeholder: 'For example: called, interview on Saturday at 4 pm' });
     const detail = (label, value) => (value === null || value === undefined || value === '' ? null : h('div', { class: 'job-detail' }, h('dt', {}, label), h('dd', {}, value)));
+    // An email link opens an email to that one address and adds nothing (mailtoHref); anything else is shown as text only.
+    const email = a.email ? (mailtoHref(a.email) ? h('a', { href: mailtoHref(a.email) }, a.email) : a.email) : null;
     const cvButton = h('button', { type: 'button', class: 'btn btn-small', onclick: () => openCv(a) },
       `Open CV (${FILE_KIND[a.cv_type] || 'file'}, ${fileSize(a.cv_size)})`);
     const body = h('div', { class: 'job-dialog' },
@@ -115,7 +117,7 @@ export async function renderJobs(root, params) {
         detail('Experience', a.experience),
         detail('Preferred branch', branchText(a.branch_id)),
         detail('Mobile', phoneLink(formatPhone(a.phone))),
-        detail('Email', a.email ? h('a', { href: `mailto:${a.email}` }, a.email) : null),
+        detail('Email', email),
         detail('CNIC', a.cnic),
         detail('Received', when(a.created_at)),
         detail('Message', a.message ? h('div', { class: 'pre-wrap' }, a.message) : null)),

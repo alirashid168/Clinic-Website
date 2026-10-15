@@ -17,8 +17,14 @@ export const POSITIONS = [
   { value: 'social_media', label: 'Social media coordinator' },
   { value: 'other', label: 'Other' },
 ];
-/** Offered under the degree box; anything else may be typed. */
+/** The degree list. "Other" opens a box for the degree itself: the word "Other" is never sent or stored. */
 export const QUALIFICATIONS = ['BDS', 'BDS + FCPS / MDS', 'Diploma', 'Intermediate', 'Other'];
+const OTHER = /^others?$/i;
+/**
+ * The hidden box only bots fill in (the database drops a form that has it filled). Its name is one no browser or password
+ * manager fills in by itself, unlike "website" or "url", so a person's form is never dropped by an autofill.
+ */
+export const HONEYPOT = 'pf_trap';
 export const JOB_STATUSES = [
   { value: 'new', label: 'New' },
   { value: 'contacted', label: 'Contacted' },
@@ -52,6 +58,8 @@ export const FEEDBACK_TOPIC_LABELS = labelOf(FEEDBACK_TOPICS);
 // The CV: the file types the bucket job-cvs takes, by file name ending. The upload sends a copy of the file that carries the
 // type of its ending (data/supabase.js uploadJobCv: Storage takes the type from the file itself, not from an option), so a
 // phone that calls a .docx "application/octet-stream", or a JPG "image/jpg", still gets through, and nothing else does.
+// A file whose name has no ending of these (a phone's "document", a WhatsApp "IMG-20261012-WA0003") is known by its type
+// when the browser gives one of the five, and gets that type's ending.
 export const CV_TYPES = {
   pdf: 'application/pdf',
   doc: 'application/msword',
@@ -59,6 +67,7 @@ export const CV_TYPES = {
   jpg: 'image/jpeg',
   png: 'image/png',
 };
+const CV_ENDING_OF_TYPE = Object.fromEntries(Object.entries(CV_TYPES).map(([ext, type]) => [type, ext]));
 export const CV_MAX_BYTES = 5 * 1024 * 1024;
 /**
  * The CV upload limits for the whole website (the database's trigger on storage.objects holds them; the demo follows them):
@@ -80,13 +89,17 @@ export const lastGraduationYear = (now = new Date()) => now.getFullYear() + 6;
 // ---------------------------------------------------------------- cleaning
 // Control characters (except new lines and tabs in longer text) are removed; nothing else is changed or escaped.
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
-/** One line: control characters and runs of spaces become one space, trimmed. */
+// Invisible characters that can disguise text, removed first: the zero-width space, joiners and direction marks
+// (U+200B-U+200F), the direction embeddings and overrides (U+202A-U+202E, which can make a name or message show in another
+// order than it was typed), the direction isolates (U+2066-U+2069) and the byte order mark (U+FEFF).
+const INVISIBLE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+/** One line: invisible characters go, control characters and runs of spaces become one space, trimmed. */
 export function cleanLine(v) {
-  return String(v ?? '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
+  return String(v ?? '').replace(INVISIBLE, '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
 }
-/** Several lines (a message): Windows line ends become one new line, other control characters go, trimmed. */
+/** Several lines (a message): Windows line ends become one new line, invisible and other control characters go, trimmed. */
 export function cleanBlock(v) {
-  return String(v ?? '').replace(/\r\n?/g, '\n').replace(CONTROL, '').trim();
+  return String(v ?? '').replace(/\r\n?/g, '\n').replace(INVISIBLE, '').replace(CONTROL, '').trim();
 }
 
 /**
@@ -112,11 +125,14 @@ export function normalizeCnic(v) {
 /** { ext, type } for a CV file, or { error } in plain words. */
 export function cvFileInfo(file) {
   if (!file) return { error: 'Please attach your CV.' };
-  let ext = String(file.name || '').toLowerCase().split('.').pop();
+  const name = String(file.name || '').toLowerCase();
+  let ext = name.includes('.') ? name.split('.').pop() : '';
   if (ext === 'jpeg') ext = 'jpg';
-  const type = CV_TYPES[ext];
-  // A type the browser names must agree with the ending (image/jpg is how some phones name a JPG).
+  // A type the browser names must agree with the ending (image/jpg is how some phones name a JPG). A name without one of the
+  // five endings takes the ending of the type, when that is one of the five.
   const given = String(file.type || '').toLowerCase().replace('image/jpg', 'image/jpeg');
+  if (!CV_TYPES[ext] && CV_ENDING_OF_TYPE[given]) ext = CV_ENDING_OF_TYPE[given];
+  const type = CV_TYPES[ext];
   if (!type || (given && given !== 'application/octet-stream' && given !== type)) {
     return { error: 'Your CV must be a PDF, Word (.doc or .docx), JPG or PNG file.' };
   }
@@ -125,10 +141,22 @@ export function cvFileInfo(file) {
   return { ext, type };
 }
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// One plain address: none of ? & = % # or a space, so the mailto: link on the staff page opens an email to it and nothing more.
+const EMAIL = /^[^\s@?&=%#]+@[^\s@?&=%#]+\.[^\s@?&=%#]+$/;
+/**
+ * The mailto: link for an applicant's email (the staff Job applications page), or null when it is not one plain address.
+ * The two parts of the address are encoded, so nothing in it can add a subject, copies or text to the email.
+ */
+export function mailtoHref(email) {
+  const e = String(email ?? '');
+  if (e.length > LIMITS.email || !EMAIL.test(e)) return null;
+  const at = e.lastIndexOf('@');
+  return `mailto:${encodeURIComponent(e.slice(0, at))}@${encodeURIComponent(e.slice(at + 1))}`;
+}
 const HAS_LETTER = /\p{L}/u;
 export const MR_PATTERN = /^[0-9A-Za-z/-]{1,20}$/;
 const PHONE_MESSAGE = 'Please enter a Pakistani mobile number, for example 0300 1234567.';
+const OTHER_DEGREE_MESSAGE = 'Please type your degree or qualification, for example BA or BSc.';
 const tooLong = (n, what = 'this') => `Please keep ${what} under ${n.toLocaleString('en-PK')} characters.`;
 
 // ---------------------------------------------------------------- the two forms
@@ -158,9 +186,14 @@ export function checkJobApplication(form, { cv, now = new Date() } = {}) {
   const position = String(f.position || '');
   if (!POSITION_LABELS[position]) add('position', 'Please choose the job you are applying for.');
 
-  const qualification = cleanLine(f.qualification);
-  if (!qualification || qualification.length < 2) add('qualification', 'Please enter your degree or qualification, for example BDS.');
-  else if (qualification.length > LIMITS.qualification) add('qualification', tooLong(LIMITS.qualification));
+  // The degree list's choice, or for "Other" the degree typed in the box under it (qualification_other): "Other" itself is no degree.
+  const picked = cleanLine(f.qualification);
+  const other = OTHER.test(picked);
+  const qualification = other ? cleanLine(f.qualification_other) : picked;
+  const qualificationField = other ? 'qualification_other' : 'qualification';
+  if (picked.length < 2) add('qualification', 'Please choose your degree or qualification.');
+  else if (other && (qualification.length < 2 || OTHER.test(qualification))) add('qualification_other', OTHER_DEGREE_MESSAGE);
+  else if (qualification.length > LIMITS.qualification) add(qualificationField, tooLong(LIMITS.qualification));
 
   const yearText = cleanLine(f.graduation_year);
   const year = yearText ? Number(yearText) : null;
@@ -195,7 +228,7 @@ export function checkJobApplication(form, { cv, now = new Date() } = {}) {
     data: {
       full_name: fullName, phone, email: email || null, position, qualification,
       graduation_year: year, experience: experience || null, branch: branch === 'any' ? 'any' : Number(branch) || null,
-      cnic, cv_path: f.cv_path || null, message: message || null, consent: f.consent === true, website: String(f.website || ''),
+      cnic, cv_path: f.cv_path || null, message: message || null, consent: f.consent === true, [HONEYPOT]: String(f[HONEYPOT] || ''),
     },
   };
 }
@@ -234,7 +267,7 @@ export function checkFeedback(form) {
     errors,
     data: {
       kind, topic, branch: branch === 'none' ? 'none' : Number(branch) || null, message,
-      name: name || null, phone, mr: mr || null, contact_me: contactMe, website: String(f.website || ''),
+      name: name || null, phone, mr: mr || null, contact_me: contactMe, [HONEYPOT]: String(f[HONEYPOT] || ''),
     },
   };
 }

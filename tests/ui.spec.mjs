@@ -2215,17 +2215,40 @@ await step('Register needs both "Register new patients" and list editing: with l
 // website forms in the Complaints inbox; the clinic coordinator (no jobs.view) sees no application at all.
 const pf = await newPage({ width: 390, height: 844 });
 const docWidth = (pg) => pg.evaluate(() => document.documentElement.scrollWidth);
-await step('homepage: a line under the four doors and a section with two buttons, "Join our team" and "Complaints & suggestions", each opening its own page; the footer links to both', async () => {
+// Where the two hero buttons sit: [top, bottom] of each (page y), the bottom of the doors, and each button's look.
+const heroButtons = (pg) => pg.evaluate(() => {
+  const y = (el) => { const r = el.getBoundingClientRect(); return [Math.round(r.top + scrollY), Math.round(r.bottom + scrollY)]; };
+  return {
+    doorsEnd: y(document.querySelector('.door-row'))[1],
+    buttons: [...document.querySelectorAll('.hero .hero-forms a')].map((a) => {
+      const s = getComputedStyle(a);
+      return { text: a.textContent, href: a.getAttribute('href'), isBtn: a.classList.contains('btn'), y: y(a), height: a.getBoundingClientRect().height,
+        border: parseFloat(s.borderTopWidth), underline: s.textDecorationLine.includes('underline') };
+    }),
+  };
+});
+await step('homepage: two buttons right under the four doors, "Join our team" and "Complaints & suggestions", on or just after the first screen; a section further down says more; the footer links to both', async () => {
   await pf.goto(BASE);
-  // Right under the doors (owner, 12 Oct: he looked for the new buttons): found without scrolling past Dr. Ali, the week and the clinics.
-  const line = pf.locator('.hero .hero-forms');
-  assert.equal(await line.getByRole('link', { name: 'Join our team' }).getAttribute('href'), '#/join');
-  assert.equal(await line.getByRole('link', { name: 'Complaints & suggestions' }).getAttribute('href'), '#/feedback');
-  const lineEnd = await line.evaluate((el) => el.getBoundingClientRect().bottom + window.scrollY);
-  const doorsEnd = await pf.locator('.door-row').evaluate((el) => el.getBoundingClientRect().bottom + window.scrollY);
-  assert.ok(lineEnd < 1100 && lineEnd - doorsEnd < 150, `the line sits just under the doors at 390 px (doors end at y=${Math.round(doorsEnd)}, the line at y=${Math.round(lineEnd)})`);
-  await line.scrollIntoViewIfNeeded();
+  // The owner (11 Oct) asked for two buttons; on 12 Oct he looked for them: they sit right under the doors, styled as buttons (not
+  // underlined text), found without scrolling past Dr. Ali, the week and the clinics.
+  await pf.locator('.hero .hero-forms a').first().waitFor();
+  const phone = await heroButtons(pf);
+  assert.deepEqual(phone.buttons.map((b) => [b.text, b.href]), [['Join our team', '#/join'], ['Complaints & suggestions', '#/feedback']]);
+  for (const b of phone.buttons) {
+    assert.ok(b.isBtn && b.border >= 1 && !b.underline && b.height >= 48, `"${b.text}" looks like a button (48 px or taller, with a border): ${JSON.stringify(b)}`);
+    assert.ok(b.y[0] - phone.doorsEnd <= 40, `"${b.text}" sits right under the doors (doors end at y=${phone.doorsEnd}, the button starts at y=${b.y[0]})`);
+    assert.ok(b.y[1] <= 844 + 120, `"${b.text}" at 390x844 is on the first screen or just after it (it ends at y=${b.y[1]})`);
+  }
+  assert.equal(phone.buttons[0].y[0], phone.buttons[1].y[0], 'side by side');
+  await pf.locator('.hero .hero-forms').scrollIntoViewIfNeeded();
   await shot(pf, '39-home-hero-forms-390');
+  // On a laptop (1366x768) both are on the first screen.
+  await pf.setViewportSize({ width: 1366, height: 768 });
+  const laptop = await heroButtons(pf);
+  for (const b of laptop.buttons) assert.ok(b.y[1] <= 768 && b.y[0] - laptop.doorsEnd <= 40, `"${b.text}" at 1366x768 is on the first screen, under the doors: ${JSON.stringify(b.y)}`);
+  await pf.evaluate(() => window.scrollTo(0, 0));
+  await shot(pf, '39b-home-hero-forms-1366');
+  await pf.setViewportSize({ width: 390, height: 844 });
   const section = pf.locator('#work-with-us');
   await section.scrollIntoViewIfNeeded();
   assert.equal(await section.locator('a.forms-card').count(), 2);
@@ -2243,9 +2266,14 @@ await step('homepage: a line under the four doors and a section with two buttons
 await step('join form on a phone: every field has a label; sent empty, each required field says what is missing, focus goes to the first, the error is linked to its field', async () => {
   const form = pf.locator('form.public-form');
   assert.ok(await docWidth(pf) <= 390, 'no sideways scrolling at 390 px');
-  for (const label of ['Full name', 'Mobile number', 'Email', 'CNIC number', 'Job you are applying for', 'Degree or qualification', 'Year you graduated', 'Experience', 'Preferred branch', 'CV file', 'Message']) {
+  for (const label of ['Full name', 'Mobile number', 'Email', 'CNIC number', 'Job you are applying for', 'Degree or qualification', 'Graduation year', 'Experience', 'Preferred branch', 'CV file', 'Message']) {
     assert.equal(await form.getByLabel(new RegExp('^' + label)).count(), 1, 'label: ' + label);
   }
+  const yearHint = (await form.getByLabel(/^Graduation year/).getAttribute('aria-describedby')).split(' ').find((id) => id.endsWith('-hint'));
+  assert.equal(await pf.locator('#' + yearHint).innerText(), 'Optional. The year you finished, or expect to finish.');
+  // The degree is a list; "Other" opens a box for the degree itself (the word "Other" is never sent).
+  assert.deepEqual((await form.getByLabel(/^Degree or qualification/).locator('option').allTextContents()).slice(1), ['BDS', 'BDS + FCPS / MDS', 'Diploma', 'Intermediate', 'Other']);
+  assert.equal(await form.getByLabel(/^Your degree or qualification/).isVisible(), false, 'no box for another degree until "Other" is chosen');
   assert.equal(await form.getByLabel(/^Mobile number/).getAttribute('inputmode'), 'tel', 'the phone keyboard for the number');
   assert.equal(await form.getByLabel(/^CNIC number/).getAttribute('inputmode'), 'numeric');
   await form.getByRole('button', { name: 'Send my application' }).click();
@@ -2258,18 +2286,27 @@ await step('join form on a phone: every field has a label; sent empty, each requ
   assert.match(await form.innerText(), /Please tick this box, so the clinic may keep your details and contact you\./);
   await shot(pf, '41-join-errors-390');
 });
-await step('join form: a wrong phone, CNIC, CV type and a CV over 5 MB are explained in plain words', async () => {
+await step('join form: a wrong phone, CNIC, email, CV type, "Other" without the degree and a CV over 5 MB are explained in plain words', async () => {
   const form = pf.locator('form.public-form');
   await form.getByLabel(/^Full name/).fill('Sample Applicant UI');
   await form.getByLabel(/^Mobile number/).fill('021 3456');
   await form.getByLabel(/^CNIC number/).fill('12345-123');
+  await form.getByLabel(/^Email/).fill('sample.ui@example.com?subject=hello');
+  await form.getByLabel(/^Degree or qualification/).selectOption('Other');
+  const otherDegree = form.getByLabel(/^Your degree or qualification/);
+  assert.equal(await otherDegree.isVisible(), true, '"Other" opens the box for the degree');
   await form.getByLabel(/^CV file/).setInputFiles({ name: 'cv.exe', mimeType: 'application/x-msdownload', buffer: Buffer.from('MZ') });
   assert.match(await form.innerText(), /Your CV must be a PDF, Word \(\.doc or \.docx\), JPG or PNG file\./, 'said as soon as the file is chosen');
   await form.getByRole('button', { name: 'Send my application' }).click();
   const text = await form.innerText();
   assert.match(text, /Please enter a Pakistani mobile number, for example 0300 1234567\./);
   assert.match(text, /A CNIC has 13 digits, for example 12345-1234567-1\./);
+  assert.match(text, /Please check your email address, for example name@gmail\.com, or leave it empty\./, 'an address with ?subject= is no plain address');
   assert.match(text, /Your CV must be a PDF, Word/);
+  assert.equal(await otherDegree.getAttribute('aria-invalid'), 'true', 'the error is on the box for the degree');
+  const otherError = (await otherDegree.getAttribute('aria-describedby')).split(' ').find((id) => id.endsWith('-error'));
+  assert.equal(await pf.locator('#' + otherError).innerText(), 'Please type your degree or qualification, for example BA or BSc.');
+  await shot(pf, '41b-join-other-degree-390');
   await form.getByLabel(/^CV file/).setInputFiles({ name: 'cv.pdf', mimeType: 'application/pdf', buffer: Buffer.alloc(5 * 1024 * 1024 + 1) });
   assert.match(await form.innerText(), /Your CV is larger than 5 MB/);
 });
@@ -2279,9 +2316,10 @@ await step('join form: a complete application is sent; the thank-you takes focus
   await form.getByLabel(/^CNIC number/).fill('1234500077881');
   await form.getByLabel(/^CNIC number/).blur();
   assert.equal(await form.getByLabel(/^CNIC number/).inputValue(), '12345-0007788-1', 'the CNIC is shown in its usual shape');
+  await form.getByLabel(/^Email/).fill('sample.ui+jobs@example.com');
   await form.getByLabel(/^Job you are applying for/).selectOption({ label: 'Dental hygienist' });
-  await form.getByLabel(/^Degree or qualification/).fill('BDS');
-  await form.getByLabel(/^Year you graduated/).fill('2021');
+  await form.getByLabel(/^Your degree or qualification/).fill('BSc Dental Hygiene');
+  await form.getByLabel(/^Graduation year/).fill('2021');
   await form.getByLabel(/^Preferred branch/).selectOption({ label: 'Gulberg Lahore' });
   await form.getByLabel(/^CV file/).setInputFiles({ name: 'sample-cv.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made-up CV for the test') });
   await form.getByLabel(/^Message/).fill('<b>Hello</b> I can start next month.');
@@ -2354,9 +2392,14 @@ await step('the hidden honeypot box: out of the tab order and hidden from screen
   await pf.waitForSelector('.door');
   await pf.goto(BASE + '#/feedback');
   await pf.waitForSelector('main form.public-form');
-  const trap = pf.locator('.hp-field input[name="website"]');
+  // Its name and id are ones no browser or password manager fills in by itself (not "website", "url" or "homepage").
+  const trap = pf.locator('.hp-field input[name="pf_trap"]');
   assert.equal(await trap.getAttribute('tabindex'), '-1');
+  assert.equal(await trap.getAttribute('autocomplete'), 'off');
+  assert.equal(await trap.getAttribute('aria-hidden'), 'true');
+  assert.doesNotMatch(await trap.getAttribute('id'), /web|site|url|home/i);
   assert.equal(await pf.locator('.hp-field').getAttribute('aria-hidden'), 'true');
+  assert.equal(await pf.locator('form.public-form input[name="website"], form.public-form input[name="url"]').count(), 0);
   const form = pf.locator('form.public-form');
   await form.getByRole('radio', { name: /Appreciation/ }).check();
   await form.getByLabel(/^What is it about/).selectOption({ label: 'Doctor' });
@@ -2381,7 +2424,7 @@ await step('a full day of applications: the form says "try again tomorrow" in pl
     await form.getByLabel(/^Mobile number/).fill('0300 5557799');
     await form.getByLabel(/^CNIC number/).fill('12345-0007799-1');
     await form.getByLabel(/^Job you are applying for/).selectOption({ label: 'Dental assistant' });
-    await form.getByLabel(/^Degree or qualification/).fill('Diploma');
+    await form.getByLabel(/^Degree or qualification/).selectOption('Diploma');
     await form.getByLabel(/^Preferred branch/).selectOption({ label: 'Any branch' });
     await form.getByLabel(/^CV file/).setInputFiles({ name: 'busy-cv.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 made-up CV for the test') });
     await form.getByLabel(/may keep these details/).check();
@@ -2398,15 +2441,29 @@ await step('a full day of applications: the form says "try again tomorrow" in pl
     await pf.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.submitJobApplication = window.__submitJob; });
   }
 });
-await step('staff: Dr. Ali opens "Job applications" from the More menu: the new application is on top; status, job and branch filters work', async () => {
+await step('staff: Today shows Dr. Ali "New job applications" (2), which opens Job applications filtered to New', async () => {
   await pf.setViewportSize({ width: 1366, height: 860 });
   await loginAs(pf, 'Dr. Ali Rashid');
+  const stat = pf.locator('a.stat', { hasText: 'New job applications' });
+  await stat.waitFor();
+  assert.equal(await stat.locator('strong').innerText(), '2', 'the made-up New application and the one just sent');
+  assert.equal(await stat.getAttribute('href'), '#/staff/jobs?status=new');
+  await stat.click();
+  await pf.waitForSelector('table.jobs-table tbody tr');
+  assert.equal(await pf.locator('.jobs-filters select').first().inputValue(), 'new', 'the status filter says New');
+  await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 2);
+  await pf.goto(BASE + '#/staff/today');
+  await pf.waitForSelector('.stat-row');
+});
+await step('staff: Dr. Ali opens "Job applications" from the More menu: the new application is on top; status, job and branch filters work', async () => {
+  await pf.setViewportSize({ width: 1366, height: 860 });
   await pf.locator('.topnav .menu:has-text("More") > button').click();
   await pf.locator('.topnav .menu-list a:has-text("Job applications")').click();
   await pf.waitForSelector('table.jobs-table tbody tr');
   const rows = pf.locator('table.jobs-table tbody tr');
   assert.equal(await rows.count(), 3, 'two made-up applications and the one just sent');
-  assert.match(await rows.first().innerText(), /Sample Applicant UI[\s\S]*Dental hygienist[\s\S]*0300 5557788[\s\S]*BDS[\s\S]*Gulberg Lahore[\s\S]*New/);
+  assert.match(await rows.first().innerText(), /Sample Applicant UI[\s\S]*Dental hygienist[\s\S]*0300 5557788[\s\S]*BSc Dental Hygiene[\s\S]*Gulberg Lahore[\s\S]*New/,
+    'the degree typed after choosing "Other" (not the word "Other")');
   const [statusSel, jobSel, branchSel] = [0, 1, 2].map((i) => pf.locator('.jobs-filters select').nth(i));
   await statusSel.selectOption('contacted');
   await pf.waitForFunction(() => document.querySelectorAll('table.jobs-table tbody tr').length === 1);
@@ -2436,6 +2493,8 @@ await step('staff: the application dialog shows the CNIC and phone, the message 
   assert.match(text, /0300 5557788/);
   assert.match(text, /<b>Hello<\/b> I can start next month\./, 'the message is shown as typed');
   assert.equal(await m.locator('.job-details b').count(), 0, 'nothing the applicant typed becomes HTML');
+  assert.equal(await m.getByRole('link', { name: 'sample.ui+jobs@example.com' }).getAttribute('href'), 'mailto:sample.ui%2Bjobs@example.com',
+    'the email link: the address encoded, nothing added');
   const [popup] = await Promise.all([pf.waitForEvent('popup'), m.getByRole('button', { name: /^Open CV \(PDF/ }).click()]);
   await popup.waitForURL(/^blob:/);
   await popup.close();
@@ -2487,7 +2546,7 @@ await step('staff: website forms are in the Complaints inbox marked "Website for
 await step('staff: Dr. Ali deletes a junk website form after a warning; a patient\'s complaint has no Delete', async () => {
   await pf.evaluate(async () => {
     const { state } = await import('/js/state.js');
-    await state.data.submitFeedback({ kind: 'complaint', topic: 'other', branch: 'none', message: 'Junk sample text for the delete step.', contact_me: false, website: '' });
+    await state.data.submitFeedback({ kind: 'complaint', topic: 'other', branch: 'none', message: 'Junk sample text for the delete step.', contact_me: false, pf_trap: '' });
   });
   await pf.goto(BASE + '#/staff/today');
   await pf.goto(BASE + '#/staff/complaints?from=website');
@@ -2520,7 +2579,7 @@ await step('staff: Dr. Ali deletes a junk website form after a warning; a patien
 await step('staff: a website thank-you about a doctor has no "About which doctor?" and never counts as a complaint about that doctor', async () => {
   const docId = await pf.evaluate(async () => {
     const { state } = await import('/js/state.js');
-    await state.data.submitFeedback({ kind: 'appreciation', topic: 'doctor', branch: '1', message: 'Thank you Dr. Bushra for the very gentle treatment (sample UI).', contact_me: false, website: '' });
+    await state.data.submitFeedback({ kind: 'appreciation', topic: 'doctor', branch: '1', message: 'Thank you Dr. Bushra for the very gentle treatment (sample UI).', contact_me: false, pf_trap: '' });
     return state.ref.clinicians.find((c) => c.display_name === 'Dr. Bushra (sample)').id;
   });
   await pf.goto(BASE + '#/staff/today');
@@ -2558,6 +2617,8 @@ await step('staff: a website thank-you about a doctor has no "About which doctor
 await step('a role without "Job applications" (the clinic coordinator): no menu entry, "Page not available", and the data layer refuses; website forms still reach their inbox', async () => {
   await tryAnotherRole(pf);
   await loginAs(pf, 'Clinic coordinator');
+  await pf.locator('a.stat', { hasText: 'New complaints & suggestions' }).waitFor();
+  assert.equal(await pf.locator('a.stat', { hasText: 'New job applications' }).count(), 0, 'Today: no number of job applications');
   await pf.locator('.topnav .menu:has-text("More") > button').click();
   const nav = (await pf.locator('.topnav .menu-list a').allTextContents()).map((t) => t.trim());
   assert.ok(nav.includes('Complaints') && !nav.includes('Job applications'), 'Complaints yes, Job applications no');
@@ -2606,7 +2667,8 @@ await step('staff: "View the website" in the account menu opens the public homep
   assert.equal(new URL(pf.url()).hash, '#/');
   assert.equal(await pf.locator('.topbar').count(), 0, 'the public homepage, not a staff page');
   for (const t of ['Patient', 'Visitor', 'Our results', 'Employee']) assert.equal(await pf.locator('.door', { hasText: t }).count(), 1, `door ${t}`);
-  assert.equal(await pf.locator('#work-with-us a.forms-card').count(), 2, 'with the two form buttons');
+  assert.equal(await pf.locator('.hero .hero-forms a.btn').count(), 2, 'with the two form buttons under the doors');
+  assert.equal(await pf.locator('#work-with-us a.forms-card').count(), 2, '... and the section on them further down');
   const back = pf.locator('.staff-return');
   await back.waitFor();
   assert.match(await back.innerText(), /You are signed in to the clinic system\. Back to staff pages/);

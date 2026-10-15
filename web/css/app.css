@@ -614,9 +614,10 @@ body:has(> .modal-backdrop) { overflow: hidden; }
 .public-fallback .inline { gap: var(--space-3); }
 .public-main.public-fallback { margin: clamp(var(--space-6), 8vh, var(--space-8)) auto; width: calc(100% - 2 * var(--space-4)); padding: var(--space-6); }
 
-/* The two homepage buttons ("Join our team", "Complaints & suggestions") and their forms (views/forms.js). Phone first: one
-   column, full-width controls and send button, 44px targets; two columns of buttons from 600px. The band has its own space
-   below the clinics (a different background) and a shorter gap to the footer than a whole public section. */
+/* The section on the two homepage forms ("Join our team", "Complaints & suggestions") after the clinics, and the forms
+   (views/forms.js). Phone first: one column, full-width controls and send button, 44px targets; two columns of cards from
+   600px. The band has its own space below the clinics (a different background) and a shorter gap to the footer than a whole
+   public section. (The two buttons under the doors are .hero-forms.) */
 .forms-band-wrap { padding-top: var(--space-7); padding-bottom: var(--space-7); }
 .forms-band { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-l); padding: clamp(var(--space-5), 4vw, var(--space-7)); }
 .forms-band h2 { font-size: var(--fs-section); letter-spacing: -.02em; margin-bottom: var(--space-4); }
@@ -680,11 +681,15 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
 .login-demo { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--border); }
 .login-demo p { font-size: var(--fs-sm); margin: 0 0 var(--space-3); }
 .hero-demo { font-size: var(--fs-ui); color: var(--on-dark-soft); margin: var(--space-4) 0 0; }
-.hero-demo a, .hero-forms a { color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
-/* The line to the two forms under the doors: each question with its link stays together, side by side when they fit. */
-.hero-forms { display: flex; flex-wrap: wrap; justify-content: center; column-gap: var(--space-5); font-size: var(--fs-ui); color: var(--on-dark-soft); margin: var(--space-3) 0 0; }
-.hero-forms a { display: inline-flex; align-items: center; min-height: var(--target); font-weight: 600; }
-.hero-forms + .hero-demo { margin-top: 0; }
+.hero-demo a { color: var(--gold-300); text-decoration: underline; text-underline-offset: 3px; }
+/* The two form buttons right under the doors ("Join our team", "Complaints & suggestions"): side by side and the same size
+   (on a phone too, where the longer one takes two lines), outlined in the gold a door shows when hovered. */
+.hero-forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); width: min(560px, 100%); margin: var(--space-4) 0 0; }
+.hero-btn {
+  border-color: var(--gold); background: var(--glass); color: var(--on-dark-strong); line-height: 1.25;
+  backdrop-filter: blur(6px); transition: background-color .2s, border-color .2s;
+}
+.hero-btn:hover { background: var(--glass-hover); border-color: var(--gold-300); }
 .sample-banner { position: sticky; top: 0; z-index: var(--z-sticky); border-radius: 0; }
 @media (max-width: 720px), (max-height: 500px) { .sample-banner { position: static; } }
 
