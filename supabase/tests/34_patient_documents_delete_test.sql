@@ -1,4 +1,4 @@
--- Upload picture / X-ray / consent form and Delete for documents (20261015000700_patient_documents_delete.sql). Made-up people only.
+-- Upload picture / X-ray / consent form and Delete for documents (20261015001000_patient_documents_delete.sql). Made-up people only.
 --   1. a consent form ticks "Consent signed" (patients.treatment_consent_at) when it is not ticked, for an assistant too (who may not
 --      edit the patient), at the form's date (noon in Pakistan) or now; a tick that is there keeps its date; other kinds tick nothing;
 --   2. who may delete a document (row and file): whoever may add one (patients.edit or photos.upload); an accountant, a switched-off

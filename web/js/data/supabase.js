@@ -690,6 +690,44 @@ export async function createSupabaseAdapter() {
     return out;
   }
 
+  /** The row of a table whose file is at storagePath (null when there is none, or the person may not see it). */
+  async function rowAtPath(table, storagePath) {
+    return check(await sb.from(table).select('*').eq('storage_path', storagePath).maybeSingle());
+  }
+
+  /**
+   * A file into a private bucket and its row into a table, once per idempotency key (one per file, kept across retries): the key
+   * fixes the path, so "already exists" from Storage means an earlier attempt uploaded the file, and "duplicate key" on the row
+   * (storage_path is unique) means an earlier attempt saved the row but its answer was lost. Either way the row already there is
+   * answered: never a second file or row, never the same database error on every retry. Used for X-rays and documents.
+   */
+  async function uploadOnce({ tag, bucket, table, key, path, file, fields }) {
+    const prior = key ? partial.get(tag + key) : null;
+    if (prior?.row) return prior.row;
+    const at = prior?.path || path;
+    if (!prior?.uploaded) {
+      const { error } = await sb.storage.from(bucket).upload(at, file, { contentType: file.type || undefined, upsert: false });
+      const duplicate = error && key && (String(error.statusCode || error.status) === '409' || /already exists|duplicate/i.test(error.message || ''));
+      if (error && !duplicate) check({ error });
+      if (key) partial.set(tag + key, { path: at, uploaded: true });
+      if (duplicate) {
+        const existing = await rowAtPath(table, at);
+        if (existing) { partial.set(tag + key, { path: at, uploaded: true, row: existing }); return existing; }
+      }
+    }
+    const res = await sb.from(table).insert({ ...fields, storage_path: at }).select().single();
+    const row = (res.error?.code === '23505' && await rowAtPath(table, at)) || check(res);
+    if (key) partial.set(tag + key, { path: at, uploaded: true, row });
+    return row;
+  }
+
+  // X-ray links signed earlier on this page, reused while they have more than 10 minutes left: the same link lets the browser answer
+  // from its cache, so the profile does not download every X-ray again each time it refreshes after a save.
+  const xrayLinks = new Map();
+  // Set once public.delete_patient_document has answered on this page (the database update 20261015001000 is there).
+  let documentDeleteReady = false;
+  const documentDeleteMissing = () => plainError('Deleting documents needs the database update of 15 Oct (20261015001000_patient_documents_delete.sql). Ask Dr. Ali to apply it. Nothing was deleted.', 'DOCUMENTS_DELETE_MISSING');
+
   // Set the first time saving a photo row says photos has no thumb_path column (audit migration not applied yet).
   let photosLackThumbPath = false;
 
@@ -1208,16 +1246,22 @@ export async function createSupabaseAdapter() {
      * A patient's X-rays (the xrays table; files in the private "xrays" bucket), newest first. Each carries url (the original),
      * thumb_url (240 px when IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms); re-sign with
      * signedUrls([storage_path], { bucket: 'xrays' }). [] for a role without xrays.view (the row policy shows them none).
+     * Links signed earlier on this page are reused while they have more than 10 minutes left (xrayLinks).
      */
     async patientXrays(id) {
       const rows = check(await sb.from('xrays').select('*').eq('patient_id', id).order('taken_on', { ascending: false }).order('created_at', { ascending: false }));
-      const paths = rows.map((r) => r.storage_path);
+      const now = Date.now();
+      const paths = rows.map((r) => r.storage_path).filter((p) => !((xrayLinks.get(p)?.expires || 0) - now > 10 * 60 * 1000));
       const [urls, resized] = await Promise.all([
         signedUrls(paths, { bucket: 'xrays' }).catch(() => new Map()),
         IMAGE_TRANSFORMS ? signedUrls(paths, { bucket: 'xrays', width: 240 }).catch(() => null) : null,
       ]);
-      const expires = Date.now() + SIGNED_URL_TTL * 1000;
-      for (const x of rows) { x.url = urls.get(x.storage_path) || null; x.thumb_url = resized?.get(x.storage_path) || x.url; x.url_expires_at = expires; }
+      const expires = now + SIGNED_URL_TTL * 1000;
+      for (const p of paths) if (urls.get(p)) xrayLinks.set(p, { url: urls.get(p), thumb: resized?.get(p) || urls.get(p), expires });
+      for (const x of rows) {
+        const link = xrayLinks.get(x.storage_path);
+        x.url = link?.url || null; x.thumb_url = link?.thumb || x.url; x.url_expires_at = link?.expires || expires;
+      }
       return rows;
     },
 
@@ -1455,7 +1499,8 @@ export async function createSupabaseAdapter() {
         photosLackThumbPath = true; // remembered until the page is reloaded, so later uploads neither store a copy nor retry
         res = await insertRow(null);
       }
-      const row = check(res);
+      // "Duplicate key" (storage_path is unique): an earlier attempt saved the row but its answer was lost; answer that row.
+      const row = (key && res.error?.code === '23505' && await rowAtPath('photos', path)) || check(res);
       if (key) partial.set('photo:' + key, { path, uploaded: true, row });
       return row;
     },
@@ -1468,54 +1513,50 @@ export async function createSupabaseAdapter() {
       return sb.storage.from('public-cases').getPublicUrl(name).data.publicUrl;
     },
     // Consent forms, ID copies, reports: private "patient-documents" bucket, one folder per patient.
-    async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
+    // Pass { idempotencyKey } (one per file, kept across retries, see uploadOnce): pressing Save again after a failure neither uploads
+    // the file twice nor records it twice. A consent form comes back with the patient's treatment_consent_at as the record has it after
+    // the save (the database ticks "Consent signed", 20261015001000), so the page says it is ticked only when it is.
+    async uploadDocument({ patientId, file, kind = 'other', title, addedOn, idempotencyKey = null }) {
+      const key = idempotencyKey || null;
       const ext = (file.name.split('.').pop() || 'pdf').toLowerCase();
       const slug = (title || file.name.replace(/\.[^.]+$/, '')).replace(/\W+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'document';
-      const path = `${patientId}/${addedOn || todayISO()}_${slug}_${crypto.randomUUID().slice(0, 8)}.${ext}`;
-      check(await sb.storage.from('patient-documents').upload(path, file, { contentType: file.type || undefined, upsert: false }));
-      return check(await sb.from('patient_documents').insert({
-        patient_id: patientId, kind, title: title || file.name, storage_path: path, added_on: addedOn || todayISO(), uploaded_by: await userId(),
-      }).select().single());
+      const path = `${patientId}/${addedOn || todayISO()}_${slug}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
+      const row = await uploadOnce({ tag: 'document:', bucket: 'patient-documents', table: 'patient_documents', key, path, file,
+        fields: { patient_id: patientId, kind, title: title || file.name, added_on: addedOn || todayISO(), uploaded_by: await userId() } });
+      if (kind !== 'consent') return row;
+      const { data } = await sb.from('patients').select('treatment_consent_at').eq('id', patientId).maybeSingle();
+      return { ...row, treatment_consent_at: data?.treatment_consent_at ?? null };
     },
     /**
-     * Deletes a document: its file first, then its row (public.delete_patient_document, 20261015000700), so a failure in between
+     * Deletes a document: its file first, then its row (public.delete_patient_document, 20261015001000), so a failure in between
      * leaves the row on the record to delete again, never a file nobody can find. { clearConsent } also unticks "Consent signed"
      * when this was the last consent form. Resolves { deleted, consent_cleared, consent_forms_left }.
+     * The function must be there before the file goes (an admin may remove files already): the first time on a page it is asked
+     * about no document (nil id: deleted = false, nothing changes), and without it nothing is touched.
      */
     async deleteDocument(doc, { clearConsent = false } = {}) {
+      if (!documentDeleteReady) {
+        const probe = await rpc('delete_patient_document', { p_document: '00000000-0000-0000-0000-000000000000', p_clear_consent: false });
+        if (probe.missing) throw documentDeleteMissing();
+        documentDeleteReady = true;
+      }
       check(await sb.storage.from('patient-documents').remove([doc.storage_path]));
       const res = await rpc('delete_patient_document', { p_document: doc.id, p_clear_consent: !!clearConsent });
-      if (res.missing) throw plainError('Deleting documents needs the database update of 15 Oct (20261015000700_patient_documents_delete.sql). Ask Dr. Ali to apply it.', 'DOCUMENTS_DELETE_MISSING');
+      if (res.missing) throw documentDeleteMissing();
       return res.data;
     },
     /**
      * An X-ray into the xrays table, its file in the private "xrays" bucket (<patient_id>/<date>_<kind>_<key>.<ext>, which the
-     * patient may read as their own). Pass { idempotencyKey } (one per file, kept across retries) as for uploadPhoto: pressing
-     * Upload again after a failure neither uploads the file twice nor records it twice.
+     * patient may read as their own). Pass { idempotencyKey } (one per file, kept across retries, see uploadOnce): pressing
+     * Upload again after a failure neither uploads the file twice nor records it twice, and finishes when the row was saved already.
      */
     async uploadXray({ patientId, visitId = null, file, kind = 'OPG', takenOn = null, notes = null, idempotencyKey = null }) {
       const key = idempotencyKey || null;
-      const prior = key ? partial.get('xray:' + key) : null;
-      if (prior?.row) return prior.row;
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
       const day = takenOn || todayISO();
-      const path = prior?.path || `${patientId}/${day}_${(kind || 'X-ray').replace(/\W+/g, '-').replace(/^-|-$/g, '')}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
-      if (!prior?.uploaded) {
-        const { error } = await sb.storage.from('xrays').upload(path, file, { contentType: file.type || undefined, upsert: false });
-        // Same key, same path: "already exists" means an earlier attempt uploaded it.
-        const duplicate = error && key && (String(error.statusCode || error.status) === '409' || /already exists|duplicate/i.test(error.message || ''));
-        if (error && !duplicate) check({ error });
-        if (key) partial.set('xray:' + key, { path, uploaded: true });
-        if (duplicate) {
-          const existing = check(await sb.from('xrays').select('*').eq('storage_path', path).maybeSingle());
-          if (existing) { partial.set('xray:' + key, { path, uploaded: true, row: existing }); return existing; }
-        }
-      }
-      const row = check(await sb.from('xrays').insert({
-        patient_id: patientId, visit_id: visitId || null, kind: kind || 'OPG', taken_on: day, notes: notes || null, storage_path: path, uploaded_by: await userId(),
-      }).select().single());
-      if (key) partial.set('xray:' + key, { path, uploaded: true, row });
-      return row;
+      const path = `${patientId}/${day}_${(kind || 'X-ray').replace(/\W+/g, '-').replace(/^-|-$/g, '')}_${(key || crypto.randomUUID()).slice(0, 8)}.${ext}`;
+      return uploadOnce({ tag: 'xray:', bucket: 'xrays', table: 'xrays', key, path, file,
+        fields: { patient_id: patientId, visit_id: visitId || null, kind: kind || 'OPG', taken_on: day, notes: notes || null, uploaded_by: await userId() } });
     },
 
     // ------------------------------------------------------------ billing

@@ -2625,6 +2625,62 @@ await step('assistant: all three buttons; Upload X-ray saves into the X-ray stor
   assert.ok((await tiles.first().locator('img').getAttribute('src')).startsWith('data:image/png'), 'the X-ray image is shown');
   await shot(pu, '31-patient-upload-buttons');
 });
+await step('Upload picture on the profile: several at once, camera and gallery both on a phone (no capture attribute), no "X-ray / OPG" view', async () => {
+  await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload picture' }).click();
+  const m = pu.locator('.modal');
+  await m.locator(`h2:has-text("Upload picture · ${puPatient.name}")`).waitFor();
+  const input = m.locator('input[type=file]');
+  assert.equal(await input.getAttribute('accept'), 'image/*');
+  assert.equal(await input.evaluate((el) => el.multiple), true, 'several at once');
+  assert.equal(await input.getAttribute('capture'), null, 'no capture attribute: a phone offers the camera and the gallery');
+  assert.equal(await m.getByLabel('View').locator('option', { hasText: 'X-ray' }).count(), 0, 'X-rays go in with Upload X-ray');
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.waitFor({ state: 'detached' });
+});
+await step('Upload X-ray on a weak connection: it says how far it is, stays open while it works, and after a lost answer Upload again sends only the rest, once', async () => {
+  const tiles = pu.locator('.photos-panel figure.xray-tile');
+  const before = await tiles.count();
+  // Every file waits until the step lets it go; the second one is saved but its answer is lost once ("Failed to fetch").
+  await pu.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const real = state.data.uploadXray;
+    window.__realUploadXray = real;
+    let calls = 0;
+    let lost = false;
+    state.data.uploadXray = async function (args) {
+      calls += 1;
+      await new Promise((resolve) => { window.__releaseXray = resolve; window.__xrayWaiting = calls; });
+      const row = await real.call(this, args);
+      if (calls === 2 && !lost) { lost = true; throw new TypeError('Failed to fetch'); }
+      return row;
+    };
+  });
+  const release = async (n) => { await pu.waitForFunction((k) => window.__xrayWaiting === k, n); await pu.evaluate(() => window.__releaseXray()); };
+  try {
+    await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload X-ray' }).click();
+    const m = pu.locator('.modal');
+    await m.locator('input[type=file]').setInputFiles([onePixel('pa-1.png'), onePixel('pa-2.png'), onePixel('pa-3.png')]);
+    await m.getByRole('button', { name: 'Upload' }).click();
+    await m.locator('.upload-progress', { hasText: 'Uploading X-ray 1 of 3…' }).waitFor();
+    await pu.keyboard.press('Escape');
+    await pu.locator('.toast', { hasText: 'Saving, wait a moment.' }).waitFor();
+    assert.equal(await m.count(), 1, 'Escape does not hide an upload that is still going');
+    await release(1);
+    await m.locator('.upload-progress', { hasText: 'Uploading X-ray 2 of 3…' }).waitFor();
+    await release(2);
+    await pu.locator('.toast', { hasText: 'No internet connection, so this did not go through. Try again once the connection is back. 1 of 3 X-rays were uploaded; pressing Upload again sends only the rest.' }).waitFor();
+    assert.equal(await m.locator('.upload-progress').innerText(), '', 'no progress line once it stopped');
+    await m.getByRole('button', { name: 'Upload' }).click();
+    await release(3);
+    await release(4);
+    await pu.locator('.toast', { hasText: '3 X-rays uploaded.' }).waitFor();
+    await m.waitFor({ state: 'detached' });
+    await pu.waitForFunction((n) => document.querySelectorAll('.photos-panel figure.xray-tile').length >= n, before + 3);
+    assert.equal(await tiles.count(), before + 3, 'three X-rays, none twice (the one whose answer was lost is not saved again)');
+  } finally {
+    await pu.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.uploadXray = window.__realUploadXray; });
+  }
+});
 await step('assistant (who may not edit the patient): Upload consent form takes photos of the pages and ticks "Consent signed"', async () => {
   await pu.waitForSelector('.badge:has-text("No treatment consent on file")');
   await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload consent form' }).click();
@@ -2676,6 +2732,38 @@ await step('Delete removes a document after confirming; the last consent form as
   await pu.locator('.toast', { hasText: 'Document deleted. "Consent signed" is unticked.' }).waitFor();
   await pu.waitForSelector('text=No documents yet.');
   await pu.waitForSelector('.profile-flags .badge:has-text("No treatment consent on file")');
+});
+await step('on a phone (375 px): the three buttons are in sight, the page does not scroll sideways, and Delete in the Documents list is fully on screen', async () => {
+  const ph = await newPage({ width: 375, height: 812 }, { isMobile: true, hasTouch: true });
+  try {
+    await loginAs(ph, 'Assistant');
+    await ph.goto(BASE + '#/staff/patients');
+    await ph.waitForSelector('table.list tbody tr');
+    await ph.click('table.list tbody tr:first-child a');
+    await ph.waitForSelector('h2:has-text("Photos and X-rays")');
+    assert.equal(await ph.locator('.profile-uploads button').count(), 3);
+    for (const b of await ph.locator('.profile-uploads button').all()) {
+      const box = await b.boundingBox();
+      assert.ok(box && box.x >= 0 && box.x + box.width <= 375, `${await b.innerText()} is in sight: ${box && Math.round(box.x)}-${box && Math.round(box.x + box.width)} px`);
+    }
+    await ph.locator('.profile-uploads').getByRole('button', { name: 'Upload consent form' }).click();
+    const m = ph.locator('.modal');
+    await m.locator('input[type=file]').setInputFiles([onePixel('consent-page-1.png'), onePixel('consent-page-2.png')]);
+    await m.getByRole('button', { name: 'Save' }).click();
+    await m.waitFor({ state: 'detached' });
+    await ph.locator('.documents-list tbody tr').nth(1).waitFor();
+    const scroller = await ph.locator('.table-scroll:has(.documents-list)').boundingBox();
+    const dels = await ph.locator('.documents-list').getByRole('button', { name: /^Delete / }).all();
+    assert.equal(dels.length, 2);
+    for (const del of dels) {
+      const box = await del.boundingBox();
+      assert.ok(box.x >= scroller.x - 1 && box.x + box.width <= scroller.x + scroller.width + 1,
+        `Delete inside the list's box: ${Math.round(box.x)}-${Math.round(box.x + box.width)} px in ${Math.round(scroller.x)}-${Math.round(scroller.x + scroller.width)} px`);
+    }
+    assert.ok(await ph.locator('.table-scroll:has(.documents-list)').evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'the list needs no sideways scroll');
+    assert.ok(await ph.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'the page itself does not scroll sideways');
+    await shot(ph, '31b-patient-uploads-phone');
+  } finally { await ph.close(); }
 });
 await pu.close();
 

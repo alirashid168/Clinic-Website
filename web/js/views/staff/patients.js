@@ -318,7 +318,7 @@ export async function renderPatient(root, id) {
   // (X-rays also xrays.view, or the X-ray saved could not be shown back), consent forms patients.edit or photos.upload (the front desk
   // takes them). The same buttons sit in the Photos and X-rays and the Documents panels.
   const mayAddDocuments = can('patients.edit') || can('photos.upload');
-  const pictureButton = (cls) => can('photos.upload') ? h('button', { class: cls, onclick: () => photoUploadModal(p, { onDone: reload }) }, 'Upload picture') : null;
+  const pictureButton = (cls) => can('photos.upload') ? h('button', { class: cls, onclick: () => photoUploadModal(p, { picture: true, onDone: reload }) }, 'Upload picture') : null;
   const xrayButton = (cls) => can('photos.upload') && can('xrays.view') ? h('button', { class: cls, onclick: () => xrayUploadModal(p, { onDone: reload }) }, 'Upload X-ray') : null;
   const consentButton = (cls) => mayAddDocuments ? h('button', { class: cls, onclick: () => documentUploadModal(p, { consent: true, onDone: reload }) }, 'Upload consent form') : null;
   const uploadRow = [pictureButton('btn'), xrayButton('btn'), consentButton('btn')].some(Boolean)

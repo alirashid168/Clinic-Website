@@ -1170,21 +1170,26 @@ export function createDemoAdapter() {
       return clone(ph);
     },
     async publishPhoto(photo) { if (me()?.role !== 'admin') fail('Only Dr. Ali can publish photos'); const ph = db.photos.find((x) => x.id === photo.id); if (ph) ph.published = true; return ph?.url; },
-    async uploadDocument({ patientId, file, kind = 'other', title, addedOn }) {
+    async uploadDocument({ patientId, file, kind = 'other', title, addedOn, idempotencyKey = null }) {
       if (!can('patients.edit') && !can('photos.upload')) fail('row-level security policy (patients.edit)');
+      // As the live adapter: a consent form comes back with the patient's treatment_consent_at after the save.
+      const withConsent = (d) => (d.kind === 'consent' ? { ...clone(d), treatment_consent_at: patient(d.patient_id)?.treatment_consent_at || null } : clone(d));
+      const prior = idempotencyKey && db.documents.find((x) => x.id === saved.get('document:' + idempotencyKey));
+      if (prior) return withConsent(prior);
       const url = URL.createObjectURL(file);
       const doc = { id: uid(), patient_id: patientId, kind, title: title || file.name, storage_path: `demo/${uid()}`, added_on: addedOn || todayISO(), url,
         uploaded_by: me()?.id || null, created_at: new Date().toISOString() };
       db.documents.push(doc); audit('patient_documents', 'INSERT', doc);
-      // As the database does (20261015000700): a consent form ticks "Consent signed" when it is not ticked yet, at the form's date (noon in Pakistan) or now.
+      // As the database does (20261015001000): a consent form ticks "Consent signed" when it is not ticked yet, at the form's date (noon in Pakistan) or now.
       const p = patient(patientId);
       if (kind === 'consent' && p && !p.treatment_consent_at) {
         p.treatment_consent_at = new Date(Math.min(Date.now(), Date.parse(`${doc.added_on}T12:00:00+05:00`) || Date.now())).toISOString();
         audit('patients', 'UPDATE', p);
       }
-      return clone(doc);
+      if (idempotencyKey) saved.set('document:' + idempotencyKey, doc.id);
+      return withConsent(doc);
     },
-    // As public.delete_patient_document (20261015000700): the people who may add documents may delete them; the last consent form can untick "Consent signed".
+    // As public.delete_patient_document (20261015001000): the people who may add documents may delete them; the last consent form can untick "Consent signed".
     async deleteDocument(doc, { clearConsent = false } = {}) {
       if (!can('patients.edit') && !can('photos.upload')) fail("NOT_ALLOWED: you may not delete documents from a patient's record. Ask Dr. Ali to tick it in the access list.");
       const row = db.documents.find((x) => x.id === doc.id);

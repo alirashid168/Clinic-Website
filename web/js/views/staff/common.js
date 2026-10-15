@@ -282,30 +282,45 @@ async function shrinkPhoto(file) {
 
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
-export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
-  const files = h('input', { type: 'file', accept: 'image/*', multiple: true, capture: 'environment' });
-  const view = select(PHOTO_VIEWS, 'Front');
+// While files go up, the upload dialogs say how far they are ("Uploading X-ray 2 of 5…") and stay open: ×, Escape, a tap outside or Back
+// then say "Saving, wait a moment." instead of hiding an upload that is still going (opened again, the same files would go twice).
+const progressLine = () => h('p', { class: 'muted upload-progress', role: 'status', 'aria-live': 'polite' });
+const stepText = (verb, unit, i, n) => (n > 1 ? `${verb} ${unit} ${i + 1} of ${n}…` : `${verb}…`);
+const stayOpenWhile = (busy) => ({ confirmDismiss: () => true, unsaved: busy });
+
+// { picture: true } is "Upload picture" on the patient profile: a phone or tablet offers the camera and the gallery both, so several
+// pictures go at once (with the capture attribute a phone opens only the camera, one picture per tap), and the "X-ray / OPG" view is
+// not offered (X-rays have their own button there and go to the X-ray store). From the day's list it stays as it was: camera first.
+export function photoUploadModal(patient, { visitId, branchId, onDone, picture = false } = {}) {
+  const files = h('input', { type: 'file', accept: 'image/*', multiple: true, capture: picture ? null : 'environment' });
+  const view = select(picture ? PHOTO_VIEWS.filter((v) => v !== 'X-ray / OPG') : PHOTO_VIEWS, 'Front');
   const edited = h('input', { type: 'checkbox' });
   const publicOk = h('input', { type: 'checkbox', disabled: !patient.photo_consent_public });
   // A failed batch must not upload the photos that already went through again:
   // remember which files are done, and give each file one idempotency key for all attempts.
   const done = new Set();
   const keys = new Map();
+  const progress = progressLine();
+  let working = false;
   const body = h('div', {},
     h('p', { class: 'muted' }, 'Raw photos go to the clinic photos folder (staff only). Tick "edited" for the finished before/after versions: those are the ones the patient sees in their account.'),
-    field('Photos', files, null, { required: true }), field('View', view, 'For several photos, the view is numbered automatically. X-rays go in with "Upload X-ray" on the patient\'s page.'),
+    field(picture ? 'Pictures' : 'Photos', files, picture ? 'Several at once is fine. On a phone you can take them with the camera or choose them from the gallery.' : null, { required: true }),
+    field('View', view, picture ? 'For several pictures, the view is numbered automatically. X-rays go in with "Upload X-ray".' : 'For several photos, the view is numbered automatically. Choose "X-ray / OPG" for X-rays.'),
     h('label', { class: 'inline' }, edited, 'Edited before/after version (shared with the patient)'),
-    h('label', { class: 'inline', style: { marginTop: '6px' } }, publicOk, patient.photo_consent_public ? 'May be shown on the website (patient has given consent)' : 'May be shown on the website — the patient has not given photo consent yet'));
-  modal(`Upload photos · ${patient.full_name}`, body, [
+    h('label', { class: 'inline', style: { marginTop: '6px' } }, publicOk, patient.photo_consent_public ? 'May be shown on the website (patient has given consent)' : 'May be shown on the website — the patient has not given photo consent yet'),
+    progress);
+  modal(`${picture ? 'Upload picture' : 'Upload photos'} · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Upload', primary: true, onClick: async () => {
       const list = [...files.files];
       if (!list.length) { showFormErrors(body, [{ input: files, message: 'Choose at least one photo.' }]); return false; }
       clearFieldErrors(body);
       const isEdited = edited.checked;
+      working = true;
       try {
         for (const [i, file] of list.entries()) {
           if (done.has(file)) continue;
+          progress.textContent = stepText('Uploading', picture ? 'picture' : 'photo', i, list.length);
           if (!keys.has(file)) keys.set(file, newKey());
           const upload = isEdited && view.value !== 'X-ray / OPG' ? await shrinkPhoto(file) : file;
           // A small copy (320 px) is saved with the photo for the photo grids; null (the browser cannot read this file, e.g. HEIC on a
@@ -321,9 +336,9 @@ export function photoUploadModal(patient, { visitId, branchId, onDone } = {}) {
         const partly = list.filter((f) => done.has(f)).length;
         toast(`${friendlyError(e)}${partly ? ` ${partly} of ${list.length} photos were uploaded; pressing Upload again sends only the rest.` : ''}`, 'error');
         return false;
-      }
+      } finally { working = false; progress.textContent = ''; }
     } },
-  ]);
+  ], stayOpenWhile(() => working));
 }
 
 export const DOCUMENT_KINDS = { consent: 'Consent form', id: 'ID copy', report: 'Report', other: 'Other' };
@@ -337,13 +352,17 @@ export function documentUploadModal(patient, { onDone, consent = false } = {}) {
   const title = h('input', { placeholder: 'e.g. Consent and information form', value: 'Consent and information form' });
   const date = h('input', { type: 'date', value: localISO() });
   kind.addEventListener('change', () => { if (!title.value || Object.values(DOCUMENT_KINDS).includes(title.value) || title.value.startsWith('Consent')) title.value = kind.value === 'consent' ? 'Consent and information form' : DOCUMENT_KINDS[kind.value]; });
-  // A failed batch must not save the files that already went through again.
+  // A failed batch must not save the files that already went through again: remember which files are done, and give each file one
+  // idempotency key for all attempts (a save whose answer was lost is then found, not saved twice).
   const done = new Set();
+  const keys = new Map();
+  const progress = progressLine();
+  let working = false;
   const body = h('div', {},
     h('p', { class: 'muted' }, consent ? 'The signed consent form: a PDF, or photos of its pages. Saving it ticks "Consent signed" on the record.'
       : 'Scanned forms and ID copies stay private to staff; patients see only their own.'),
     field('File', file, consent ? 'PDF or photos of the signed form (several pages at once is fine).' : 'PDF or a photo of the signed form.', { required: true }),
-    consent ? null : field('Type', kind), field('Title', title), field('Date', date));
+    consent ? null : field('Type', kind), field('Title', title), field('Date', date), progress);
   modal(`${consent ? 'Upload consent form' : 'Add document'} · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Save', primary: true, onClick: async () => {
@@ -352,22 +371,29 @@ export function documentUploadModal(patient, { onDone, consent = false } = {}) {
       clearFieldErrors(body);
       const docKind = consent ? 'consent' : kind.value;
       const name = title.value.trim() || DOCUMENT_KINDS[docKind];
+      // "Consent signed" as the record has it after the save (the database ticks it), so the message never claims a tick that did not happen.
+      let signedAt = null;
+      working = true;
       try {
         for (const [i, f] of list.entries()) {
           if (done.has(f)) continue;
-          await state.data.uploadDocument({ patientId: patient.id, file: f, kind: docKind, title: list.length > 1 ? `${name} (${i + 1} of ${list.length})` : name, addedOn: date.value });
+          progress.textContent = stepText('Saving', docKind === 'consent' ? 'page' : 'file', i, list.length);
+          if (!keys.has(f)) keys.set(f, newKey());
+          const row = await state.data.uploadDocument({ patientId: patient.id, file: f, kind: docKind, title: list.length > 1 ? `${name} (${i + 1} of ${list.length})` : name,
+            addedOn: date.value, idempotencyKey: keys.get(f) });
+          signedAt = row?.treatment_consent_at || signedAt;
           done.add(f);
         }
         const what = consent ? 'Consent form' : 'Document';
-        toast(`${list.length > 1 ? `${list.length} files saved` : `${what} saved`}.${docKind === 'consent' && !patient.treatment_consent_at ? ' "Consent signed" is now ticked.' : ''}`, 'ok');
+        toast(`${list.length > 1 ? `${list.length} files saved` : `${what} saved`}.${docKind === 'consent' && !patient.treatment_consent_at && signedAt ? ' "Consent signed" is now ticked.' : ''}`, 'ok');
         await onDone?.();
       } catch (e) {
         const partly = list.filter((f) => done.has(f)).length;
         toast(`${friendlyError(e)}${partly ? ` ${partly} of ${list.length} files were saved; pressing Save again sends only the rest.` : ''}`, 'error');
         return false;
-      }
+      } finally { working = false; progress.textContent = ''; }
     } },
-  ]);
+  ], stayOpenWhile(() => working));
 }
 
 // Delete on the Documents list, for the people who may add documents: asks first, then removes the file and the row (the audit log
@@ -403,19 +429,23 @@ export function xrayUploadModal(patient, { visitId, onDone } = {}) {
   // As for photos: files already saved are not sent again, and each file keeps one idempotency key for all attempts.
   const done = new Set();
   const keys = new Map();
+  const progress = progressLine();
+  let working = false;
   const body = h('div', {},
     h('p', { class: 'muted' }, "X-rays are kept private with the patient's record. Choose the files from the X-ray machine, or take a photo of the X-ray."),
     field('X-rays', files, 'Several at once is fine.', { required: true }),
-    h('div', { class: 'form-grid' }, field('Type', kind), field('Date taken', date)), field('Note', notes));
+    h('div', { class: 'form-grid' }, field('Type', kind), field('Date taken', date)), field('Note', notes), progress);
   modal(`Upload X-ray · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Upload', primary: true, onClick: async () => {
       const list = [...files.files];
       if (!list.length) { showFormErrors(body, [{ input: files, message: 'Choose at least one X-ray.' }]); return false; }
       clearFieldErrors(body);
+      working = true;
       try {
-        for (const file of list) {
+        for (const [i, file] of list.entries()) {
           if (done.has(file)) continue;
+          progress.textContent = stepText('Uploading', 'X-ray', i, list.length);
           if (!keys.has(file)) keys.set(file, newKey());
           await state.data.uploadXray({ patientId: patient.id, visitId, file, kind: kind.value, takenOn: date.value || localISO(), notes: notes.value.trim() || null, idempotencyKey: keys.get(file) });
           done.add(file);
@@ -426,9 +456,9 @@ export function xrayUploadModal(patient, { visitId, onDone } = {}) {
         const partly = list.filter((f) => done.has(f)).length;
         toast(`${friendlyError(e)}${partly ? ` ${partly} of ${list.length} X-rays were uploaded; pressing Upload again sends only the rest.` : ''}`, 'error');
         return false;
-      }
+      } finally { working = false; progress.textContent = ''; }
     } },
-  ]);
+  ], stayOpenWhile(() => working));
 }
 
 export function guidancePanel(g) {
