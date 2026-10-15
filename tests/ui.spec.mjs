@@ -9260,7 +9260,7 @@ await step('An imported line (the visit type "Bonding", the Healthwire procedure
     const { state } = await import('/js/state.js');
     const p = (await state.data.searchPatients('9825')).find((x) => x.mr_number === '9825');
     const bonding = state.ref.treatments.find((t) => t.name === 'Bonding');
-    const inv = await state.data.createInvoice({ patient_id: p.id, branch_id: 2, items: [{ description: 'Braces Kit (Made in China, sample), Monthly (x2)', quantity: 1, unit_price: 55000, treatment_id: bonding.id }], discount_amount: 0 });
+    const inv = await state.data.createInvoice({ patient_id: p.id, branch_id: 2, items: [{ description: 'Braces Kit (Made in China, sample), Monthly (x2)', quantity: 1, unit_price: 50000, treatment_id: bonding.id }], discount_amount: 0 });
     return inv.invoice_no;
   });
   await tryAnotherRole(plive);
