@@ -9,15 +9,10 @@ import { AutosaveQueue, PermanentSaveError } from '../../lib/autosave.js';
 import { protocolFor, canTreat, canCheck, guidance as protocolGuidance } from '../../lib/protocol.js';
 import { STATUS_LABELS, patientSearch, newPatientModal, flagForAliModal, photoUploadModal, guidancePanel, commitOnFinish } from './common.js';
 import { newInvoiceModal, paymentModal } from './invoice.js';
-<<<<<<< sheet-view
-import { dayListCheckups } from '../../lib/checkups.js';
+import { dayListCheckups, hasFormAnswers, formComplete, yesNo, PRICING_LABELS } from '../../lib/checkups.js';
 import { personTones, personTone } from '../../lib/tones.js';
 import { splitPeople, matchClinician } from '../../lib/legacy.js';
-import { checkupFormModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
-=======
-import { dayListCheckups, hasFormAnswers, formComplete, yesNo, PRICING_LABELS } from '../../lib/checkups.js';
 import { checkupFormModal, checkupAnswersModal, registerCheckupModal, removeCheckupModal, canRemoveCheckup, canRegisterCheckup, followUpSelect, registeredMr } from './checkup-actions.js';
->>>>>>> golive
 import { dayEndControls, laterDayHint, bookedFor } from './day-end.js';
 import { FIRST_DAY } from '../../lib/day-list.js';
 
@@ -224,12 +219,7 @@ export async function renderSheet(root, params, signal) {
   const busyDemo = params.get('demo') === 'busy' && d.mode === 'demo' && typeof d.fillBusyDay === 'function';
   let rows = [];
   let checkups = []; // the day's checkup patients (no Mr#); see lib/checkups.js dayListCheckups for which of them are shown
-<<<<<<< sheet-view
-  let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Checkup patient"
-=======
-  let serials = new Map(); // row id -> its serial number in the list as last drawn (draw)
   let checkupsMissing = false; // the database update for checkups has not been run yet: no checkup rows, no "+ Add checkup patient"
->>>>>>> golive
   let checkupsWarn = ''; // why the checkups could not be loaded (the visits still show)
   let checkupsKey = ''; // branch and day the `checkups` above belong to
   let filter = ''; // a status (the Filters panel, or a status count above the list)
@@ -690,11 +680,8 @@ export async function renderSheet(root, params, signal) {
     }
   }
 
-<<<<<<< sheet-view
-  // The dialog behind ⋮ on a checkup row ("Checkup options"): follow-up status, notes, patient file, the checkup list, remove.
-=======
-  // The dialog behind "Options" on a checkup row: the checkup form, follow-up status, patient file, the checkup list, remove.
->>>>>>> golive
+  // The dialog behind ⋮ on a checkup row ("Checkup options"): the checkup form, follow-up status, notes, patient file, the
+  // checkup list, remove.
   function checkupOptions(c) {
     const who = c.patient_name;
     const mr = registeredMr(c);
@@ -718,6 +705,7 @@ export async function renderSheet(root, params, signal) {
         if (saved === false) load(); // it is gone: read the list again
         if (!saved) return;
         checkups = checkups.map((x) => (x.id === saved.id ? saved : x));
+        listVersion++;
         draw();
         toast(`Answers saved on ${saved.patient_name}'s checkup.`, 'ok');
       } }, 'Fill in the checkup form') : null,
@@ -731,19 +719,13 @@ export async function renderSheet(root, params, signal) {
     dialog = modal(`${who} · Checkup patient`, h('div', {},
       h('p', { class: 'muted' }, c.patient_id ? 'Has a patient file now.' : 'No Mr# yet. A checkup patient gets a patient file when they start treatment.'),
       h('div', { class: 'form-grid' },
-<<<<<<< sheet-view
-        h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Name'), h('div', {}, who)),
-        h('div', { class: 'field' }, h('div', { class: 'field-label' }, 'Phone'), h('div', {}, c.phone || '–')),
-        field('Follow-up status', follow),
-        field('Notes', notes, 'Saved by itself, like the cells of the list.')),
-=======
         shown('Name', who),
         shown('Phone', c.phone),
         field('Follow-up status', follow),
+        field('Notes', notes, 'Saved by itself, like the cells of the list.'),
         // the answers of the checkup form, when it was filled in (not for a checkup from the sheet or from before the form)
         hasFormAnswers(c) ? [shown('Dr. Ali recommended', yesNo(c.ali_recommended)), shown('Understood pricing', PRICING_LABELS[c.pricing_understood]),
           shown('Wants to start', yesNo(c.wants_treatment)), shown('When / why not', c.treatment_plan)] : null),
->>>>>>> golive
       h('div', { class: 'inline', style: { marginTop: '10px' } }, actions)), [{ label: 'Done', primary: true }]);
   }
 
@@ -1168,7 +1150,7 @@ export async function renderSheet(root, params, signal) {
       h('th', { scope: 'row', class: 'frozen row-head name-col' }, h('div', { class: 'name-cell' },
         nameIn,
         srOnly('Checkup patient'),
-        h('button', { type: 'button', class: 'kebab-btn', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, title: 'Options: follow-up, notes, register, remove', dataset: { focus: 'options' }, onclick: () => checkupOptions(c) },
+        h('button', { type: 'button', class: 'kebab-btn', 'aria-haspopup': 'dialog', 'aria-label': `Checkup options for ${who}`, title: 'Options: checkup form, follow-up, notes, register, remove', dataset: { focus: 'options' }, onclick: () => checkupOptions(c) },
           h('span', { 'aria-hidden': 'true' }, '⋮')))),
       h('td', {}, h('span', { class: 'chip chip-fill gs-grey' }, srOnly('Not braces'))),
       h('td', {}, typedCell(text('checkup_for', 'Treatment', { list: 'sheet-treatments', class: 'cell-input center' }))),
@@ -1505,13 +1487,8 @@ export async function renderSheet(root, params, signal) {
     onEnter: addByMr,
   }) : null;
 
-<<<<<<< sheet-view
   const branchHead = h('th', { scope: 'col', class: 'branch-cell', hidden: true }, 'Branch');
-  // A person who only comes for a checkup gets no Mr#: "+ Checkup patient" puts them on this list (and on the Checkups page).
-=======
-  const branchHead = h('th', { scope: 'col', hidden: true }, 'Branch');
   // A person who only comes for a checkup gets no Mr#: "+ Add checkup patient" (the checkup form) puts them on this list and on the Checkups page.
->>>>>>> golive
   // A patient who starts treatment and is new gets an Mr# with "+ New walk-in".
   const ADD_HINT_PLAIN = 'Search by name, Mr# or phone. New walk-in? Register them here. To book an appointment, pick that date above first.';
   const ADD_HINT_CHECKUP = 'New and starting treatment? Use "+ New walk-in" (gets an Mr#). Only a checkup? Use "+ Add checkup patient" (no Mr#).';
@@ -1520,28 +1497,22 @@ export async function renderSheet(root, params, signal) {
     const res = await checkupFormModal({ branchId, date, fixedDay: true });
     if (!res) return;
     if (res.patient) { addPatient(res.patient); return; } // the person already has a patient file: put that file on the list instead
-<<<<<<< sheet-view
-    checkups = [...checkups.filter((c) => c.id !== res.id), res]; // (by its id, as addPatient)
-    listVersion++;
-    drawAdded();
-    toast(`${res.patient_name} added as a checkup patient.`, 'ok');
-  } }, '+ Checkup patient');
-  // The add line. It comes before the list in the page, so the keyboard reaches it from the toolbar in a few Tabs; on a
-  // laptop app.css shows it under the list like the sheet's next empty row, in sight at the bottom on a long day. On a phone
-  // it stays above the list: the page scrolls there, and the end of a 120-patient list is far down.
-=======
     if (res.updated) { // the person was on this list already: the answers went on that checkup
       checkups = checkups.map((c) => (c.id === res.updated.id ? res.updated : c));
+      listVersion++;
       draw();
       toast(`Answers saved on ${res.updated.patient_name}'s checkup.`, 'ok');
       return;
     }
-    checkups = [...checkups, res];
-    draw();
-    // (added on arrival, "Add as Waiting": the form is filled in after the checkup, from Options on the row)
+    checkups = [...checkups.filter((c) => c.id !== res.id), res]; // (by its id, as addPatient)
+    listVersion++;
+    drawAdded();
+    // (added on arrival, "Add as Waiting": the form is filled in after the checkup, from ⋮ (Options) on the row)
     toast(res.day_status === 'waiting' ? `${res.patient_name} added as Waiting. After the checkup: Options, then "Fill in the checkup form".` : `${res.patient_name} added as a checkup patient.`, 'ok');
   } }, '+ Add checkup patient');
->>>>>>> golive
+  // The add line. It comes before the list in the page, so the keyboard reaches it from the toolbar in a few Tabs; on a
+  // laptop app.css shows it under the list like the sheet's next empty row, in sight at the bottom on a long day. On a phone
+  // it stays above the list: the page scrolls there, and the end of a 120-patient list is far down.
   const addPanel = search ? h('div', { class: 'add-panel' },
     h('span', { class: 'add-label' }, 'Add a patient'),
     search,

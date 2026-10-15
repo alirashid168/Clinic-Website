@@ -203,9 +203,6 @@ await step('flag patient for Dr. Ali from the sheet', async () => {
 // ------------------------------------------------------------- checkup patients on the Aaj ki List (front desk, North Nazimabad)
 // (Checkup patients have no Mr#. Made-up names only; the demo keeps its data in memory, so the browser is never reloaded here.)
 const checkupRow = (pg, name) => pg.locator(`table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient ${name}"])`);
-<<<<<<< sheet-view
-await step('front desk: the Aaj ki List shows the checkup patients of the day with no Mr# and no badge (as on the sheet), sorted like the sheet with a serial number on every row', async () => {
-=======
 // The checkup form ("Checkup Patient Form 2.0", owner 11 Oct 2026) has nine questions, all required for a new checkup. This fills them; the
 // doctor is the first one the website lists (no name is written into the test; doctorCount ticks the first n) unless doctorOther gives the
 // "Other" text. "Who did your checkup?" and "What was your checkup for?" are tick boxes, as on the Google Form: checkupFor may be a list.
@@ -231,8 +228,7 @@ async function fillCheckupForm(m, { name, phone, checkupFor = 'General checkup',
   await m.getByRole('group', { name: /^Would you like to start the treatment/ }).getByLabel(wants, { exact: true }).check();
   await m.getByLabel(/^If yes, then when/).fill(plan);
 }
-await step('front desk: the Aaj ki List shows the checkup patients of the day with a "Checkup" badge and no Mr#, sorted like the sheet with a serial number on every row', async () => {
->>>>>>> golive
+await step('front desk: the Aaj ki List shows the checkup patients of the day with no Mr# and no badge (as on the sheet), sorted like the sheet with a serial number on every row', async () => {
   await page.goto(BASE + '#/staff/sheet');
   await page.waitForSelector('table.sheet tbody tr.is-checkup');
   const seeded = page.locator('table.sheet tbody tr.is-checkup');
@@ -260,7 +256,6 @@ await step('front desk: the Aaj ki List shows the checkup patients of the day wi
   assert.match(await page.locator('.sheet-counts').innerText(), /Checkups \d+/);
   await shot(page, '14-sheet-checkups');
 });
-<<<<<<< sheet-view
 await step('front desk: a checkup row\'s Doctor Name shows the names typed there as chips in each doctor\'s colour (grey for a name not on the clinic\'s list), and the text to type in once the cell is chosen', async () => {
   // Owner, 11 Oct 2026: "doctor names should have similar colours so they dont look all the same", on every row.
   const want = await page.evaluate(async () => {
@@ -294,12 +289,8 @@ await step('front desk: a checkup row\'s Doctor Name shows the names typed there
   await page.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
   await page.evaluate(() => document.activeElement?.blur());
 });
-await step('front desk: "+ Checkup patient" adds a checkup patient (no Mr#); details and status save; the row can be removed', async () => {
-  await page.getByRole('button', { name: '+ Checkup patient' }).click();
-=======
 await step('front desk: "+ Add checkup patient" on the Aaj ki List adds a checkup patient (no Mr#) with the checkup form; details and status save; the row can be removed', async () => {
   await page.getByRole('button', { name: '+ Add checkup patient' }).click();
->>>>>>> golive
   const m = page.locator('.modal');
   assert.equal(await m.getByLabel(/^Which branch did you visit/).inputValue(), 'North Nazimabad', 'the branch of the list on screen');
   assert.equal(await m.getByLabel(/^Which branch did you visit/).getAttribute('readonly'), '', 'and it is not asked');
@@ -310,13 +301,8 @@ await step('front desk: "+ Add checkup patient" on the Aaj ki List adds a checku
   await row.waitFor();
   assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Scaling and polishing', '"What was your checkup for?" is the treatment of the row');
   assert.equal(await row.locator('input[aria-label^="Phone for"]').inputValue(), '0300 5550101');
-<<<<<<< sheet-view
-  assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'waiting', 'today: waiting');
-  assert.doesNotMatch(await row.locator('td.mr-cell').innerText(), /\d/);
-=======
   assert.equal(await row.locator('select[aria-label^="Status for"]').inputValue(), 'completed', 'the form is filled in after the checkup: Completed');
-  assert.doesNotMatch(await row.locator('th').innerText(), /Mr# \d/);
->>>>>>> golive
+  assert.doesNotMatch(await row.locator('td.mr-cell').innerText(), /\d/);
   await row.locator('input[aria-label^="Treatment details"]').fill('Scaling advised');
   await page.waitForTimeout(1200);
   await page.waitForSelector('.save-state[data-state="saved"]', { timeout: 5000 });
