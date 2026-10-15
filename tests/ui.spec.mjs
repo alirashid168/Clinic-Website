@@ -345,7 +345,7 @@ await step('front desk: "+ Add checkup patient" on today\'s Aaj ki List asks onl
   // Options -> Remove -> confirm
   await removeCheckup(page, row);
 });
-await step('front desk: a checkup patient whose phone belongs to a patient file is offered "Add Mr# N to the list instead"', async () => {
+await step('front desk: a checkup patient whose phone belongs to a patient file is offered "Add Mr# N to the list instead"; with that note showing, Enter still adds the checkup at once', async () => {
   await page.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = page.locator('.modal');
   await m.getByLabel(/^Patient full name/).fill('Dup Check Person');
@@ -362,6 +362,18 @@ await step('front desk: a checkup patient whose phone belongs to a patient file 
   await page.waitForSelector('.modal', { state: 'detached' });
   await page.waitForFunction(([n, count]) => [...document.querySelectorAll('table.sheet tbody tr:not(.is-checkup)')].filter((t) => t.textContent.includes(`Mr# ${n}`)).length === count, [mr, before + 1]);
   assert.equal(await page.locator('table.sheet tbody tr.is-checkup:has(input[aria-label="Name of checkup patient Dup Check Person"])').count(), 0, 'no checkup was made');
+  // the note stays out of the way: Enter in the phone adds the checkup (one press), and no patient row is added
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('File Note Person');
+  await m.getByLabel(/^Mobile number/).fill('03010734521');
+  await m.locator('.alert-warning:has-text("already has a patient file")').waitFor();
+  await m.getByLabel(/^Mobile number/).press('Enter');
+  await page.waitForSelector('.toast:has-text("File Note Person added to today\'s list for North Nazimabad.")');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  const row = checkupRow(page, 'File Note Person');
+  await row.waitFor();
+  assert.equal(await page.locator('table.sheet tbody tr:not(.is-checkup)', { hasText: `Mr# ${mr}` }).count(), before + 1, 'no patient row was added');
+  await removeCheckup(page, row);
 });
 await step('front desk: the status filter and the find box apply to the checkup rows, and the dues filter hides them', async () => {
   // (status, doctor, group, dues and braces sit behind "Filters")
@@ -417,7 +429,7 @@ await step('front desk: the arrow keys move between the name cells of checkup ro
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), await names.nth(1).getAttribute('aria-label'));
 });
 
-await step('front desk: the same person twice on today\'s list is refused in plain words (the same phone, or the name of a row typed in without a phone); another name on the same phone (often a family member) is a checkup of their own', async () => {
+await step('front desk: the same person twice on today\'s list is refused in plain words (the same phone, or the same name of a row typed in without a phone); another name on the same phone (often a family member), or a name that only partly fits, is said too and is one more click', async () => {
   await quickAdd(page, 'Twice Typed Person', '0300 5550955');
   await page.waitForSelector('.toast:has-text("Twice Typed Person added to today\'s list for North Nazimabad.")');
   await page.waitForSelector('.modal', { state: 'detached' });
@@ -426,11 +438,21 @@ await step('front desk: the same person twice on today\'s list is refused in pla
   await refused.waitFor();
   assert.equal((await refused.innerText()).trim(), "Twice Typed Person (0300 5550955) is already on today's list for North Nazimabad, so they are not added again.");
   assert.deepEqual(await m.locator('.modal-actions button').allInnerTexts(), ['Cancel', 'Add to the list'], 'nothing else to choose');
+  // a mistyped number put right: the refusal goes at once (it may not be true any more)
+  await m.getByLabel(/^Mobile number/).fill('0300 5550999');
+  assert.equal(await refused.count(), 0, 'not said any more once the phone is changed');
   await m.getByRole('button', { name: 'Cancel' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   assert.equal(await checkupRow(page, 'Twice Typed Person').count(), 1, 'one row, not two');
-  // another name on the same phone: a checkup of their own
-  await quickAdd(page, 'Twice Typed Brother', '0300 5550955');
+  // another name on the same phone (a family member, or the same person written another way): said, not added without a word; one more
+  // click adds them as a checkup of their own
+  const other = await quickAdd(page, 'Twice Typed Brother', '0300 5550955');
+  const maybe = other.locator('.alert[role="alert"]');
+  await maybe.waitFor();
+  assert.match(await maybe.innerText(), /^Twice Typed Person \(0300 5550955\) is already on today's list for North Nazimabad on this phone number\. The same person\? Then they are on the list already: press Cancel\./);
+  assert.match(await maybe.innerText(), /Someone else on the same phone \(often a family member\)\? Add Twice Typed Brother as someone else$/);
+  assert.equal(await checkupRow(page, 'Twice Typed Brother').count(), 0, 'not added yet');
+  await other.getByRole('button', { name: 'Add Twice Typed Brother as someone else' }).click();
   await page.waitForSelector('.toast:has-text("Twice Typed Brother added to today\'s list for North Nazimabad.")');
   await page.waitForSelector('.modal', { state: 'detached' });
   await checkupRow(page, 'Twice Typed Brother').waitFor();
@@ -446,9 +468,16 @@ await step('front desk: the same person twice on today\'s list is refused in pla
     "Nophone Desk Person (no phone) is already on today's list for North Nazimabad, so they are not added again. If that is someone else, first write their mobile number on their row, then add this person.");
   await again.getByRole('button', { name: 'Cancel' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
+  // a name that only partly fits the one without a phone: said, and one more click adds them
+  const partly = await quickAdd(page, 'Nophone Desk Person Rizvi', '0300 5550957');
+  await partly.locator('.alert[role="alert"]').waitFor();
+  assert.match(await partly.locator('.alert[role="alert"]').innerText(), /^Nophone Desk Person \(no phone\) is already on today's list for North Nazimabad\. The same person\? Then they are on the list already: press Cancel\.\s+Someone else\? Add Nophone Desk Person Rizvi as someone else$/);
+  await partly.getByRole('button', { name: 'Add Nophone Desk Person Rizvi as someone else' }).click();
+  await page.waitForSelector('.toast:has-text("Nophone Desk Person Rizvi added to today\'s list for North Nazimabad.")');
+  await page.waitForSelector('.modal', { state: 'detached' });
   // leave the list as it was
   await page.getByRole('button', { name: 'Today', exact: true }).click();
-  for (const who of ['Twice Typed Person', 'Twice Typed Brother', 'Nophone Desk Person']) {
+  for (const who of ['Twice Typed Person', 'Twice Typed Brother', 'Nophone Desk Person', 'Nophone Desk Person Rizvi']) {
     const row = checkupRow(page, who);
     await row.waitFor();
     await removeCheckup(page, row);
@@ -531,13 +560,16 @@ await step('Today page (the first page after login): "+ Add checkup patient" ask
   await m.getByRole('button', { name: 'Cancel' }).click();
   await page.waitForSelector('.modal', { state: 'detached' });
   assert.equal(await count(), before + 1, 'not one more');
-  // a phone of a patient file: named, with a link to the file
+  // a phone of a patient file: named, with a link to the file; the note stays out of the way (Enter still adds the checkup, one press)
   await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Today File Person');
   await m.getByLabel(/^Mobile number/).fill('03010734521');
   await m.locator('.alert-warning:has-text("This person already has a patient file")').waitFor();
   assert.ok(await m.getByRole('link', { name: 'Open the patient file' }).count(), 'a link to the file');
-  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.getByLabel(/^Mobile number/).press('Enter');
+  await page.waitForSelector('.toast:has-text("Today File Person added to today\'s list for North Nazimabad.")');
   await page.waitForSelector('.modal', { state: 'detached' });
+  assert.equal(await count(), before + 2, 'added with the note showing');
   // on the branch's Aaj ki List for today: Waiting, with "Fill in form" on the row
   await page.goto(BASE + '#/staff/sheet');
   const row = checkupRow(page, 'Today Quick Person');
@@ -546,6 +578,7 @@ await step('Today page (the first page after login): "+ Add checkup patient" ask
   assert.equal(await row.locator('input[aria-label^="Treatment for"]').inputValue(), 'Checkup');
   assert.ok(await row.getByRole('button', { name: 'Fill in form for Today Quick Person' }).isVisible());
   await removeCheckup(page, row);
+  await removeCheckup(page, checkupRow(page, 'Today File Person'));
 });
 // The whole form ("Checkup Patient Form 2.0", owner 11 Oct 2026) stays on the Checkups page, with a date for an earlier day.
 await step('Checkups page: "+ Add checkup patient" opens the whole checkup form with its nine questions in the form\'s order', async () => {
@@ -1050,15 +1083,48 @@ await step('Aaj ki List: a checkup patient put on today\'s list at the desk (Wai
   const [status, doctors, ali, pricing, wants, plan] = await stored();
   assert.deepEqual([status, !!doctors, ali, pricing, wants, plan], ['completed', true, true, 'yes', true, 'Next week'], 'the answers of the form');
   // an earlier day's list: nobody arrives there, so the whole form
-  await page.goto(BASE + `#/staff/sheet?date=${await page.evaluate(async () => { const { addDaysISO, localISO } = await import('/js/ui/dom.js'); return addDaysISO(localISO(), -1); })}`);
+  const yesterday = await page.evaluate(async () => { const { addDaysISO, localISO } = await import('/js/ui/dom.js'); return addDaysISO(localISO(), -1); });
+  await page.goto(BASE + `#/staff/sheet?date=${yesterday}`);
   await page.getByRole('button', { name: '+ Add checkup patient' }).click();
   const m = page.locator('.modal').first();
   await m.waitFor();
   assert.deepEqual(await m.locator('.modal-actions button').allInnerTexts(), ['Cancel', 'Add checkup patient']);
   assert.ok(await doctorGroup(m).count() && await forGroup(m).count(), 'the questions of the form');
   assert.equal(await m.getByLabel(/^Which branch did you visit/).inputValue(), 'North Nazimabad');
-  await m.getByRole('button', { name: 'Cancel' }).click();
+  // a phone of a patient file: "Add Mr# N to the list instead" asks first when an answer of the form would be thrown away
+  await m.getByLabel(/^Patient full name/).fill('Earlier Day Person');
+  await m.getByLabel(/^Mobile number/).fill('03010734521');
+  await m.getByLabel(/^Mobile number/).press('Tab');
+  const fileNote = m.locator('.alert-warning', { hasText: 'already has a patient file' });
+  await fileNote.waitFor();
+  const fileMr = (await fileNote.innerText()).match(/Mr# (\d+)/)[1];
+  await doctorGroup(m).getByRole('checkbox').first().check();
+  await m.getByRole('button', { name: `Add Mr# ${fileMr} to the list instead` }).click();
+  const ask = page.locator('.modal', { hasText: 'Discard this checkup form?' });
+  await ask.getByRole('button', { name: 'Keep filling in' }).click();
+  await ask.waitFor({ state: 'detached' });
+  assert.equal(await m.getByLabel(/^Patient full name/).inputValue(), 'Earlier Day Person', 'the form stays');
+  assert.ok(await doctorGroup(m).getByRole('checkbox').first().isChecked(), 'and its answer');
+  // the whole form saved there: on that day's list, Completed, with no "Fill in form" (another phone first: the note goes, and the questions
+  // move up, before they are answered)
+  await m.getByLabel(/^Mobile number/).fill('0300 5550965');
+  await m.getByLabel(/^Mobile number/).press('Tab');
+  await fileNote.waitFor({ state: 'detached' });
+  await fillCheckupForm(m, { name: 'Earlier Day Person', checkupFor: 'Braces' });
+  await m.getByRole('button', { name: 'Add checkup patient' }).click();
+  await page.waitForSelector('.toast:has-text("Earlier Day Person added as a checkup patient.")');
   await page.waitForSelector('.modal', { state: 'detached' });
+  const earlier = checkupRow(page, 'Earlier Day Person');
+  await earlier.waitFor();
+  assert.equal(await earlier.locator('select[aria-label^="Status for"]').inputValue(), 'completed');
+  assert.equal(await earlier.locator('input[aria-label^="Treatment for"]').inputValue(), 'Braces');
+  assert.equal(await earlier.getByRole('button', { name: /^Fill in form/ }).count(), 0, 'the form is filled in: no "Fill in form"');
+  assert.deepEqual(await page.evaluate(async (day) => {
+    const { state } = await import('/js/state.js');
+    const c = (await state.data.listDayCheckups({ branchId: 2, date: day })).find((x) => x.patient_name === 'Earlier Day Person');
+    return [c.checkup_date, c.follow_up, c.day_status];
+  }, yesterday), [yesterday, 'Not Contacted', 'completed'], 'saved for that day');
+  await removeCheckup(page, earlier);
   // leave today's list as it was
   await page.goto(BASE + '#/staff/sheet');
   await row.waitFor();
@@ -1068,7 +1134,7 @@ await step('Aaj ki List: a checkup patient put on today\'s list at the desk (Wai
 // digit at once: the add waits for it (the quick add reads today's list when it is pressed), so a person typed into the Google Sheet on arrival
 // is not put on the list twice. And while an add is under way nothing closes the dialog (the add would go ahead anyway): it waits, says so,
 // and closes once it is saved.
-await step('Aaj ki List on a slow line: "Add to the list" tapped right after the last digit of the phone still finds the person on today\'s list (so does the whole form of the Checkups page); while an add is under way, Escape, the ×, a tap outside and Back wait for it', async () => {
+await step('Aaj ki List on a slow line: "Add to the list" tapped right after the last digit of the phone still finds the person on today\'s list (so does the whole form of the Checkups page); while an add is under way (from the press: today\'s list is read first), Escape, the ×, a tap outside, Back and "Add Mr# N to the list instead" wait for it', async () => {
   await page.evaluate(async () => {
     const { state } = await import('/js/state.js');
     const { localISO } = await import('/js/ui/dom.js');
@@ -1112,6 +1178,28 @@ await step('Aaj ki List on a slow line: "Add to the list" tapped right after the
     const { localISO } = await import('/js/ui/dom.js');
     return (await window.__realListDay.call(state.data, { branchId: 2, date: localISO() })).filter((c) => String(c.phone).replace(/\D/g, '') === '03005559931').length;
   }), 1, 'one checkup with that phone on today\'s list, not two');
+  // today's list being read after "Add to the list" (held until the test lets it go; only the quick add's read, not the page's own): Back
+  // waits for it too, and the checkup is added once, with the dialog open until then
+  await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const d = state.data;
+    d.listDayCheckups = async (...args) => {
+      if (new Error().stack.includes('checkup-actions.js')) await new Promise((r) => { window.__releaseList = r; });
+      return window.__realListDay.apply(d, args);
+    };
+  });
+  await page.goto(BASE + '#/staff/sheet');
+  await checkupRow(page, 'Race Sheet Person').waitFor();
+  await quickAdd(page, 'Back Race Person', '0300 5559933');
+  await page.waitForFunction(() => typeof window.__releaseList === 'function');
+  await page.goBack();
+  await page.waitForTimeout(200);
+  assert.equal(await m.locator('h2').innerText(), 'Add a checkup patient', 'the dialog is still open while the list is read');
+  assert.match(await page.evaluate(() => location.hash), /^#\/staff\/sheet/, 'Back keeps the page while the list is read');
+  await page.evaluate(() => window.__releaseList());
+  await page.waitForSelector('.toast:has-text("Back Race Person added to today\'s list for North Nazimabad.")');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  await checkupRow(page, 'Back Race Person').waitFor();
   // a save under way (held until the test lets it go)
   await page.evaluate(async () => {
     const { state } = await import('/js/state.js');
@@ -1120,9 +1208,13 @@ await step('Aaj ki List on a slow line: "Add to the list" tapped right after the
     window.__realAdd = d.addCheckup;
     d.addCheckup = async (...args) => { await new Promise((r) => { window.__releaseSave = r; }); return window.__realAdd.apply(d, args); };
   });
-  await page.goto(BASE + '#/staff/sheet');
-  await checkupRow(page, 'Race Sheet Person').waitFor();
-  await quickAdd(page, 'Slow Save Person', '0300 5559932');
+  // (a phone of a patient file: its note is there as Enter adds, and stays while the add is under way)
+  await page.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.getByLabel(/^Patient full name/).fill('Slow Save Person');
+  await m.getByLabel(/^Mobile number/).fill('03010734521');
+  const instead = m.getByRole('button', { name: /^Add Mr# \d+ to the list instead$/ });
+  await instead.waitFor();
+  await m.getByLabel(/^Mobile number/).press('Enter');
   await page.waitForFunction(() => typeof window.__releaseSave === 'function');
   const saving = page.locator('.toast', { hasText: 'Saving, wait a moment.' });
   await page.keyboard.press('Escape');
@@ -1130,6 +1222,9 @@ await step('Aaj ki List on a slow line: "Add to the list" tapped right after the
   await m.getByRole('button', { name: 'Close' }).click();
   await page.mouse.click(4, 4);   // (the strip around the dialog)
   await page.goBack();
+  // "Add Mr# N to the list instead" waits too: the person would be on the list twice
+  const patientRows = await page.locator('table.sheet tbody tr:not(.is-checkup)').count();
+  await instead.click();
   await page.waitForTimeout(200);
   assert.equal(await page.locator('.modal').count(), 1, 'nothing else opens');
   assert.equal(await m.locator('h2').innerText(), 'Add a checkup patient', 'the dialog is still open');
@@ -1138,10 +1233,11 @@ await step('Aaj ki List on a slow line: "Add to the list" tapped right after the
   await page.waitForSelector('.toast:has-text("Slow Save Person added to today\'s list for North Nazimabad.")');
   await page.waitForSelector('.modal', { state: 'detached' });
   await checkupRow(page, 'Slow Save Person').waitFor();
+  assert.equal(await page.locator('table.sheet tbody tr:not(.is-checkup)').count(), patientRows, 'no patient row was added: the person is on the list once');
   assert.equal(await reloadAsks(page), false, 'saved: a reload is not asked about');
   // leave today's list as it was
   await page.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.addCheckup = window.__realAdd; });
-  for (const who of ['Race Sheet Person', 'Slow Save Person']) {
+  for (const who of ['Race Sheet Person', 'Back Race Person', 'Slow Save Person']) {
     const row = checkupRow(page, who);
     await row.getByRole('button', { name: /Checkup options/ }).click();
     await page.locator('.modal').getByRole('button', { name: 'Remove from the list' }).click();
@@ -1191,6 +1287,55 @@ await step('photo month cannot be completed without photos', async () => {
     await row.locator('select[aria-label^="Status"]').selectOption('completed');
     await p2.waitForSelector('.toast-error');
   }
+});
+// Staff who work at several branches: the Today page names their own branch, with "Change branch" for a day at another one (covering for
+// someone); with no branch of their own the branch is asked.
+await step('assistant (every branch): the Today page\'s quick add asks the branch when they have none of their own; with a home branch it is named, and "Change branch" puts the name on another branch\'s list', async () => {
+  await p2.locator('.topnav a:has-text("Today")').click();
+  const panel = p2.locator('section.today-checkup');
+  await panel.waitFor();
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  const m = p2.locator('.modal');
+  await m.waitFor();
+  const lead = () => m.locator('.modal-body .muted').first().innerText();
+  assert.deepEqual(await quickFields(m), ['Patient full name', 'Mobile number', 'Branch'], 'no branch of their own: asked');
+  assert.ok((await lead()).startsWith("The name goes on today's Aaj ki List of the branch, as Waiting."), await lead());
+  assert.equal(await m.getByRole('button', { name: 'Change branch' }).count(), 0);
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await p2.waitForSelector('.modal', { state: 'detached' });
+  const other = await p2.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    window.__homeWas = state.session.staff.home_branch_id;
+    state.session.staff.home_branch_id = 2;
+    const b = state.ref.branches.find((x) => x.id !== 2);
+    return { id: b.id, name: b.name };
+  });
+  await panel.getByRole('button', { name: '+ Add checkup patient' }).click();
+  await m.waitFor();
+  assert.deepEqual(await quickFields(m), ['Patient full name', 'Mobile number'], 'their own branch: named, not asked');
+  assert.ok((await lead()).startsWith("The name goes on today's Aaj ki List for North Nazimabad, as Waiting."), await lead());
+  await m.getByRole('button', { name: 'Change branch' }).click();
+  assert.deepEqual(await quickFields(m), ['Patient full name', 'Mobile number', 'Branch']);
+  assert.equal(await m.getByLabel(/^Branch/).inputValue(), '2', 'their own branch to start with');
+  assert.ok(await m.getByLabel(/^Branch/).evaluate((el) => el === document.activeElement), 'the cursor goes to the branch');
+  assert.equal(await m.getByRole('button', { name: 'Change branch' }).count(), 0, 'the button is done with');
+  await m.getByLabel(/^Branch/).selectOption(String(other.id));
+  assert.ok((await lead()).startsWith(`The name goes on today's Aaj ki List for ${other.name}, as Waiting.`), await lead());
+  await m.getByLabel(/^Patient full name/).fill('Other Branch Person');
+  await m.getByLabel(/^Mobile number/).fill('0300 5550982');
+  await m.getByLabel(/^Mobile number/).press('Enter');
+  await p2.waitForSelector(`.toast:has-text("Other Branch Person added to today's list for ${other.name}.")`);
+  await p2.waitForSelector('.modal', { state: 'detached' });
+  // on that branch's list for today, as Waiting; then everything as it was
+  const saved = await p2.evaluate(async (id) => {
+    const { state } = await import('/js/state.js');
+    const { localISO } = await import('/js/ui/dom.js');
+    const c = (await state.data.listDayCheckups({ branchId: id, date: localISO() })).find((x) => x.patient_name === 'Other Branch Person');
+    if (c) await state.data.deleteCheckup(c.id);
+    state.session.staff.home_branch_id = window.__homeWas;
+    return c ? [c.branch_id, c.day_status] : null;
+  }, other.id);
+  assert.deepEqual(saved, [other.id, 'waiting']);
 });
 // Owner, 15 Oct 2026: "once the checkup is done, the assistant should have options to enter all the details after the checkup".
 await step('assistant: a checkup put on today\'s list with the name and phone only shows "Fill in form" on its row (and on the Checkups page); the nine answers make it Completed and the button goes', async () => {

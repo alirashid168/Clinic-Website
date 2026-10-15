@@ -534,9 +534,12 @@ export const formLater = (row) => can('sheet.edit') && !!row.branch_id && !formC
  * "Checkup" until the form says what it was for, so the name is on that branch's Aaj ki List at once. The assistant fills in the checkup form
  * after the checkup ("Fill in form" on their row, or Options; checkupAnswersModal).
  * The branch: the list's (branchFixed), else the person's only branch, else their home branch; asked only when none of these is known.
+ * Staff of several branches see the known one named, with "Change branch" (someone covering another branch today).
  * Someone already on today's list there is not put on it a second time, and the dialog says so: the same phone with a name that fits, or the
- * name of a checkup typed in without a phone. (Another name on the same phone, often a family member, is a checkup of their own, as in the
- * import.) The list is read when "Add to the list" is pressed, so a slow line cannot let the same person in twice.
+ * same name, letter for letter, of a checkup typed in without a phone. Perhaps the same person (another name on the same phone, or a name
+ * that only partly fits one typed in without a phone): said too, with "Add <name> as someone else" (a family member on the same phone is a
+ * checkup of their own, as in the import). The list is read when "Add to the list" is pressed, so a slow line cannot let the same person in
+ * twice.
  * A patient file with the same phone is named while typing: "Add Mr# N to the list instead" (fileAction 'add', the Aaj ki List) or a link to
  * the file (the Today page). Enter in a field adds; nothing else is asked.
  * Resolves the saved row, { patient } (that patient file instead), or null when it was cancelled.
@@ -549,16 +552,34 @@ export function quickCheckupModal({ branchId = null, branchFixed = false, fileAc
     const known = branchFixed ? Number(branchId)
       : mine.length === 1 ? mine[0].id
         : [Number(branchId), Number(state.session?.staff?.home_branch_id)].find((id) => id && mine.some((b) => b.id === id)) || null;
-    const branch = known ? null : select([{ value: '', label: 'Choose…' }, ...mine.map((b) => ({ value: b.id, label: b.name }))], '');
-    const branchValue = () => known || Number(branch.value) || null;
+    // the branch field: asked when the branch is not known; for staff of several branches whose branch is known, put in by "Change branch"
+    const branch = branchFixed || (known && mine.length <= 1) ? null
+      : select([{ value: '', label: 'Choose…' }, ...mine.map((b) => ({ value: b.id, label: b.name }))], known || '');
+    const branchValue = () => (branch ? Number(branch.value) || null : known);
+    const branchField = branch ? field('Branch', branch, null, { required: true }) : null;
+    const whereText = () => (branchValue() ? `for ${branchName(branchValue())}` : 'of the branch');
+    const where = h('span', {}, whereText());
+    const grid = h('div', { class: 'form-grid' },
+      field('Patient full name', name, null, { required: true }),
+      field('Mobile number', phone, null, { required: true }),
+      known ? null : branchField);
+    const change = branch && known ? h('button', { type: 'button', class: 'link-btn', onclick: () => {
+      change.remove();
+      grid.append(branchField);
+      branch.focus();
+    } }, 'Change branch') : null;
     const warn = h('div', {});
     const files = h('div', {});
     let done = false;
     let adding = false;
     let dialog = null;
+    // "Said, not added" is cleared as soon as the name, the phone or the branch is changed (it may not be true any more)
+    for (const el of [name, phone]) el.addEventListener('input', () => mount(warn));
+    branch?.addEventListener('change', () => { mount(warn); where.textContent = whereText(); });
 
     // A patient file with this phone (the number only: a name alone finds too many): named under the fields, a moment after the typing stops.
-    // (once per number: the phone's change on leaving it, as its button is pressed, must not draw that button again under the click)
+    // (once per number that was looked up: the phone's change on leaving it, as its button is pressed, must not draw that button again under
+    // the click; a lookup that failed is no answer, so the next change looks again)
     let fileSeq = 0;
     let typing;
     let checkedFor = null;
@@ -568,28 +589,35 @@ export function quickCheckupModal({ branchId = null, branchFixed = false, fileAc
       if (digits === checkedFor) return;
       checkedFor = digits;
       const mineSeq = ++fileSeq;
-      const found = digits.length >= 7 ? await state.data.findDuplicates('', phone.value).catch(() => []) : [];
+      let failed = false;
+      const found = digits.length >= 7 ? await state.data.findDuplicates('', phone.value).catch(() => { failed = true; return []; }) : [];
       if (mineSeq !== fileSeq || done) return;
+      if (failed) checkedFor = null;
       const same = found.filter((p) => digitsOf(p.phone) === digits).slice(0, 3);
       mount(files, same.length ? h('div', { class: 'alert alert-warning', role: 'status' }, same.map((p) => h('div', { class: 'dup-line' },
         h('span', {}, h('strong', {}, 'This person already has a patient file: '), mrLine(p), '.'),
         fileAction === 'add'
-          ? h('button', { type: 'button', class: 'btn btn-small', onclick: () => { done = true; resolve({ patient: p }); dialog?.close(); } }, `Add Mr# ${p.mr_number} to the list instead`)
+          ? h('button', { type: 'button', class: 'btn btn-small', onclick: async () => {
+            // not while the checkup is being added ("Saving, wait a moment."): the person would be on the list twice
+            if (done || !dialog || !(await dialog.mayLeave(() => true)) || adding) return;
+            done = true;
+            resolve({ patient: p });
+            dialog.close();
+          } }, `Add Mr# ${p.mr_number} to the list instead`)
           : h('a', { class: 'btn btn-small', href: `#/staff/patient/${p.id}` }, 'Open the patient file')))) : null);
     };
     phone.addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(checkFiles, 400); });
     phone.addEventListener('change', checkFiles);
 
-    const where = known ? `today's Aaj ki List for ${branchName(known)}` : "today's Aaj ki List of the branch";
     const body = h('div', {},
-      h('p', { class: 'muted' }, `The name goes on ${where}, as Waiting. After the checkup, fill in the checkup form from their row there ("Fill in form").`),
-      h('div', { class: 'form-grid' },
-        field('Patient full name', name, null, { required: true }),
-        field('Mobile number', phone, null, { required: true }),
-        branch ? field('Branch', branch, null, { required: true }) : null),
+      h('p', { class: 'muted' }, "The name goes on today's Aaj ki List ", where, ', as Waiting. After the checkup, fill in the checkup form from their row there ("Fill in form").',
+        change ? ' ' : null, change),
+      grid,
       warn,
       files);
 
+    // "Add <name> as someone else" was pressed for this phone, name and branch: perhaps-the-same rows are not asked about again
+    let someoneElse = null;
     const add = async () => {
       mount(warn);
       const typed = name.value.trim().replace(/\s+/g, ' ');
@@ -602,18 +630,38 @@ export function quickCheckupModal({ branchId = null, branchFixed = false, fileAc
       const bId = branchValue();
       const day = localISO();
       const phoneKey = checkupPhone(phone.value);
-      const list = state.data.listDayCheckups ? await state.data.listDayCheckups({ branchId: bId, date: day }).catch(() => []) : [];
-      const there = list.find((c) => Number(c.branch_id) === bId
-        && (checkupPhone(c.phone) ? checkupPhone(c.phone) === phoneKey && sameName(typed, c) : nameMatch(typed, c)));
-      if (there) {
-        mount(warn, h('div', { class: 'alert alert-warning', role: 'alert' },
-          `${listedAs(there)} is already on today's list for ${branchName(bId)}, so they are not added again.`,
-          checkupPhone(there.phone) ? '' : ' If that is someone else, first write their mobile number on their row, then add this person.'));
-        return false;
-      }
+      const typedKey = nameNorm(typed);
+      const key = JSON.stringify([phoneKey, typedKey, bId]);
       const b = state.ref.branches.find((x) => x.id === bId);
+      // From here Back, a link, Escape, the × and a tap outside wait (today's list is read from the server, then the checkup is added).
       adding = true;
       try {
+        const list = state.data.listDayCheckups ? await state.data.listDayCheckups({ branchId: bId, date: day }).catch(() => []) : [];
+        if (done) return false;
+        const here = list.filter((c) => Number(c.branch_id) === bId);
+        const samePhone = (c) => !!checkupPhone(c.phone) && checkupPhone(c.phone) === phoneKey;
+        // the same person: the same phone and a name that fits, or the same name, letter for letter, typed in without a phone
+        const there = here.find((c) => (samePhone(c) && sameName(typed, c)) || (!checkupPhone(c.phone) && !!typedKey && typedKey === nameNorm(c.patient_name)));
+        if (there) {
+          mount(warn, h('div', { class: 'alert alert-warning', role: 'alert' },
+            `${listedAs(there)} is already on today's list for ${branchName(bId)}, so they are not added again.`,
+            checkupPhone(there.phone) ? '' : ' If that is someone else, first write their mobile number on their row, then add this person.'));
+          return false;
+        }
+        // perhaps the same person: another name on this phone (often a family member), or a name that partly fits one without a phone
+        const maybe = key === someoneElse ? [] : here.filter((c) => samePhone(c) || (!checkupPhone(c.phone) && nameMatch(typed, c)));
+        if (maybe.length) {
+          const viaPhone = maybe.every(samePhone);
+          mount(warn, h('div', { class: 'alert alert-warning', role: 'alert' },
+            h('p', {}, `${maybe.map(listedAs).join(', ')} ${maybe.length === 1 ? 'is' : 'are'} already on today's list for ${branchName(bId)}${viaPhone ? ' on this phone number' : ''}. `
+              + 'The same person? Then they are on the list already: press Cancel.'),
+            h('p', {}, `Someone else${viaPhone ? ' on the same phone (often a family member)' : ''}? `,
+              h('button', { type: 'button', class: 'btn btn-small', onclick: () => {
+                someoneElse = key;
+                dialog?.dialog.querySelector('.modal-actions .btn-primary')?.click();
+              } }, `Add ${typed} as someone else`))));
+          return false;
+        }
         const row = await state.data.addCheckup({
           patient_name: typed, branch_id: bId, phone: phone.value.trim(), checkup_for: 'Checkup', checkup_date: day,
           city: (b && cityName(b.city_id)) || null, day_status: 'waiting', follow_up: 'Not Contacted',
@@ -623,8 +671,9 @@ export function quickCheckupModal({ branchId = null, branchFixed = false, fileAc
       } catch (e) { toast(friendlyError(e), 'error'); return false; } finally { adding = false; }
     };
 
-    // Nothing is asked before it closes; but while the checkup is being added, Escape, the ×, a tap outside, Back or a link wait for it and
-    // say so (the add goes ahead anyway: closed meanwhile, the list would not show the row until it is read again).
+    // Nothing is asked before it closes; but while the checkup is being added (from the press of "Add to the list": today's list is read
+    // first), Escape, the ×, a tap outside, Back, a link or "Add Mr# N to the list instead" wait for it and say so (the add goes ahead anyway:
+    // closed meanwhile, the list would not show the row until it is read again).
     dialog = modal('Add a checkup patient', body, [
       { label: 'Cancel', dismiss: true },
       { label: 'Add to the list', primary: true, onClick: add },
