@@ -42,7 +42,9 @@ function menuFor(keys: string[] | null): Item[] {
 const ADMIN = () => menuFor(null);
 // The top bar as text: links by label, drop-downs as "Label ▾".
 const bar = (menu: Item[]) => menu.map((m) => (m.items ? `${m.label} ▾` : m.label));
-const more = (menu: Item[]) => (menu.find((m) => m.key === 'more')?.items || []).map((i: Item) => (i.divider ? '---' : i.heading ? `[${i.heading}]` : i.label));
+// More as text: '---' a line between its parts, '[Name]' a drop-down's section followed by its pages ('  ---' a line inside it).
+const more = (menu: Item[]) => (menu.find((m) => m.key === 'more')?.items || []).flatMap((i: Item) => (i.divider ? '---'
+  : i.heading ? [`[${i.heading}]`, ...i.items.map((p: Item) => (p.divider ? '  ---' : p.label))] : i.label));
 const DEFAULT_TOP = ['today', 'menu:sheet', 'patients', 'billing', 'menu:reports', 'menu:coordinator'];
 
 test('page keys are the address without #/staff/, drop-downs are menu:<key>, More is not an entry', () => {
@@ -120,6 +122,31 @@ test('a drop-down put in More keeps its name there; a top-bar page taken off goe
   const out = arrangeMenu(m, saved);
   assert.deepEqual(bar(out), ['Patients', 'Today', 'Aaj ki List ▾', 'Reports ▾', 'More ▾']);
   assert.deepEqual(more(out), ['Billing', '---', '[Coordinator]', 'Reminders', 'Lab work', '---', 'Stock', 'Complaints', '---', 'Staff accounts', 'Audit log']);
+});
+
+test('a drop-down with a line inside it (Reports) keeps all its pages under its name in More, the line inside its section', () => {
+  const m = ADMIN();
+  const out = arrangeMenu(m, ['-menu:reports']);
+  assert.deepEqual(bar(out), ['Today', 'Aaj ki List ▾', 'Patients', 'Billing', 'Coordinator ▾', 'More ▾']);
+  const items = out.find((x: Item) => x.key === 'more').items;
+  // One item of More holds the whole drop-down: the pages after its line (the Accounts tabs) are still the Reports section's.
+  assert.deepEqual(items.map((i: Item) => (i.divider ? '---' : i.heading ? `[${i.heading}]` : i.label)), ['[Reports]', '---', 'Stock', 'Complaints', '---', 'Staff accounts', 'Audit log']);
+  const reports = items[0];
+  assert.deepEqual([reports.heading, reports.key], ['Reports', 'reports']);
+  assert.deepEqual(reports.items.map((i: Item) => (i.divider ? '---' : i.label)), ['Financial', 'Patients', 'OPD', '---', 'Expenses', 'Cash closing']);
+  assert.deepEqual(reports.items.filter((i: Item) => !i.divider).map((i: Item) => i.href),
+    ['#/staff/reports?group=financial', '#/staff/reports?group=patients', '#/staff/reports?group=opd', '#/staff/accounts?tab=expenses', '#/staff/accounts?tab=cash']);
+  // Spilled from a top bar too long for the screen, the same: Coordinator and Reports each a section, in the menu's order.
+  assert.deepEqual(more(arrangeMenu(m, [], { spill: 2 })), ['[Reports]', 'Financial', 'Patients', 'OPD', '  ---', 'Expenses', 'Cash closing', '---',
+    '[Coordinator]', 'Reminders', 'Lab work', '---', 'Stock', 'Complaints', '---', 'Staff accounts', 'Audit log']);
+  // Pages pinned from it leave no line at an edge of its section, and none doubled.
+  const pinned = (keys: string[]) => arrangeMenu(m, [...DEFAULT_TOP.filter((k) => k !== 'menu:reports'), ...keys, '-menu:reports'])
+    .find((x: Item) => x.key === 'more').items[0].items.map((i: Item) => (i.divider ? '---' : i.label));
+  assert.deepEqual(pinned(['reports?group=financial', 'reports?group=patients', 'reports?group=opd']), ['Expenses', 'Cash closing']);
+  assert.deepEqual(pinned(['accounts?tab=expenses', 'accounts?tab=cash']), ['Financial', 'Patients', 'OPD']);
+  // With no page of it left, it has no section at all (and no heading by itself).
+  assert.deepEqual(more(arrangeMenu(m, [...DEFAULT_TOP.filter((k) => k !== 'menu:reports'), 'reports?group=financial', 'reports?group=patients', 'reports?group=opd',
+    'accounts?tab=expenses', 'accounts?tab=cash', '-menu:reports'])), ['Stock', 'Complaints', '---', 'Staff accounts', 'Audit log']);
 });
 
 test('a page pinned out of a drop-down leaves it; a pinned tab page is "current" only on that very tab; a shared label says where it is from', () => {

@@ -169,6 +169,35 @@ async function saveArrangement(list) {
   return { here: false };
 }
 
+// A double-click (or a double tap) on "Arrange my menu" opens the dialog at its first click, and the second one lands in the
+// dialog, which is under the pointer by then: on its backdrop it would close the dialog again at once, on a phone press the
+// row button there. So a press in the dialog that starts in its first moments (OPENING ms, longer than a double tap) is the
+// rest of the press that opened it and does nothing: no focus moved, no word selected, no click. So is a mouse press that
+// the browser counts as the second click of a double-click (a slow one, at the same spot). The first press that acts ends
+// this, and a touch screen's count of quick taps (1, 2, 3, then 1 again, for taps that are each meant) is not looked at.
+// A single click does not wait (the dialog opens at once), nor does the keyboard (Enter or Space is a click with no count).
+const OPENING = 400;
+function ignoreOpeningPress(backdrop, ctl) {
+  const opened = performance.now();
+  let mouse = false; // the press going on is a mouse's
+  let skip = false; // and it is the rest of the press that opened the dialog
+  const on = (type, fn) => document.addEventListener(type, (ev) => { if (backdrop.contains(ev.target)) fn(ev); },
+    { capture: true, signal: ctl.signal });
+  // When the press was made: one made while the dialog was being drawn is handled only after that, and counts as early.
+  on('pointerdown', (ev) => {
+    mouse = ev.pointerType === 'mouse';
+    skip = Math.min(ev.timeStamp, performance.now()) - opened < OPENING;
+  });
+  on('mousedown', (ev) => { if (skip || (mouse && ev.detail > 1)) { skip = true; ev.preventDefault(); } });
+  on('click', (ev) => {
+    if (!ev.detail) return; // the keyboard
+    if (!skip) { ctl.abort(); return; }
+    skip = false;
+    ev.preventDefault();
+    ev.stopImmediatePropagation(); // before the backdrop's own listener, which closes the dialog, and before any button's
+  });
+}
+
 /**
  * The dialog. `menu` is shell.js's menu() (only what the person may open). Two lists: what is on the top bar, in order, with
  * Move up / Move down / Put in More on every row; and everything else, grouped like More, with Put on the top bar. Saving
@@ -360,6 +389,7 @@ export function openArrangeMenu(menu) {
     h('h3', {}, 'Not on the top bar'),
     rest);
   draw();
+  const opening = new AbortController(); // ignoreOpeningPress, until the first press that acts or the dialog closes
   const { dialog } = modal('Arrange my menu', body, [
     { label: 'Reset to default', onClick: () => {
       top = [...defaults];
@@ -378,7 +408,8 @@ export function openArrangeMenu(menu) {
       // Only the menus are drawn again: the page stays as it is, with anything typed on it and where it was scrolled to.
       redraw?.();
     } },
-  ], { initialFocus: topHeading });
+  ], { initialFocus: topHeading, onClose: () => opening.abort() });
+  ignoreOpeningPress(dialog.parentElement, opening);
   const scroller = dialog.querySelector('.modal-body');
   scroller.addEventListener('scroll', () => dropLift(scroller), { passive: true });
 }

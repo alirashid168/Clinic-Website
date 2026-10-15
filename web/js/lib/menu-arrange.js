@@ -19,7 +19,9 @@
 //
 // On an arranged top bar the pages that are not on it are under More: first the pages of the clinic's top bar that were taken
 // off it, then each drop-down that is not on the top bar under its own name (Aaj ki List, Reports, Coordinator), then More's
-// own pages. Every name on the bar is different from the others (barLabel): a page put on it from a drop-down says where it
+// own pages. Such a drop-down is one item of More, a section { heading, key, items } with all its pages and its own lines
+// (Reports: the report groups, a line, the Accounts tabs), so a line inside it never cuts its last pages off from its name.
+// Every name on the bar is different from the others (barLabel): a page put on it from a drop-down says where it
 // comes from when its name is taken ("Patients (Reports)"), and the Aaj ki List page reads "Aaj ki List (today)".
 
 export const MAX_KEYS = 60;
@@ -144,8 +146,9 @@ export function atAddress(key, here) {
 }
 
 /**
- * The menu in the same shape as menu(), arranged by `saved`. The clinic's own menu comes back unchanged (the same array) when
- * nothing differs from it. { spill: n } moves the last n entries of the top bar into More (a top bar too long for the screen).
+ * The menu in the same shape as menu(), arranged by `saved`, and More may hold sections: { heading, key, items } for each drop-down
+ * that is not on the top bar. The clinic's own menu comes back unchanged (the same array) when nothing differs from it.
+ * { spill: n } moves the last n entries of the top bar into More (a top bar too long for the screen).
  * { here } is the address on screen ('#/staff/coordinator?tab=lab'): a page put on the top bar from a drop-down (or More) is
  * marked as the current one (key = its section, as shell.js's current() expects) only at its own address, on that very tab.
  * shell.js's current() also counts a section's other pages as that drop-down's (Checkups and History of Aaj ki List light
@@ -179,17 +182,20 @@ export function arrangeMenu(menu, saved, { spill = 0, here = '' } = {}) {
   // Anything at the top level that is neither a link nor a drop-down (none today) keeps its place on the bar.
   for (const m of menu) if (!m.items && !isLink(m)) out.push(m);
   // More: the clinic's top-bar pages taken off it, each drop-down that is not on the top bar under its own name, then More's own pages.
+  // Such a drop-down is one item, a section with its own lines inside it: they never part its last pages from its name.
   const sections = [];
   const loose = entries.filter((e) => e.kind === 'page' && e.top && !onTop.has(e.key)).map((e) => e.item);
   if (loose.length) sections.push({ items: loose });
   const groups = menu.filter((m) => m.items && m.key !== MORE && !onTop.has(groupKey(m.key)));
-  for (const m of groups) sections.push({ heading: m.label, items: trim(m.items.filter(open)) });
+  for (const m of groups) {
+    const inside = trim(m.items.filter(open));
+    sections.push({ items: inside.length ? [{ heading: m.label, key: m.key, items: inside }] : [] });
+  }
   const more = menu.find((m) => m.items && m.key === MORE);
   if (more) sections.push({ items: trim(more.items.filter(open)) });
   const items = [];
   for (const s of sections.filter((x) => x.items.length)) {
     if (items.length) items.push({ divider: true });
-    if (s.heading) items.push({ heading: s.heading });
     items.push(...s.items);
   }
   if (items.length) out.push({ ...(more || { label: 'More', key: MORE }), items });

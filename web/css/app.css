@@ -789,6 +789,10 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: var(--space-1); }
    scrolled the page to the top. Not the links inside a drop-down list, which scroll within it. */
 .topbar :is(.nav-link, .icon-btn, .wordmark, .topsearch input) { scroll-margin-top: calc(-1 * (var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--space-4))); }
 .menu-heading { padding: var(--space-2) var(--space-3) var(--space-1); font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
+/* A drop-down under More: its pages are indented under its name, and so is a line inside it (Reports: the reports, then the Accounts
+   tabs): it reads as part of the section. The lines between More's parts run the full width. */
+.menu-section > a { padding-left: var(--space-6); }
+.menu-section > hr { margin-left: var(--space-6); }
 .nav-subgroup { padding-left: var(--space-4); }
 /* In the phone drawer such a drop-down's pages sit under its name, and a line ends them: More's own pages come after it,
    back at the usual indent. */

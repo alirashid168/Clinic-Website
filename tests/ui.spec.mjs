@@ -1675,10 +1675,13 @@ const noStrayText = async (pg) => {
   assert.ok(!/\bnull\b/.test(await arrangeDialog(pg).innerText()), 'no "null" in the dialog');
   assert.deepEqual(await arrangeDialog(pg).locator('.arrange-rest').evaluate((el) => [...el.childNodes].filter((n) => n.nodeType !== 1).map((n) => n.textContent)), [], 'no loose text between its sections');
 };
+// A press in the dialog's first 400 ms is taken for the second click of a double-click on "Arrange my menu" and does nothing
+// (nav-arrange.js): a person never aims at one of its buttons that fast, this test does. So it waits that moment out first.
+const arrangeOpened = async (pg) => { await arrangeDialog(pg).waitFor(); await pg.waitForTimeout(450); };
 const openArrange = async (pg) => {
   await pg.locator('.user-menu > button').click();
   await pg.locator('.user-menu .menu-list button:has-text("Arrange my menu")').click();
-  await arrangeDialog(pg).waitFor();
+  await arrangeOpened(pg);
 };
 const saveArrange = async (pg, expectBar) => {
   await arrangeDialog(pg).getByRole('button', { name: 'Save', exact: true }).click();
@@ -1704,7 +1707,7 @@ await step('Arrange my menu: in the name menu above "Change password"; the dialo
   await pn.locator('.user-menu > button').click();
   assert.deepEqual((await pn.locator('.user-menu .menu-list button').allTextContents()).map((t) => t.trim()), ['Arrange my menu', 'Change password', 'Log out']);
   await pn.locator('.user-menu .menu-list button:has-text("Arrange my menu")').click();
-  await arrangeDialog(pn).waitFor();
+  await arrangeOpened(pn);
   assert.equal(await pn.locator('.user-menu.open').count(), 0, 'the menu closed behind the dialog');
   assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
   const rest = arrangeDialog(pn).locator('.arrange-rest');
@@ -1888,6 +1891,48 @@ await step('Arrange my menu: "Reset to default" brings back the clinic\'s menu, 
   assert.equal(await pn.evaluate(() => localStorage.getItem('staff-menu:s-admin')), '[]');
   assert.deepEqual(await pn.evaluate(async () => (await import('/js/state.js')).state.data.myMenuArrangement()), []);
 });
+await step('Arrange my menu: a double-click on "Arrange my menu" opens the dialog and leaves it open; the keyboard is not kept waiting', async () => {
+  // The second click lands on the backdrop, where "Arrange my menu" was: it used to close the dialog again at once.
+  await pn.locator('.user-menu > button').click();
+  const item = pn.locator('.user-menu .menu-list button:has-text("Arrange my menu")');
+  const box = await item.boundingBox();
+  const spot = [box.x + box.width / 2, box.y + box.height / 2];
+  await item.dblclick();
+  await arrangeDialog(pn).waitFor();
+  assert.equal(await pn.evaluate(([x, y]) => document.elementFromPoint(x, y)?.className, spot), 'modal-backdrop', 'the second click landed on the backdrop');
+  await pn.waitForTimeout(500);
+  assert.equal(await arrangeDialog(pn).count(), 1, 'the dialog is still open');
+  assert.equal(await focusedName(pn), 'On the top bar', 'focus is where the dialog put it');
+  assert.equal(await pn.evaluate(() => getSelection().toString()), '', 'no word selected');
+  assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
+  // The moment over, a click on the backdrop closes it as before.
+  await pn.mouse.click(...spot);
+  await arrangeDialog(pn).waitFor({ state: 'detached' });
+  // A slow double-click (its second click after that moment, still counted as a double-click by the browser) leaves it open too.
+  await pn.locator('.user-menu > button').click();
+  await item.click();
+  await arrangeDialog(pn).waitFor();
+  await pn.waitForTimeout(450);
+  await pn.mouse.down({ clickCount: 2 });
+  await pn.mouse.up({ clickCount: 2 });
+  await pn.waitForTimeout(100);
+  assert.equal(await arrangeDialog(pn).count(), 1, 'a slow double-click: still open');
+  await pn.keyboard.press('Escape');
+  await arrangeDialog(pn).waitFor({ state: 'detached' });
+  // Opened with Enter, the dialog takes the keyboard at once: Move down for Today, pressed right away, moves it.
+  await pn.locator('.user-menu > button').click();
+  await item.focus();
+  await pn.keyboard.press('Enter');
+  await arrangeDialog(pn).waitFor();
+  await pn.keyboard.press('Tab');
+  await pn.keyboard.press('Tab');
+  assert.equal(await focusedName(pn), 'Move down: Today');
+  await pn.keyboard.press('Enter');
+  assert.deepEqual((await topRows(pn)).slice(0, 2), ['Aaj ki List drop-down', 'Today'], 'Enter acted at once');
+  await pn.keyboard.press('Escape');
+  await arrangeDialog(pn).waitFor({ state: 'detached' });
+  assert.deepEqual(await barLabels(pn), ADMIN_BAR, 'nothing was saved');
+});
 await step('Arrange my menu: the Aaj ki List page put on the top bar beside its drop-down reads "Aaj ki List (today)", so no name is on the bar twice', async () => {
   await openArrange(pn);
   const d = arrangeDialog(pn);
@@ -2012,6 +2057,7 @@ await step('Arrange my menu on a phone: the drawer follows the arrangement and h
   await pnPhone.evaluate(() => { document.querySelector('main').dataset.kept = 'yes'; });
   await pnPhone.locator('.menu-toggle').click();
   await arrange.click();
+  await arrangeOpened(pnPhone);
   await arrangeDialog(pnPhone).getByRole('button', { name: 'Put in More: Stock', exact: true }).click();
   await saveArrange(pnPhone);
   await pnPhone.locator('.menu-toggle').click();
@@ -2051,6 +2097,25 @@ await step('Arrange my menu: with the Reports drop-down under More, the long Mor
   const list = pnShort.locator('.topnav .menu.open .menu-list');
   const size = await list.evaluate((el) => ({ bottom: el.getBoundingClientRect().bottom, scrolls: el.scrollHeight > el.clientHeight }));
   assert.ok(size.scrolls && size.bottom <= 625, `the list ends inside the window (at ${Math.round(size.bottom)} of 625) and scrolls`);
+  // All the Reports pages are one group under its name, the Accounts tabs after the line inside it too; Stock is More's own.
+  const reports = list.getByRole('group', { name: 'Reports', exact: true });
+  assert.deepEqual((await reports.locator('a').allTextContents()).map((t) => t.trim()),
+    ['Financial', 'Patients', 'OPD', 'Inventory', 'Accounts', 'HR', 'Branch income vs expenses', 'Expenses', 'Cash closing']);
+  assert.equal(await reports.locator('hr').count(), 1, 'the line between the reports and the Accounts tabs is inside the group');
+  assert.equal(await list.locator(':scope > a:text-is("Stock")').count(), 1, "Stock is one of More's own pages");
+  // To the eye: the Accounts tabs are indented like the reports, under the name; the line inside the group starts at that indent,
+  // the line that ends the group runs the full width.
+  const look = await list.evaluate((el) => {
+    const left = (x) => x.getBoundingClientRect().left - el.getBoundingClientRect().left;
+    const text = (a) => left(a) + parseFloat(getComputedStyle(a).paddingLeft);
+    const link = (name) => [...el.querySelectorAll('a')].find((a) => a.textContent.trim() === name);
+    const section = el.querySelector('[role="group"]');
+    return { financial: text(link('Financial')), cash: text(link('Cash closing')), stock: text(link('Stock')), heading: text(section.querySelector('.menu-heading')),
+      inner: left(section.querySelector('hr')), outer: left(section.nextElementSibling) };
+  });
+  assert.equal(look.cash, look.financial, `the Accounts tabs line up with the reports (${JSON.stringify(look)})`);
+  assert.ok(look.financial > look.heading + 8 && look.financial > look.stock + 8, `the Reports pages are indented under its name, further in than Stock (${JSON.stringify(look)})`);
+  assert.ok(look.inner > look.outer + 8, `the line inside the group is indented, the one after it is not (${JSON.stringify(look)})`);
   await shot(pnShort, '25-long-more-scrolls');
   // The mouse wheel scrolls the list, and the page behind it stays where it is.
   const box = await list.boundingBox();
@@ -2066,6 +2131,21 @@ await step('Arrange my menu: with the Reports drop-down under More, the long Mor
   assert.ok(at.y >= 0 && at.y + at.height <= 625, `"Audit log" is on screen with focus (at ${Math.round(at.y)})`);
   await last.click();
   await pnShort.waitForFunction(() => location.hash === '#/staff/admin?tab=audit');
+});
+await step('Arrange my menu on a phone: with the Reports drop-down under More, the drawer keeps all its pages in its group, the Accounts tabs too', async () => {
+  await pnShort.setViewportSize({ width: 390, height: 844 });
+  await pnShort.locator('.menu-toggle').click();
+  await pnShort.waitForSelector('#staff-drawer.open');
+  const more = pnShort.getByRole('group', { name: 'More', exact: true });
+  const reports = more.getByRole('group', { name: 'Reports', exact: true });
+  assert.deepEqual((await reports.locator('a').allTextContents()).map((t) => t.trim()),
+    ['Financial', 'Patients', 'OPD', 'Inventory', 'Accounts', 'HR', 'Branch income vs expenses', 'Expenses', 'Cash closing']);
+  assert.equal(await more.locator(':scope > a:text-is("Stock")').count(), 1, "Stock is one of More's own pages");
+  assert.equal(await more.locator(':scope > a:text-is("Expenses"), :scope > a:text-is("Cash closing")').count(), 0, 'no Accounts tab is left among them');
+  const indents = await reports.evaluate((g) => [...g.querySelectorAll('a')].map((a) => a.getBoundingClientRect().left + parseFloat(getComputedStyle(a).paddingLeft)));
+  assert.equal(new Set(indents).size, 1, `every Reports page at the same indent (${indents.join(', ')})`);
+  await shot(pnShort, '25b-drawer-reports-under-more');
+  await pnShort.keyboard.press('Escape');
 });
 // Before 20261015000100 is run (the owner runs it by hand in the SQL Editor), Save keeps the menu on this computer only and says
 // it will follow the person once the update is run. The stand-in below answers like supabase.js does then: no row, and Save
@@ -2200,11 +2280,37 @@ await pnSection.close();
 // A touch screen: the dialog's buttons act on every tap. Chrome counts quick taps at one spot like the clicks of a double-click
 // (1, 2, 3, then 1 again); only a mouse double-click is left alone at its second click.
 const pnTouch = await newPage({ width: 390, height: 844 }, { isMobile: true, hasTouch: true });
-await step('Arrange my menu on a touch screen: quick taps at one spot all count; a mouse double-click still moves a page once', async () => {
+await step('Arrange my menu on a touch screen: a double tap on "Arrange my menu" in the drawer opens the dialog and presses none of its buttons', async () => {
   await loginAs(pnTouch, 'Dr. Ali Rashid');
   await pnTouch.locator('.menu-toggle').click();
-  await pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")').click();
+  await pnTouch.waitForSelector('#staff-drawer.open');
+  const arrange = pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")');
+  await arrange.scrollIntoViewIfNeeded();
+  await pnTouch.waitForFunction(() => document.querySelector('#staff-drawer').getBoundingClientRect().left === 0); // slid in
+  const box = await arrange.boundingBox();
+  const spot = [box.x + box.width / 2, box.y + box.height / 2];
+  await pnTouch.touchscreen.tap(...spot);
+  await pnTouch.touchscreen.tap(...spot);
   await arrangeDialog(pnTouch).waitFor();
+  // The second tap lands on a row of the dialog: it used to press the button there and move that row's page.
+  assert.ok(await pnTouch.evaluate(([x, y]) => !!document.elementFromPoint(x, y)?.closest('.modal .arrange-row'), spot), 'the second tap landed on a row of the dialog');
+  await pnTouch.waitForTimeout(500);
+  assert.deepEqual(await topRows(pnTouch), ADMIN_TOP_ROWS, 'no page moved');
+  assert.equal(await arrangeDialog(pnTouch).locator('.arrange-moved').count(), 0);
+  assert.equal(await focusedName(pnTouch), 'On the top bar', 'focus is where the dialog put it');
+  // The moment over, a tap acts at once.
+  const down = arrangeDialog(pnTouch).getByRole('button', { name: 'Move down: Today', exact: true });
+  await down.scrollIntoViewIfNeeded();
+  const at = await down.boundingBox();
+  await pnTouch.touchscreen.tap(at.x + at.width / 2, at.y + at.height / 2);
+  assert.deepEqual((await topRows(pnTouch)).slice(0, 2), ['Aaj ki List drop-down', 'Today']);
+  await pnTouch.keyboard.press('Escape');
+  await arrangeDialog(pnTouch).waitFor({ state: 'detached' });
+});
+await step('Arrange my menu on a touch screen: quick taps at one spot all count; a mouse double-click still moves a page once', async () => {
+  await pnTouch.locator('.menu-toggle').click();
+  await pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")').click();
+  await arrangeOpened(pnTouch);
   const where = async () => (await topRows(pnTouch)).indexOf('Coordinator drop-down');
   assert.equal(await where(), 5);
   // Real taps, quick and at one spot: the moved page's button stays under the finger, and each tap moves it one more place.
@@ -2214,19 +2320,21 @@ await step('Arrange my menu on a touch screen: quick taps at one spot all count;
   for (let n = 0; n < 4; n++) await pnTouch.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
   await pnTouch.waitForFunction(() => document.querySelectorAll('.modal ol.arrange-list > li')[1]?.textContent.includes('Coordinator drop-down'), null, { timeout: 3000 })
     .catch(async () => assert.fail(`four taps: Coordinator is at row ${(await where()) + 1}, not 2`));
-  // Taps carrying the counts 1, 2 and 3 (as the browser sends a tap: pointerdown, mousedown and a click with the count), each on the
-  // button under the finger by then: three taps, three places.
+  // Taps carrying the counts 1, 2, 3, 1, 2 and 3 (as the browser sends a tap: pointerdown, mousedown and a click with the count),
+  // each on the button under the finger by then: every tap moves the page one place.
   const tap = (label, count) => pnTouch.evaluate(([name, n]) => {
     const b = document.querySelector(`.modal button[aria-label="${name}"]`);
     b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true }));
     b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, detail: n }));
     b.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, detail: n, pointerType: 'touch' }));
   }, [label, count]);
-  for (const n of [1, 2, 3]) await tap('Move down: Coordinator drop-down', n);
-  assert.equal(await where(), 4, 'taps counted 1, 2, 3: three places down');
+  for (const n of [1, 2, 3, 1]) await tap('Move down: Coordinator drop-down', n);
+  assert.equal(await where(), 5, 'taps counted 1, 2, 3, 1: four places down');
+  for (const n of [2, 3]) await tap('Move up: Coordinator drop-down', n);
+  assert.equal(await where(), 3, 'and 2, 3: two places up');
   // A mouse double-click (the clicks counted 1 and 2) moves it once.
   await arrangeDialog(pnTouch).getByRole('button', { name: 'Move up: Coordinator drop-down', exact: true }).dblclick();
-  assert.equal(await where(), 3, 'a mouse double-click: one place');
+  assert.equal(await where(), 2, 'a mouse double-click: one place');
   await pnTouch.keyboard.press('Escape');
   await arrangeDialog(pnTouch).waitFor({ state: 'detached' });
 });
@@ -2234,7 +2342,7 @@ await step('Arrange my menu on a touch screen: quick taps at one spot all count;
 await step('Arrange my menu on a phone: with the Coordinator drop-down under More, the drawer keeps its pages in a group of their own; Stock is not one of them', async () => {
   await pnTouch.locator('.menu-toggle').click();
   await pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")').click();
-  await arrangeDialog(pnTouch).waitFor();
+  await arrangeOpened(pnTouch);
   await arrangeDialog(pnTouch).getByRole('button', { name: 'Put in More: Coordinator drop-down', exact: true }).click();
   await saveArrange(pnTouch);
   await pnTouch.locator('.menu-toggle').click();

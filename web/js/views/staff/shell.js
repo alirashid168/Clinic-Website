@@ -168,12 +168,17 @@ export async function renderStaff(root, path, params, signOut) {
     const listId = `menu-list-${m.key}`;
     const btn = h('button', { type: 'button', class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-expanded': 'false', 'aria-controls': listId },
       m.label, current(m.key) ? srOnly(' (current section)') : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
-    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i) => (i.divider ? h('hr', {}) : i.heading ? h('div', { class: 'menu-heading' }, i.heading) : h('a', { href: i.href, onclick: () => {
+    const item = (i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: () => {
       // Choosing the page already on screen fires no hashchange, so give focus back to the menu button.
       const same = i.href === location.hash;
       closeAll();
       if (same) btn.focus();
-    } }, i.label))));
+    } }, i.label));
+    // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): one group named after it, with
+    // all its pages and a line inside it (Reports: the reports, then the Accounts tabs) indented under its name.
+    const section = (i, n) => h('div', { class: 'menu-section', role: 'group', 'aria-labelledby': `${listId}-${n}` },
+      h('div', { class: 'menu-heading', id: `${listId}-${n}` }, i.heading), i.items.map(item));
+    const list = h('div', { class: 'menu-list', id: listId }, m.items.map((i, n) => (i.heading ? section(i, n) : item(i))));
     markCurrent(list);
     return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
   };
@@ -224,23 +229,13 @@ export async function renderStaff(root, path, params, signOut) {
   // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
   const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
-  // A sub-heading (a drop-down put under More with "Arrange my menu") heads a group of its own that ends at the next line or
-  // sub-heading: the pages after it are More's own, not that drop-down's, to the eye (they are not indented under it) and to
-  // a screen reader (the group is named after the sub-heading).
-  const drawerItems = (m) => {
-    const out = [];
-    let sub = null;
-    m.items.forEach((i, n) => {
-      if (i.divider) sub = null;
-      else if (i.heading) {
-        const id = `drawer-group-${m.key}-${n}`;
-        sub = h('div', { class: 'drawer-subgroup', role: 'group', 'aria-labelledby': id }, h('div', { class: 'nav-group nav-subgroup', id }, i.heading));
-        out.push(sub);
-      } else if (sub) sub.append(drawerLink(i));
-      else out.push(drawerLink(i));
-    });
-    return out;
-  };
+  // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): a group of its own, named after
+  // it, with all its pages (the drawer draws no lines inside a group). The pages after it are More's own, not that drop-down's,
+  // to the eye (they are not indented under it) and to a screen reader.
+  const drawerItems = (m) => m.items.filter((i) => !i.divider).map((i, n) => (i.heading
+    ? h('div', { class: 'drawer-subgroup', role: 'group', 'aria-labelledby': `drawer-group-${m.key}-${n}` },
+      h('div', { class: 'nav-group nav-subgroup', id: `drawer-group-${m.key}-${n}` }, i.heading), drawerItems(i))
+    : drawerLink(i)));
   const drawerEntry = (m) => (m.items
     ? h('div', { class: 'drawer-group', role: 'group', 'aria-labelledby': `drawer-group-${m.key}` }, h('div', { class: 'nav-group', id: `drawer-group-${m.key}` }, m.label), drawerItems(m))
     : drawerLink(m, current(m.key)));
