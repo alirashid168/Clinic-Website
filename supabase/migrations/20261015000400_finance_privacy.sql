@@ -10,7 +10,11 @@
 --      or "View invoices and payments" (billing.view), which only accounts and Dr. Ali have;
 --   b. a list of payments across patients: billing.view, or (today only, never a total) the new
 --      "Today's payments, one by one (no totals)";
---   c. one patient's own invoices, payments and dues: as before (billing.view, billing.create, "See $$ pending dues flag").
+--   c. one patient's own invoices, payments and dues: as before (billing.view, "See $$ pending dues flag"), and the front desk's
+--      "Create invoices and take payments" (billing.create): the owner, 15 Oct 2026, "yes the front desk takes the payment". The
+--      front desk makes invoices, takes payments and prints the bill; 20261015000500_front_desk_billing.sql lets billing.create read
+--      back the invoices, invoice lines and payments of its branches ("billers view ..." policies). This file leaves those policies
+--      and that tick alone; it keeps every total away from them (a, above).
 --
 -- What this file adds or changes
 --   1. The permission 'payments.day_list' ("Today's payments, one by one (no totals)", under Billing): on for front desk,
@@ -27,27 +31,36 @@
 --      cash.verify, billing.view or finance.view): close_cash() answers them without the expected cash and the difference,
 --      they no longer read cash_closings directly (its "view closings" policy), and public.cash_closings_blind() lists the
 --      closings of their branches (when, who closed, checked by accounts or not) without any amount.
---   6. public.patient_billing(patient): one patient's own invoices and payments, for someone who may take payments
---      (billing.create) without seeing invoices (billing.view), so the payment form can match the money to that
---      patient's unpaid invoices. Nothing across patients.
+--   6. branch_daily_income and branch_monthly_pnl (the income of a branch per day and per month): empty for whoever has neither
+--      finance.view nor billing.view. Both add up the payments a person may read, and since 20261015000500 the front desk reads
+--      its branches' payments one by one (to bill and print), which these views would otherwise add up for it.
 --   7. dues_for(patients): at most 500 patients a call for someone without finance.view or billing.view (the website asks
 --      for 100 at a time). It only slows down adding up everybody's dues; see "What this file does not stop" below.
 --
 -- Additive where it can be: one policy is replaced (cash_closings "view closings": drop policy if exists + create), five
 -- functions are replaced with the same arguments and answers (payments_summary, total_dues, doctor_summary, close_cash,
--- dues_for: the changes are only the refusals and the money left out), and three are new. It needs
--- 20261007002000 (payments_summary, total_dues) and 20261011000200 (doctor_summary) first. Safe to run more than once.
+-- dues_for: the changes are only the refusals and the money left out), two views are replaced with the same columns (the rows
+-- only for who sees the totals), and two functions are new. It needs 20261007002000 (payments_summary, total_dues) and
+-- 20261011000200 (doctor_summary) first. It runs the same before or after 20261015000500_front_desk_billing.sql (live has that
+-- one already): nothing here touches the "billers view ..." policies, and its role_permissions insert never overwrites a row
+-- that is there (the front desk's "Create invoices and take payments" stays as it is). Safe to run more than once.
 --
 -- What this file does not stop (for Dr. Ali to decide)
 --   - Every role has "See $$ pending dues flag" and may look up patients, so anyone signed in can ask dues_for for every
 --     patient (500 at a time: a clinic of 10,000 patients is 20 requests) and add up the clinic's pending dues. Stopping
 --     that needs dues_for limited to the patients a person is working with (today's lists, a search), a larger change.
+--   - Since 20261015000500 the front desk reads its branches' invoices and payments row by row (to bill, take payments and
+--     print). The website never adds them up for it and the database refuses it every total, but the rows themselves (any
+--     day) could be added up outside the website by someone with a front desk login and a programming tool. Stopping that
+--     needs those policies limited to the patients being billed (today's lists, a search), a larger change.
 --
 -- HOW TO APPLY (in this order)
 --   1. Put the website live first (the new pages work with the database as it is now: the front desk's cash closing and its
---      "Closed" or "Not closed" on Today keep working; "Payments today" says the database update is needed).
+--      "Closed" or "Not closed" on Today keep working, it bills and takes payments as before; "Payments today" says the database
+--      update is needed).
 --   2. Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run.
---      With the Supabase CLI, keep the file name as it is (20261015000400 sorts after 20261015000100_staff_menu_prefs.sql).
+--      With the Supabase CLI, keep the file name as it is (20261015000400 sorts after 20261015000100_staff_menu_prefs.sql; on live
+--      it runs after 20261015000500_front_desk_billing.sql, which was applied first, and that is fine).
 --   3. Reload the website on every staff computer (Ctrl+Shift+R). A page left open from before step 1 would tell the front
 --      desk "It matches" after a cash count without checking, and a page opened between steps 1 and 2 keeps saying the
 --      database update is needed until it is reloaded.
@@ -323,41 +336,48 @@ revoke all on function public.cash_closings_blind(integer) from public, anon;
 grant execute on function public.cash_closings_blind(integer) to authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
--- 6. One patient's own invoices and payments, for taking a payment
+-- 6. The income of a branch per day and per month: only for who sees the totals
 -- ---------------------------------------------------------------------------------------------------------------
--- For someone with billing.create (take payments) but not billing.view, whose direct reads of invoices and payments row-level
--- security refuses. One patient at a time, at the branches the person works at (as the billing.view policies), never a list
--- across patients. Answers { invoices: [... with items], payments: [...] }.
-create or replace function public.patient_billing(p_patient uuid)
-returns jsonb
-language plpgsql stable security definer set search_path = public
-as $$
-begin
-  if auth.uid() is null or not (public.has_perm('billing.view') or public.has_perm('billing.create')) then
-    raise exception 'NOT_ALLOWED: a patient''s invoices need "Create invoices and take payments" or "View invoices and payments" in the access list.'
-      using errcode = '42501';
-  end if;
-  return jsonb_build_object(
-    'invoices', coalesce((
-      select jsonb_agg(jsonb_build_object('id', i.id, 'invoice_no', i.invoice_no, 'patient_id', i.patient_id, 'branch_id', i.branch_id,
-               'visit_id', i.visit_id, 'issue_date', i.issue_date, 'subtotal', i.subtotal, 'discount_amount', i.discount_amount,
-               'total', i.total, 'status', i.status, 'template_key', i.template_key,
-               'items', coalesce((select jsonb_agg(jsonb_build_object('id', it.id, 'description', it.description, 'quantity', it.quantity,
-                                                                      'unit_price', it.unit_price) order by it.description, it.id)
-                                    from public.invoice_items it where it.invoice_id = i.id), '[]'::jsonb))
-             order by i.issue_date desc, i.invoice_no desc)
-        from public.invoices i
-       where i.patient_id = p_patient and public.can_access_branch(i.branch_id)), '[]'::jsonb),
-    'payments', coalesce((
-      select jsonb_agg(jsonb_build_object('id', y.id, 'patient_id', y.patient_id, 'invoice_id', y.invoice_id, 'branch_id', y.branch_id,
-               'amount', y.amount, 'method', y.method, 'received_at', y.received_at, 'notes', y.notes)
-             order by y.received_at desc, y.id)
-        from public.payments y
-       where y.patient_id = p_patient and public.can_access_branch(y.branch_id)), '[]'::jsonb));
-end $$;
+-- As 20261005000200 and 20261007000300 left them (SECURITY INVOKER: row-level security still decides which payments are added up),
+-- with the payments taken in only for finance.view or billing.view. The front desk reads its branches' payments one by one since
+-- 20261015000500 (to bill, take payments and print), and these views would add them up into its branch's income for it. Expenses
+-- are read with finance.view only ("view expenses"), so they need no check of their own. (select ...): asked once per query.
+create or replace view public.branch_daily_income
+with (security_invoker = true) as
+select branch_id,
+       (received_at at time zone 'Asia/Karachi')::date as day,
+       sum(amount) filter (where amount > 0) as received,
+       -sum(amount) filter (where amount < 0) as refunded,
+       sum(amount) as net
+  from public.payments
+ where (select public.has_perm('finance.view') or public.has_perm('billing.view'))
+ group by 1, 2;
 
-revoke all on function public.patient_billing(uuid) from public, anon;
-grant execute on function public.patient_billing(uuid) to authenticated;
+create or replace view public.branch_monthly_pnl
+with (security_invoker = true) as
+with inc as (
+  select branch_id, date_trunc('month', received_at at time zone 'Asia/Karachi')::date as month,
+         sum(amount) as income
+    from public.payments
+   where (select public.has_perm('finance.view') or public.has_perm('billing.view'))
+   group by 1, 2
+), expb as (
+  select branch_id, date_trunc('month', expense_date)::date as month, sum(amount) as expenses
+    from public.expenses where branch_id is not null group by 1, 2
+), expc as (
+  select city_id, date_trunc('month', expense_date)::date as month, sum(amount) as expenses
+    from public.expenses where branch_id is null group by 1, 2
+)
+select coalesce(inc.branch_id, expb.branch_id) as branch_id,
+       coalesce(inc.month, expb.month) as month,
+       coalesce(inc.income, 0) as income,
+       coalesce(expb.expenses, 0) as expenses,
+       coalesce(inc.income, 0) - coalesce(expb.expenses, 0) as profit,
+       null::smallint as city_id
+  from inc full join expb on inc.branch_id = expb.branch_id and inc.month = expb.month
+union all
+select null::smallint, expc.month, 0::numeric, expc.expenses, -expc.expenses, expc.city_id
+  from expc;
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- 7. Dues for the screens, at most 500 patients a call for whoever does not see the totals

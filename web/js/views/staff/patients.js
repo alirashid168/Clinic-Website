@@ -319,12 +319,12 @@ export async function renderPatient(root, id) {
     }
   };
 
-  // The patient's invoices, payments and installment plans (owner, 15 Oct 2026: the clinic's money is for Dr. Ali and accounts): read
-  // with "View invoices and payments"; someone who only takes payments ("Create invoices and take payments") gets this patient's own
-  // invoices and payments (patient_billing) but not the plans; the rest of the staff see the dues only. A new invoice or plan is read
-  // back as it is saved, which needs "View invoices and payments" as well (20261015000400_finance_privacy.sql).
+  // The patient's invoices, payments and installment plans (owner, 15 Oct 2026: the clinic's money is for Dr. Ali and accounts, and "yes
+  // the front desk takes the payment"): with "View invoices and payments", or with "Create invoices and take payments" alone (the front
+  // desk: this patient's own at its branches, 20261015000500_front_desk_billing.sql), who also makes invoices and plans and prints the
+  // bill and receipts. The rest of the staff see the dues only. No total across patients here either way.
   const seesBills = can('billing.view') || can('billing.create');
-  const makesBills = can('billing.create') && can('billing.view');
+  const makesBills = can('billing.create');
 
   mount(root,
     h('p', {}, h('a', { href: '#/staff/patients' }, '← Patients')),
@@ -391,9 +391,9 @@ export async function renderPatient(root, id) {
               h('td', {}, pay.method.replace('_', ' '), pay.invoice_id ? h('div', { class: 'muted' }, p.invoices.find((i) => i.id === pay.invoice_id)?.invoice_no || '') : null),
               h('td', { class: ['right', Number(pay.amount) < 0 && 'status-bad'] }, rupees(pay.amount)),
               h('td', { class: 'right' }, h('button', { class: 'btn btn-small', 'aria-label': `Receipt, ${shortDate(dayOf(pay.received_at))} ${rupees(pay.amount)}`, onclick: () => printReceipt(pay, p, p.invoices.find((i) => i.id === pay.invoice_id), p.dues) }, 'Receipt')))))))) : null,
-        can('billing.view') ? h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
+        seesBills ? h('div', { class: 'inline', style: { justifyContent: 'space-between', marginTop: '14px' } }, h('h3', { style: { margin: 0 } }, 'Installment plan'),
           makesBills ? h('button', { class: 'btn btn-small', onclick: () => installmentPlanModal(p, { totalFee: bc?.total_fee || (p.dues > 0 ? p.dues : ''), bracesCaseId: bc?.id, onDone: reload }) }, (p.plans || []).length ? 'New plan' : 'Set up a plan') : null) : null,
-        !can('billing.view') ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
+        !seesBills ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
           planTable(plan, p.payments),
           makesBills && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
           : h('p', { class: 'muted' }, 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'))),

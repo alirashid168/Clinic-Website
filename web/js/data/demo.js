@@ -710,13 +710,14 @@ export function createDemoAdapter() {
         ...clone(p), dues: dues(id), flag: clone(activeFlag(id)),
         braces_case: bc ? { ...clone(bc), next_month: nextMonth(bc.id) } : null,
         visits: db.visits.filter((v) => v.patient_id === id).sort((a, b) => b.visit_date.localeCompare(a.visit_date)).map(enrichVisit),
-        // As the database: staff read invoices and payments with billing.view; someone who only takes payments (billing.create) gets
-        // this patient's own at their branches (patient_billing); the rest of the staff get none. A patient: their own issued ones.
+        // As the database: staff read invoices and payments with billing.view; the front desk, which makes invoices and takes payments
+        // (billing.create), gets those of its branches ("billers view ...", 20261015000500); the rest of the staff get none. Plans:
+        // billing.view, or billing.create (which manages them). A patient: their own issued ones.
         invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || (can('billing.create') && branchOk(i.branch_id))))),
         payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || (can('billing.create') && branchOk(x.branch_id))))),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
-        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view')))),
+        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || can('billing.create')))),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
         complaints: db.complaints.filter((c) => c.patient_id === id).map((c) => ({ ...clone(c), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id && (s?.kind === 'staff' || !m.internal_note))) })),
       };
@@ -1203,8 +1204,6 @@ export function createDemoAdapter() {
     // ------------------------------------------------------------ billing
     async createInvoice({ patient_id, branch_id, items, discount_amount = 0, discount_reason = null, visit_id = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
-      // As the database: save_invoice runs as the person and reads the new invoice back, which needs billing.view.
-      if (!can('billing.view')) fail('new row violates row-level security policy for table "invoices"');
       // The database refuses these (invoice_items.quantity > 0, invoices.discount_amount >= 0); an empty quantity still means 1.
       if (items.some((it) => it.quantity != null && it.quantity !== '' && !(Number(it.quantity) > 0))) fail('new row for relation "invoice_items" violates check constraint "invoice_items_quantity_check"');
       if (Number(discount_amount) < 0) fail('new row for relation "invoices" violates check constraint "invoices_discount_amount_check"');
@@ -1238,20 +1237,19 @@ export function createDemoAdapter() {
       return clone(pay);
     },
     async patientBilling(patientId) {
-      // billing.view reads them directly; a payment taker without it gets this patient's own at their branches (patient_billing).
+      // billing.view reads them; the front desk (billing.create alone) reads this patient's own at its branches (20261015000500).
       if (!can('billing.view') && !can('billing.create')) fail('NOT_ALLOWED: a patient\'s invoices need "Create invoices and take payments" or "View invoices and payments" in the access list.');
       const mine = (r) => r.patient_id === patientId && (can('billing.view') || branchOk(r.branch_id));
       return { invoices: clone(db.invoices.filter(mine)), payments: clone(db.payments.filter(mine)) };
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
-      if (me() && !can('billing.view')) return []; // row-level security ("view plans"): plans are for "View invoices and payments"
+      // row-level security: "view plans" (billing.view) and "manage plans" (billing.create); a patient reads their own
+      if (me() && !can('billing.view') && !can('billing.create')) return [];
       return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId));
     },
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
       need('billing.create');
-      // As the database: save_installment_plan runs as the person and reads the new plan back, which needs billing.view.
-      if (!can('billing.view')) fail('new row violates row-level security policy for table "payment_plans"');
       db.payment_plans ||= [];
       const key = opts.idempotencyKey || idempotencyKey;
       const sig = JSON.stringify([patient_id, braces_case_id, Number(total_fee), starts_on || todayISO(), notes, installments.map((i) => [i.due_date, Number(i.amount), i.note || null])]);

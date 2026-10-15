@@ -1432,11 +1432,13 @@ await step('money: the access list has "Today\'s payments, one by one (no totals
   const box = (role) => pfin.getByLabel(`${role}: Today's payments, one by one (no totals)`, { exact: true });
   assert.deepEqual(await Promise.all(['Front desk', 'Assistant', 'Doctor', 'Clinic coordinator', 'Accountant'].map((r) => box(r).isChecked())), [true, false, false, false, true],
     'on for front desk and accountant, off for assistant, doctor and coordinator');
-  // Live today: "View invoices and payments", "Create invoices and take payments" and "Give discounts" are for accounts and Dr. Ali.
-  for (const label of ['Front desk: View invoices and payments', 'Front desk: Create invoices and take payments', 'Front desk: Give discounts within cap', 'Clinic coordinator: View invoices and payments']) {
+  // Live today: "View invoices and payments" and "Give discounts" are for accounts and Dr. Ali; the front desk makes invoices and takes
+  // payments ("Create invoices and take payments", 20261015000500: the owner, "yes the front desk takes the payment").
+  for (const label of ['Front desk: View invoices and payments', 'Front desk: Give discounts within cap', 'Clinic coordinator: View invoices and payments']) {
     await pfin.getByLabel(label, { exact: true }).uncheck();
     await pfin.waitForSelector(`.toast:has-text("${label} removed.")`);
   }
+  assert.ok(await pfin.getByLabel('Front desk: Create invoices and take payments', { exact: true }).isChecked(), 'the front desk bills');
 });
 await step('money: the front desk sees today\'s payments of its branch one by one (patient, amount, method, who took it) and no total anywhere on its pages', async () => {
   await tryAnotherRole(pfin);
@@ -1461,13 +1463,16 @@ await step('money: the front desk sees today\'s payments of its branch one by on
   await pfin.waitForSelector('table.sheet tbody tr');
   assert.ok(await pfin.locator('table.sheet td.pp .pp-due').count(), 'a patient\'s dues still show in P.P');
   assert.deepEqual(await rupeesShown(pfin, 'td.pp'), [], 'Aaj ki List: no rupees but a patient\'s own dues');
-  // A patient who paid today: no invoice or payment list on the profile (those are for "View invoices and payments").
+  // A patient who paid today: the desk bills, so the profile has that patient's own invoice and payment (with the receipt to print).
   await pfin.goto(BASE + '#/staff/patients?q=Mariam');
   await pfin.locator('table.list tbody tr a:text("Mariam Akhtar")').click();
   const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
-  await money.waitFor();
-  assert.match(await money.innerText(), /No dues\s+Invoices and payments are with accounts\./);
-  assert.doesNotMatch(await money.innerText(), /Rs|received|No invoices|Installment plan/, 'no payment or amount of the patient on the profile, and no plan');
+  await money.locator('table.list tbody tr').first().waitFor();
+  assert.match(await money.innerText(), /No dues[\s\S]*INV-2026-\d+[\s\S]*Paid/, 'the patient\'s own invoice, paid');
+  assert.doesNotMatch(await money.innerText(), /with accounts/);
+  await money.locator('summary', { hasText: 'payments' }).click();
+  assert.ok(await money.getByRole('button', { name: /^Receipt, / }).count(), 'the receipt of the payment, to print');
+  for (const name of ['New invoice', 'Take payment']) assert.ok(await pfin.getByRole('button', { name, exact: true }).count(), name);
   // Reports: no "Highest dues" (every patient's dues added up by branch).
   await pfin.goto(BASE + '#/staff/reports?group=patients&tab=dues');
   await pfin.waitForSelector('.report-tabs .tab');
@@ -1565,12 +1570,7 @@ await step('money: the coordinator\'s doctor log has the treatments and counts, 
   await pfin.locator('h2:text("Branches today")').waitFor();
   assert.deepEqual(await rupeesShown(pfin), [], 'no rupees on the coordinator\'s Today page');
 });
-await step('money: with "Create invoices and take payments" ticked (still no "View invoices and payments") the front desk takes a payment, sees only that patient\'s invoices, and no totals', async () => {
-  await tryAnotherRole(pfin);
-  await loginAs(pfin, 'Dr. Ali Rashid');
-  await pfin.goto(BASE + '#/staff/admin?tab=access');
-  await pfin.getByLabel('Front desk: Create invoices and take payments', { exact: true }).check();
-  await pfin.waitForSelector('.toast:has-text("Front desk: Create invoices and take payments allowed.")');
+await step('money: the front desk (Create invoices and take payments, no View invoices and payments) makes an invoice, takes a payment, sets up a plan, and sees no totals', async () => {
   await tryAnotherRole(pfin);
   await loginAs(pfin, 'Front desk \\(North Nazimabad\\)');
   await pfin.goto(BASE + '#/staff/patients?q=Hamza');
@@ -1578,23 +1578,49 @@ await step('money: with "Create invoices and take payments" ticked (still no "Vi
   const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
   await money.locator('table.list tbody tr').first().waitFor();
   assert.match(await money.innerText(), /INV-2026-\d+[\s\S]*Rs 15,000 unpaid/, 'the patient\'s own invoice, with what is unpaid');
-  // Making an invoice or a plan reads it back as it is saved, which needs "View invoices and payments": not offered, so the desk is
-  // never sent to ask Dr. Ali for a box that would show it the clinic's totals.
-  assert.equal(await pfin.getByRole('button', { name: 'New invoice' }).count(), 0, 'no New invoice');
-  assert.doesNotMatch(await money.innerText(), /Installment plan|Set up a plan/, 'no installment plans');
-  await pfin.getByRole('button', { name: 'Take payment' }).click();
+  // A new invoice (the owner: the front desk makes the invoice and prints the bill).
+  await pfin.getByRole('button', { name: 'New invoice', exact: true }).click();
+  const inv = pfin.locator('.modal:has(h2:has-text("New invoice · Hamza Qureshi"))');
+  await inv.getByLabel('Treatment, line 1').fill('Sample bracket repair');
+  await inv.getByLabel('Price (Rs), line 1').fill('1000');
+  assert.equal(await inv.getByLabel('Discount (Rs)').count(), 0, 'no discount box ("Give discounts" is off for the desk)');
+  await inv.getByRole('button', { name: 'Save invoice' }).click();
+  await pfin.waitForSelector('.toast:has-text("Invoice INV-2026-")');
+  await money.locator('strong', { hasText: 'Rs 16,000 pending' }).waitFor();
+  await money.locator('table.list tbody tr', { hasText: 'Rs 1,000 unpaid' }).waitFor();
+  // A payment against it.
+  await pfin.getByRole('button', { name: 'Take payment', exact: true }).click();
   const m = pfin.locator('.modal:has(h2:has-text("Take payment · Hamza Qureshi"))');
   await m.getByLabel('For invoice').waitFor();
-  assert.match(await m.getByLabel('For invoice').locator('option:checked').innerText(), /Rs 15,000 unpaid/, 'the payment form matches the money to the unpaid invoice');
+  assert.match(await m.getByLabel('For invoice').locator('option:checked').innerText(), /unpaid/, 'the payment form matches the money to an unpaid invoice');
   await m.getByLabel('Amount').fill('5000');
   await m.getByRole('button', { name: 'Save payment' }).click();
   await pfin.waitForSelector('.toast:has-text("Payment of Rs 5,000 saved.")');
-  await money.locator('strong', { hasText: 'Rs 10,000 pending' }).waitFor();
+  await money.locator('strong', { hasText: 'Rs 11,000 pending' }).waitFor();
+  // The installment plan section, with its button.
+  assert.match(await money.innerText(), /Installment plan/);
+  assert.ok(await money.getByRole('button', { name: /Set up a plan|New plan/ }).count(), 'the desk may set up an installment plan');
   await pfin.goto(BASE + '#/staff/today');
   await pfin.locator('table.day-payments tbody tr:has-text("Hamza Qureshi")').waitFor();
   assert.match(await pfin.locator('table.day-payments tbody tr:has-text("Hamza Qureshi")').innerText(), /Rs 5,000\s+Cash\s+North Nazimabad\s+Front desk \(North Nazimabad\)/);
   assert.deepEqual(await rupeesShown(pfin, '.day-payments td'), [], 'still no total on Today');
+  assert.equal(await pfin.locator('.stat:has-text("Received today")').count(), 0, 'no "Received today"');
   assert.equal(await pfin.locator('.topnav a:text-is("Billing")').count(), 0, 'and still no Billing page');
+});
+await step('money: with "Create invoices and take payments" unticked for the front desk, a patient\'s invoices and payments are with accounts', async () => {
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Dr. Ali Rashid');
+  await pfin.goto(BASE + '#/staff/admin?tab=access');
+  await pfin.getByLabel('Front desk: Create invoices and take payments', { exact: true }).uncheck();
+  await pfin.waitForSelector('.toast:has-text("Front desk: Create invoices and take payments removed.")');
+  await tryAnotherRole(pfin);
+  await loginAs(pfin, 'Front desk \\(North Nazimabad\\)');
+  await pfin.goto(BASE + '#/staff/patients?q=Hamza');
+  await pfin.locator('table.list tbody tr a:text("Hamza Qureshi")').click();
+  const money = pfin.locator('section.panel:has(h2:text-is("Money"))');
+  await money.waitFor();
+  assert.match(await money.innerText(), /Rs 11,000 pending\s+Invoices and payments are with accounts\./);
+  for (const name of ['New invoice', 'Take payment']) assert.equal(await pfin.getByRole('button', { name, exact: true }).count(), 0, `no ${name}`);
 });
 await pfin.close();
 

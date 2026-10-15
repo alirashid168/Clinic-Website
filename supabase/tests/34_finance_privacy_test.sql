@@ -1,19 +1,23 @@
 -- Finance privacy (20261015000400_finance_privacy.sql): the clinic's money is for Dr. Ali and accounts. Made-up people only.
--- The grid is set as the clinic has it live (15 Oct 2026): "View invoices and payments", "Create invoices and take payments" and
--- "Give discounts" off for the front desk, "View invoices and payments" off for the coordinator.
+-- The grid is set as the clinic has it live (15 Oct 2026): the front desk makes invoices and takes payments ("Create invoices and take
+-- payments", 20261015000500_front_desk_billing.sql) without "View invoices and payments" or "Give discounts"; "View invoices and
+-- payments" off for the coordinator.
 --   0. the file runs again (earlier test files run older migrations again, which put back the old payments_summary, total_dues and
---      doctor_summary), and a second run leaves a choice made in the access list alone;
+--      doctor_summary), and a second run leaves a choice made in the access list alone; it runs after 20261015000500 (as on live) and
+--      leaves the front desk's "Create invoices and take payments" and the "billers view ..." policies alone;
 --   1. the permission "Today's payments, one by one (no totals)" and its defaults;
 --   2. payments_today: the front desk gets today's payments of its own branch one by one (name, Mr#, amount, method, branch, who
 --      took it), never another day or branch and never a total; the assistant, doctor and coordinator are refused; a choice for
 --      one person in the access list (unticked for a desk, ticked for an assistant) is followed;
---   3. money totals (payments_summary, total_dues, clinic_report) refuse everyone but accounts and Dr. Ali; a patient's own login
---      still gets its own; the money tables and views give the others nothing;
+--   3. money totals (payments_summary, total_dues, clinic_report, the branch income views) refuse everyone but accounts and Dr. Ali;
+--      a patient's own login still gets its own; the money tables give the assistant, doctor and coordinator nothing, and the front
+--      desk only its own branch's invoices and payments one by one;
 --   4. doctor_summary: the counts for whoever may open it, the rupees only for accounts, Dr. Ali, or the doctor on their own
 --      (not a shared doctors login with no doctor record of its own, not a coordinator with "See own doctor percentage");
 --   5. the cash closing is a blind count for the front desk: no expected cash, no difference, no amounts in its list;
---   6. "Create invoices and take payments" without "View invoices and payments": one patient's own invoices and payments, a payment
---      can be taken, and still no list across patients;
+--   6. the front desk bills ("Create invoices and take payments" without "View invoices and payments"): a patient's own invoices and
+--      payments at its branch, an invoice, a payment and an installment plan made and read back, and still no total; a desk it is
+--      unticked for, and the assistant, read and make none;
 --   7. dues_for: at most 500 patients a call for whoever does not see the totals;
 --   8. grants.
 \set ON_ERROR_STOP 1
@@ -93,10 +97,17 @@ update public.role_permissions set allowed = (role = 'front_desk') where permiss
 select pg_temp.check((select count(*) from public.permissions where key = 'payments.day_list') = 1
     and (select count(*) from public.role_permissions where permission_key = 'payments.day_list') = (select count(*) from unnest(enum_range(null::public.staff_role))),
   'permission: one row in the list and one per role after two runs');
+-- The front desk's billing (20261015000500, on live before this file): this file runs after it there, and leaves it as it is.
+select pg_temp.check((select allowed from public.role_permissions where role = 'front_desk' and permission_key = 'billing.create')
+    and (select string_agg(tablename || ':' || policyname || ':' || cmd, ',' order by tablename) from pg_policies
+          where schemaname = 'public' and policyname like 'billers view %')
+        = 'invoice_items:billers view invoice items:SELECT,invoices:billers view invoices:SELECT,payments:billers view payments:SELECT',
+  'after two runs the front desk still has "Create invoices and take payments" and the three "billers view ..." policies are there');
 
--- The grid as the clinic has it live.
+-- The grid as the clinic has it live: the front desk bills (20261015000500) without seeing invoices and payments or giving discounts.
 update public.role_permissions set allowed = false
- where (role::text, permission_key) in (('front_desk', 'billing.view'), ('front_desk', 'billing.create'), ('front_desk', 'discount.give'), ('coordinator', 'billing.view'));
+ where (role::text, permission_key) in (('front_desk', 'billing.view'), ('front_desk', 'discount.give'), ('coordinator', 'billing.view'));
+update public.role_permissions set allowed = true where role = 'front_desk' and permission_key = 'billing.create';
 
 insert into auth.users (id, email) values
   (:admin, 'admin34@dralirashid.com'), (:fd, 'fd34@dralirashid.com'), (:fdall, 'fdall34@dralirashid.com'), (:asst, 'asst34@dralirashid.com'),
@@ -113,8 +124,6 @@ insert into public.staff (id, full_name, email, role) values
   (:taker, 'Desk Who Takes Payments', 'taker34@dralirashid.com', 'front_desk'),
   (:shared, 'Doctors Login Thirtyfour', 'doctors34@dralirashid.com', 'doctor');
 update public.staff set restrict_to_branches = true, branch_ids = array[current_setting('test.nn')::smallint] where id in (:fd, :taker);
--- Dr. Ali ticks "Create invoices and take payments" for one desk only (a personal choice in the access list).
-insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:taker, 'billing.create', true);
 -- One doctors login for the clinic (no doctor record of its own: the doctor is picked per treatment), which may open every doctor's
 -- log. It is a doctor, so "See own doctor percentage" is on for it.
 insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:shared, 'doctor_log.view_all', true);
@@ -169,8 +178,11 @@ begin
   perform pg_temp.check((select count(*) from public.payments_today(v_nn) x where pg_temp.mine(x.mr_number)) = 3, 'payments_today: its own branch asked for by name gives the same three');
   perform pg_temp.expect_state(format('select * from public.payments_today(%s::smallint)', current_setting('test.gul')), '42501', 'only at the branches you work at',
     'payments_today: a desk of North Nazimabad cannot ask for Gulshan''s');
-  perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0,
-    'the desk still reads no payment or invoice directly (no "View invoices and payments")');
+  perform pg_temp.check((select count(*) from public.payments y join public.patients pt on pt.id = y.patient_id where pg_temp.mine(pt.mr_number)) = 4
+      and not exists (select 1 from public.payments where branch_id <> v_nn)
+      and (select string_agg(invoice_no, ',' order by invoice_no) from public.invoices where invoice_no like 'T34-%') = 'T34-1,T34-2'
+      and not exists (select 1 from public.invoices where branch_id <> v_nn),
+    'the desk reads its own branch''s payments and invoices one by one (it bills there: 20261015000500), none of another branch');
 
   perform pg_temp.act_as(current_setting('test.fdall'));
   perform pg_temp.check((select string_agg(x.mr_number || '@' || b.code, ',' order by x.received_at desc) from public.payments_today() x join public.branches b on b.id = x.branch_id
@@ -232,15 +244,28 @@ begin
       'clinic_report (income): refused for the ' || who);
     perform pg_temp.expect_state('select public.clinic_report(''dues_by_branch'', current_date - 30, current_date)', '42501', 'Only accounts and Dr. Ali',
       'clinic_report (pending dues by branch): refused for the ' || who);
-    -- the money tables and the views that add them up give them nothing
-    perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0 and (select count(*) from public.invoice_items) = 0
-        and (select count(*) from public.expenses) = 0 and (select count(*) from public.cash_closings) = 0 and (select count(*) from public.discount_requests) = 0
-        and (select count(*) from public.payment_plans) = 0 and (select count(*) from public.plan_installments) = 0,
-      'tables: payments, invoices, invoice items, expenses, cash closings, discount requests and payment plans are empty for the ' || who);
-    perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0
-        and (select count(*) from public.installment_status) = 0
-        and (select coalesce(sum(abs(billed)) + sum(abs(paid)), 0) from public.patient_balances) = 0,
-      'views: branch income, branch income vs expenses, installments and balances add up nothing for the ' || who);
+    if who = 'fd' then
+      -- The desk bills at its branch (20261015000500): it reads that branch's invoices, their lines and payments one by one (and the
+      -- installment plans it manages), and nothing that adds up a branch's or the clinic's money.
+      perform pg_temp.check(not exists (select 1 from public.payments where branch_id <> current_setting('test.nn')::smallint)
+          and not exists (select 1 from public.invoices where branch_id <> current_setting('test.nn')::smallint)
+          and exists (select 1 from public.invoice_items where description = 'Sample braces kit')
+          and not exists (select 1 from public.invoice_items it where not exists (select 1 from public.invoices i where i.id = it.invoice_id and i.branch_id = current_setting('test.nn')::smallint))
+          and (select count(*) from public.expenses) = 0 and (select count(*) from public.cash_closings) = 0 and (select count(*) from public.discount_requests) = 0,
+        'tables: the desk reads only its own branch''s payments, invoices and lines, and no expenses, cash closings or discount requests');
+      perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0,
+        'views: the branch income per day and per month add up nothing for the desk');
+    else
+      -- the money tables and the views that add them up give them nothing
+      perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0 and (select count(*) from public.invoice_items) = 0
+          and (select count(*) from public.expenses) = 0 and (select count(*) from public.cash_closings) = 0 and (select count(*) from public.discount_requests) = 0
+          and (select count(*) from public.payment_plans) = 0 and (select count(*) from public.plan_installments) = 0,
+        'tables: payments, invoices, invoice items, expenses, cash closings, discount requests and payment plans are empty for the ' || who);
+      perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0
+          and (select count(*) from public.installment_status) = 0
+          and (select coalesce(sum(abs(billed)) + sum(abs(paid)), 0) from public.patient_balances) = 0,
+        'views: branch income, branch income vs expenses, installments and balances add up nothing for the ' || who);
+    end if;
   end loop;
 
   perform pg_temp.act_as(current_setting('test.acct'));
@@ -409,48 +434,78 @@ begin
     'cash_closings_blind: no amount and no note among its columns');
 end $$;
 
--- 6. A desk with "Create invoices and take payments" but not "View invoices and payments" (the taker, at North Nazimabad).
+-- 6. The front desk bills (20261015000500; the owner, 15 Oct 2026: "yes the front desk takes the payment"): "Create invoices and take
+-- payments" without "View invoices and payments" (the taker, a desk at North Nazimabad).
 set role authenticated;
 do $$
-declare b jsonb;
+declare
+  v_nn smallint := current_setting('test.nn')::smallint;
+  v_p1 uuid := current_setting('test.p1')::uuid;
+  v_p3 uuid := current_setting('test.p3')::uuid;
+  v_id uuid;
+  b jsonb;
 begin
   perform pg_temp.act_as(current_setting('test.taker'));
-  b := public.patient_billing(current_setting('test.p1')::uuid);
-  perform pg_temp.check(jsonb_array_length(b->'invoices') = 1 and b->'invoices'->0->>'invoice_no' = 'T34-1' and (b->'invoices'->0->>'total')::numeric = 5000
-      and b->'invoices'->0->'items'->0->>'description' = 'Sample braces kit',
-    'patient_billing: the desk that takes payments sees that patient''s own invoice, with its lines');
-  perform pg_temp.check((select string_agg((x->>'amount')::numeric::int::text, ',' order by x->>'received_at') from jsonb_array_elements(b->'payments') x) = '3000,-500',
-    'patient_billing: and that patient''s own payments');
-  b := public.patient_billing(current_setting('test.p3')::uuid);
-  perform pg_temp.check(b = '{"invoices": [], "payments": []}'::jsonb, 'patient_billing: nothing from a branch the desk does not work at');
-  -- Taking a payment: the row goes in (it is not asked back: reading it back needs "View invoices and payments").
-  insert into public.payments (patient_id, branch_id, amount, method) values (current_setting('test.p2')::uuid, current_setting('test.nn')::smallint, 500, 'cash');
-  perform pg_temp.check((select count(*) from jsonb_array_elements(public.patient_billing(current_setting('test.p2')::uuid)->'payments') x
-                          where (x->>'amount')::numeric = 500) = 1,
-    'taking a payment works: the desk''s payment is saved and shows in that patient''s payments');
+  perform pg_temp.check((select count(*) = 1 and min(total) = 5000 from public.invoices where patient_id = v_p1)
+      and exists (select 1 from public.invoice_items it join public.invoices i on i.id = it.invoice_id where i.patient_id = v_p1 and it.description = 'Sample braces kit'),
+    'the desk reads that patient''s own invoice, with its lines (for the bill)');
+  perform pg_temp.check((select string_agg(amount::int::text, ',' order by received_at) from public.payments where patient_id = v_p1) = '3000,-500',
+    'and that patient''s own payments (for the receipt and the Money panel)');
+  perform pg_temp.check(not exists (select 1 from public.invoices where patient_id = v_p3) and not exists (select 1 from public.payments where patient_id = v_p3),
+    'nothing of a patient billed only at a branch the desk does not work at (Gulshan)');
+  -- Taking a payment: saved and read back (the receipt), with who took it.
+  insert into public.payments (patient_id, branch_id, amount, method) values (current_setting('test.p2')::uuid, v_nn, 500, 'cash') returning id into v_id;
+  perform pg_temp.check(v_id is not null and (select received_by from public.payments where id = v_id) = auth.uid(),
+    'taking a payment works: saved, read back and stamped with who took it');
   perform pg_temp.check((select x.received_by_name from public.payments_today() x where x.mr_number = '34002' and x.amount = 500) = 'Desk Who Takes Payments',
-    'and in today''s payments, with who took it');
-  perform pg_temp.expect_state(format('insert into public.payments (patient_id, branch_id, amount, method) values (%L, %s, 100, %L) returning id',
-                                      current_setting('test.p2'), current_setting('test.nn'), 'cash'), '42501', 'row-level security',
-    'a payment cannot be asked back (returning) without "View invoices and payments": the website sends it without asking');
-  perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0,
-    'the desk that takes payments still reads no list of payments or invoices');
-  -- Not done by this file: a new invoice is read back by save_invoice (it runs as the person), which needs billing.view too.
+    'and it is in today''s payments, with who took it');
+  -- A new invoice: save_invoice runs as the desk and reads the invoice back (the billers policy), for the printed bill.
+  b := public.save_invoice(null, jsonb_build_object('patient_id', current_setting('test.p2'), 'branch_id', v_nn, 'visit_id', null, 'discount_amount', 0, 'discount_reason', null),
+                           '[{"description": "Sample", "quantity": 1, "unit_price": 1000}]'::jsonb);
+  perform pg_temp.check(b->>'status' = 'issued' and (b->>'total')::numeric = 1000 and jsonb_array_length(b->'items') = 1 and b->>'invoice_no' is not null,
+    'the desk makes an invoice: issued, read back with its line');
   perform pg_temp.expect_state(format('select public.save_invoice(null, %L::jsonb, %L::jsonb)',
-      jsonb_build_object('patient_id', current_setting('test.p2'), 'branch_id', current_setting('test.nn')::int, 'visit_id', null, 'discount_amount', 0, 'discount_reason', null),
+      jsonb_build_object('patient_id', current_setting('test.p3'), 'branch_id', current_setting('test.gul')::int, 'visit_id', null, 'discount_amount', 0, 'discount_reason', null),
       '[{"description": "Sample", "quantity": 1, "unit_price": 1000}]'), '42501', 'row-level security',
-    'still to do before the front desk makes invoices: save_invoice needs "View invoices and payments" to read back the invoice it made');
-  perform pg_temp.expect_state('select public.payments_summary(null, null)', '42501', 'NOT_ALLOWED: money totals', 'and still no totals');
-  perform pg_temp.act_as(current_setting('test.fd'));
-  perform pg_temp.expect_state(format('select public.patient_billing(%L)', current_setting('test.p1')), '42501', 'NOT_ALLOWED: a patient''s invoices need',
-    'patient_billing: refused for a desk that may not take payments');
-  perform pg_temp.act_as(current_setting('test.asst'));
-  perform pg_temp.expect_state(format('select public.patient_billing(%L)', current_setting('test.p1')), '42501', 'NOT_ALLOWED', 'patient_billing: refused for the assistant');
+    'but not at a branch it does not work at');
+  -- An installment plan, read back with its installments.
+  b := public.save_installment_plan(null, jsonb_build_object('patient_id', current_setting('test.p2'), 'braces_case_id', null, 'total_fee', 30000, 'starts_on', '2026-10-01', 'notes', null),
+                                    '[{"due_date": "2026-10-01", "amount": 15000}, {"due_date": "2026-11-01", "amount": 15000}]'::jsonb);
+  perform pg_temp.check(b->>'id' is not null and (select count(*) from public.plan_installments where plan_id = (b->>'id')::uuid) = 2,
+    'the desk sets up an installment plan and reads it back');
+  -- Still no total of any kind.
+  perform pg_temp.expect_state('select public.payments_summary(null, null)', '42501', 'NOT_ALLOWED: money totals', 'and still no payment totals');
+  perform pg_temp.expect_state('select public.total_dues()', '42501', 'NOT_ALLOWED: money totals', 'nor the pending dues added up');
+  perform pg_temp.expect_state('select public.clinic_report(''pnl_trend'', current_date - 30, current_date)', '42501', 'Only accounts and Dr. Ali', 'nor the reports');
+  perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0, 'nor the branch''s income');
   perform pg_temp.act_as(current_setting('test.acct'));
-  perform pg_temp.check(jsonb_array_length(public.patient_billing(current_setting('test.p1')::uuid)->'invoices') = 1, 'patient_billing: the accountant gets it too');
+  perform pg_temp.check((select count(*) from public.invoices where patient_id = v_p1) = 1 and (select count(*) from public.payments where patient_id = v_p1) = 2,
+    'the accountant reads them too');
 end $$;
 reset role;
 select pg_temp.act_as('');
+-- "Create invoices and take payments" unticked for one desk (a choice for that person in the access list): it reads and makes none.
+insert into public.staff_permission_overrides (staff_id, permission_key, allowed) values (:fd, 'billing.create', false);
+set role authenticated;
+do $$
+declare who text;
+begin
+  foreach who in array array['fd', 'asst'] loop
+    perform pg_temp.act_as(current_setting('test.' || who));
+    perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0 and (select count(*) from public.invoice_items) = 0,
+      case who when 'fd' then 'a desk it is unticked for' else 'the assistant' end || ' reads no invoice or payment');
+    perform pg_temp.expect_state(format('insert into public.payments (patient_id, branch_id, amount, method) values (%L, %s, 100, %L)',
+                                        current_setting('test.p2'), current_setting('test.nn'), 'cash'), '42501', 'row-level security',
+      case who when 'fd' then 'a desk it is unticked for' else 'the assistant' end || ' takes no payment');
+    perform pg_temp.expect_state(format('select public.save_invoice(null, %L::jsonb, %L::jsonb)',
+        jsonb_build_object('patient_id', current_setting('test.p2'), 'branch_id', current_setting('test.nn')::int, 'visit_id', null, 'discount_amount', 0, 'discount_reason', null),
+        '[{"description": "Sample", "quantity": 1, "unit_price": 1000}]'), '42501', 'row-level security',
+      case who when 'fd' then 'a desk it is unticked for' else 'the assistant' end || ' makes no invoice');
+  end loop;
+end $$;
+reset role;
+select pg_temp.act_as('');
+delete from public.staff_permission_overrides where staff_id = :fd;
 
 -- 7. dues_for (each patient's dues, for the pending dues flag): at most 500 patients a call for whoever does not see the totals, so the
 -- clinic's pending dues cannot be added up from one request.
@@ -478,7 +533,7 @@ select pg_temp.act_as('');
 do $$
 declare f text;
 begin
-  foreach f in array array['public.payments_today(smallint)', 'public.cash_closings_blind(integer)', 'public.patient_billing(uuid)',
+  foreach f in array array['public.payments_today(smallint)', 'public.cash_closings_blind(integer)',
                            'public.payments_summary(date, date, bigint, text)', 'public.total_dues()', 'public.doctor_summary(uuid, date, date)',
                            'public.close_cash(smallint, date, numeric, text)', 'public.dues_for(uuid[])'] loop
     perform pg_temp.check(not has_function_privilege('anon', f, 'execute') and has_function_privilege('authenticated', f, 'execute'),
@@ -486,7 +541,10 @@ begin
   end loop;
   perform pg_temp.check((select bool_and(prosecdef and proconfig is not null) from pg_proc
                           where oid in ('public.payments_today(smallint)'::regprocedure, 'public.cash_closings_blind(integer)'::regprocedure,
-                                        'public.patient_billing(uuid)'::regprocedure, 'public.close_cash(smallint, date, numeric, text)'::regprocedure)),
+                                        'public.close_cash(smallint, date, numeric, text)'::regprocedure)),
     'the new functions run as their owner with a fixed search_path, and check the permission themselves');
+  perform pg_temp.check((select bool_and('security_invoker=true' = any(reloptions)) from pg_class
+                          where oid in ('public.branch_daily_income'::regclass, 'public.branch_monthly_pnl'::regclass)),
+    'the branch income views still read as the person (row-level security decides which payments an allowed person adds up)');
 end $$;
 rollback;

@@ -44,13 +44,17 @@ test('permission grid: "Today\'s payments, one by one (no totals)" sits under Bi
 });
 
 // ======================================================================================= the demo adapter
-/** A demo page with the grid as the clinic has it live: invoices, payments and discounts are for accounts and Dr. Ali. */
+/**
+ * A demo page with the grid as the clinic has it live: "View invoices and payments" and discounts are for accounts and Dr. Ali; the
+ * front desk makes invoices and takes payments ("Create invoices and take payments", 20261015000500_front_desk_billing.sql).
+ */
 async function demoLive() {
   const d: any = createDemoAdapter();
   await d.signInDemo('s-admin');
-  for (const [role, key] of [['front_desk', 'billing.view'], ['front_desk', 'billing.create'], ['front_desk', 'discount.give'], ['coordinator', 'billing.view']]) {
+  for (const [role, key] of [['front_desk', 'billing.view'], ['front_desk', 'discount.give'], ['coordinator', 'billing.view']]) {
     await d.setRolePermission(role, key, false);
   }
+  await d.setRolePermission('front_desk', 'billing.create', true);
   return d;
 }
 const as = async (d: any, id: string) => { await d.signOut(); await d.signInDemo(id); return d; };
@@ -95,7 +99,7 @@ test('demo: money totals refuse everyone but accounts and Dr. Ali; the Today row
 
 test('demo: the cash closing is a blind count for the desk; accounts see expected, counted and the difference', async () => {
   const d = await as(await demoLive(), 's-fd-nn');
-  assert.equal(await d.expectedCash(2, todayISO()), 0, 'the desk cannot add up the day\'s cash');
+  assert.equal(await d.expectedCash(2, todayISO()), 0, 'the desk is not given the day\'s cash');
   const c = await d.closeCash(2, todayISO(), 3000, 'Counted twice');
   assert.equal(c.counted_cash, 3000);
   assert.equal(c.expected_cash, null, 'not told the expected cash');
@@ -132,27 +136,39 @@ test('demo: the doctor dashboard\'s rupees only for accounts, Dr. Ali, or the do
   assert.equal(typeof (await d.doctorSummary(bushra, from, todayISO())).billed, 'number', 'the accountant');
 });
 
-test('demo: a patient\'s invoices and payments: none for the assistant; one patient\'s own at their branch for a desk that may take payments', async () => {
+test('demo: a patient\'s invoices and payments: none for the assistant; the front desk (Create invoices and take payments) bills, takes payments and makes plans at its branch, and gets no totals', async () => {
   const d = await demoLive();
   const hamza = (await d.searchPatients('Hamza'))[0];
   await as(d, 's-asst');
   const p = await d.getPatient(hamza.id);
   assert.deepEqual([p.invoices.length, p.payments.length, p.plans.length, p.dues], [0, 0, 0, 15000], 'the assistant: only the dues');
   await assert.rejects(() => d.patientBilling(hamza.id), /NOT_ALLOWED/);
-  await as(d, 's-admin');
-  await d.setRolePermission('front_desk', 'billing.create', true);
+  await assert.rejects(() => d.createInvoice({ patient_id: hamza.id, branch_id: 2, items: [{ description: 'Sample', quantity: 1, unit_price: 100 }] }), /row-level security/,
+    'the assistant makes no invoice');
   await as(d, 's-fd-nn');
   const own = await d.patientBilling(hamza.id);
-  assert.equal(own.invoices.length, 1, 'the desk that may take payments: that patient\'s invoice');
-  await d.recordPayment({ patient_id: hamza.id, branch_id: 2, amount: 5000, method: 'cash' });
-  assert.equal((await d.getPatient(hamza.id)).dues, 10000, 'the payment is taken');
+  assert.equal(own.invoices.length, 1, 'the desk: that patient\'s invoice');
+  assert.equal((await d.getPatient(hamza.id)).invoices.length, 1, 'and on the profile\'s Money panel');
+  const inv = await d.createInvoice({ patient_id: hamza.id, branch_id: 2, items: [{ description: 'Sample', quantity: 1, unit_price: 1000 }] });
+  assert.deepEqual([inv.status, inv.total], ['issued', 1000], 'the desk makes an invoice (save_invoice reads it back with the billers policy)');
+  await assert.rejects(() => d.createInvoice({ patient_id: hamza.id, branch_id: 1, items: [{ description: 'Sample', quantity: 1, unit_price: 100 }] }), /row-level security/,
+    'not at a branch it does not work at');
+  const pay = await d.recordPayment({ patient_id: hamza.id, branch_id: 2, amount: 5000, method: 'cash', invoice_id: inv.id });
+  assert.equal(pay.amount, 5000, 'the payment is answered back (for the receipt)');
+  assert.equal((await d.getPatient(hamza.id)).dues, 11000, 'the payment is taken');
   assert.ok((await d.paymentsToday()).some((r: any) => r.patient_name === 'Hamza Qureshi' && r.amount === 5000 && r.received_by_name === 'Front desk (North Nazimabad)'));
-  await assert.rejects(() => d.createInvoice({ patient_id: hamza.id, branch_id: 2, items: [{ description: 'Sample', quantity: 1, unit_price: 100 }] }), /row-level security/,
-    'a new invoice still needs "View invoices and payments" (as the database: save_invoice reads it back)');
-  await assert.rejects(() => d.savePaymentPlan({ patient_id: hamza.id, total_fee: 60000, starts_on: todayISO(), installments: [{ due_date: todayISO(), amount: 60000 }] }),
-    /row-level security/, 'so does a new installment plan (save_installment_plan reads it back)');
-  assert.deepEqual([(await d.getPatient(hamza.id)).plans.length, (await d.paymentPlans(hamza.id)).length], [0, 0], 'and the plans are not read ("view plans": billing.view)');
+  await d.savePaymentPlan({ patient_id: hamza.id, total_fee: 60000, starts_on: todayISO(), installments: [{ due_date: todayISO(), amount: 60000 }] });
+  assert.deepEqual([(await d.getPatient(hamza.id)).plans.length, (await d.paymentPlans(hamza.id)).length], [1, 1], 'and an installment plan, which it reads back');
   await assert.rejects(() => d.totalDues(), /NOT_ALLOWED: money totals/, 'and still no totals');
+  await assert.rejects(() => d.paymentsSummary({ from: todayISO(), to: todayISO() }), /row-level security/, 'nor the payments added up');
+  assert.equal((await d.dashboard(todayISO())).find((r: any) => r.branch.id === 2).received, 0, 'nor what came in today');
+  // "Create invoices and take payments" unticked for the desk: the patient's invoices and payments are with accounts again.
+  await as(d, 's-admin');
+  await d.setRolePermission('front_desk', 'billing.create', false);
+  await as(d, 's-fd-nn');
+  const none = await d.getPatient(hamza.id);
+  assert.deepEqual([none.invoices.length, none.payments.length, none.plans.length], [0, 0, 0]);
+  await assert.rejects(() => d.patientBilling(hamza.id), /NOT_ALLOWED/);
 });
 
 // ======================================================================================= the live adapter
@@ -236,30 +252,30 @@ test('live: the desk\'s Today asks for the closings without amounts and does not
   desk.f.rpcAnswer = (name: string) => ({ data: name === 'dues_for' ? [{ patient_id: 'pa', dues: 4000 }, { patient_id: 'pb', dues: 0 }]
     : name === 'cash_closings_blind' ? [{ id: 'c1', branch_id: 2, closing_date: todayISO(), checked: false }] : [], error: null, status: 200 });
   const [row] = await desk.data.dashboard(todayISO());
-  assert.deepEqual([row.dues, row.dues_patients, row.closing?.id], [null, 1, 'c1']);
+  assert.deepEqual([row.dues, row.dues_patients, row.closing?.id, row.received], [null, 1, 'c1', 0]);
   assert.ok(!desk.f.requests.some((r: any) => r.table === 'cash_closings'), 'the desk never reads the cash_closings table');
+  assert.ok(!desk.f.requests.some((r: any) => r.table === 'branch_daily_income'), 'nor the branch\'s income');
   const acct = await livePage(['finance.view', 'billing.view', 'cash.verify', 'dues.view'], answer);
   acct.f.rpcAnswer = (name: string) => ({ data: name === 'dues_for' ? [{ patient_id: 'pa', dues: 4000 }] : [], error: null, status: 200 });
   const [a] = await acct.data.dashboard(todayISO());
   assert.equal(a.dues, 4000);
   assert.ok(acct.f.requests.some((r: any) => r.table === 'cash_closings'), 'accounts read the closings with their amounts');
+  assert.ok(acct.f.requests.some((r: any) => r.table === 'branch_daily_income'), 'and what came in');
   assert.ok(!acct.f.rpcs.some((r: any) => r.name === 'cash_closings_blind'));
 });
 
-test('live: a desk that may take payments without seeing invoices: the payment goes in without being read back, and the patient\'s own invoices come from patient_billing', async () => {
-  const { f, data } = await livePage(['billing.create']);
-  f.rpcAnswer = (name: string, args: any) => ({ data: name === 'patient_billing' ? { invoices: [{ id: 'i1', patient_id: args.p_patient }], payments: [] } : null, error: null, status: 200 });
-  assert.deepEqual(await data.patientBilling('pt-1'), { invoices: [{ id: 'i1', patient_id: 'pt-1' }], payments: [] });
-  assert.deepEqual(f.rpcs.at(-1), { name: 'patient_billing', args: { p_patient: 'pt-1' } });
-  const pay = await data.recordPayment({ patient_id: 'pt-1', branch_id: '2', amount: '5000', method: 'cash' });
-  const insert = f.requests.find((r: any) => r.table === 'payments');
-  assert.ok(insert.ops.some((o: any) => o[0] === 'insert' && o[1].id === pay.id && o[1].amount === 5000 && o[1].branch_id === 2), 'sent with its own id');
-  assert.ok(!insert.ops.some((o: any) => o[0] === 'select'), 'not asked back (row-level security would refuse the read)');
-  assert.equal(typeof pay.received_at, 'string', 'the receipt has its time');
-  // With billing.view: read straight from the tables and the new payment read back, as before.
-  const acct = await livePage(['billing.view', 'billing.create'], (table: string, ops: any[]) => ({
-    data: ops.some((o: any) => o[0] === 'single') ? { id: 'y9', table } : [], error: null, status: 200 }));
-  await acct.data.patientBilling('pt-1');
-  assert.ok(!acct.f.rpcs.some((r: any) => r.name === 'patient_billing'));
-  assert.deepEqual(await acct.data.recordPayment({ patient_id: 'pt-1', branch_id: 2, amount: 100 }), { id: 'y9', table: 'payments' });
+test('live: the front desk (Create invoices and take payments, no View invoices and payments) reads a patient\'s invoices and payments and the new payment back from the tables, as accounts do', async () => {
+  // 20261015000500_front_desk_billing.sql: billing.create reads back the invoices, lines and payments of its branches, so the website
+  // asks the tables for both, with no database function of their own.
+  for (const perms of [['billing.create', 'payments.day_list', 'cash.close'], ['billing.view', 'billing.create']]) {
+    const { f, data } = await livePage(perms, (table: string, ops: any[]) => ({
+      data: ops.some((o: any) => o[0] === 'single') ? { id: 'y9', table } : [{ id: table + '-1', patient_id: 'pt-1' }], error: null, status: 200 }));
+    const got = await data.patientBilling('pt-1');
+    assert.deepEqual([got.invoices[0].id, got.payments[0].id], ['invoices-1', 'payments-1'], perms.join(','));
+    assert.ok(!f.rpcs.length, `${perms.join(',')}: no database function`);
+    assert.deepEqual(await data.recordPayment({ patient_id: 'pt-1', branch_id: '2', amount: '5000', method: 'cash' }), { id: 'y9', table: 'payments' });
+    const insert = f.requests.find((r: any) => r.table === 'payments' && r.ops.some((o: any) => o[0] === 'insert'));
+    assert.ok(insert.ops.some((o: any) => o[0] === 'insert' && o[1].amount === 5000 && o[1].branch_id === 2) && insert.ops.some((o: any) => o[0] === 'select'),
+      `${perms.join(',')}: the payment is sent and read back (for the receipt)`);
+  }
 });
