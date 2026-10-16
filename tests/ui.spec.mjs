@@ -2726,7 +2726,7 @@ await step('coordinator (live access list, two branches): "Installments due" lis
   assert.deepEqual(await panel.locator('thead th').allInnerTexts(), ['Due', 'Patient', 'Installment', 'Amount', 'Behind by', 'Status']);
   const rows = panel.locator('tbody tr');
   assert.equal(await rows.count(), 2, 'her patient\'s overdue and due-soon installments, one row each (the later one is not due yet)');
-  for (const i of [0, 1]) assert.equal(await rows.nth(i).locator('td:nth-child(2) a').innerText(), who.mine.name);
+  for (const i of [0, 1]) assert.equal(await rows.nth(i).locator('td:nth-child(2) > a').innerText(), who.mine.name);
   assert.match(await rows.nth(0).innerText(), /Installment 1\s+Rs 10,000\s+Rs 10,000\s+Overdue/);
   assert.match(await rows.nth(1).innerText(), /Installment 2\s+Rs 10,000\s+Rs 20,000\s+Due soon/);
   assert.ok(!(await panel.innerText()).includes(who.other.name), 'the patient of the other branch is not on her list');

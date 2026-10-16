@@ -18,7 +18,8 @@
 --    folder" (photos.view_raw): every raw photo row of every patient and every file of the clinic-photos bucket, the raw inbox folders
 --    included. The front desk is NOT given that. Instead, anyone with photos.upload reads the photo rows they uploaded themselves
 --    ("uploaders see their photos") and those photos' files and small copies ("uploaders read their clinic photos": a file under the
---    patient's own folder that is the storage_path or thumb_path of such a row). Without this the front desk's upload would fail (the
+--    patient's own folder that is the storage_path or thumb_path of such a row, or a clinic-photos file Storage recorded as theirs in
+--    objects.owner, for the moment between storing the file and saving its row). Without this the front desk's upload would fail (the
 --    website saves the row and reads it back in one request) and the picture would not show on the profile. Assistants, doctors, the
 --    coordinator and Dr. Ali keep photos.view_raw and see every photo, as before. A photo's uploaded_by is now always the person who
 --    saved it (private.photo_uploaded_by, for everyone but Dr. Ali and server jobs), so nobody can claim someone else's photo to read
