@@ -130,6 +130,14 @@ select pg_temp.check((select count(*) from public.photos where patient_id = :'p1
   'the front desk saves a raw picture and reads its row back (the website''s insert-and-select); uploaded_by is the front desk, not what was sent');
 select pg_temp.check((select count(*) from storage.objects where bucket_id = 'clinic-photos' and name like :'p1' || '/raw/%38aaaaaa.jpg') = 2,
   'and reads the picture and its small copy in storage (the profile signs both)');
+-- A file Storage recorded as the front desk's (owner: the uploader's login, as Storage fills it in), before any row names it.
+insert into storage.objects (bucket_id, name, owner) values ('clinic-photos', :'p1' || '/raw/2026-10-16_Right_38ffffff.jpg', auth.uid());
+select pg_temp.check((select count(*) from storage.objects where bucket_id = 'clinic-photos' and name like :'p1' || '/raw/%38ffffff.jpg') = 1,
+  'a file Storage recorded as the front desk''s is readable by it before its row is saved (the moment between the two)');
+select pg_temp.act_as(:fd2);
+select pg_temp.check((select count(*) from storage.objects where bucket_id = 'clinic-photos' and name like :'p1' || '/raw/%38ffffff.jpg') = 0,
+  'but not by another front desk login');
+select pg_temp.act_as(:fd);
 reset role;
 
 -- Someone else's raw photo of the same patient (the assistant's), and a file in the raw inbox.

@@ -90,14 +90,17 @@ create policy "uploaders see their photos" on public.photos for select to authen
   using (uploaded_by = auth.uid() and public.has_perm('photos.upload'));
 
 -- ... and those photos' files and small copies: a file in the patient's own folder that one of their rows names. (The raw inbox
--- folders, inbox/<branch>/<date>/, are no patient's folder, so a row naming one of those files opens nothing.)
+-- folders, inbox/<branch>/<date>/, are no patient's folder, so a row naming one of those files opens nothing.) Also a file Storage
+-- recorded as theirs (objects.owner, which Storage fills in with the uploader's login), so the picture and its small copy can be read
+-- back in the moment between storing them and saving the row.
 drop policy if exists "uploaders read their clinic photos" on storage.objects;
 create policy "uploaders read their clinic photos" on storage.objects for select to authenticated
   using (bucket_id = 'clinic-photos' and public.has_perm('photos.upload')
-         and exists (select 1 from public.photos ph
-                      where ph.uploaded_by = auth.uid() and ph.patient_id is not null
-                        and (storage.foldername(objects.name))[1] = ph.patient_id::text
-                        and objects.name in (ph.storage_path, ph.thumb_path)));
+         and (objects.owner = auth.uid()
+              or exists (select 1 from public.photos ph
+                          where ph.uploaded_by = auth.uid() and ph.patient_id is not null
+                            and (storage.foldername(objects.name))[1] = ph.patient_id::text
+                            and objects.name in (ph.storage_path, ph.thumb_path))));
 
 -- 4. billing.edit reads the payment plans and installments of the patients of its branches (rows only, one patient at a time).
 -- Yes or no; false for anyone without billing.edit. Security definer: it looks at the patient's branch, invoices and payments
