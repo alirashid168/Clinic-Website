@@ -403,7 +403,8 @@ select pg_temp.check((select string_agg(distinct pt.mr_number, ',' order by pt.m
                      and not exists (select 1 from public.plan_installments where note = 'Changed by the desk'),
   'the front desk changes only the plans it reads (38001, 38004 and its own for 38003) and removes no plan of 38002');
 
--- 6. No total opens for the coordinator or the front desk.
+-- 6. No total opens for the coordinator or the front desk (signed in, under row-level security).
+set role authenticated;
 do $$
 declare who text;
 begin
