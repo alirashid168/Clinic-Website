@@ -1804,7 +1804,9 @@ export async function createSupabaseAdapter() {
       return row;
     },
     async deletePaymentPlan(id) { check(await sb.from('payment_plans').delete().eq('id', id)); },
-    // Installments that are overdue or due within a week, for the coordinator's call list.
+    // Installments that are overdue or due within a week, for the coordinator's call list: one row per installment of each patient, never
+    // a total. installment_status shows the plans this person may read: billing.view, billing.create, and since 20261016000100
+    // billing.edit (the coordinator) for the patients of the branches they work at.
     async installmentsDue() {
       const rows = check(await sb.from('installment_status').select('*').in('status', ['overdue', 'due_soon']).order('due_date'));
       return attachPatients(rows);

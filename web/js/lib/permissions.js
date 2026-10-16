@@ -26,7 +26,9 @@ export const PERMISSIONS = [
     { key: 'braces.override', label: 'Override braces protocol rules', category: 'Braces', defaults: [N, N, N, N, N] },
     { key: 'retainers.manage', label: 'Manage retainer cases', category: 'Braces', defaults: [N, Y, Y, Y, N] },
     { key: 'doctor_log.view_all', label: "See every doctor's daily log", category: 'Doctors', defaults: [N, N, N, Y, Y] },
-    { key: 'photos.upload', label: 'Upload clinic photos and X-rays', category: 'Photos', defaults: [N, Y, Y, Y, N] },
+    // The front desk too (owner, 16 Oct 2026: "front desk can upload pictures and x rays and consent forms, so can the assistants";
+    // 20261016000100_desk_uploads_coordinator_dues.sql). It sees the raw pictures it uploads itself, not the raw photos folder.
+    { key: 'photos.upload', label: 'Upload clinic photos and X-rays', category: 'Photos', defaults: [Y, Y, Y, Y, N] },
     { key: 'photos.view_raw', label: 'View raw clinic photos folder', category: 'Photos', defaults: [N, Y, Y, Y, N] },
     { key: 'xrays.view', label: 'View X-rays', category: 'Photos', defaults: [Y, Y, Y, Y, N] },
     { key: 'dues.view', label: 'See $$ pending dues flag', category: 'Billing', defaults: [Y, Y, Y, Y, Y] },

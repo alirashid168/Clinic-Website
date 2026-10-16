@@ -415,8 +415,12 @@ set role authenticated;
 select pg_temp.check((select count(*) from storage.objects where name like '%/edited/%2001-04-01%') = 4
     and (select count(*) from storage.objects where name like '%/raw/%2001-04-01%') = 0,
   'staff who may see patient profiles but not raw photos read every edited photo and thumbnail, and no raw photo or raw thumbnail');
+reset role;
+-- (The front desk uploads photos since 20261016000100; the accountant stands in for staff without photos.upload.)
+select pg_temp.act_as(:acc);
+set role authenticated;
 select pg_temp.expect_error(format($f$insert into storage.objects (bucket_id, name) values ('clinic-photos', %L)$f$, current_setting('test.pat1') || '/edited/thumbs/2001-04-01_Front_dd.jpg'),
-  'row-level security', 'and without photos.upload they cannot store a thumbnail either');
+  'row-level security', 'and without photos.upload (the accountant) they cannot store a thumbnail either');
 reset role;
 select pg_temp.act_as(:doc);
 set role authenticated;

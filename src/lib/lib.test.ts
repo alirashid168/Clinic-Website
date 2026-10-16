@@ -146,6 +146,12 @@ test('permission grid defaults', () => {
   assert.deepEqual(mayMakeLogins, ['front_desk', 'coordinator', 'admin']);
   // Job applications from the website (CNIC, phone, CV) are admin only until Dr. Ali ticks someone else (20261011000200).
   assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'jobs.view', grid)), ['admin']);
+  // Owner, 16 Oct 2026: "front desk can upload pictures and x rays and consent forms, so can the assistants" (20261016000100). The raw
+  // photos folder stays with the clinical staff: the front desk sees the raw pictures it uploads itself (the database's rule).
+  assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'photos.upload', grid)),
+    ['front_desk', 'assistant', 'doctor', 'coordinator', 'admin']);
+  assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'photos.view_raw', grid)),
+    ['assistant', 'doctor', 'coordinator', 'admin']);
   assert.equal(hasPermission(null, 'patients.view', grid), false);
   assert.equal(new Set(PERMISSIONS.map((p) => p.key)).size, PERMISSIONS.length, 'no duplicate keys');
 });

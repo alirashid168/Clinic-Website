@@ -6,7 +6,8 @@
 --   3. the audit log has the document added and deleted, with who did it and the whole row;
 --   4. deleting the last consent form unticks "Consent signed" only when asked, never while another consent form is left;
 --      a document already gone answers deleted = false;
---   5. X-rays go to the existing X-ray store: photos.upload adds them (row and file), xrays.view sees them, the front desk does not add.
+--   5. X-rays go to the existing X-ray store: photos.upload adds them (row and file), xrays.view sees them, the accountant does not add
+--      (the front desk adds them since 20261016000100: 38_desk_uploads_dues_test.sql).
 \set ON_ERROR_STOP 1
 \set admin  '''00000000-0000-0000-0000-000000003400'''
 \set fd     '''00000000-0000-0000-0000-000000003401'''
@@ -158,10 +159,11 @@ insert into public.xrays (patient_id, kind, storage_path, uploaded_by) values (:
 select pg_temp.check((select count(*) from public.xrays where patient_id = :'p1') = 1, 'an assistant (photos.upload) adds an X-ray, file and row, and sees it');
 select pg_temp.act_as(:fd);
 select pg_temp.check((select count(*) from public.xrays where patient_id = :'p1') = 1, 'the front desk sees it (xrays.view)');
-select pg_temp.expect_error(format($$insert into public.xrays (patient_id, storage_path) values (%L, 'x34.png')$$, :'p1'), 'row-level security', 'but does not add X-rays');
-select pg_temp.expect_error($$insert into storage.objects (bucket_id, name) values ('xrays', 'x34.png')$$, 'row-level security', 'nor X-ray files');
+-- (The front desk adds X-rays too since 20261016000100: 38_desk_uploads_dues_test.sql.)
 select pg_temp.act_as(:acct);
 select pg_temp.check((select count(*) from public.xrays where patient_id = :'p1') = 0, 'an accountant does not see X-rays');
+select pg_temp.expect_error(format($$insert into public.xrays (patient_id, storage_path) values (%L, 'x34.png')$$, :'p1'), 'row-level security', 'and does not add X-rays');
+select pg_temp.expect_error($$insert into storage.objects (bucket_id, name) values ('xrays', 'x34.png')$$, 'row-level security', 'nor X-ray files');
 reset role;
 select pg_temp.act_as('');
 rollback;

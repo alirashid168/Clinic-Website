@@ -410,6 +410,15 @@ export function createDemoAdapter() {
   // finance.view, cash.verify or billing.view; the rest of the staff are refused, or get rows without amounts.
   const seesTotals = () => can('finance.view') || can('billing.view');
   const seesCash = () => can('finance.view') || can('cash.verify') || can('billing.view');
+  // Installment plans, as the plan policies: billing.view ("view plans") and billing.create ("manage plans", every plan), and since
+  // 20261016000100 billing.edit for the patients of the branches the person works at (registered there, or with an invoice or a payment
+  // there: public.editor_sees_plans_of). Rows only: nobody is given a total of them.
+  const editorSeesPlansOf = (pid) => can('billing.edit') && (branchOk(patient(pid)?.first_branch_id)
+    || db.invoices.some((i) => i.patient_id === pid && branchOk(i.branch_id)) || db.payments.some((x) => x.patient_id === pid && branchOk(x.branch_id)));
+  const seesPlansOf = (pid) => can('billing.view') || can('billing.create') || editorSeesPlansOf(pid);
+  // A photo, as the photo policies: an edited one for whoever sees patient profiles, a raw one with "View raw clinic photos folder", and
+  // (20261016000100) the photos a person uploaded themselves while they may upload (the front desk sees the raw pictures it saved).
+  const seesPhoto = (ph) => (ph.kind === 'edited' && can('patients.view')) || can('photos.view_raw') || (!!ph.uploaded_by && ph.uploaded_by === me()?.id && can('photos.upload'));
   const totalsRefused = () => fail('NOT_ALLOWED: money totals are for Dr. Ali and accounts ("View all financial reports" or "View invoices and payments" in the access list).');
   // The Pakistan day of a payment: a moment with a time zone (Z or +05:00) is converted, a sample's plain local time is that day.
   const karachiDay = (ts) => (/(Z|[+-]\d\d:?\d\d)$/.test(String(ts)) ? localISO(new Date(ts)) : String(ts).slice(0, 10));
@@ -776,12 +785,13 @@ export function createDemoAdapter() {
         // As the database: staff read invoices and payments with billing.view; the front desk, which makes invoices and takes payments
         // (billing.create), gets those of its branches ("billers view ...", 20261015000500), and so does "Edit or void invoices"
         // (billing.edit, "editors view ...", 20261015000900); the rest of the staff get none. Plans: billing.view, or billing.create
-        // (which manages them). A patient: their own issued ones.
+        // (which manages them), or billing.edit for the patients of its branches (seesPlansOf). A patient: their own issued ones.
+        // Photos: as the photo policies (seesPhoto); a patient sees the edited ones.
         invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(i.branch_id))))),
         payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(x.branch_id))))),
-        photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' || x.kind === 'edited'))),
+        photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' ? seesPhoto(x) : x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
-        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || can('billing.create')))),
+        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || seesPlansOf(id)))),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
         complaints: db.complaints.filter((c) => c.patient_id === id).map((c) => ({ ...clone(c), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id && (s?.kind === 'staff' || !m.internal_note))) })),
       };
@@ -1250,7 +1260,7 @@ export function createDemoAdapter() {
       const storagePath = `demo/${uid()}`;
       const ph = { id: uid(), patient_id: patientId, visit_id: visitId || null, branch_id: branchId || null, taken_on: todayISO(), kind,
         view_label: viewLabel || null, url: dataUrl, storage_path: storagePath, thumb_path: thumbUrl ? thumbPathFor(storagePath) : null, thumb_url: thumbUrl,
-        public_ok: kind === 'edited' && !!publicOk, created_at: new Date().toISOString() };
+        public_ok: kind === 'edited' && !!publicOk, uploaded_by: me()?.id || null, created_at: new Date().toISOString() };
       db.photos.push(ph);
       if (key) saved.set('photo:' + key, ph.id);
       if (visitId) { const v = db.visits.find((x) => x.id === visitId); if (v) v.photos_uploaded = true; }
@@ -1354,8 +1364,9 @@ export function createDemoAdapter() {
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
-      // row-level security: "view plans" (billing.view) and "manage plans" (billing.create); a patient reads their own
-      if (me() && !can('billing.view') && !can('billing.create')) return [];
+      // row-level security: "view plans" (billing.view), "manage plans" (billing.create) and "editors view plans" (billing.edit, the
+      // patients of its branches); a patient reads their own
+      if (me() && !seesPlansOf(patientId)) return [];
       return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId));
     },
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
@@ -1375,12 +1386,14 @@ export function createDemoAdapter() {
       return clone(plan);
     },
     async deletePaymentPlan(id) { need('billing.create'); db.payment_plans = (db.payment_plans || []).filter((p) => p.id !== id); },
+    // As public.installment_status (security invoker): the installments of the plans this person reads (seesPlansOf), one row each, with
+    // "paid" from the payments they may read (at their branches); no total of anything.
     async installmentsDue() {
-      if (!can('billing.view')) return [];
+      if (!me()) return [];
       const today = todayISO(); const soon = daysAgo(-7);
       const out = [];
-      for (const plan of db.payment_plans || []) {
-        const paid = db.payments.filter((x) => x.patient_id === plan.patient_id && x.received_at.slice(0, 10) >= plan.starts_on).reduce((s, x) => s + x.amount, 0);
+      for (const plan of (db.payment_plans || []).filter((p) => seesPlansOf(p.patient_id))) {
+        const paid = db.payments.filter((x) => x.patient_id === plan.patient_id && branchOk(x.branch_id) && x.received_at.slice(0, 10) >= plan.starts_on).reduce((s, x) => s + x.amount, 0);
         let cum = 0;
         for (const i of [...plan.installments].sort((a, b) => a.due_date.localeCompare(b.due_date))) {
           cum += i.amount;

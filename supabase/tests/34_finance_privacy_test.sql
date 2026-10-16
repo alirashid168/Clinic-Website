@@ -12,7 +12,8 @@
 --   3. money totals (payments_summary, total_dues, clinic_report, the branch income views) refuse everyone but accounts and Dr. Ali;
 --      a patient's own login still gets its own; the money tables give the assistant and doctor nothing, the front desk only its own
 --      branch's invoices and payments one by one, and the coordinator (billing.edit, to correct them) the invoices and payments of
---      its branches one by one, never a total and no expenses, cash closings, discount requests or plans;
+--      its branches one by one, never a total and no expenses, cash closings or discount requests (and since 20261016000100 the
+--      installment plans of its branches' patients, row by row);
 --   4. doctor_summary: the counts for whoever may open it, the rupees only for accounts, Dr. Ali, or the doctor on their own
 --      (not a shared doctors login with no doctor record of its own, not a coordinator with "See own doctor percentage");
 --   5. the cash closing is a blind count for the front desk: no expected cash, no difference, no amounts in its list;
@@ -261,15 +262,18 @@ begin
     elsif who = 'coord' then
       -- The coordinator corrects invoices and payments ("Edit or void invoices", 20261015000900_billing_desk.sql): it reads the
       -- invoices, their lines and the payments of its branches one by one (this coordinator works at every branch), and nothing that
-      -- adds up a branch's or the clinic's money; no expenses, cash closings, discount requests or installment plans.
+      -- adds up a branch's or the clinic's money; no expenses, cash closings or discount requests. Since 20261016000100 (the owner: "yes
+      -- pending dues should only be seen for per patient and not totals") also the installment plans of its branches' patients, row by
+      -- row (38_desk_uploads_dues_test.sql), still with nothing added up.
       perform pg_temp.check(exists (select 1 from public.payments) and exists (select 1 from public.invoices)
           and exists (select 1 from public.invoice_items where description = 'Sample braces kit')
           and (select count(*) from public.expenses) = 0 and (select count(*) from public.cash_closings) = 0 and (select count(*) from public.discount_requests) = 0
-          and (select count(*) from public.payment_plans) = 0 and (select count(*) from public.plan_installments) = 0,
-        'tables: the coordinator (billing.edit) reads payments, invoices and lines one by one, and no expenses, cash closings, discount requests or plans');
+          and exists (select 1 from public.payment_plans where id = '00000000-0000-0000-0000-000000003431')
+          and (select count(*) from public.plan_installments where plan_id = '00000000-0000-0000-0000-000000003431') = 2,
+        'tables: the coordinator (billing.edit) reads payments, invoices, lines and (since 20261016000100) installment plans one by one, and no expenses, cash closings or discount requests');
       perform pg_temp.check((select count(*) from public.branch_daily_income) = 0 and (select count(*) from public.branch_monthly_pnl) = 0
-          and (select count(*) from public.installment_status) = 0,
-        'views: the branch income per day and per month and the installments add up nothing for the coordinator');
+          and (select count(*) from public.installment_status where plan_id = '00000000-0000-0000-0000-000000003431') = 2,
+        'views: the branch income per day and per month add up nothing for the coordinator; installment_status gives her one row per installment');
     else
       -- the money tables and the views that add them up give them nothing
       perform pg_temp.check((select count(*) from public.payments) = 0 and (select count(*) from public.invoices) = 0 and (select count(*) from public.invoice_items) = 0

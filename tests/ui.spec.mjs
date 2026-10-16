@@ -2687,6 +2687,64 @@ await step('installment plan: set up on the patient page, overdue shows for the 
   await shot(p7, '15-installments-due');
 });
 
+// The owner (16 Oct 2026), asked whether the coordinator should see each patient's installments due: "yes pending dues should only be
+// seen for per patient and not totals" (20261016000100). With the access list as live (no "View invoices and payments" for her) and her
+// two branches, as the clinic's coordinator works.
+const pdue = await newPage();
+await step('coordinator (live access list, two branches): "Installments due" lists each of her patients\' installments, one row each, no total and no rupees outside the rows; a patient of another branch is not there; the patient page shows the plan, read only', async () => {
+  await loginAs(pdue, 'Dr. Ali Rashid');
+  const who = await pdue.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { localISO, addDaysISO } = await import('/js/ui/dom.js');
+    const d = state.data;
+    await d.setRolePermission('coordinator', 'billing.view', false);
+    await d.updateStaffBranches('s-coord', [1, 2]);
+    // A patient registered and billed only at branch 1 (hers), and one registered and billed only at branch 4 (not hers); neither has a
+    // plan yet nor a payment today (the plans below count payments from today).
+    const today = localISO();
+    const at = async (branch) => {
+      for (const p of await d.searchPatients('')) {
+        if (p.first_branch_id !== branch) continue;
+        const full = await d.getPatient(p.id);
+        if ([...full.invoices, ...full.payments].every((r) => r.branch_id === branch) && !(full.plans || []).length
+          && full.payments.every((r) => localISO(new Date(r.received_at)) < today)) return { id: p.id, name: p.full_name };
+      }
+      return null;
+    };
+    const mine = await at(1); const other = await at(4);
+    const installments = [[-10, 'Installment 1'], [3, 'Installment 2'], [40, 'Installment 3']].map(([n, note]) => ({ due_date: addDaysISO(today, n), amount: 10000, note }));
+    for (const p of [mine, other]) await d.savePaymentPlan({ patient_id: p.id, total_fee: 30000, starts_on: today, notes: 'Sample plan (UI)', installments });
+    return { mine, other };
+  });
+  assert.ok(who.mine && who.other, 'a patient of her branch and one of another branch');
+  await tryAnotherRole(pdue);
+  await loginAs(pdue, 'Clinic coordinator');
+  assert.ok(await pdue.evaluate(async () => { const { can } = await import('/js/state.js'); return can('billing.edit') && !can('billing.view') && !can('billing.create'); }), 'the coordinator as live');
+  await pdue.goto(BASE + '#/staff/coordinator?tab=reminders');
+  const panel = pdue.locator('section.installments-due');
+  await panel.locator('h2:text("Installments due")').waitFor();
+  assert.deepEqual(await panel.locator('thead th').allInnerTexts(), ['Due', 'Patient', 'Installment', 'Amount', 'Behind by', 'Status']);
+  const rows = panel.locator('tbody tr');
+  assert.equal(await rows.count(), 2, 'her patient\'s overdue and due-soon installments, one row each (the later one is not due yet)');
+  for (const i of [0, 1]) assert.equal(await rows.nth(i).locator('td:nth-child(2) a').innerText(), who.mine.name);
+  assert.match(await rows.nth(0).innerText(), /Installment 1\s+Rs 10,000\s+Rs 10,000\s+Overdue/);
+  assert.match(await rows.nth(1).innerText(), /Installment 2\s+Rs 10,000\s+Rs 20,000\s+Due soon/);
+  assert.ok(!(await panel.innerText()).includes(who.other.name), 'the patient of the other branch is not on her list');
+  assert.equal(await panel.locator('tfoot').count(), 0, 'no total row');
+  assert.ok(!/\bTotal\b/.test(await panel.innerText()), 'no total anywhere in the panel');
+  assert.deepEqual(await rupeesShown(pdue, '.installments-due tbody td'), [], 'no rupees on the page outside the patients\' own rows');
+  // Her patient's page: the plan, read only (making and removing plans stays with "Create invoices and take payments").
+  await pdue.goto(BASE + `#/staff/patient/${who.mine.id}`);
+  const money = pdue.locator('section.panel:has(h2:text-is("Money"))');
+  await money.locator('h3:text("Installment plan")').waitFor();
+  await money.locator('td', { hasText: 'Installment 1' }).waitFor();
+  assert.equal(await money.getByRole('button', { name: /Set up a plan|New plan|Remove plan/ }).count(), 0, 'no Set up, New or Remove plan');
+  await pdue.goto(BASE + `#/staff/patient/${who.other.id}`);
+  await money.locator('h3:text("Installment plan")').waitFor();
+  assert.match(await money.innerText(), /No installment plan at the branches you work at\./, 'the other branch\'s plan is not shown to her');
+});
+await pdue.close();
+
 await step('braces off → retainer case with a next check date, on the patient file and on the Retainer Record of the city', async () => {
   await p7.goto(BASE + '#/staff/patients');
   await p7.waitForSelector('table.list tbody tr');
@@ -2827,17 +2885,45 @@ const pu = await newPage();
 let puPatient = null; // the profile used by these steps: { url, name }
 const uploadButtons = (pg) => pg.locator('.profile-uploads button').allInnerTexts();
 const onePixel = (name) => ({ name, mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64') });
-await step('patient profile upload buttons per role: the front desk has "Upload consent form" only (at the top and in the Documents panel, beside Add document)', async () => {
+// The owner (16 Oct 2026): "front desk can upload pictures and x rays and consent forms, so can the assistants" (20261016000100).
+await step('patient profile upload buttons per role: the front desk has all three (at the top, in Photos and X-rays, and "Upload consent form" beside Add document)', async () => {
   await loginAs(pu, 'Front desk \\(North Nazimabad\\)');
   await pu.goto(BASE + '#/staff/patients');
   await pu.waitForSelector('table.list tbody tr');
   await pu.click('table.list tbody tr:first-child a');
   await pu.waitForSelector('h2:has-text("Photos and X-rays")');
   puPatient = { url: pu.url(), name: await pu.locator('h1').innerText() };
-  assert.deepEqual(await uploadButtons(pu), ['Upload consent form']);
-  assert.equal(await pu.locator('.photos-panel button').count(), 0, 'no picture or X-ray buttons in the Photos and X-rays panel');
+  assert.deepEqual(await uploadButtons(pu), ['Upload picture', 'Upload X-ray', 'Upload consent form']);
+  assert.deepEqual(await pu.locator('.photos-panel .panel-head button').allInnerTexts(), ['Upload picture', 'Upload X-ray'], 'the picture and X-ray buttons in the Photos and X-rays panel too');
   const docs = pu.locator('section.panel', { has: pu.locator('h2:has-text("Documents")') });
   assert.deepEqual(await docs.locator('h2:has-text("Documents") + .inline button').allInnerTexts(), ['Upload consent form', 'Add document']);
+});
+await step('front desk: Upload picture and Upload X-ray save on a profile and show there straight away (its own raw picture, the X-ray as an X-ray)', async () => {
+  await pu.goto(BASE + '#/staff/patients');
+  await pu.waitForSelector('table.list tbody tr');
+  await pu.click('table.list tbody tr:nth-child(2) a');
+  await pu.waitForSelector('h2:has-text("Photos and X-rays")');
+  const name = await pu.locator('h1').innerText();
+  assert.notEqual(name, puPatient.name, 'another patient than the steps below use');
+  const panel = pu.locator('.photos-panel');
+  const before = await panel.locator('figure').count();
+  await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload picture' }).click();
+  const m = pu.locator('.modal');
+  await m.locator(`h2:has-text("Upload picture · ${name}")`).waitFor();
+  await m.locator('input[type=file]').setInputFiles(onePixel('desk-front.png'));
+  await m.getByRole('button', { name: 'Upload' }).click();
+  await pu.waitForSelector('.toast:has-text("1 photo uploaded.")');
+  await m.waitFor({ state: 'detached' });
+  await panel.locator('figcaption', { hasText: 'raw (staff only)' }).waitFor();
+  await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload X-ray' }).click();
+  await m.locator(`h2:has-text("Upload X-ray · ${name}")`).waitFor();
+  await m.locator('input[type=file]').setInputFiles(onePixel('desk-opg.png'));
+  await m.getByRole('button', { name: 'Upload' }).click();
+  await pu.waitForSelector('.toast:has-text("1 X-ray uploaded.")');
+  await m.waitFor({ state: 'detached' });
+  await panel.locator('figure.xray-tile').first().waitFor();
+  assert.equal(await panel.locator('figure').count(), before + 2, 'the picture and the X-ray are both in the panel');
+  assert.equal(await panel.locator('figure.xray-tile').count(), 1, 'one of them as an X-ray');
 });
 await step('assistant: all three buttons; Upload X-ray saves into the X-ray store and the new X-rays show in Photos and X-rays as X-rays', async () => {
   await tryAnotherRole(pu);

@@ -138,9 +138,12 @@ async function reminders(root, redraw, live) {
   const [rows, due] = await Promise.all([d.reminders(), d.installmentsDue ? d.installmentsDue().catch(() => []) : []]);
   if (!live()) return;
   const today = localISO();
-  const installmentsPanel = due.length ? h('section', { class: 'panel' },
+  // Each patient's installments, one row each, and never a sum (owner, 16 Oct 2026: "yes pending dues should only be seen for per patient
+  // and not totals"). The coordinator ("Edit or void invoices") gets the plans of the patients of her branches (20261016000100); whoever
+  // makes plans (billing.create) or sees invoices and payments (billing.view) gets the plans they read.
+  const installmentsPanel = due.length ? h('section', { class: 'panel installments-due' },
     h('h2', {}, 'Installments due'),
-    h('p', { class: 'muted' }, 'From installment plans on patient pages. Overdue first; "due soon" is within a week.'),
+    h('p', { class: 'muted' }, 'From installment plans on patient pages, one row per installment of each patient. Overdue first; "due soon" is within a week. The clinic\'s totals are with accounts.'),
     h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
       h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Due'), h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Installment'), h('th', { scope: 'col', class: 'right' }, 'Amount'), h('th', { scope: 'col', class: 'right' }, 'Behind by'), h('th', { scope: 'col' }, 'Status'))),
       h('tbody', {}, due.map((r) => h('tr', {},

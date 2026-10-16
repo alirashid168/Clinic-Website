@@ -315,8 +315,10 @@ export async function renderPatient(root, id) {
 
   // The owner (15 Oct 2026): "there should be a upload picture and upload x ray button on all patient profile and consent form upload
   // button with add or delete option too". Each button shows only to people who may use it: pictures and X-rays need photos.upload
-  // (X-rays also xrays.view, or the X-ray saved could not be shown back), consent forms patients.edit or photos.upload (the front desk
-  // takes them). The same buttons sit in the Photos and X-rays and the Documents panels.
+  // (X-rays also xrays.view, or the X-ray saved could not be shown back), consent forms patients.edit or photos.upload. The same buttons
+  // sit in the Photos and X-rays and the Documents panels. Since 16 Oct 2026 the front desk has photos.upload too ("front desk can upload
+  // pictures and x rays and consent forms, so can the assistants", 20261016000100): it sees the raw pictures it saved itself (the
+  // database shows the uploader its own photos), while the raw photos others took stay with "View raw clinic photos folder".
   const mayAddDocuments = can('patients.edit') || can('photos.upload');
   const pictureButton = (cls) => can('photos.upload') ? h('button', { class: cls, onclick: () => photoUploadModal(p, { picture: true, onDone: reload }) }, 'Upload picture') : null;
   const xrayButton = (cls) => can('photos.upload') && can('xrays.view') ? h('button', { class: cls, onclick: () => xrayUploadModal(p, { onDone: reload }) }, 'Upload X-ray') : null;
@@ -356,10 +358,12 @@ export async function renderPatient(root, id) {
   // the front desk takes the payment"): with "View invoices and payments", or with "Create invoices and take payments" alone (the front
   // desk: this patient's own at its branches, 20261015000500_front_desk_billing.sql), who also makes invoices and plans and prints the
   // bill and receipts. "Edit or void invoices" (billing.edit: the accountant, and the clinic coordinator since 15 Oct) reads them too, at
-  // its branches, to correct them ("editors view ..." policies, 20261015000900_billing_desk.sql); installment plans stay with
-  // billing.view and billing.create (the plan policies). The rest of the staff see the dues only. No total across patients here either way.
+  // its branches, to correct them ("editors view ..." policies, 20261015000900_billing_desk.sql), and since 16 Oct 2026 also the
+  // installment plans of the patients of its branches, read only (owner: "yes pending dues should only be seen for per patient and not
+  // totals"; "editors view plans", 20261016000100). Plans are made and removed with billing.create. The rest of the staff see the dues
+  // only. No total across patients here either way.
   const seesBills = can('billing.view') || can('billing.create') || can('billing.edit');
-  const seesPlans = can('billing.view') || can('billing.create');
+  const seesPlans = can('billing.view') || can('billing.create') || can('billing.edit');
   const makesBills = can('billing.create');
 
   mount(root,
@@ -437,7 +441,9 @@ export async function renderPatient(root, id) {
         !seesPlans ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
           planTable(plan, p.payments),
           makesBills && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
-          : h('p', { class: 'muted' }, 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'))),
+          // Whoever reads plans without seeing every plan (the coordinator: the patients of her branches) is not told there is none at all.
+          : h('p', { class: 'muted' }, makesBills ? 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'
+            : can('billing.view') ? 'No installment plan.' : 'No installment plan at the branches you work at.'))),
     h('section', { class: 'panel' },
       h('h2', {}, 'Visits'),
       p.visits.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },
