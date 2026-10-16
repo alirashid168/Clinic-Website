@@ -1774,7 +1774,14 @@ export async function createSupabaseAdapter() {
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
-      return check(await sb.from('payment_plans').select('*, installments:plan_installments(*)').eq('patient_id', patientId).order('created_at', { ascending: false }));
+      const plans = check(await sb.from('payment_plans').select('*, installments:plan_installments(*)').eq('patient_id', patientId).order('created_at', { ascending: false }));
+      if (!plans.length) return plans;
+      // Each plan's "paid" as installment_status counts it (since 20261016000100 the patient's payments at every branch since the plan
+      // started, public.plan_paid), so the plan on the profile says what the coordinator's list says, also to staff who read only their
+      // own branches' payments. One patient's plan, never a total. Without an answer the page counts the payments it shows, as before.
+      const { data } = await sb.from('installment_status').select('plan_id, paid').eq('patient_id', patientId);
+      const paid = new Map((data || []).map((r) => [r.plan_id, Number(r.paid)]));
+      return plans.map((plan) => (paid.has(plan.id) ? { ...plan, paid: paid.get(plan.id) } : plan));
     },
     /** One database call (save_installment_plan: plan + installments together). { idempotencyKey } and the retry rules as for createInvoice. */
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
@@ -1805,8 +1812,9 @@ export async function createSupabaseAdapter() {
     },
     async deletePaymentPlan(id) { check(await sb.from('payment_plans').delete().eq('id', id)); },
     // Installments that are overdue or due within a week, for the coordinator's call list: one row per installment of each patient, never
-    // a total. installment_status shows the plans this person may read: billing.view, billing.create, and since 20261016000100
-    // billing.edit (the coordinator) for the patients of the branches they work at.
+    // a total. installment_status shows the plans this person may read: billing.view every plan; since 20261016000100 billing.create (the
+    // front desk) and billing.edit (the coordinator) the plans of the patients of the branches they work at, and billing.create the plans
+    // it made. "paid" there is the patient's payments at every branch since the plan started (public.plan_paid).
     async installmentsDue() {
       const rows = check(await sb.from('installment_status').select('*').in('status', ['overdue', 'due_soon']).order('due_date'));
       return attachPatients(rows);

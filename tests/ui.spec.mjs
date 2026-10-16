@@ -2691,6 +2691,7 @@ await step('installment plan: set up on the patient page, overdue shows for the 
 // seen for per patient and not totals" (20261016000100). With the access list as live (no "View invoices and payments" for her) and her
 // two branches, as the clinic's coordinator works.
 const pdue = await newPage();
+let dueWho = null; // { mine, other }: the two patients with a plan, for the front desk step below
 await step('coordinator (live access list, two branches): "Installments due" lists each of her patients\' installments, one row each, no total and no rupees outside the rows; a patient of another branch is not there; the patient page shows the plan, read only', async () => {
   await loginAs(pdue, 'Dr. Ali Rashid');
   const who = await pdue.evaluate(async () => {
@@ -2698,6 +2699,7 @@ await step('coordinator (live access list, two branches): "Installments due" lis
     const { localISO, addDaysISO } = await import('/js/ui/dom.js');
     const d = state.data;
     await d.setRolePermission('coordinator', 'billing.view', false);
+    await d.setRolePermission('front_desk', 'billing.view', false); // the front desk as live too, for the step after this one
     await d.updateStaffBranches('s-coord', [1, 2]);
     // A patient registered and billed only at branch 1 (hers), and one registered and billed only at branch 4 (not hers); neither has a
     // plan yet nor a payment today (the plans below count payments from today).
@@ -2717,6 +2719,7 @@ await step('coordinator (live access list, two branches): "Installments due" lis
     return { mine, other };
   });
   assert.ok(who.mine && who.other, 'a patient of her branch and one of another branch');
+  dueWho = who;
   await tryAnotherRole(pdue);
   await loginAs(pdue, 'Clinic coordinator');
   assert.ok(await pdue.evaluate(async () => { const { can } = await import('/js/state.js'); return can('billing.edit') && !can('billing.view') && !can('billing.create'); }), 'the coordinator as live');
@@ -2742,6 +2745,25 @@ await step('coordinator (live access list, two branches): "Installments due" lis
   await pdue.goto(BASE + `#/staff/patient/${who.other.id}`);
   await money.locator('h3:text("Installment plan")').waitFor();
   assert.match(await money.innerText(), /No installment plan at the branches you work at\./, 'the other branch\'s plan is not shown to her');
+});
+// The front desk makes plans ("Create invoices and take payments") and, since 20261016000100, reads the plans of its own branch's patients
+// (and the ones it made), no longer every branch's.
+await step('front desk (live access list, its one branch): "Installments due" has its branch\'s patient and not the other branch\'s; that patient\'s page says there is no plan at its branches and still offers to set one up', async () => {
+  assert.ok(dueWho, 'the step above made the two plans');
+  await tryAnotherRole(pdue);
+  await loginAs(pdue, 'Front desk \\(Gulshan\\)');
+  assert.ok(await pdue.evaluate(async () => { const { can } = await import('/js/state.js'); return can('billing.create') && !can('billing.view'); }), 'the front desk as live');
+  await pdue.goto(BASE + '#/staff/coordinator?tab=reminders');
+  const panel = pdue.locator('section.installments-due');
+  await panel.locator('h2:text("Installments due")').waitFor();
+  await panel.locator('tbody tr', { hasText: dueWho.mine.name }).first().waitFor();
+  assert.ok(!(await panel.innerText()).includes(dueWho.other.name), 'the patient of branch 4 is not on the Gulshan desk\'s list');
+  assert.equal(await panel.locator('tfoot').count(), 0, 'no total row');
+  await pdue.goto(BASE + `#/staff/patient/${dueWho.other.id}`);
+  const money = pdue.locator('section.panel:has(h2:text-is("Money"))');
+  await money.locator('h3:text("Installment plan")').waitFor();
+  assert.match(await money.innerText(), /No installment plan at the branches you work at\. For braces fees paid monthly/, 'the other branch\'s plan is not shown to it');
+  assert.equal(await money.getByRole('button', { name: 'Set up a plan' }).count(), 1, 'it may still set one up');
 });
 await pdue.close();
 

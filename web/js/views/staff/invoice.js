@@ -754,9 +754,13 @@ export function printReceipt(payment, patient, invoice, remainingDues, { onClose
 // Overdue always says "Overdue" in words; the colour only repeats it.
 const PLAN_STATUS = { paid: ['badge-ok', 'Paid'], overdue: ['badge-dues badge-overdue', 'Overdue'], due_soon: ['badge-warn', 'Due soon'], upcoming: ['badge-muted', 'Upcoming'] };
 
-/** Where each installment of a plan stands: payments since the plan started are applied to installments in order. */
+/**
+ * Where each installment of a plan stands: payments since the plan started are applied to installments in order. plan.paid, when the
+ * data layer has it (installment_status: the patient's payments at every branch, 20261016000100), is used; else the payments given.
+ */
 export function planProgress(plan, payments) {
-  const paid = (payments || []).filter((p) => dayOf(p.received_at) >= plan.starts_on).reduce((s, p) => s + Number(p.amount), 0);
+  const paid = Number.isFinite(plan.paid) ? plan.paid
+    : (payments || []).filter((p) => dayOf(p.received_at) >= plan.starts_on).reduce((s, p) => s + Number(p.amount), 0);
   const today = localISO();
   const soon = addDaysISO(today, 7);
   let cum = 0;

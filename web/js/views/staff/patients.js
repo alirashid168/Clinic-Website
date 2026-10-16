@@ -360,8 +360,9 @@ export async function renderPatient(root, id) {
   // bill and receipts. "Edit or void invoices" (billing.edit: the accountant, and the clinic coordinator since 15 Oct) reads them too, at
   // its branches, to correct them ("editors view ..." policies, 20261015000900_billing_desk.sql), and since 16 Oct 2026 also the
   // installment plans of the patients of its branches, read only (owner: "yes pending dues should only be seen for per patient and not
-  // totals"; "editors view plans", 20261016000100). Plans are made and removed with billing.create. The rest of the staff see the dues
-  // only. No total across patients here either way.
+  // totals"; "branch billers view plans", 20261016000100). Plans are made and removed with billing.create, which since then also reads
+  // only the plans of its branches' patients and the plans it made. A plan's "paid" counts the patient's payments at every branch
+  // (plan.paid). The rest of the staff see the dues only. No total across patients here either way.
   const seesBills = can('billing.view') || can('billing.create') || can('billing.edit');
   const seesPlans = can('billing.view') || can('billing.create') || can('billing.edit');
   const makesBills = can('billing.create');
@@ -441,9 +442,10 @@ export async function renderPatient(root, id) {
         !seesPlans ? null : (p.plans || []).length ? (p.plans || []).map((plan) => h('div', { style: { marginTop: '8px' } },
           planTable(plan, p.payments),
           makesBills && planProgress(plan, p.payments).remaining > 0 ? h('button', { class: 'link-btn muted', style: { fontSize: '12px' }, 'aria-label': `Remove plan from ${shortDate(plan.starts_on)}`, onclick: () => removePlan(plan) }, 'Remove plan') : null))
-          // Whoever reads plans without seeing every plan (the coordinator: the patients of her branches) is not told there is none at all.
-          : h('p', { class: 'muted' }, makesBills ? 'No installment plan. For braces fees paid monthly, set one up so the coordinator sees who falls behind.'
-            : can('billing.view') ? 'No installment plan.' : 'No installment plan at the branches you work at.'))),
+          // Whoever reads plans without seeing every plan (the front desk and the coordinator: the patients of their branches) is not told
+          // there is none at all.
+          : h('p', { class: 'muted' }, (can('billing.view') ? 'No installment plan.' : 'No installment plan at the branches you work at.')
+            + (makesBills ? ' For braces fees paid monthly, set one up so the coordinator sees who falls behind.' : '')))),
     h('section', { class: 'panel' },
       h('h2', {}, 'Visits'),
       p.visits.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list' },

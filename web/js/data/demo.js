@@ -410,12 +410,20 @@ export function createDemoAdapter() {
   // finance.view, cash.verify or billing.view; the rest of the staff are refused, or get rows without amounts.
   const seesTotals = () => can('finance.view') || can('billing.view');
   const seesCash = () => can('finance.view') || can('cash.verify') || can('billing.view');
-  // Installment plans, as the plan policies: billing.view ("view plans") and billing.create ("manage plans", every plan), and since
-  // 20261016000100 billing.edit for the patients of the branches the person works at (registered there, or with an invoice or a payment
-  // there: public.editor_sees_plans_of). Rows only: nobody is given a total of them.
-  const editorSeesPlansOf = (pid) => can('billing.edit') && (branchOk(patient(pid)?.first_branch_id)
+  // Installment plans, as the plan policies (20261016000100): billing.view ("view plans") every plan; billing.create and billing.edit
+  // the plans of the patients of the branches the person works at (registered there, or with an invoice or a payment there:
+  // public.biller_sees_plans_of); billing.create also the plans it made. Rows only: nobody is given a total of them.
+  const billerSeesPlansOf = (pid) => (can('billing.create') || can('billing.edit')) && (branchOk(patient(pid)?.first_branch_id)
     || db.invoices.some((i) => i.patient_id === pid && branchOk(i.branch_id)) || db.payments.some((x) => x.patient_id === pid && branchOk(x.branch_id)));
-  const seesPlansOf = (pid) => can('billing.view') || can('billing.create') || editorSeesPlansOf(pid);
+  const seesPlan = (plan) => can('billing.view') || billerSeesPlansOf(plan.patient_id) || (can('billing.create') && !!plan.created_by && plan.created_by === me()?.id);
+  // A plan's "paid", as installment_status: the patient's payments since the plan started at every branch (public.plan_paid) for
+  // billing.view, the patient's branches' billers and the patient; otherwise the payments the person reads (at their branches).
+  const planPaid = (plan) => {
+    const everyBranch = !me() || can('billing.view') || billerSeesPlansOf(plan.patient_id);
+    return db.payments.filter((x) => x.patient_id === plan.patient_id && (everyBranch || branchOk(x.branch_id)) && x.received_at.slice(0, 10) >= plan.starts_on)
+      .reduce((s, x) => s + x.amount, 0);
+  };
+  const withPaid = (plan) => ({ ...clone(plan), paid: planPaid(plan) });
   // A photo, as the photo policies: an edited one for whoever sees patient profiles, a raw one with "View raw clinic photos folder", and
   // (20261016000100) the photos a person uploaded themselves while they may upload (the front desk sees the raw pictures it saved).
   const seesPhoto = (ph) => (ph.kind === 'edited' && can('patients.view')) || can('photos.view_raw') || (!!ph.uploaded_by && ph.uploaded_by === me()?.id && can('photos.upload'));
@@ -784,14 +792,15 @@ export function createDemoAdapter() {
         visits: db.visits.filter((v) => v.patient_id === id).sort((a, b) => b.visit_date.localeCompare(a.visit_date)).map(enrichVisit),
         // As the database: staff read invoices and payments with billing.view; the front desk, which makes invoices and takes payments
         // (billing.create), gets those of its branches ("billers view ...", 20261015000500), and so does "Edit or void invoices"
-        // (billing.edit, "editors view ...", 20261015000900); the rest of the staff get none. Plans: billing.view, or billing.create
-        // (which manages them), or billing.edit for the patients of its branches (seesPlansOf). A patient: their own issued ones.
+        // (billing.edit, "editors view ...", 20261015000900); the rest of the staff get none. Plans: billing.view every plan, billing.create
+        // and billing.edit those of the patients of their branches, billing.create also the ones it made (seesPlan), each with its "paid"
+        // (planPaid). A patient: their own issued ones.
         // Photos: as the photo policies (seesPhoto); a patient sees the edited ones.
         invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(i.branch_id))))),
         payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(x.branch_id))))),
         photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' ? seesPhoto(x) : x.kind === 'edited'))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
-        plans: clone((db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || seesPlansOf(id)))),
+        plans: (db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || seesPlan(x))).map(withPaid),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
         complaints: db.complaints.filter((c) => c.patient_id === id).map((c) => ({ ...clone(c), messages: clone(db.complaint_messages.filter((m) => m.complaint_id === c.id && (s?.kind === 'staff' || !m.internal_note))) })),
       };
@@ -1364,10 +1373,9 @@ export function createDemoAdapter() {
     },
     // ------------------------------------------------------------ installment plans
     async paymentPlans(patientId) {
-      // row-level security: "view plans" (billing.view), "manage plans" (billing.create) and "editors view plans" (billing.edit, the
-      // patients of its branches); a patient reads their own
-      if (me() && !seesPlansOf(patientId)) return [];
-      return clone((db.payment_plans || []).filter((x) => x.patient_id === patientId));
+      // row-level security: "view plans" (billing.view) and "branch billers view plans" (billing.create and billing.edit: the patients of
+      // their branches, and the plans billing.create made); a patient reads their own. Each with its "paid" (planPaid).
+      return (db.payment_plans || []).filter((x) => x.patient_id === patientId && (!me() || seesPlan(x))).map(withPaid);
     },
     async savePaymentPlan({ patient_id, braces_case_id = null, total_fee, starts_on, notes = null, installments, idempotencyKey = null }, opts = {}) {
       need('billing.create');
@@ -1379,21 +1387,22 @@ export function createDemoAdapter() {
         if (saved.get('plan:' + key).sig !== sig) fail('IDEMPOTENCY_MISMATCH: an earlier attempt already saved this payment plan with different details. Refresh the patient record and check it (delete the plan if it is wrong) before saving again.');
         return clone(again);
       }
-      const plan = { id: uid(), patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_at: new Date().toISOString(),
+      const plan = { id: uid(), patient_id, braces_case_id, total_fee: Number(total_fee), starts_on: starts_on || todayISO(), notes, created_by: me()?.id || null, created_at: new Date().toISOString(),
         installments: installments.map((i) => ({ id: uid(), due_date: i.due_date, amount: Number(i.amount), note: i.note || null })) };
       db.payment_plans.push(plan);
       if (key) saved.set('plan:' + key, { id: plan.id, sig });
       return clone(plan);
     },
-    async deletePaymentPlan(id) { need('billing.create'); db.payment_plans = (db.payment_plans || []).filter((p) => p.id !== id); },
-    // As public.installment_status (security invoker): the installments of the plans this person reads (seesPlansOf), one row each, with
-    // "paid" from the payments they may read (at their branches); no total of anything.
+    // "billers remove plans": billing.create, and only a plan it reads (another one is left as it is, without a word, like the database).
+    async deletePaymentPlan(id) { need('billing.create'); db.payment_plans = (db.payment_plans || []).filter((p) => p.id !== id || !seesPlan(p)); },
+    // As public.installment_status (security invoker): the installments of the plans this person reads (seesPlan), one row each, with
+    // "paid" as planPaid counts it; no total of anything.
     async installmentsDue() {
       if (!me()) return [];
       const today = todayISO(); const soon = daysAgo(-7);
       const out = [];
-      for (const plan of (db.payment_plans || []).filter((p) => seesPlansOf(p.patient_id))) {
-        const paid = db.payments.filter((x) => x.patient_id === plan.patient_id && branchOk(x.branch_id) && x.received_at.slice(0, 10) >= plan.starts_on).reduce((s, x) => s + x.amount, 0);
+      for (const plan of (db.payment_plans || []).filter(seesPlan)) {
+        const paid = planPaid(plan);
         let cum = 0;
         for (const i of [...plan.installments].sort((a, b) => a.due_date.localeCompare(b.due_date))) {
           cum += i.amount;
