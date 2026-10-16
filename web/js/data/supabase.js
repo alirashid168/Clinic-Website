@@ -472,6 +472,14 @@ export function thumbPathFor(path) {
   const slash = path.lastIndexOf('/') + 1;
   return `${path.slice(0, slash)}thumbs/${path.slice(slash).replace(/\.[^.]*$/, '')}.jpg`;
 }
+/**
+ * The name of an edited photo's copy in the website gallery (bucket public-cases): "<date taken>_<label>_<first 8 of the id>.<ext>".
+ * publishPhoto makes it; deletePhoto removes it, and the database lets a photo deleter remove only such a copy of a photo they see
+ * (public.website_copy_photo, 20261016000200).
+ */
+export function websiteCopyName(photo) {
+  return `${photo.taken_on}_${(photo.view_label || 'case').replace(/\W+/g, '-')}_${photo.id.slice(0, 8)}.${photo.storage_path.split('.').pop()}`;
+}
 /** PostgREST (PGRST204) or Postgres (42703) saying photos has no thumb_path column yet: the audit migration has not been applied. */
 export function isMissingThumbColumn(error) {
   const msg = String(error?.message || '');
@@ -802,6 +810,17 @@ export async function createSupabaseAdapter() {
   // Set once public.delete_patient_document has answered on this page (the database update 20261015001000 is there).
   let documentDeleteReady = false;
   const documentDeleteMissing = () => plainError('Deleting documents needs the database update of 15 Oct (20261015001000_patient_documents_delete.sql). Ask Dr. Ali to apply it. Nothing was deleted.', 'DOCUMENTS_DELETE_MISSING');
+  // The same for pictures and X-rays: the names of public.delete_patient_photo / delete_patient_xray once each has answered on this page
+  // (the database update 20261016000200 is there).
+  const mediaDeleteReady = new Set();
+  const mediaDeleteMissing = () => plainError('Deleting pictures and X-rays needs the database update of 16 Oct (20261016000200_photo_xray_delete.sql). Ask Dr. Ali to apply it. Nothing was deleted.', 'PHOTOS_DELETE_MISSING');
+  /** Calls a delete function about no row (nil id: deleted = false, nothing changes) the first time on a page; throws when it is not installed. */
+  async function mediaDeleteFunctionReady(name, arg) {
+    if (mediaDeleteReady.has(name)) return;
+    const probe = await rpc(name, { [arg]: '00000000-0000-0000-0000-000000000000' });
+    if (probe.missing) throw mediaDeleteMissing();
+    mediaDeleteReady.add(name);
+  }
 
   // Set the first time saving a photo row says photos has no thumb_path column (audit migration not applied yet).
   let photosLackThumbPath = false;
@@ -1615,7 +1634,7 @@ export async function createSupabaseAdapter() {
     // Admin puts a consented, edited before/after photo on the public website gallery.
     async publishPhoto(photo) {
       if (!photo.public_ok) throw new Error('This photo is not marked as allowed on the website.');
-      const name = `${photo.taken_on}_${(photo.view_label || 'case').replace(/\W+/g, '-')}_${photo.id.slice(0, 8)}.${photo.storage_path.split('.').pop()}`;
+      const name = websiteCopyName(photo);
       check(await sb.storage.from('clinic-photos').copy(photo.storage_path, name, { destinationBucket: 'public-cases' }));
       forget('publicCases');
       return sb.storage.from('public-cases').getPublicUrl(name).data.publicUrl;
@@ -1651,6 +1670,34 @@ export async function createSupabaseAdapter() {
       check(await sb.storage.from('patient-documents').remove([doc.storage_path]));
       const res = await rpc('delete_patient_document', { p_document: doc.id, p_clear_consent: !!clearConsent });
       if (res.missing) throw documentDeleteMissing();
+      return res.data;
+    },
+    /**
+     * Deletes a picture (20261016000200, "Delete clinic photos and X-rays"): its files first (the picture and its small copy; for an
+     * edited picture also the copy Dr. Ali may have put in the website gallery, named as publishPhoto names it), then its row
+     * (public.delete_patient_photo), so a failure in between leaves the row on the record to delete again, never a file nobody can find.
+     * Resolves { deleted, edited_copies, visit_unticked }: the edited pictures made from it that stay, and whether its visit's
+     * "photos uploaded" tick came off (it was that visit's last picture). The function is asked about no picture first, once per page,
+     * and without it no file is touched.
+     */
+    async deletePhoto(photo) {
+      await mediaDeleteFunctionReady('delete_patient_photo', 'p_photo');
+      if (photo.kind === 'edited') {
+        check(await sb.storage.from('public-cases').remove([websiteCopyName(photo)]));
+        forget('publicCases');
+      }
+      check(await sb.storage.from('clinic-photos').remove([...new Set([photo.storage_path, photo.thumb_path].filter(Boolean))]));
+      const res = await rpc('delete_patient_photo', { p_photo: photo.id });
+      if (res.missing) throw mediaDeleteMissing();
+      return res.data;
+    },
+    /** Deletes an X-ray the same way: its file in the "xrays" bucket, then its row (public.delete_patient_xray). Resolves { deleted }. */
+    async deleteXray(xray) {
+      await mediaDeleteFunctionReady('delete_patient_xray', 'p_xray');
+      check(await sb.storage.from('xrays').remove([xray.storage_path]));
+      xrayLinks.delete(xray.storage_path);
+      const res = await rpc('delete_patient_xray', { p_xray: xray.id });
+      if (res.missing) throw mediaDeleteMissing();
       return res.data;
     },
     /**

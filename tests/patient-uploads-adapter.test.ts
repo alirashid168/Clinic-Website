@@ -3,7 +3,9 @@
 //   - a weak connection: the row is saved but its answer is lost; pressing Upload / Save again (same idempotency key) uploads nothing
 //     again, gets "duplicate key" from the database and answers the row that is there: one file, one row, no database error;
 //   - a consent form comes back with the patient's "Consent signed" as the record has it after the save (null when it was not ticked);
-//   - Delete asks the database function first (once per page) and touches no file while the database update is missing.
+//   - Delete asks the database function first (once per page) and touches no file while the database update is missing;
+//   - Delete for a picture and an X-ray (20261016000200) the same way: files first (a picture's small copy, an edited picture's website
+//     gallery copy as publishPhoto names it), then the row through public.delete_patient_photo / delete_patient_xray.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
@@ -86,9 +88,13 @@ function fakeClient() {
     from: f.from,
     rpc: (name: string, args: any) => {
       f.rpcs.push([name, args]);
+      const id = args.p_document ?? args.p_photo ?? args.p_xray;
+      const answer = name === 'delete_patient_photo' ? { deleted: id !== NIL, edited_copies: 0, visit_unticked: id === 'photo-on-visit' }
+        : name === 'delete_patient_xray' ? { deleted: id !== NIL }
+          : { deleted: id !== NIL, consent_cleared: false, consent_forms_left: 0 };
       const r: any = Promise.resolve(f.missingRpc
-        ? { data: null, error: { code: 'PGRST202', message: 'Could not find the function public.delete_patient_document' }, status: 404 }
-        : { data: { deleted: args.p_document !== NIL, consent_cleared: false, consent_forms_left: 0 }, error: null, status: 200 });
+        ? { data: null, error: { code: 'PGRST202', message: `Could not find the function public.${name}` }, status: 404 }
+        : { data: answer, error: null, status: 200 });
       r.abortSignal = () => r;
       return r;
     },
@@ -164,4 +170,33 @@ test('deleteDocument: without the database update nothing is touched; with it, a
   ]);
   await data.deleteDocument({ ...doc, id: 'doc-2' });
   assert.equal(f.rpcs.length, 3, 'asked about no document only the first time');
+});
+
+test('deletePhoto: without the database update nothing is touched; with it, the picture and its small copy, then the row (asked once per page)', async () => {
+  const raw = { id: 'photo-on-visit', kind: 'raw', taken_on: '2026-10-16', view_label: 'Front', public_ok: false,
+    storage_path: `${PATIENT}/raw/2026-10-16_Front_eeeeeeee.jpg`, thumb_path: `${PATIENT}/raw/thumbs/2026-10-16_Front_eeeeeeee.jpg` };
+  const missing = await openPage();
+  missing.f.missingRpc = true;
+  await assert.rejects(missing.data.deletePhoto(raw), (e: any) => e.code === 'PHOTOS_DELETE_MISSING' && /20261016000200_photo_xray_delete\.sql/.test(e.message) && /Nothing was deleted/.test(e.message));
+  await assert.rejects(missing.data.deleteXray({ id: 'x-1', storage_path: `${PATIENT}/2026-10-16_OPG_ffffffff.png` }), (e: any) => e.code === 'PHOTOS_DELETE_MISSING');
+  assert.deepEqual(missing.f.removes, [], 'no file is touched');
+
+  const { f, data } = await openPage();
+  assert.deepEqual(await data.deletePhoto(raw), { deleted: true, edited_copies: 0, visit_unticked: true });
+  assert.deepEqual(f.removes, [`clinic-photos/${raw.storage_path}`, `clinic-photos/${raw.thumb_path}`], 'a raw picture: its file and small copy, nothing in the gallery');
+  assert.deepEqual(f.rpcs, [['delete_patient_photo', { p_photo: NIL }], ['delete_patient_photo', { p_photo: 'photo-on-visit' }]]);
+
+  // An edited picture: its website gallery copy too, named as publishPhoto names it; one with no small copy removes just its file.
+  const edited = { id: 'abcdef12-0000-4000-8000-000000000001', kind: 'edited', taken_on: '2026-10-12', view_label: 'After · front', public_ok: true,
+    storage_path: `${PATIENT}/edited/2026-10-12_After_abcdef12.png`, thumb_path: null };
+  f.removes.length = 0;
+  await data.deletePhoto(edited);
+  assert.deepEqual(f.removes, ['public-cases/2026-10-12_After-front_abcdef12.png', `clinic-photos/${edited.storage_path}`]);
+  assert.equal(f.rpcs.filter(([n]: [string]) => n === 'delete_patient_photo').length, 3, 'asked about no picture only the first time');
+
+  f.removes.length = 0;
+  const xray = { id: 'x-1', storage_path: `${PATIENT}/2026-10-16_OPG_ffffffff.png` };
+  assert.deepEqual(await data.deleteXray(xray), { deleted: true });
+  assert.deepEqual(f.removes, [`xrays/${xray.storage_path}`]);
+  assert.deepEqual(f.rpcs.slice(-2), [['delete_patient_xray', { p_xray: NIL }], ['delete_patient_xray', { p_xray: 'x-1' }]]);
 });

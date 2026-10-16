@@ -3,7 +3,7 @@ import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, select
 import { state, can, branchName, isAdmin, clinicianName, myBranches, defaultBranchId } from '../../state.js';
 import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
-import { xrayUploadModal, deleteDocumentModal } from './common.js';
+import { xrayUploadModal, deleteDocumentModal, deletePhotoModal, deleteXrayModal } from './common.js';
 import { portalLoginModal } from './portal-login.js';
 import { retainerStatuses, checkOverdue } from '../../lib/records.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt, editInvoiceModal, editPaymentModal } from './invoice.js';
@@ -295,6 +295,20 @@ export async function renderPatient(root, id) {
     return link;
   };
 
+  // Delete on each picture and X-ray for "Delete clinic photos and X-rays" only (owner, 16 Oct 2026, asked whether the front desk and
+  // assistants may delete a wrong picture or X-ray: "they can delete assistant and coordinator"; 20261016000200). The front desk uploads
+  // them but has no Delete; doctors and accounts neither. Each asks first, naming what goes, and the panel is drawn again after.
+  const mayDeleteMedia = can('photos.delete');
+  const photoDeleteButton = (ph) => {
+    if (!mayDeleteMedia) return null;
+    const name = [ph.view_label, shortDate(ph.taken_on)].filter(Boolean).join(', ');
+    return h('button', { class: 'btn btn-small btn-danger media-delete', 'aria-label': name ? `Delete picture: ${name}` : 'Delete picture',
+      onclick: () => deletePhotoModal(p, ph, { onDone: reload }) }, 'Delete');
+  };
+  const xrayDeleteButton = (x) => mayDeleteMedia ? h('button', { class: 'btn btn-small btn-danger media-delete',
+    'aria-label': `Delete X-ray: ${[x.kind || 'X-ray', shortDate(x.taken_on)].filter(Boolean).join(', ')}`,
+    onclick: () => deleteXrayModal(p, x, { onDone: reload }) }, 'Delete') : null;
+
   // X-ray tiles, from the X-ray store (bucket "xrays"): signed with the list like photos, signed again once when an image fails to load
   // or a full-size link is clicked near its expiry. { day, at, el } so they sort in with the photos, newest first.
   const xrayTiles = (xrays || []).map((x) => {
@@ -310,7 +324,8 @@ export async function renderPatient(root, id) {
       } catch { /* the broken image stays; reloading the page signs everything again */ }
     });
     return { day: x.taken_on, at: x.created_at, el: h('figure', { class: 'xray-tile' }, link,
-      h('figcaption', {}, h('span', { class: 'badge badge-muted' }, 'X-ray'), ' ', [shortDate(x.taken_on), x.kind, x.notes].filter(Boolean).join(' · '))) };
+      h('figcaption', {}, h('span', { class: 'badge badge-muted' }, 'X-ray'), ' ', [shortDate(x.taken_on), x.kind, x.notes].filter(Boolean).join(' · ')),
+      xrayDeleteButton(x)) };
   });
 
   // The owner (15 Oct 2026): "there should be a upload picture and upload x ray button on all patient profile and consent form upload
@@ -462,7 +477,8 @@ export async function renderPatient(root, id) {
         h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label, ph.kind === 'raw' ? 'raw (staff only)' : 'edited (patient sees it)', ph.public_ok ? 'website ok' : null].filter(Boolean).join(' · '),
           isAdmin() && ph.kind === 'edited' && ph.public_ok ? h('div', {}, h('button', { class: 'link-btn', style: { fontSize: '12px' }, onclick: busy(async () => {
             await d.publishPhoto(ph); toast('Added to the website gallery.', 'ok');
-          }) }, 'Publish on website')) : null)) })), ...xrayTiles]
+          }) }, 'Publish on website')) : null),
+        photoDeleteButton(ph)) })), ...xrayTiles]
         .sort((a, b) => String(b.day || '').localeCompare(String(a.day || '')) || String(b.at || '').localeCompare(String(a.at || ''))).map((t) => t.el))
         : empty('No photos or X-rays yet.')),
     h('section', { class: 'panel' },

@@ -3083,6 +3083,91 @@ await step('Delete removes a document after confirming; the last consent form as
   await pu.waitForSelector('text=No documents yet.');
   await pu.waitForSelector('.profile-flags .badge:has-text("No treatment consent on file")');
 });
+// The owner (16 Oct 2026), asked whether the front desk and assistants may delete a wrong picture or X-ray: "they can delete assistant and
+// coordinator" ("Delete clinic photos and X-rays", 20261016000200). The front desk uploads them but has no Delete on them.
+await step('assistant: Delete on each picture and X-ray asks first and names what goes (an edited picture leaves the patient\'s page); Cancel keeps it, Delete takes it out of Photos and X-rays', async () => {
+  const panel = pu.locator('.photos-panel');
+  const m = pu.locator('.modal');
+  // A wrong raw picture and an edited one to work with.
+  for (const [file, edited] of [['wrong-raw.png', false], ['wrong-edited.png', true]]) {
+    await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload picture' }).click();
+    await m.locator(`h2:has-text("Upload picture · ${puPatient.name}")`).waitFor();
+    await m.locator('input[type=file]').setInputFiles(onePixel(file));
+    if (edited) await m.locator('label:has-text("Edited before/after") input').check();
+    await m.getByRole('button', { name: 'Upload' }).click();
+    await m.waitFor({ state: 'detached' });
+  }
+  const pictures = panel.locator('figure:not(.xray-tile)');
+  const raw = pictures.filter({ hasText: 'raw (staff only)' });
+  const edited = pictures.filter({ hasText: 'edited (patient sees it)' });
+  await raw.first().waitFor();
+  await edited.first().waitFor();
+  const [pictureCount, rawCount, xrayCount] = [await pictures.count(), await raw.count(), await panel.locator('figure.xray-tile').count()];
+  assert.ok(xrayCount > 0, 'the X-rays uploaded above are there');
+  assert.equal(await panel.getByRole('button', { name: /^Delete (picture|X-ray)/ }).count(), pictureCount + xrayCount, 'a Delete on every picture and X-ray');
+  // The edited picture: the dialog names it and says the patient loses it from their page. Cancel keeps it.
+  await edited.first().getByRole('button', { name: /^Delete picture/ }).click();
+  await m.locator('h2:has-text("Delete this picture?")').waitFor();
+  const said = await m.locator('p').first().innerText();
+  assert.ok(said.startsWith('Delete the picture (Front, ') && said.endsWith(`) from ${puPatient.name}'s record? The picture and its small copy are removed for good. This cannot be undone.`), said);
+  assert.deepEqual(await m.locator('li').allInnerTexts(), ['The patient sees this picture on their page: it disappears from there too.']);
+  await m.getByRole('button', { name: 'Cancel' }).click();
+  await m.waitFor({ state: 'detached' });
+  assert.equal(await pictures.count(), pictureCount, 'Cancel deletes nothing');
+  // The raw picture: deleted, and the panel is drawn again without it.
+  await raw.first().getByRole('button', { name: /^Delete picture/ }).click();
+  await m.locator('h2:has-text("Delete this picture?")').waitFor();
+  assert.equal(await m.locator('li').count(), 0, 'a raw picture of no visit takes nothing else with it');
+  await m.getByRole('button', { name: 'Delete', exact: true }).click();
+  await pu.waitForSelector('.toast:has-text("Picture deleted.")');
+  await m.waitFor({ state: 'detached' });
+  await pu.waitForFunction((n) => document.querySelectorAll('.photos-panel figure:not(.xray-tile)').length === n, pictureCount - 1);
+  assert.equal(await raw.count(), rawCount - 1, 'the raw picture is gone');
+  assert.ok(await edited.count() > 0, 'the edited one stays');
+  // An X-ray.
+  const tile = panel.locator('figure.xray-tile').first();
+  assert.match(await tile.getByRole('button', { name: /^Delete X-ray/ }).getAttribute('aria-label'), /^Delete X-ray: (OPG|Periapical \(PA\)), \d{1,2} \w{3} \d{4}$/);
+  await tile.getByRole('button', { name: /^Delete X-ray/ }).click();
+  await m.locator('h2:has-text("Delete this X-ray?")').waitFor();
+  const xraySaid = await m.locator('p').first().innerText();
+  assert.ok(xraySaid.startsWith('Delete the X-ray (') && xraySaid.endsWith(`) from ${puPatient.name}'s record? The X-ray file is removed for good. This cannot be undone.`), xraySaid);
+  await m.getByRole('button', { name: 'Delete', exact: true }).click();
+  await pu.waitForSelector('.toast:has-text("X-ray deleted.")');
+  await m.waitFor({ state: 'detached' });
+  await pu.waitForFunction((n) => document.querySelectorAll('.photos-panel figure.xray-tile').length === n, xrayCount - 1);
+  await shot(pu, '31c-picture-xray-delete');
+});
+await step('front desk: no Delete on pictures or X-rays, but its Upload picture and Upload X-ray stay, and so does Delete on documents', async () => {
+  await tryAnotherRole(pu);
+  await loginAs(pu, 'Front desk \\(North Nazimabad\\)');
+  await pu.goto(puPatient.url);
+  await pu.waitForSelector('h2:has-text("Photos and X-rays")');
+  const panel = pu.locator('.photos-panel');
+  await panel.locator('figure.xray-tile').first().waitFor();
+  await panel.locator('figure:not(.xray-tile)', { hasText: 'edited (patient sees it)' }).first().waitFor();
+  assert.equal(await panel.getByRole('button', { name: /^Delete/ }).count(), 0, 'no Delete on any picture or X-ray');
+  assert.deepEqual(await uploadButtons(pu), ['Upload picture', 'Upload X-ray', 'Upload consent form']);
+  assert.deepEqual(await panel.locator('.panel-head button').allInnerTexts(), ['Upload picture', 'Upload X-ray']);
+  await pu.locator('.profile-uploads').getByRole('button', { name: 'Upload consent form' }).click();
+  const m = pu.locator('.modal');
+  await m.locator('input[type=file]').setInputFiles([onePixel('consent-page-1.png')]);
+  await m.getByRole('button', { name: 'Save' }).click();
+  await m.waitFor({ state: 'detached' });
+  const docs = pu.locator('.documents-list tbody tr');
+  await docs.first().waitFor();
+  assert.equal(await pu.locator('.documents-list').getByRole('button', { name: /^Delete / }).count(), await docs.count(), 'Delete on each document, as before');
+});
+await step('the clinic coordinator has Delete on every picture and X-ray too; a doctor has none', async () => {
+  for (const [who, expected] of [['Clinic coordinator', 'all'], ['Dr. Bushra', 'none']]) {
+    await tryAnotherRole(pu);
+    await loginAs(pu, who);
+    await pu.goto(puPatient.url);
+    const panel = pu.locator('.photos-panel');
+    await panel.locator('figure.xray-tile').first().waitFor();
+    const figures = await panel.locator('figure').count();
+    assert.equal(await panel.getByRole('button', { name: /^Delete/ }).count(), expected === 'all' ? figures : 0, `${who}: ${expected}`);
+  }
+});
 await step('on a phone (375 px): the three buttons are in sight, the page does not scroll sideways, and Delete in the Documents list is fully on screen', async () => {
   const ph = await newPage({ width: 375, height: 812 }, { isMobile: true, hasTouch: true });
   try {

@@ -152,6 +152,13 @@ test('permission grid defaults', () => {
     ['front_desk', 'assistant', 'doctor', 'coordinator', 'admin']);
   assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'photos.view_raw', grid)),
     ['assistant', 'doctor', 'coordinator', 'admin']);
+  // Owner, 16 Oct 2026, asked whether the front desk and assistants may delete a wrong picture or X-ray: "they can delete assistant and
+  // coordinator" (20261016000200). The front desk uploads them but does not delete them.
+  assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'photos.delete', grid)),
+    ['assistant', 'coordinator', 'admin']);
+  const photoKeys = PERMISSIONS.filter((p) => p.category === 'Photos').map((p) => p.key);
+  assert.deepEqual(photoKeys, ['photos.upload', 'photos.view_raw', 'xrays.view', 'photos.delete'], 'in the access list order of the database (sort_order 50-53)');
+  assert.equal(PERMISSIONS.find((p) => p.key === 'photos.delete')?.label, 'Delete clinic photos and X-rays');
   assert.equal(hasPermission(null, 'patients.view', grid), false);
   assert.equal(new Set(PERMISSIONS.map((p) => p.key)).size, PERMISSIONS.length, 'no duplicate keys');
 });

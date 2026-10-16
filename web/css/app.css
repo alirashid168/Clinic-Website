@@ -1573,6 +1573,9 @@ table.perm-grid .cat td { background: var(--aubergine-soft); font-weight: 700; c
 .photo-grid figure { margin: 0; }
 .photo-grid img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-s); background: var(--aubergine-soft); }
 .photo-grid figcaption { font-size: var(--fs-xs); color: var(--text-muted); }
+/* Delete under a picture or an X-ray (photos.delete): its own line, below the caption. */
+.photo-grid .media-delete { margin-top: var(--space-1); }
+.delete-notes { margin: var(--space-2) 0 0; padding-left: var(--space-5); }
 /* The patient's Documents list on a phone: the Type column goes (the title names the document), so Open and Delete stay on screen. */
 @media (max-width: 480px) { .documents-list th:nth-child(2), .documents-list td:nth-child(2) { display: none; } }
 

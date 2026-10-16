@@ -1,6 +1,6 @@
 // Pieces shared by several staff screens: patient search box, new patient
 // form, flag buttons, photo upload, braces guidance.
-import { h, mount, modal, field, select, toast, friendlyError, rupees, announce, showFormErrors, clearFieldErrors, localISO } from '../../ui/dom.js';
+import { h, mount, modal, field, select, toast, friendlyError, rupees, announce, showFormErrors, clearFieldErrors, localISO, shortDate } from '../../ui/dom.js';
 import { state, can, myBranches, defaultBranchId } from '../../state.js';
 import { makeThumbnail } from '../../ui/photos.js';
 
@@ -411,6 +411,52 @@ export function deleteDocumentModal(patient, doc, { onDone } = {}) {
       try {
         const res = await state.data.deleteDocument(doc, { clearConsent: !!untick?.checked });
         toast(res?.deleted === false ? 'This document was already deleted.' : res?.consent_cleared ? 'Document deleted. "Consent signed" is unticked.' : 'Document deleted.', 'ok');
+      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      await onDone?.();
+    } },
+  ], { destructive: true });
+}
+
+// Delete for a picture or an X-ray on the patient profile (owner, 16 Oct 2026: "they can delete assistant and coordinator";
+// "Delete clinic photos and X-rays", 20261016000200). The dialog names what goes, and what goes with it: an edited picture disappears from
+// the patient's page, one marked for the website from the website; edited pictures made from a raw one stay; the visit of its last picture
+// asks for photos again.
+export function deletePhotoModal(patient, photo, { onDone } = {}) {
+  const what = [photo.view_label, shortDate(photo.taken_on)].filter(Boolean).join(', ');
+  const others = (patient.photos || []).filter((x) => x.id !== photo.id);
+  const copies = others.filter((x) => x.edited_from === photo.id).length;
+  const lastOfVisit = !!photo.visit_id && !others.some((x) => x.visit_id === photo.visit_id);
+  const notes = [
+    photo.kind === 'edited' || photo.sent_to_patient_at ? 'The patient sees this picture on their page: it disappears from there too.' : null,
+    photo.public_ok ? 'It may be shown on the website ("Our results"): it disappears from the website too.' : null,
+    copies ? `${copies === 1 ? 'The edited picture' : `The ${copies} edited pictures`} made from it stay${copies === 1 ? 's' : ''} on the record.` : null,
+    lastOfVisit ? 'It is the only picture of its visit, so that visit asks for photos again.' : null,
+  ].filter(Boolean);
+  const body = h('div', {},
+    h('p', {}, `Delete the picture${what ? ` (${what})` : ''} from ${patient.full_name}'s record? The picture and its small copy are removed for good. This cannot be undone.`),
+    notes.length ? h('ul', { class: 'delete-notes' }, notes.map((n) => h('li', {}, n))) : null);
+  modal('Delete this picture?', body, [
+    { label: 'Cancel' },
+    { label: 'Delete', danger: true, onClick: async () => {
+      try {
+        const res = await state.data.deletePhoto(photo);
+        toast(res?.deleted === false ? 'This picture was already deleted.' : `Picture deleted.${res?.visit_unticked ? ' Its visit asks for photos again.' : ''}`, 'ok');
+      } catch (e) { toast(friendlyError(e), 'error'); return false; }
+      await onDone?.();
+    } },
+  ], { destructive: true });
+}
+
+export function deleteXrayModal(patient, xray, { onDone } = {}) {
+  const what = [xray.kind, shortDate(xray.taken_on)].filter(Boolean).join(', ');
+  const body = h('div', {},
+    h('p', {}, `Delete the X-ray${what ? ` (${what})` : ''} from ${patient.full_name}'s record? The X-ray file is removed for good. This cannot be undone.`));
+  modal('Delete this X-ray?', body, [
+    { label: 'Cancel' },
+    { label: 'Delete', danger: true, onClick: async () => {
+      try {
+        const res = await state.data.deleteXray(xray);
+        toast(res?.deleted === false ? 'This X-ray was already deleted.' : 'X-ray deleted.', 'ok');
       } catch (e) { toast(friendlyError(e), 'error'); return false; }
       await onDone?.();
     } },
