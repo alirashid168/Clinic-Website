@@ -1307,14 +1307,17 @@ export function createDemoAdapter() {
       if (clearConsent && row.kind === 'consent' && left === 0 && p?.treatment_consent_at) { p.treatment_consent_at = null; cleared = true; audit('patients', 'UPDATE', p); }
       return { deleted: true, consent_cleared: cleared, consent_forms_left: left };
     },
-    // As public.delete_patient_photo (20261016000200): "Delete clinic photos and X-rays" (assistants, the coordinator, Dr. Ali) deletes a
-    // picture the person sees (seesPhoto). Edited pictures made from it stay and no longer point at it; when it was its visit's last
-    // picture, the visit's "photos uploaded" tick comes off. The audit log has the whole row.
+    // As public.begin_photo_delete + delete_patient_photo (20261016000200): "Delete clinic photos and X-rays" (assistants, the
+    // coordinator, Dr. Ali) deletes a picture the person sees (seesPhoto). Its files are named in the audit log first (DELETE_FILES; the
+    // demo stores no files), then the row goes. Edited pictures made from it stay and no longer point at it; when it was its visit's
+    // last picture, the visit's "photos uploaded" tick comes off, and a photo month not yet completed asks for photos again. The audit
+    // log has the whole row.
     async deletePhoto(photo) {
       if (!can('photos.delete')) fail('NOT_ALLOWED: you may not delete pictures from a patient\'s record. Ask Dr. Ali to tick "Delete clinic photos and X-rays" in the access list.');
       const row = db.photos.find((x) => x.id === photo.id);
-      if (!row) return { deleted: false, edited_copies: 0, visit_unticked: false };
+      if (!row) return { deleted: false, edited_copies: 0, visit_unticked: false, visit_asks_photos: false };
       if (!seesPhoto(row)) fail('NOT_ALLOWED: you may not delete this picture: it is a raw picture, and raw pictures need "View raw clinic photos folder" in the access list.');
+      audit('photos', 'DELETE_FILES', { id: row.id, files: [row.storage_path, row.thumb_path].filter(Boolean).map((name) => ({ bucket: 'clinic-photos', name })) }, { viaFunction: true, before: row });
       const copies = db.photos.filter((x) => x.edited_from === row.id);
       for (const c of copies) { const before = clone(c); c.edited_from = null; audit('photos', 'UPDATE', c, { before }); }
       db.photos = db.photos.filter((x) => x !== row);
@@ -1322,14 +1325,16 @@ export function createDemoAdapter() {
       const visit = row.visit_id && !db.photos.some((x) => x.visit_id === row.visit_id) ? db.visits.find((v) => v.id === row.visit_id) : null;
       const unticked = !!visit?.photos_uploaded;
       if (unticked) { visit.photos_uploaded = false; audit('visits', 'UPDATE', visit); }
-      return { deleted: true, edited_copies: copies.length, visit_unticked: unticked };
+      const asks = unticked && !!visit.photo_required && !['completed', 'cancelled', 'no_show'].includes(visit.status);
+      return { deleted: true, edited_copies: copies.length, visit_unticked: unticked, visit_asks_photos: asks };
     },
-    // As public.delete_patient_xray: the same permission, for an X-ray the person sees (xrays.view).
+    // As public.begin_xray_delete + delete_patient_xray: the same permission, for an X-ray the person sees (xrays.view).
     async deleteXray(xray) {
       if (!can('photos.delete')) fail('NOT_ALLOWED: you may not delete X-rays from a patient\'s record. Ask Dr. Ali to tick "Delete clinic photos and X-rays" in the access list.');
       const row = (db.xrays || []).find((x) => x.id === xray.id);
       if (!row) return { deleted: false };
       if (!can('xrays.view')) fail('NOT_ALLOWED: you may not delete this X-ray: X-rays need "View X-rays" in the access list.');
+      audit('xrays', 'DELETE_FILES', { id: row.id, files: [{ bucket: 'xrays', name: row.storage_path }] }, { viaFunction: true, before: row });
       db.xrays = db.xrays.filter((x) => x !== row);
       audit('xrays', 'DELETE', row, { before: row });
       return { deleted: true };

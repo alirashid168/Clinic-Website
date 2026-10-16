@@ -419,18 +419,19 @@ export function deleteDocumentModal(patient, doc, { onDone } = {}) {
 
 // Delete for a picture or an X-ray on the patient profile (owner, 16 Oct 2026: "they can delete assistant and coordinator";
 // "Delete clinic photos and X-rays", 20261016000200). The dialog names what goes, and what goes with it: an edited picture disappears from
-// the patient's page, one marked for the website from the website; edited pictures made from a raw one stay; the visit of its last picture
-// asks for photos again.
+// the patient's page, one marked for the website from the website; edited pictures made from a raw one stay; when it is the last picture
+// of a photo month not yet completed, that visit asks for photos again (a completed visit, or one that is no photo month, asks nothing).
 export function deletePhotoModal(patient, photo, { onDone } = {}) {
   const what = [photo.view_label, shortDate(photo.taken_on)].filter(Boolean).join(', ');
   const others = (patient.photos || []).filter((x) => x.id !== photo.id);
   const copies = others.filter((x) => x.edited_from === photo.id).length;
-  const lastOfVisit = !!photo.visit_id && !others.some((x) => x.visit_id === photo.visit_id);
+  const visit = photo.visit_id && !others.some((x) => x.visit_id === photo.visit_id) ? (patient.visits || []).find((v) => v.id === photo.visit_id) : null;
+  const asksAgain = !!visit?.photo_required && !['completed', 'cancelled', 'no_show'].includes(visit.status);
   const notes = [
     photo.kind === 'edited' || photo.sent_to_patient_at ? 'The patient sees this picture on their page: it disappears from there too.' : null,
     photo.public_ok ? 'It may be shown on the website ("Our results"): it disappears from the website too.' : null,
     copies ? `${copies === 1 ? 'The edited picture' : `The ${copies} edited pictures`} made from it stay${copies === 1 ? 's' : ''} on the record.` : null,
-    lastOfVisit ? 'It is the only picture of its visit, so that visit asks for photos again.' : null,
+    asksAgain ? 'It is the only picture of its visit, a photo month not yet completed: that visit asks for photos again before it is completed.' : null,
   ].filter(Boolean);
   const body = h('div', {},
     h('p', {}, `Delete the picture${what ? ` (${what})` : ''} from ${patient.full_name}'s record? The picture and its small copy are removed for good. This cannot be undone.`),
@@ -440,7 +441,7 @@ export function deletePhotoModal(patient, photo, { onDone } = {}) {
     { label: 'Delete', danger: true, onClick: async () => {
       try {
         const res = await state.data.deletePhoto(photo);
-        toast(res?.deleted === false ? 'This picture was already deleted.' : `Picture deleted.${res?.visit_unticked ? ' Its visit asks for photos again.' : ''}`, 'ok');
+        toast(res?.deleted === false ? 'This picture was already deleted.' : `Picture deleted.${res?.visit_asks_photos ? ' Its visit asks for photos again.' : ''}`, 'ok');
       } catch (e) { toast(friendlyError(e), 'error'); return false; }
       await onDone?.();
     } },
