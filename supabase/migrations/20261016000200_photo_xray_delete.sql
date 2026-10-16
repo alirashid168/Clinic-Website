@@ -18,9 +18,10 @@
 --    refuses a direct delete from storage.objects, and the file itself would stay behind, so the page removes them through Storage):
 --      a. public.begin_photo_delete() / begin_xray_delete(): the database works out the files that go with the picture or X-ray and writes
 --         them in the audit log (action DELETE_FILES: who, when, the whole row, the files). The page never chooses the files itself.
---      b. The page removes those files through Storage. A file in clinic-photos, xrays or public-cases can be removed only by someone with
---         photos.delete who asked for that very file in the last 15 minutes (public.photo_file_removable). So no file goes without its
---         line in the audit log, and nobody removes a file by naming it.
+--      b. The page removes those files through Storage. The new storage policy lets someone with photos.delete remove a file in
+--         clinic-photos, xrays or public-cases only when they asked for that very file in the last 15 minutes
+--         (public.photo_file_removable). So no file goes this way without its line in the audit log, and nobody removes a file by naming
+--         it. (Dr. Ali's own storage policies stay as they were.)
 --      c. public.delete_patient_photo() / delete_patient_xray() remove the row, only once its files are gone (FILES_LEFT otherwise: a
 --         file Storage did not remove keeps the row on the record, and Delete can be pressed again). The row's delete is in the audit
 --         log too, with the whole row.
