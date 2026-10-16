@@ -5,11 +5,15 @@
  * WHAT IT IS
  *   One Google Apps Script, pasted into the sheet (Extensions -> Apps Script). It is NOT part of the website.
  *   Every minute (08:00 to 23:59 Pakistan time) it sends what staff typed in the five branch tabs to the website,
- *   and writes what the website changed back into the tabs. After midnight it copies each tab's rows into the
- *   spreadsheet "Aj ki List - Archive" and clears the tab, so a new empty list starts. A row without an Mr# is a
+ *   and writes what the website changed back into the tabs. After midnight it copies each tab's rows of the day into the
+ *   spreadsheet "Aj ki List - Archive", once. The rows STAY on the tab (owner, 17 Oct 2026: "please dont delete the aaj ki list
+ *   google sheet entries daily, one of my assistant does it after recording the treatments in healthwire"): a row of an earlier
+ *   day is a "kept" row, shown calmly, never sent again, and deleting it changes nothing on the website. A row without an Mr# is a
  *   checkup patient (no patient file) when its Treatment says checkup (any other Treatment: "Needs attention: add the Mr#"); at night
  *   the checkup patients are also added to the "Checkup karwaliya" sheet.
- *   A row deleted in the sheet is removed from the website too (the website refuses when something real hangs on it).
+ *   A row of today deleted in the sheet is removed from the website too (the website refuses when something real hangs on it); a
+ *   patient who is done (Completed, Treatment, Cancelled) only goes off the sheet and stays on the website as it is. Every call says
+ *   so to the website (keep_rows); a website that does not know it yet answers as before.
  *   The branch tabs are Google Sheets tables: the Advanced Sheets service ("Sheets", apps-script/appsscript.json) lets Set up widen each
  *   table over the hidden columns, so a sort moves whole rows. Without it the sync still works (the log says what to do by hand).
  *   Setup, step by step: docs/AAJ-SYNC-SETUP.md
@@ -57,8 +61,12 @@ var AAJ = {
   // "paused" instead of going stale. Raise them once a real busy day has been measured in Aaj Sync > Status.
   RUNTIME_SLOW_MS: 3000000,    // 50 min of run time today: work only every 5th minute
   RUNTIME_STOP_MS: 3900000,    // 65 min: stop for today
-  MAX_ROWS: 400,               // more named rows than this on one tab: that tab is not synced until old rows are archived
+  // Rows of earlier days stay on the tab until staff delete them, so the limits count TODAY's rows: 400 is also what the website takes in
+  // one call's list of present rows. Kept rows cost little (they are read, not sent), but a tab is only read down to MAX_READ_ROWS: a list
+  // that reaches within LIST_ROOM rows of it is not synced (a row added below the read rows would be added again every minute).
+  MAX_ROWS: 400,               // more of today's rows than this on one tab: that tab is not synced
   MAX_READ_ROWS: 3000,         // rows below this are never read (stray cells far down a tab are ignored)
+  LIST_ROOM: 200,
   HEADER_REFRESH_MS: 300000,
   EMPTY_TICKS: 3,
   LOG_KEEP: 2000,
@@ -504,9 +512,10 @@ var AAJ_MOVE_FIELDS = ['mr', 'name', 'phone', 'month', 'treatment', 'status'];  
  * person as a new row (RSG-1). When the exchange is not closed (a row the website has not answered yet took part in the sort), a "deleted"
  * memory whose row now holds somebody else still goes to the one row that shows exactly its person.
  * Rows that show the same cells (two walk-ins of one name with no phone, a row and its copy) are handed out by position: a sort keeps their
- * order. A key on two rows (a pure copy) is one memory with two places (SB10-1). A memory of an EARLIER day ("Left over") goes with its
- * person too, never onto a patient of today (SB10-2). So does the hidden edit time. A key left on a row whose name is blank ("Delete
- * cells, shift up", a cleared row sorted down, a cut and paste) is one more place of its memory (m.lost), never in an exchange (B1/B2).
+ * order. A key on two rows (a pure copy) is one memory with two places (SB10-1). A memory of an EARLIER day (a kept row, which now
+ * stays on the tab for days) goes with its person too, never onto a patient of today (SB10-2). So does the hidden edit time. A key left
+ * on a row whose name is blank ("Delete cells, shift up", a cleared row sorted down, a cut and paste) is one more place of its memory
+ * (m.lost), never in an exchange (B1/B2).
  * Returns {row number: {key, baseText, from, edited}}. Pure.
  */
 function aajFindMoves(grid, cols, hc, listDate, branch) {
@@ -652,12 +661,28 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
   var scan = {
     listDate: listDate, branch: opts.branch || '', cols: cols, hc: hc, grid: grid, nowMs: nowMs, rows: [], present: [], newKeys: [], rekeys: [], stamps: [],
     releases: [], releaseBusy: false, named: 0, tooMany: false, lastNamed: 1, keyRow: {}, statusText: {}, headers: [], final: !!opts.final, swaps: [],
+    kept: 0,                       // named rows of earlier days kept on the tab (not sent, not counted in MAX_ROWS)
+    tooLong: false,                // the list reaches within LIST_ROOM rows of MAX_READ_ROWS: not synced
     doubled: [],                   // keys on two rows that show the same person (the lower row is a pure copy, RV-1 / RV-3)
     unanswered: false,             // a key whose first answer never came back left its person (aajPendingMoved): no removal pass this minute
     releasedKeys: {}               // the keys of the rows released this minute (aajReconcileTab never adds their record back in the same minute)
   };
   // rows that only changed places in a sort of the visible columns take the key and memory of the person now in them (written before the send)
   var moves = aajFindMoves(grid, cols, hc, listDate, opts.branch || '');
+  // keys on more than one named row (after the moves), with how many of those rows were not edited today: of the rows that show one kept
+  // key, the copies made today are today's rows (below)
+  var day0 = aajDayStartMs_(listDate), multi = {};
+  if (cols.name !== undefined && hc.key >= 0) {
+    for (var mi = 1; mi < grid.length; mi++) {
+      if (!aajText(grid[mi][cols.name])) continue;
+      var mkey = moves[mi + 1] ? moves[mi + 1].key : aajText(grid[mi][hc.key]);
+      if (!mkey) continue;
+      var med = moves[mi + 1] && moves[mi + 1].edited !== undefined ? (Number(moves[mi + 1].edited) || 0) : (hc.edited >= 0 ? (Number(aajText(grid[mi][hc.edited])) || 0) : 0);
+      var mm = multi[mkey] || (multi[mkey] = { n: 0, first: mi + 1, old: 0 });
+      mm.n++;
+      if (med < day0) mm.old++;
+    }
+  }
   var h0 = grid[0] || [];
   for (var hi = 0; hi < h0.length; hi++) scan.headers.push(aajText(h0[hi]));
   var seen = {};
@@ -712,17 +737,27 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
     if (key && seen[key]) { key = ''; rekeyed = true; }            // a copied row typed over with somebody else: the topmost keeps the key
     if (key) {
       base = aajParseBase(baseText);
-      // A row of an EARLIER day that nobody has edited since this day began: the midnight clear left it on the tab. It is that day's patient,
-      // never a new row of today (RV9-1). It is not sent and not in "present", and says so; the next archive clears it.
-      // A row edited today (typed over, or typed while the sync was off) is today's row, as before. So is a row that no longer shows that
-      // day's person: a sort put a patient of today here (SB10-2; aajFindMoves takes the memory to the row that shows its person).
-      if (base && base.d && base.d < listDate && edited < aajDayStartMs_(listDate) && !aajPendingMoved(cells, cols, base.s || {})) {
-        var lo = { r: r, key: key, state: 'stale', day: base.d, base: null, baseText: baseText, raw: {}, texts: {}, edited: edited, busy: false, bad: null,
-          push: false, held: false, fields: [], stamped: false, rekeyed: false, swapped: false, movedStatus: '', fromSetup: false, tokenDoctor: '' };
-        aajLazyRead_(lo, cells, cols);
-        scan.rows.push(lo);
-        if (swapRec) scan.swaps.push(swapRec);      // moved: its key is written where it is now
-        continue;
+      // A KEPT row: a row of an EARLIER day that stays on the tab until staff delete it (owner, 17 Oct 2026). The nightly archive copied it
+      // and wrote that into its memory (base.a, aajMarkBase_); a row an older version of this script left behind after its nightly clear
+      // has no mark and counts while nobody edited it since this day began (RV9-1). It is that day's patient, never a row of today: it is
+      // not sent, not in "present" (so deleting it, in any way and in any number, removes nothing and brings nothing back), not counted in
+      // MAX_ROWS, and its Website cell says so calmly. Staff may edit it (Healthwire done, a Status) and it stays kept.
+      // A row that no longer shows that day's person is today's row, as before: a new patient typed over it, or a sort that put a patient of
+      // today here (SB10-2; aajFindMoves takes the memory to the row that shows its person). So is an unmarked row edited today (typed
+      // while the sync was off; the archive left it for today), and a copy of a kept row made today (its hidden key too: a returning
+      // patient's row copied to save typing): of the rows that show one kept key, the copies edited today are today's rows.
+      if (base && base.d && base.d < listDate && (base.a || edited < day0) && !aajPendingMoved(cells, cols, base.s || {})) {
+        var mk = multi[key];
+        if (mk && mk.n > 1 && edited >= day0 && (mk.old > 0 || mk.first !== r)) { base = null; key = ''; rekeyed = true; }
+        else {
+          var lo = { r: r, key: key, state: 'kept', day: base.d, base: null, baseText: baseText, raw: {}, texts: {}, edited: edited, busy: false, bad: null,
+            push: false, held: false, fields: [], stamped: false, rekeyed: false, swapped: false, movedStatus: '', fromSetup: false, tokenDoctor: '' };
+          aajLazyRead_(lo, cells, cols);
+          scan.rows.push(lo);
+          scan.kept++;
+          if (swapRec) scan.swaps.push(swapRec);      // moved: its key is written where it is now
+          continue;
+        }
       }
       if (base && base.d && base.d !== listDate) { base = null; key = ''; rekeyed = true; }   // belonged to another day
       if (base && base.b && scan.branch && base.b !== scan.branch) { base = null; key = ''; rekeyed = true; }   // copied from another branch's tab
@@ -858,7 +893,8 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
     aajLazyRead_(row, cells, cols);
     scan.rows.push(row);
   }
-  if (scan.named > AAJ.MAX_ROWS) scan.tooMany = true;
+  if (scan.named - scan.kept > AAJ.MAX_ROWS) scan.tooMany = true;               // today's rows only: kept rows of earlier days do not count
+  if (scan.lastNamed > AAJ.MAX_READ_ROWS - AAJ.LIST_ROOM) scan.tooLong = true;   // too close to the last row that is read
   return scan;
 }
 
@@ -920,7 +956,10 @@ function aajBuildPayload(date, entries, chunk, checkRemoved) {
     if ((br === 'LHR' || br === 'ISB') && rp.set.token) rp.set.token = { t: rp.set.token.t, v: null };
     tabs[chunk[j].si].rows.push(rp);
   }
-  return { date: date, check_removed: !!checkRemoved, tabs: tabs };
+  // keep_rows: this script keeps rows on the tab (no nightly clear), so the website lets a row of a patient who is done (Completed,
+  // Treatment, Cancelled) go off the sheet instead of putting it back (20261017000100_aaj_keep_rows.sql). A website without that file
+  // ignores the flag and answers as before (the row comes back): both orders of putting the two live are safe.
+  return { date: date, check_removed: !!checkRemoved, keep_rows: true, tabs: tabs };
 }
 
 function aajDoctorsDiffer(a, b) {
@@ -943,8 +982,16 @@ function aajStatusColor(text) {
   var c = String(text || '').charAt(0);
   if (c === '\u26a0') return '#b45309';
   if (c === '\u2717') return '#b91c1c';
+  if (AAJ_KEPT_RE.test(String(text || ''))) return '#6b7280';      // a kept row of an earlier day: grey, so today's rows stand out
   return null;
 }
+
+/** The Website cell of a row of an earlier day kept on the tab (day = 'yyyy-MM-dd'). */
+function aajKeptText(day) {
+  var p = String(day).split('-');
+  return '\u2713 ' + p[2] + '-' + p[1] + '-' + p[0] + ': kept on the sheet (delete it when it is entered in Healthwire)';
+}
+var AAJ_KEPT_RE = /^\u2713 \d\d-\d\d-\d{4}: kept on the sheet /;
 
 function aajLabelOf(scan, f) {
   // the Status column is headed "Waiting" in Gulshan, North Nazimabad and DHA: "Website change kept for: Waiting" would read like a status
@@ -1010,8 +1057,9 @@ function aajReconcileTab(scan, resp, ctx) {
     // a pure copy of the row above with its key (aajScanTab): nothing was sent for it. Deleting it removes nothing; deleting the other row
     // instead leaves this one as the row of that visit or checkup
     if (row.state === 'copy') { setStatus(row, '\u2717 Duplicate of row ' + row.copyOf + ': delete this row.', 'error'); continue; }
-    // a row of an earlier day the midnight clear left behind (aajScanTab): nothing was sent for it
-    if (row.state === 'stale') { setStatus(row, '\u2717 Left over from ' + row.day + ' (archived that night): delete this row.', 'error'); continue; }
+    // a row of an earlier day kept on the tab (aajScanTab): nothing was sent for it, and it is not something to fix (a tick, never counted
+    // in "need attention")
+    if (row.state === 'kept') { setStatus(row, aajKeptText(row.day), 'ok'); continue; }
     if (row.bad) { setStatus(row, '\u2717 ' + row.bad, 'error'); continue; }
     // a checkup row (its memory says so) is told "checkup", not "visit"; a row whose visit or checkup the website moved to another branch or
     // day (base.mv) is told so
@@ -1812,12 +1860,13 @@ function aajSyncTabs_(ctx, entries, date, opts) {
     e.scan = aajScanTab(e.grid, e.cols, e.hc, nowMs, date, { newKey: aajNewKey_, final: !!opts.final, busyMs: AAJ.BUSY_MS, branch: e.cfg.branch,
       setupStamp: Number(st.get('setupStamp:' + e.cfg.tab)) || 0 });
     var emptyKey = 'empty:' + e.cfg.tab;
-    if (e.scan.tooMany) {
+    if (e.scan.tooMany || e.scan.tooLong) {
       st.set('prob:' + e.cfg.tab, '1');
-      aajSetHeader_(ctx, e, aajHeaderText('error', ctx.hhmm, 'more than ' + AAJ.MAX_ROWS + ' rows: archive or clear old rows'));
+      aajSetHeader_(ctx, e, aajHeaderText('error', ctx.hhmm, e.scan.tooMany ? 'more than ' + AAJ.MAX_ROWS + ' rows of today: check the tab (rows of earlier days do not count)'
+        : 'the list reaches row ' + e.scan.lastNamed + ': delete rows of earlier days (they are in the archive)'));
       continue;
     }
-    if (e.scan.named === 0) {
+    if (e.scan.named - e.scan.kept === 0) {           // no row of today (kept rows of earlier days do not count: a tab cleared of today's rows)
       var n = (Number(st.get(emptyKey)) || 0) + 1;
       st.set(emptyKey, n);
       if (!opts.final && n < AAJ.EMPTY_TICKS) { aajSetHeader_(ctx, e, aajHeaderText('ok', ctx.hhmm)); pending = true; continue; }
@@ -1825,7 +1874,7 @@ function aajSyncTabs_(ctx, entries, date, opts) {
     e.hash = st.get('hash:' + e.cfg.tab);
     live.push(e);
   }
-  if (!live.length) return { ok: true, pending: pending };
+  if (!live.length) return { ok: true, pending: pending, lists: {} };
   for (i = 0; i < live.length; i++) aajPrewrite_(ctx, live[i]);
   // While a row is still settling (typed or moved a moment ago) or a name was just cleared, the website is not asked to remove the rows that
   // "disappeared": the row may only have been moved or retyped, and the visit must be adopted by it, not deleted (and made again 60 s later).
@@ -1853,14 +1902,16 @@ function aajSyncTabs_(ctx, entries, date, opts) {
     } else failMsg = 'not syncing: the website did not answer';
     if (info.failed.kind !== 'busy') aajLog_(ctx, '', '', 'Sync failed: ' + info.failed.message);
     if (failMsg) for (i = 0; i < live.length; i++) aajSetHeader_(ctx, live[i], aajHeaderText('error', ctx.hhmm, failMsg));
-    return { ok: false, pending: true };
+    return { ok: false, pending: true, lists: {} };
   }
   st.del('busyN');
   if (info.failed && info.failed.kind !== 'deadline') aajLog_(ctx, '', '', 'Sync stopped part way: ' + info.failed.message);
+  var lists = {};                  // the website's list of the day per tab (the last flush before the archive copies the patients taken off the sheet from it)
   for (i = 0; i < live.length; i++) {
     e = live[i];
     var tr = info.latest[i];
     if (!tr) continue;
+    lists[e.cfg.tab] = tr.visits || null;
     var rctx = { nowMs: nowMs, results: info.results[i], pushed: info.pushed[i], extraBusy: {}, listDate: date };
     var rec = aajReconcileTab(e.scan, tr, rctx);
     var hasWork = rec.writes.length || rec.appends.length || Object.keys(rec.helper).length || Object.keys(rec.status).length;
@@ -1896,7 +1947,7 @@ function aajSyncTabs_(ctx, entries, date, opts) {
     }
   }
   if (info.failed) pending = true;
-  return { ok: !(info.failed && info.failed.kind !== 'deadline'), pending: pending };
+  return { ok: !(info.failed && info.failed.kind !== 'deadline'), pending: pending, lists: lists };
 }
 
 // ---------- the one-minute tick ----------
@@ -1978,7 +2029,7 @@ function aajQuickCall_(ctx, active) {
     if (h) tabs.push({ branch: active[i].cfg.branch, tab: active[i].cfg.tab, hash: h, rows: [] });
   }
   ctx.calls++;
-  var r = aajCallRpc_(ctx.secret, { date: ctx.today, check_removed: false, tabs: tabs });
+  var r = aajCallRpc_(ctx.secret, { date: ctx.today, check_removed: false, keep_rows: true, tabs: tabs });
   if (!r.ok) return false;                                 // anything unusual: the full run below deals with it (and shows it in the headings)
   var back = r.resp.tabs || [];
   if (back.length !== tabs.length) return false;
@@ -2003,7 +2054,7 @@ function aajTickWork_(ctx, st, manual, rt) {
     return false;
   }
   if (!manual && rt > AAJ.RUNTIME_SLOW_MS && minute % 5 !== 0) return false;
-  // older rows first (copy to the archive, clear): each tab is archived under the day it holds
+  // older rows first (copied to the archive and marked; they stay on the tab): each tab is archived under the day it holds
   for (i = 0; i < sheets.length; i++) {
     s = sheets[i];
     if (!s.sheet) continue;
@@ -2113,7 +2164,7 @@ function aajArchiveBook_(ctx) {
 
 /**
  * The columns that hold the list: every column of the tab except our four helper columns, so a column the staff added to the right of
- * them ("Staff notes") is copied to the archive like the others (the midnight clear wipes the whole row).
+ * them ("Staff notes") is copied to the archive like the others.
  */
 function aajDataCols_(s) {
   var skip = {}, out = [], n = (s.grid && s.grid[0]) ? s.grid[0].length : 0;
@@ -2136,32 +2187,89 @@ function aajRowFp_(cells, s) {
 }
 
 /**
- * Every row with something in a data column (named or not), so nothing is cleared that was not copied.
- * keepFromMs: rows edited at or after this moment are left in place (they were typed today, after the website lost touch with the
- * tab: they belong to the new day and are sent as today's rows, not archived under the old date).
- * day: the date being archived. A row of an earlier day not edited since that day (stale: a row an earlier clear left behind, aajScanTab)
- * was archived on its own day: it is cleared, never copied a second time nor put on the checkup list again (only while it still shows that
- * day's person, as in aajScanTab).
+ * The patient rows (a name) of the tab at night, sorted into what the archive does with them. Nothing is cleared any more (owner, 17 Oct
+ * 2026), so a stray cell or a row without a name stays where it is and is not copied. Returns { copy: [...], mark: [...], today: n }:
+ *  - copy: the rows of the day being archived (day), each copied once and then marked (aajMarkBase_).
+ *  - mark: rows an older version of this script left behind after its nightly clear (an earlier day, not edited since that day, still that
+ *    day's person: they were archived on their own night): marked under their own day, never copied a second time nor put on the checkup
+ *    list again.
+ *  - today: rows edited at or after keepFromMs (typed today while the website had lost touch with the tab: they belong to the new day and
+ *    are sent as today's rows, not archived under the old date).
+ * A row archived on an earlier night (base.a) that still shows that person is a kept row: left alone. A kept row a new patient was typed
+ * over is a row of the day again (aajPendingMoved, the rule of aajScanTab).
  */
 function aajArchiveRows_(s, keepFromMs, day) {
-  var out = [], dcs = aajDataCols_(s);
+  var out = { copy: [], mark: [], today: 0 };
+  if (s.cols.name === undefined) return out;
   for (var i = 1; i < s.grid.length; i++) {
     var cells = s.grid[i];
-    if (!aajRowHasData_(cells, dcs)) continue;
+    if (aajText(cells[s.cols.name]) === '') continue;
     var edited = Number(aajText(s.hc.edited >= 0 ? cells[s.hc.edited] : '')) || 0;
-    if (keepFromMs && edited >= keepFromMs) continue;
     var key = aajText(cells[s.hc.key]);
-    var base = aajParseBase(aajText(cells[s.hc.base]));
-    out.push({ r: i + 1, key: key, fp: aajRowFp_(cells, s), cells: cells, visit: base && base.v ? String(base.v) : '', checkup: !!(base && base.k),
-      stale: !!(day && key && base && base.d && base.d < day && edited < aajDayStartMs_(day) && !aajPendingMoved(cells, s.cols, base.s || {})),
-      ckMr: base && base.k && base.w && base.w.mr ? String(base.w.mr) : '',
+    if (!AAJ_KEY_RE.test(key)) key = '';
+    var base = key ? aajParseBase(aajText(cells[s.hc.base])) : null;
+    var same = !!base && !aajPendingMoved(cells, s.cols, base.s || {});
+    if (same && base.a) continue;
+    var fp = aajRowFp_(cells, s), idh = aajHash32(aajIdText(cells, s.cols));
+    if (same && base.d && base.d < day && edited < aajDayStartMs_(day)) { out.mark.push({ r: i + 1, key: key, fp: fp, idh: idh, day: base.d }); continue; }
+    if (keepFromMs && edited >= keepFromMs) { out.today++; continue; }
+    out.copy.push({ r: i + 1, key: key, fp: fp, idh: idh, day: day, cells: cells, visit: base && base.v ? String(base.v) : '', checkup: !!(base && base.k),
       // the website said its visit or checkup was deleted (or moved to another branch or day) there: never "did not reach the website"
       gone: !!(base && (base.g || base.gk)),
       // refused as "already on this list in row N" (a second row of a person whose own row is on the tab): that other row is the one listed
       dup: !!(base && base.dup),
-      named: s.cols.name !== undefined && aajText(cells[s.cols.name]) !== '' });
+      named: true });
   }
   return out;
+}
+
+/**
+ * The patients of the day who are done on the website (Completed or Treatment) and whose rows are not on the tab at night: staff took them
+ * off the sheet after entering them in Healthwire (the website kept them, 20261017000100_aaj_keep_rows.sql). They are copied to the archive
+ * from the website's list (list = the day's list from the last flush), so the archive and the nightly checkup list still have the whole
+ * day. Cells are put in the tab's own columns; P.P comes from the website, Healthwire and Reminder stay empty. Pure.
+ */
+function aajOffSheetRows(s, list) {
+  var out = [], onTab = {}, i;
+  if (!list || !list.length) return out;
+  for (i = 1; i < s.grid.length; i++) { var k = aajText(s.grid[i][s.hc.key]); if (k) onTab[k] = true; }
+  var width = s.grid[0].length;
+  for (i = 0; i < list.length; i++) {
+    var v = list[i];
+    if (typeof v.key !== 'string' || !AAJ_KEY_RE.test(v.key) || onTab[v.key]) continue;
+    var stt = aajLiveStatus(v.status);
+    if (stt !== 'completed' && stt !== 'in_treatment') continue;
+    var cells = [];
+    for (var c = 0; c < width; c++) cells.push('');
+    var fs = AAJ_FIELDS.concat(['pp']);
+    for (var f = 0; f < fs.length; f++) {
+      if (s.cols[fs[f]] === undefined) continue;
+      var val = v[fs[f]] === null || v[fs[f]] === undefined ? '' : String(v[fs[f]]);
+      if (fs[f] === 'token' && (s.cfg.branch === 'LHR' || s.cfg.branch === 'ISB')) val = '';      // their Token column is kit / material text
+      cells[s.cols[fs[f]]] = val;
+    }
+    out.push({ r: 0, key: v.key, fp: '', cells: cells, visit: String(v.id), checkup: v.kind === 'checkup', gone: false, dup: false, named: true, off: true });
+  }
+  return out;
+}
+
+/**
+ * The memory a row keeps once the archive has copied it (aajArchiveTab_): its own memory with a = the day it was archived under (d is that
+ * day too) and s = what it shows now, so aajScanTab and aajFindMoves know it as that day's kept row however long it stays. A row the
+ * website never placed or never answered (no visit, checkup or refusal in its memory) gets an "unplaced" memory (u), which takes part in
+ * aajFindMoves like the others. Pure.
+ */
+function aajMarkBase_(cells, s, baseText, day) {
+  var b = aajParseBase(baseText);
+  if (!b || !b.w || !(b.v || b.g || b.u)) b = { v: null, d: day, b: s.cfg.branch, s: {}, w: {}, u: 1 };
+  var texts = {};
+  for (var i = 0; i < AAJ_ALL_FIELDS.length; i++) {
+    var f = AAJ_ALL_FIELDS[i];
+    if (s.cols[f] !== undefined) texts[f] = aajFieldKey(f, cells[s.cols[f]]);
+  }
+  b.s = texts; b.d = day; b.b = s.cfg.branch; b.a = day;
+  delete b.p;
+  return JSON.stringify(b);
 }
 
 /**
@@ -2461,9 +2569,14 @@ function aajCheckupRetry_(ctx) {
 }
 
 /**
- * Copies a tab's rows into the archive and clears them. Resumable: a marker says what was copied. Called by the tick
- * (when the tab still holds an older day) and by Set up (rows of an earlier day).
- * opts: { noWait, noFinal }
+ * Copies a tab's rows of its day into the archive, once, and marks each copied row in its hidden memory (aajMarkBase_). The rows STAY on
+ * the tab (owner, 17 Oct 2026: "please dont delete the aaj ki list google sheet entries daily, one of my assistant does it after recording
+ * the treatments in healthwire"; she does it the same evening or the next day): from the new day on they are kept rows (aajScanTab).
+ * Every row is copied under its own day and never again: a marked row is skipped on every later night, so is a row an older version of
+ * this script left behind after its clear. The patients of the day who are done and whose rows staff already took off the sheet are
+ * copied from the website's list of the last flush (aajOffSheetRows). Resumable: a marker says what was copied; the next minute only marks.
+ * Called by the tick (when the tab still holds an older day) and by Set up (rows of an earlier day).
+ * opts: { noWait, noFinal, noCheckups }
  */
 function aajArchiveTab_(ctx, s, opts) {
   opts = opts || {};
@@ -2479,18 +2592,22 @@ function aajArchiveTab_(ctx, s, opts) {
       for (i = 1; i < s.grid.length; i++) maxEdit = Math.max(maxEdit, Number(aajText(s.grid[i][s.hc.edited])) || 0);
       if (nowMs - maxEdit < AAJ.BUSY_MS) return;
     }
-    var named = 0;
-    for (i = 1; i < s.grid.length; i++) if (aajText(s.grid[i][s.cols.name]) !== '') named++;
-    var finalDone = false;
+    var finalDone = false, tried = false, list = null;
     if (!opts.noFinal && aajDateAdd(listDate, 1) === ctx.today && ctx.hhmm < AAJ.GRACE_UNTIL) {
+      tried = true;
       ctx.secret = ctx.secret || aajSecret_();
       if (!ctx.secret) aajLog_(ctx, tab, '', 'The last sync before the archive was skipped: no sync secret.');
       else {
         var syncOk = false;
-        try { syncOk = aajSyncTabs_(ctx, [s], listDate, { final: true, checkRemoved: false }).ok; }
-        catch (e) { aajLog_(ctx, tab, '', 'The last sync before the archive failed: ' + aajErrText_(e)); }
+        // without the hash the website sends the day's whole list: the patients taken off the sheet during the day are archived from it
+        st.del('hash:' + tab);
+        try {
+          var fr = aajSyncTabs_(ctx, [s], listDate, { final: true, checkRemoved: false });
+          syncOk = fr.ok;
+          list = fr.lists ? fr.lists[tab] || null : null;
+        } catch (e) { aajLog_(ctx, tab, '', 'The last sync before the archive failed: ' + aajErrText_(e)); }
         if (!syncOk && ctx.hhmm < AAJ.FINAL_RETRY_UNTIL) {
-          // the website did not take the last rows: they are not cleared yet. Try again next minute (until 02:30).
+          // the website did not take the last rows: they are not archived yet. Try again next minute (until 02:30).
           if (st.get('finalwait:' + tab) !== listDate) { aajLog_(ctx, tab, '', 'The last sync before the archive did not go through. Trying again every minute until ' + AAJ.FINAL_RETRY_UNTIL + '.'); st.set('finalwait:' + tab, listDate); }
           return;
         }
@@ -2499,19 +2616,17 @@ function aajArchiveTab_(ctx, s, opts) {
         aajReadTab_(s);
         if (s.problem) return;
       }
-    } else if (named > 0) {
-      aajLog_(ctx, tab, '', 'Rows for ' + listDate + ' archived without a final sync (the sync was off).');
     }
     // Without a final sync the website never saw what was typed since midnight: rows edited today are today's patients, not
-    // yesterday's. They stay on the tab (they are sent as today's rows) instead of being archived and cleared unseen.
+    // yesterday's. They stay unmarked (they are sent as today's rows) instead of being archived unseen under the old day.
     var keepFrom = (finalDone || opts.noFinal) ? 0 : aajDayStartMs_(ctx.today);
-    var all = aajArchiveRows_(s, keepFrom, listDate), rows = [], staleRows = [];
-    for (i = 0; i < all.length; i++) (all[i].stale ? staleRows : rows).push(all[i]);
-    if (staleRows.length) aajLog_(ctx, tab, '', staleRows.length + ' rows left over from an earlier day are cleared (they were archived on their own day).');
+    var found = aajArchiveRows_(s, keepFrom, listDate), rows = found.copy;
+    if (!tried && !opts.noFinal && rows.length) aajLog_(ctx, tab, '', 'Rows for ' + listDate + ' archived without a final sync (the sync was off).');
+    if (found.mark.length) aajLog_(ctx, tab, '', found.mark.length + ' rows left over from an earlier day are marked as archived (they were copied on their own day).');
     // a row whose visit or checkup the website deleted (or moved) is not one that "never reached the website": importing it again would
     // bring a wrong entry back as a Completed visit (RS8-C1). It is named in the log as deleted on the website instead.
     var unsynced = 0;
-    for (i = 0; i < rows.length; i++) if (rows[i].named && !rows[i].visit && !rows[i].gone) unsynced++;
+    for (i = 0; i < rows.length; i++) if (!rows[i].visit && !rows[i].gone) unsynced++;
     if (!finalDone && !opts.noFinal && unsynced > 0) {
       aajLog_(ctx, tab, '', unsynced + ' of the ' + rows.length + ' rows of ' + listDate + ' never reached the website (the last sync did not go through). They are in the archive: Admin > Import can bring them back.');
     }
@@ -2520,7 +2635,7 @@ function aajArchiveTab_(ctx, s, opts) {
     if (finalDone && unsynced > 0) {
       var lost = 0;
       for (i = 0; i < rows.length; i++) {
-        if (!rows[i].named || rows[i].visit || rows[i].gone) continue;
+        if (rows[i].visit || rows[i].gone) continue;
         lost++;
         if (lost <= 20) aajLog_(ctx, tab, aajText(rows[i].cells[s.cols.name]), 'Archived without reaching the website (the row still needed attention). It is in the archive under ' + listDate + ': correct it there and use Admin > Import.');
       }
@@ -2528,23 +2643,27 @@ function aajArchiveTab_(ctx, s, opts) {
     }
     var goneN = 0;
     for (i = 0; i < rows.length; i++) {
-      if (!rows[i].named || !rows[i].gone) continue;
+      if (!rows[i].gone) continue;
       goneN++;
       if (goneN <= 20) aajLog_(ctx, tab, aajText(rows[i].cells[s.cols.name]), 'Deleted on the website (or moved to another branch or day there): archived under ' + listDate + ' marked "' + AAJ_ARCH_GONE + '". Admin > Import skips it.');
     }
     if (goneN > 20) aajLog_(ctx, tab, '', (goneN - 20) + ' more rows of ' + listDate + ' had been deleted on the website.');
-    var withData = 0, dcols = aajDataCols_(s);
-    for (i = 1; i < s.grid.length; i++) if (aajRowHasData_(s.grid[i], dcols)) withData++;
-    if (withData > all.length) aajLog_(ctx, tab, '', (withData - all.length) + ' rows typed today stay on the tab as today\'s patients (the sync had been off since ' + listDate + ').');
-    if (rows.length) aajArchiveAppend_(ctx, s, listDate, rows);
-    if (rows.length && !opts.noCheckups) aajCheckupsFromArchive_(ctx, s, listDate, rows);
+    if (found.today) aajLog_(ctx, tab, '', found.today + ' rows typed today stay on the tab as today\'s patients (the sync had been off since ' + listDate + ').');
+    // the patients taken off the sheet during the day who are done on the website: copied from its list (only the last flush has it)
+    var off = finalDone ? aajOffSheetRows(s, list) : [];
+    if (!finalDone && !opts.noFinal) aajLog_(ctx, tab, '', 'Patients taken off the sheet during ' + listDate + ' are not copied to the archive (there was no last sync that night). The website has them.');
+    var copied = rows.concat(off);
+    if (copied.length) aajArchiveAppend_(ctx, s, listDate, copied);
+    if (copied.length && !opts.noCheckups) aajCheckupsFromArchive_(ctx, s, listDate, copied);
     var mrows = [];
-    for (i = 0; i < all.length; i++) mrows.push([all[i].r, all[i].key, all[i].fp]);
+    for (i = 0; i < rows.length; i++) mrows.push([rows[i].r, rows[i].key, rows[i].fp, listDate, rows[i].idh]);
+    for (i = 0; i < found.mark.length; i++) mrows.push([found.mark[i].r, found.mark[i].key, found.mark[i].fp, found.mark[i].day, found.mark[i].idh]);
     marker = { date: listDate, phase: 'copied', at: nowMs, rows: mrows };
     aajSaveMarker_(st, tab, marker);
-    if (rows.length) aajLog_(ctx, tab, '', rows.length + ' rows of ' + listDate + ' copied to "' + AAJ.ARCHIVE_NAME + '".');
+    if (rows.length) aajLog_(ctx, tab, '', rows.length + ' rows of ' + listDate + ' copied to "' + AAJ.ARCHIVE_NAME + '". They stay on the tab until you delete them.');
+    if (off.length) aajLog_(ctx, tab, '', off.length + ' patients of ' + listDate + ' who were done and already taken off the sheet are copied to "' + AAJ.ARCHIVE_NAME + '" from the website.');
   }
-  // the rows are copied: clear exactly those rows that are still as they were copied
+  // the rows are copied: each copied row still on the tab is marked in its hidden memory (never cleared, never copied again)
   aajReadTab_(s);
   if (s.problem) return;
   // A key can be on two rows: a "Duplicate of row N" copy that nobody deleted keeps the key of its original (RV-1). Each copied row is found
@@ -2555,7 +2674,7 @@ function aajArchiveTab_(ctx, s, opts) {
     var k = aajText(grid[i][s.hc.key]);
     if (k) (keyRows[k] = keyRows[k] || []).push(i + 1);
   }
-  var clear = [], recopy = [];
+  var keys = {}, bases = {}, used = {}, n = 0;
   for (i = 0; i < marker.rows.length; i++) {
     var m = marker.rows[i];
     var cr = m[0];
@@ -2568,41 +2687,29 @@ function aajArchiveTab_(ctx, s, opts) {
     }
     if (!cr || cr > grid.length) continue;
     taken[cr] = true;
-    var cur = aajRowFp_(grid[cr - 1], s);
-    if (cur === m[2]) clear.push(cr);
-    else if (m[1]) recopy.push({ r: cr, index: i });
+    var cells = grid[cr - 1];
+    if (s.cols.name === undefined || aajText(cells[s.cols.name]) === '') continue;
+    // edited since the copy: still the same person, it is marked (the archive has it as it was at the copy); another person typed over it in
+    // the meantime is a row of the new day and stays unmarked (a marker of an older version, without the person, marks only unchanged rows)
+    if (aajRowFp_(cells, s) !== m[2] && (!m[4] || aajHash32(aajIdText(cells, s.cols)) !== m[4])) continue;
+    // each kept row gets a key of its own: the second row of a key (a "Duplicate of row N" copy nobody deleted) and a row the website never
+    // saw get a new one, so a copy of a kept row made later is told apart from it (aajScanTab)
+    var kt = aajText(cells[s.hc.key]);
+    if (!AAJ_KEY_RE.test(kt) || used[kt]) { kt = aajNewKey_(); keys[cr] = kt; }
+    used[kt] = true;
+    bases[cr] = aajMarkBase_(cells, s, aajText(cells[s.hc.base]), m[3] || marker.date);
+    n++;
   }
-  if (recopy.length) {
-    var again = [];
-    for (i = 0; i < recopy.length; i++) {
-      var cells = grid[recopy[i].r - 1];
-      var base = aajParseBase(aajText(cells[s.hc.base]));
-      again.push({ r: recopy[i].r, key: aajText(cells[s.hc.key]), fp: aajRowFp_(cells, s), cells: cells, visit: base && base.v ? String(base.v) : '',
-        checkup: !!(base && base.k), gone: !!(base && (base.g || base.gk)) });
-    }
-    aajArchiveAppend_(ctx, s, marker.date, again);
-    for (i = 0; i < recopy.length; i++) marker.rows[recopy[i].index] = [again[i].r, again[i].key, again[i].fp];
-    aajSaveMarker_(st, tab, marker);
-    aajLog_(ctx, tab, '', recopy.length + ' rows were edited while they were being archived. They are copied again and cleared next minute.');
-  }
-  clear.sort(function (a, b) { return a - b; });
-  var j = 0, lastCol = grid[0].length;
-  while (j < clear.length) {
-    var j2 = j;
-    while (j2 + 1 < clear.length && clear[j2 + 1] === clear[j2] + 1) j2++;
-    s.sheet.getRange(clear[j], 1, j2 - j + 1, lastCol).clearContent();
-    s.sheet.getRange(clear[j], s.hc.status + 1, j2 - j + 1, 1).setFontColor(null);
-    j = j2 + 1;
-  }
-  if (recopy.length) return;
+  aajWriteRuns_(s.sheet, s.hc.key + 1, keys);
+  aajWriteRuns_(s.sheet, s.hc.base + 1, bases);
   st.set('listDate:' + tab, ctx.today);
   aajDeleteMarker_(st, tab);
   st.del('hash:' + tab);
   st.del('empty:' + tab);
   st.del('setupStamp:' + tab);
   s.grid = null;
-  aajSetHeaderLight_(ctx, s, aajHeaderText('plain', ctx.hhmm, 'new list for ' + ctx.today));
-  aajLog_(ctx, tab, '', 'New empty list for ' + ctx.today + '.');
+  aajSetHeaderLight_(ctx, s, aajHeaderText('plain', ctx.hhmm, 'new list for ' + ctx.today + (n ? ' (rows of earlier days stay)' : '')));
+  aajLog_(ctx, tab, '', 'New list for ' + ctx.today + '.' + (n ? ' The ' + n + ' rows of ' + marker.date + ' stay on the tab, marked as kept: delete them when they are entered in Healthwire.' : ''));
 }
 
 // ---------- editing, menu ----------
@@ -2692,13 +2799,14 @@ function aajHelp() {
     'The "Website" column says what happened to each row. A tick means the row is on the website. A warning or a cross says what to do.\n' +
     'A row WITH an Mr# is a patient. A row WITHOUT an Mr# whose Treatment says checkup is a checkup patient: it goes to the website\'s checkup list and no patient file is made. With any other Treatment the row says "add the Mr#": look it up in Healthwire.\n' +
     'A Healthwire Mr# that the website does not know yet is added as a patient (check it on the website). A website Mr# is 50000 or more; a number of 50000 or more that the website does not have is a typing mistake. A patient\'s old Mr# (10000-10012 are now 50000-50012) makes the row say which Mr# to use.\n' +
-    'Deleting a row (a wrong entry, or the patient did not come) removes that patient from the website\'s list too. The website keeps a patient who has an invoice, photos or treatment, and says so (in the row, or for a No show in the Aaj Sync log).\n' +
-    'Never delete more than three rows at once: the website puts them back and asks you to look.\n' +
+    'Deleting a row of today (a wrong entry, or the patient did not come) removes that patient from the website\'s list too. The website keeps a patient who has an invoice, photos or treatment, and says so (in the row, or for a No show in the Aaj Sync log).\n' +
+    'A patient who is done (Completed, Treatment or Cancelled) can be deleted from the sheet once the treatment is entered in Healthwire, one row or many at once: the website keeps the visit as it is and the row does not come back.\n' +
+    'Never delete four or more waiting patients at once: the website puts them back and asks you to look.\n' +
     'A row marked Completed completes the visit on the website.\n' +
     'Never delete or unhide the hidden columns next to Website.\n' +
     'To sort, click the small arrow in a heading of the list (the table\'s menu, or the filter button in row 1) and choose Sort A to Z or Z to A: that moves whole rows, the hidden columns too. Never select only some columns and sort them.\n' +
     'The time in the Website heading should be recent. If it is older than 10 minutes during clinic hours, tell Dr. Ali.\n' +
-    'At night the day is copied to the archive and the tabs start empty.',
+    'At night the day is copied to the archive. The rows stay on the tab, marked "kept on the sheet" (grey): delete them when they are entered in Healthwire, whenever you like. Deleting them never changes the website.',
     ui.ButtonSet.OK);
 }
 
@@ -2831,7 +2939,8 @@ function aajSetupLocked_(ui, ss) {
       aajWriteRuns_(s.sheet, s.hc.edited + 1, stamps);
       st.set('setupStamp:' + tab, setupMs);
     } else {
-      // an earlier day: archived under that day and cleared; no visits are made, and these checkups are not added to the checkup list
+      // an earlier day: archived under that day and marked (the rows stay on the tab as kept rows); no visits are made, and these checkups
+      // are not added to the checkup list
       st.set('listDate:' + tab, chosen);
       aajArchiveTab_(ctx, s, { noWait: true, noFinal: true, noCheckups: true });
     }

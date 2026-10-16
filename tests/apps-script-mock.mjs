@@ -407,22 +407,28 @@ function makeEnv(options = {}) {
 
 export function createEnv(options = {}) {
   const env = makeEnv(options);
-  const src = fs.readFileSync(options.file || SCRIPT_PATH, 'utf8');
   // The file is a plain Google script: its top-level `function`s and `var`s are its API. It is run inside a function scope
   // (a vm context's global object makes every variable lookup 3x slower) and those names are handed back as `env.ctx`.
-  const fnNames = [...src.matchAll(/^function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
-  const varNames = [...src.matchAll(/^var\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
-  const sb = env.sandbox;
-  const NL = String.fromCharCode(10);
-  // Sheets (the Advanced Sheets service) is a parameter only when it is turned on: otherwise the name does not exist, as in Google
-  const params = 'SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date, console, Logger' + (sb.Sheets ? ', Sheets' : '');
-  const wrapper = '(function (' + params + ') {' + NL + src + NL + ';var __api = {};' + NL
-    + fnNames.map((n) => '__api.' + n + ' = ' + n + ';').join(NL)
-    + varNames.map((n) => NL + 'Object.defineProperty(__api, ' + JSON.stringify(n) + ', { get: function () { return ' + n + '; }, set: function (v) { ' + n + ' = v; }, enumerable: true });').join('')
-    + NL + 'return __api;' + NL + '})';
-  const ctx = vm.runInNewContext(wrapper, {}, { filename: 'AajSync.js' })(sb.SpreadsheetApp, sb.PropertiesService, sb.LockService, sb.ScriptApp, sb.Utilities, sb.UrlFetchApp, sb.Date, sb.console, sb.Logger, sb.Sheets);
-  env.ctx = ctx;
-  env.source = src;
+  // env.load(file) runs another version of the script in the same fake Google (the sheet, its properties and triggers stay): what happens
+  // when Dr. Ali pastes a new version into Extensions > Apps Script.
+  env.load = (file) => {
+    const src = fs.readFileSync(file || SCRIPT_PATH, 'utf8');
+    const fnNames = [...src.matchAll(/^function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+    const varNames = [...src.matchAll(/^var\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+    const sb = env.sandbox;
+    const NL = String.fromCharCode(10);
+    // Sheets (the Advanced Sheets service) is a parameter only when it is turned on: otherwise the name does not exist, as in Google
+    const params = 'SpreadsheetApp, PropertiesService, LockService, ScriptApp, Utilities, UrlFetchApp, Date, console, Logger' + (sb.Sheets ? ', Sheets' : '');
+    const wrapper = '(function (' + params + ') {' + NL + src + NL + ';var __api = {};' + NL
+      + fnNames.map((n) => '__api.' + n + ' = ' + n + ';').join(NL)
+      + varNames.map((n) => NL + 'Object.defineProperty(__api, ' + JSON.stringify(n) + ', { get: function () { return ' + n + '; }, set: function (v) { ' + n + ' = v; }, enumerable: true });').join('')
+      + NL + 'return __api;' + NL + '})';
+    env.ctx = vm.runInNewContext(wrapper, {}, { filename: 'AajSync.js' })(sb.SpreadsheetApp, sb.PropertiesService, sb.LockService, sb.ScriptApp, sb.Utilities, sb.UrlFetchApp, sb.Date, sb.console, sb.Logger, sb.Sheets);
+    env.source = src;
+    return env.ctx;
+  };
+  env.load(options.file);
+  const ctx = new Proxy({}, { get: (t, k) => env.ctx[k] });      // always the version loaded last
 
   // call any function of the script; results are cloned so assert.deepEqual works across the two JavaScript realms
   env.call = (name, ...args) => {
