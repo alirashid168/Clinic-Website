@@ -9,6 +9,8 @@
 // time the Photo inbox is opened on a page, so no other screen's sample numbers change. Made-up people only.
 // The note box and old photos (20261017000600_photo_inbox_notes.sql): uploads (batches) with their kind and note, old photos stored with an
 // as-it-is copy and never sent to the stand-in Claude, the note's Mr# filing by itself (note_mr / old_note_mr), checked like the database.
+// A note with each photo (20261017000800_photo_item_notes.sql): sent with the photo or saved later (photoInboxItemNote, audited), in the
+// day's photos with the patients the notes name, and read with the upload's note by the re-checks of note_mr / old_note_mr.
 import { inboxPaths, citySlug, karachiDate, viewName, MAX_AUTO_PHOTOS, EDIT_VERSION, NOTE_MAX, ONE_VISIT_SEC, noteMrs, noteMonth, noteWords } from '../lib/photo-intake.js';
 import { nameNorm, nameSpelling } from '../lib/checkups.js';
 import { todayISO } from '../ui/dom.js';
@@ -64,12 +66,20 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   const setById = (id) => inbox().sets.find((s) => s.id === id);
   const batchOf = (id) => (id ? inbox().batches.find((b) => b.id === id) || null : null);
   const monthOf = (occasion) => { const m = /^Month ([0-9]{1,2})$/.exec(String(occasion || '')); return m ? Number(m[1]) : null; };
-  /** The occasion of a set of old photos (private.photo_inbox_set_occasion): the month its note names, else "Old photo". */
+  /** A note as stored (private.photo_inbox_clean_note): spaces and line breaks tidied, null when empty. */
+  const cleanNote = (t) => String(t ?? '').replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim() || null;
+  /**
+   * The occasion of a set of old photos (private.photo_inbox_set_occasion): the month its notes name (its upload's, when it is of one
+   * upload, and its photos' own), when they name one; else "Old photo".
+   */
   const setOccasion = (s) => {
-    const bs = [...new Set(itemsOf(s.id).map((i) => i.upload_batch).filter(Boolean))].map(batchOf).filter(Boolean);
-    const m = bs.length === 1 ? noteMonth(bs[0].note) : null;
-    return m ? `Month ${m}` : 'Old photo';
+    const its = itemsOf(s.id);
+    const bIds = [...new Set(its.map((i) => i.upload_batch).filter(Boolean))];
+    const months = new Set([...(bIds.length === 1 ? [noteMonth(batchOf(bIds[0])?.note)] : []), ...its.map((i) => noteMonth(i.note))].filter(Boolean));
+    return months.size === 1 ? `Month ${[...months][0]}` : 'Old photo';
   };
+  /** The Mr#s the photos of a set (or a list of photos) name in their own notes (private.photo_inbox_item_note_mrs). */
+  const itemKeys = (its) => [...new Set(its.flatMap((i) => noteMrs(i.note)))].sort();
   /** Where a set of old photos is filed (private.photo_inbox_old_target): the patient, no visit, their first branch, the note's occasion. */
   const oldTarget = (s, visitId, patientId) => {
     const pid = (visitId && db().visits.find((x) => x.id === visitId)?.patient_id) || patientId;
@@ -233,6 +243,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       time_source: i.time_source, clock_ok: i.clock_ok, camera: i.camera, file_seq_prefix: i.file_seq_prefix, file_seq: i.file_seq, branch_hint: i.branch_hint,
       uploaded_by: i.uploaded_by, uploaded_at: i.uploaded_at, upload_batch: i.upload_batch, edit_round: i.edit_round, ai_status: i.ai_status, ai_kind: i.ai_result?.kind || null, ai_view: i.ai_result?.view || null,
       ai_issues: i.ai_result?.issues || [], edit_status: i.edit_status, edit_basic: i.edit_basic, raw_photo_id: i.raw_photo_id, edited_photo_id: i.edited_photo_id,
+      note: i.note ?? null,
     }));
     const c = city(cityId);
     // the uploads of the day's photos: kind, note, the Mr#s it names and their patients; for old photos also the patients whose first name is
@@ -241,20 +252,30 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       city_id: branch(p.first_branch_id)?.city_id ?? null, ...extra });
     const words = (t) => nameNorm(t).split(' ').filter((w) => w && !['m', 'mr', 'mrs', 'ms', 'miss', 'dr', 'md', 'muhammad', 'mohammad', 'muhammed', 'mohammed', 'mohd', 'syed', 'syeda', 'sayed', 'hafiz', 'haji', 'baby', 'master', 'kid'].includes(w));
     const batchIds = [...new Set(items.map((i) => i.upload_batch).filter(Boolean))];
-    const batches = batchIds.map(batchOf).filter(Boolean).sort((a, b) => a.created_at.localeCompare(b.created_at)).map((b) => {
-      const mrs = noteMrs(b.note);
-      const nw = new Set(noteWords(b.note));
-      const named = b.kind === 'old' && nw.size ? db().patients.map((p) => {
+    // the patients whose first name (or more) is among a note's words: the most name words first, this city's first, at most 20
+    const namedBy = (noteText) => {
+      const nw = new Set(noteWords(noteText));
+      return nw.size ? db().patients.map((p) => {
         const ws = words(p.full_name).map(nameSpelling);
         return { p, first: ws.length && nw.has(ws[0]), hits: ws.filter((w) => nw.has(w)).length };
       }).filter((x) => x.first).sort((x, y) => (y.hits - x.hits) || (Number(branch(y.p.first_branch_id)?.city_id === Number(cityId)) - Number(branch(x.p.first_branch_id)?.city_id === Number(cityId)))
-        || x.p.mr_number.localeCompare(y.p.mr_number)).slice(0, 20).map((x) => pRow(x.p, { hits: x.hits })) : [];
+        || x.p.mr_number.localeCompare(y.p.mr_number)).slice(0, 20) : [];
+    };
+    const batches = batchIds.map(batchOf).filter(Boolean).sort((a, b) => a.created_at.localeCompare(b.created_at)).map((b) => {
+      const mrs = noteMrs(b.note);
+      const named = b.kind === 'old' ? namedBy(b.note).map((x) => pRow(x.p, { hits: x.hits })) : [];
       return { batch_id: b.id, kind: b.kind, note: b.note, created_at: b.created_at, created_by_name: db().staff.find((x) => x.id === b.created_by)?.full_name || null,
         mrs: [...mrs].sort(), mr_patients: db().patients.filter((p) => mrs.includes(String(p.mr_number).toLowerCase())).sort((x, y) => x.mr_number.localeCompare(y.mr_number)).map((p) => pRow(p)),
         name_patients: named };
     });
+    // (photo notes) the patients the photos' own notes name: by Mr# (any city), and for old photos by name
+    const raw = inbox().items.filter((i) => i.city_id === Number(cityId) && i.photo_day === day && i.note);
+    const noteMrSet = new Set(raw.flatMap((i) => noteMrs(i.note)));
+    const byName = new Set(raw.filter((i) => batchOf(i.upload_batch)?.kind === 'old').flatMap((i) => namedBy(i.note).map((x) => x.p.id)));
+    const notePatients = db().patients.filter((p) => noteMrSet.has(String(p.mr_number).toLowerCase()) || byName.has(p.id))
+      .sort((x, y) => String(x.mr_number).localeCompare(String(y.mr_number))).map((p) => pRow(p));
     return { city: { id: c.id, name: c.name, slug: citySlug(c.name) }, day, hold_hours: hold() / (60 * MIN), branches: branches.map((b) => ({ id: b.id, code: b.code, name: b.name })),
-      visits, sets, items, batches };
+      visits, sets, items, batches, note_patients: notePatients };
   };
   const claimable = (i, canHeic, lease) => (i.edit_status === 'pending' || (i.edit_status === 'failed' && i.edit_attempts < 3) || (canHeic && i.edit_status === 'needs_safari' && i.edit_attempts < 3))
     && (!i.edit_lease_until || Date.parse(i.edit_lease_until) < Date.now() || i.edit_lease_by === lease);
@@ -347,7 +368,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         const sha = String(x.sha256 || '').toLowerCase();
         if (!/^[0-9a-f]{64}$/.test(sha)) fail('PHOTO_BAD_INPUT: a photo\'s fingerprint is not right.');
         const existing = inbox().items.find((i) => i.sha256 === sha);
-        if (existing) { out.push({ sha256: sha, item_id: existing.id, state: 'duplicate', city_id: existing.city_id, photo_day: existing.photo_day }); continue; }
+        if (existing) { out.push({ sha256: sha, item_id: existing.id, state: 'duplicate', city_id: existing.city_id, photo_day: existing.photo_day, note: existing.note ?? null }); continue; }
         if (!['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'].includes(x.ext) || !['image/jpeg', 'image/png', 'image/heic', 'image/heif', 'image/webp'].includes(x.mime_type)) {
           fail('PHOTO_BAD_INPUT: only JPEG, PNG, HEIC and WebP photos go into the Photo inbox.');
         }
@@ -375,6 +396,9 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         // (an old photo's as-it-is copy, next to it at edited/<sha>.jpg)
         const edited = old && x.edited ? paths.edited : null;
         if (edited && !store().has(edited)) fail('PHOTO_FILE_MISSING: the copy of an old photo did not finish uploading. Choose it again.');
+        // (photo notes) the photo's own note
+        const note = cleanNote(x.note);
+        if (note && note.length > NOTE_MAX) fail('PHOTO_BAD_INPUT: a photo\'s note is longer than 500 characters.');
         const it = { id: uid(), sha256: sha, city_id: Number(x.city_id), photo_day: x.photo_day, storage_path: path, thumb_path: x.thumb && store().has(thumbPath) ? thumbPath : null,
           file_name: String(x.file_name || 'photo').slice(0, 200), mime_type: x.mime_type, byte_size: Number(x.byte_size),
           width: x.width || null, height: x.height || null, taken_at: x.taken_at || null, time_source: x.time_source || 'none', clock_ok: clockOk,
@@ -382,11 +406,25 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
           branch_hint: x.branch_hint ?? null, uploaded_by: me().id, uploaded_at: nowIso(), upload_batch: x.upload_batch || null, set_id: null, position: null,
           raw_photo_id: null, edited_photo_id: null, ai_status: old ? 'skipped' : 'pending', ai_result: null, ai_attempts: 0, ai_call_id: null,
           edit_status: edited ? 'done' : 'pending', edit_basic: false, edit_version: edited ? EDIT_VERSION : null, edit_attempts: 0, edit_round: 1,
-          edit_lease_until: null, edit_lease_by: null, edited_path: edited, edited_thumb_path: edited && store().has(paths.editedThumb) ? paths.editedThumb : null };
+          edit_lease_until: null, edit_lease_by: null, edited_path: edited, edited_thumb_path: edited && store().has(paths.editedThumb) ? paths.editedThumb : null, note };
         inbox().items.push(it);
-        out.push({ sha256: sha, item_id: it.id, state: 'added', city_id: it.city_id, photo_day: it.photo_day });
+        out.push({ sha256: sha, item_id: it.id, state: 'added', city_id: it.city_id, photo_day: it.photo_day, note });
       }
       return out;
+    },
+    /** The note of one photo, typed after it was registered (public.photo_inbox_item_note): any photo of a folder the person may use; audited. */
+    async photoInboxItemNote(itemId, note) {
+      require(null);
+      const it = inbox().items.find((i) => i.id === itemId);
+      if (!it) fail('PHOTO_BAD_INPUT: that photo is not in the Photo inbox.');
+      require(it.city_id);
+      const text = cleanNote(note);
+      if (text && text.length > NOTE_MAX) fail('PHOTO_BAD_INPUT: the note is longer than 500 characters.');
+      if ((it.note ?? null) === text) return { item_id: it.id, note: text, changed: false };
+      const before = { id: it.id, note: it.note ?? null, set_id: it.set_id };
+      it.note = text;
+      audit('photo_inbox_items', 'PHOTO_NOTE', { id: it.id, note: text, set_id: it.set_id }, { before });
+      return { item_id: it.id, note: text, changed: true };
     },
     async photoInboxOverview(cityId) {
       require(cityId);
@@ -438,7 +476,9 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
           ok = ft.length > 0 && gt.length > 0 && its.every(timeOk)
             && its.every((i) => fits.every((f) => f.camera === i.camera && (f.branch_hint ?? 0) === (i.branch_hint ?? 0) && f.uploaded_by === i.uploaded_by))
             && fits.length + its.length <= MAX_AUTO_PHOTOS && Math.max(fl, gl) - Math.min(fa, ga) <= 900 * 1000
-            && ((ga >= fa && gl <= fl) || (ga >= fl && ga - fl <= 180 * 1000) || (gl <= fa && fa - gl <= 180 * 1000));
+            && ((ga >= fa && gl <= fl) || (ga >= fl && ga - fl <= 180 * 1000) || (gl <= fa && fa - gl <= 180 * 1000))
+            // (photo notes) never when a photo's own note names another patient than the set's
+            && its.every((i) => noteMrs(i.note).every((k) => k === String(patient(join.patient_id)?.mr_number ?? '').toLowerCase()));
         }
         let s;
         if (ok) s = join;
@@ -474,21 +514,23 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         if (g.auto && Number(plan.matcher_version) >= 1 && ruleKind !== 'time') {
           // (filed by the note: one upload of that kind with a note naming exactly one Mr# of exactly one patient; checked like the database)
           const v = g.auto.visit_id ? db().visits.find((x) => x.id === g.auto.visit_id) : null;
+          // (photo notes) the notes are the photos' own notes + the upload's note
           const its = itemsOf(s.id);
           const bIds = [...new Set(its.map((i) => i.upload_batch || '-'))];
           const bt = bIds.length === 1 ? batchOf(bIds[0]) : null;
-          const keys = noteMrs(bt?.note);
+          const own = itemKeys(its);
+          const keys = [...new Set([...noteMrs(bt?.note), ...own])].sort();
           const pats = db().patients.filter((p) => keys.includes(String(p.mr_number).toLowerCase()));
           const timed = inbox().items.filter((i) => bt && i.upload_batch === bt.id && i.photo_day === day && i.time_source === 'exif' && i.taken_at).map((i) => Date.parse(i.taken_at));
           const why = s.manual || s.ai_flag ? 'the photos are not clear enough'
-            : !bt || !bt.note ? 'the photos are not of one upload with a note'
-              : bt.kind !== (ruleKind === 'note_mr' ? 'day' : 'old') ? 'the upload is not of that kind'
+            : bIds.length !== 1 || (!bt?.note && !its.some((i) => i.note)) ? 'the photos are not of one upload with a note'
+              : (bt?.kind || 'day') !== (ruleKind === 'note_mr' ? 'day' : 'old') ? 'the upload is not of that kind'
                 : keys.length !== 1 ? 'the note does not name exactly one Mr#'
                   : pats.length !== 1 ? 'no single patient has the Mr# of the note'
                     : g.auto.patient_id !== pats[0].id ? 'the patient is not the one the note names'
                       : ruleKind === 'note_mr' && (!v || v.patient_id !== pats[0].id || !inCity(v)) ? 'the note\'s patient has no visit that day in this city'
                         : ruleKind === 'note_mr' && s.branch_hint && v.branch_id !== s.branch_hint ? 'the visit is at another branch'
-                          : ruleKind === 'note_mr' && timed.length && Math.max(...timed) - Math.min(...timed) > ONE_VISIT_SEC * 1000 ? 'the upload is more than one visit'
+                          : ruleKind === 'note_mr' && !own.includes(keys[0]) && timed.length && Math.max(...timed) - Math.min(...timed) > ONE_VISIT_SEC * 1000 ? 'the upload is more than one visit'
                             : ruleKind === 'old_note_mr' && s.kind !== 'old' ? 'the photos are not old photos'
                               : !['note_mr', 'old_note_mr'].includes(ruleKind) ? 'unknown rule' : null;
           if (!why) {
@@ -511,8 +553,11 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
             : given !== null && v.started_at && Math.abs(given - at(v.started_at)) <= 1000 ? at(v.started_at) : at(v.started_at || v.checked_in_at);
           const first = s.first_at ? Date.parse(s.first_at) : NaN;
           const last = s.last_at ? Date.parse(s.last_at) : NaN;
+          const own = itemKeys(itemsOf(s.id));
           const why = !v ? 'no such visit'
             : !s.time_ok || s.manual || s.ai_flag || s.photo_count > MAX_AUTO_PHOTOS ? 'the photos are not clear enough'
+              // (photo notes) the photos' own notes name another patient (or two) than the one the time fits
+              : own.length && own.some((k) => k !== String(patient(v.patient_id)?.mr_number ?? '').toLowerCase()) ? 'the photos\' own notes name another patient'
               : v.visit_date !== day || branch(v.branch_id)?.city_id !== Number(cityId) ? 'the visit is not of this city and day'
                 : s.branch_hint && v.branch_id !== s.branch_hint ? 'the visit is at another branch'
                   : v.legacy_source || !['in_treatment', 'completed'].includes(v.status) ? 'the visit is not in treatment or completed'

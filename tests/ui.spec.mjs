@@ -10384,6 +10384,87 @@ await step('Old photos whose note names two Mr#s ("9815 9818"): "Which patient?"
 });
 await pboxNote.close();
 
+// ------------------------------------------------------------- a picture and a text box with each photo (owner, 17 Oct 2026)
+// "i want picutres in thumbnail here and text box with each photo, so we can put the details of it with the picture".
+const pboxItem = await newPage();
+const itemNoteOf = (pg, name) => pg.getByLabel(`Details for ${name} (optional)`);
+await step('Upload list: every photo has its small picture and its own text box; a note typed on one photo before the upload starts is under its picture on "Which patient?" (and puts that patient first)', async () => {
+  await loginAs(pboxItem, 'Assistant');
+  await pboxItem.goto(BASE + '#/staff/photo-inbox');
+  await pboxItem.waitForSelector('h1:text-is("Photo inbox")');
+  // (the upload is held at its start until the note is typed: the note is typed before any photo is registered)
+  await pboxItem.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const start = state.data.photoInboxStartBatch.bind(state.data);
+    state.data.photoInboxStartBatch = async (...a) => { await new Promise((go) => { window.__startUpload = go; }); return start(...a); };
+  });
+  await inboxInput(pboxItem).setInputFiles(await makePhotos(pboxItem, DAY_PHOTOS));
+  await itemNoteOf(pboxItem, 'IMG_0110.JPG').fill('Fatima front view');
+  assert.equal(await pboxItem.locator('.inbox-file', { hasText: 'IMG_0110.JPG' }).locator('.inbox-file-note-state').innerText(), 'Kept: it is saved with the photo.');
+  assert.equal(await pboxItem.locator('.inbox-file-note').count(), 6, 'a text box with each photo');
+  await pboxItem.evaluate(() => window.__startUpload());
+  await pboxItem.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxItem.locator('.inbox-done').innerText(), /^6 photos uploaded\. 1 set filed automatically\. 2 sets wait/);
+  const pics = await pboxItem.evaluate(() => [...document.querySelectorAll('.inbox-file .inbox-file-pic img')].map((img) => [img.naturalWidth, img.naturalHeight, img.src.slice(0, 5)]));
+  assert.equal(pics.length, 6, 'a picture for every photo (the screenshot too)');
+  assert.ok(pics.every(([w, ht, src]) => w > 0 && Math.max(w, ht) <= 160 && src === 'blob:'), `small pictures from the page's own copies (${JSON.stringify(pics)})`);
+  await shot(pboxItem, '68-photo-inbox-pictures');
+  await pboxItem.setViewportSize({ width: 375, height: 812 });
+  await pboxItem.waitForTimeout(300);
+  const over = await pboxItem.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  assert.ok(over <= 0, `the upload list scrolls sideways by ${over}px at 375 px`);
+  await shot(pboxItem, '69-photo-inbox-pictures-phone');
+  await pboxItem.setViewportSize({ width: 1280, height: 900 });
+  const sent = await pboxItem.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const karachi = (await state.data.photoInboxCities()).find((c) => c.name === 'Karachi');
+    const lib = await import('/js/lib/photo-intake.js');
+    return (await state.data.photoInboxDay(karachi.id, lib.karachiDate(Date.now() - 86400000))).items.filter((i) => i.note).map((i) => `${i.file_name}: ${i.note}`);
+  });
+  assert.deepEqual(sent, ['IMG_0110.JPG: Fatima front view'], 'the note was registered with that photo only');
+  await pboxItem.getByRole('tab', { name: /Which patient/ }).click();
+  const card = pboxItem.locator('.inbox-card', { hasText: '7:15 PM' });
+  await card.waitFor();
+  assert.deepEqual(await card.locator('.inbox-thumb-note').allInnerTexts(), ['Fatima front view'], 'the note is under its picture');
+  const cands = await card.locator('.inbox-candidate').allInnerTexts();
+  assert.match(cands[0], /^Fatima Noor · Mr# 9815 .*name in the note/, 'the patient a photo\'s note names comes first');
+  await shot(pboxItem, '70-photo-inbox-photo-note-card');
+});
+await pboxItem.close();
+const pboxItem2 = await newPage();
+await step('A photo note "Mr# 9815" typed after the upload files the set to Fatima Noor by itself; Filed shows the note under its picture', async () => {
+  await loginAs(pboxItem2, 'Assistant');
+  await pboxItem2.goto(BASE + '#/staff/photo-inbox');
+  await pboxItem2.waitForSelector('h1:text-is("Photo inbox")');
+  await inboxInput(pboxItem2).setInputFiles(await makePhotos(pboxItem2, DAY_PHOTOS.slice(3, 5)));
+  await pboxItem2.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxItem2.locator('.inbox-done').innerText(), /^2 photos uploaded\. 0 sets filed automatically\. 1 set waits/);
+  await itemNoteOf(pboxItem2, 'IMG_0111.JPG').fill('Mr# 9815');
+  await pboxItem2.waitForFunction(() => [...document.querySelectorAll('.inbox-file')].find((li) => li.textContent.includes('IMG_0111.JPG'))?.querySelector('.inbox-file-note-state')?.textContent === 'Saved', null, { timeout: 15000 });
+  // (the day is matched again a moment after the note is saved)
+  await pboxItem2.waitForFunction(async () => {
+    const { state } = await import('/js/state.js');
+    const karachi = (await state.data.photoInboxCities()).find((c) => c.name === 'Karachi');
+    const lib = await import('/js/lib/photo-intake.js');
+    return (await state.data.photoInboxDay(karachi.id, lib.karachiDate(Date.now() - 86400000))).sets.some((s) => s.status === 'filed' && s.mr_number === '9815');
+  }, null, { timeout: 20000, polling: 500 });
+  await pboxItem2.getByRole('tab', { name: 'Filed' }).click();
+  const filed = pboxItem2.locator('.inbox-filed', { hasText: 'Fatima Noor' });
+  await filed.waitFor();
+  assert.match(await filed.innerText(), /Automatic: the note with these photos names Mr# 9815, on the DHA list that day/);
+  assert.deepEqual(await filed.locator('.inbox-thumb-note').allInnerTexts(), ['Mr# 9815']);
+  const audit = await pboxItem2.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const karachi = (await state.data.photoInboxCities()).find((c) => c.name === 'Karachi');
+    const lib = await import('/js/lib/photo-intake.js');
+    const items = (await state.data.photoInboxDay(karachi.id, lib.karachiDate(Date.now() - 86400000))).items;
+    return items.filter((i) => i.note).map((i) => i.file_name);
+  });
+  assert.deepEqual(audit, ['IMG_0111.JPG']);
+  await shot(pboxItem2, '71-photo-inbox-photo-note-filed');
+});
+await pboxItem2.close();
+
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }
 console.log(`${passed} checks passed`);

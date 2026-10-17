@@ -8,10 +8,15 @@
 // The note box (optional, with each upload) helps the matching: the Mr#s and names in it come first on "Which patient?", and a single Mr#
 // files the photos by itself. "Old photos (already edited)": any past date, not matched by time, not sent to Claude (an as-it-is copy is
 // the edited photo), filed to the patient of the note's Mr# or chosen on "Which patient?" (search all patients).
+// A small picture and a text box with each photo of the upload list (owner, 17 Oct 2026: "i want picutres in thumbnail here and text box
+// with each photo, so we can put the details of it with the picture"): the picture is drawn from the small copy made for the upload (one
+// photo at a time; its object URL is given back when the list is cleared); the photo's note goes with it when it is registered, or is
+// saved by itself afterwards (20261017000800_photo_item_notes.sql). The photos' notes and the upload's note help the matching together,
+// and each photo's note is shown under its picture on "Which patient?" and Filed.
 import { h, mount, toast, friendlyError, modal, field, select, empty, tabs, announce, busy, todayISO, shortDate } from '../../ui/dom.js';
 import { state, can, isAdmin, branchName } from '../../state.js';
 import { readExif, captureTime, cameraClocks, fileSeq, sniffType, planDay, planUnchanged, waitSentence, karachiClock, dayLabel, karachiDate, isConnectionProblem, EDIT_VERSION,
-  oldPhotoTime, noteMrs, inboxPaths, NOTE_MAX, OLD_CANDIDATES } from '../../lib/photo-intake.js';
+  oldPhotoTime, setNoteKeys, inboxPaths, NOTE_MAX, OLD_CANDIDATES } from '../../lib/photo-intake.js';
 import { sha256Hex, readHead, makeThumb, decode, aiCopy, renderEdit, renderAsIs, canHeic } from '../../ui/photo-edit.js';
 import { STATUS_LABELS } from './common.js';
 
@@ -19,6 +24,7 @@ const AI_CHUNK = 8; // photos per Claude call (supabase/functions/photo-ai/core.
 const UPLOADS_AT_ONCE = 3;
 const RETRY_WAITS = [2, 5, 15, 30, 60]; // seconds, after a connection problem
 const REMATCH_MS = 3 * 60 * 1000;
+const NOTE_SAVE_MS = 800; // a photo's note is saved this long after the last key (at once when its box is left)
 const CITY_KEY = (id) => `photo-inbox-city:${id}`;
 // The token that holds photos for editing: one per browser tab (this module is loaded once per tab), so leaving the Photo inbox and
 // coming back in the same tab takes up the photos where the worker stopped, while another tab or device is another worker.
@@ -219,7 +225,95 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     h('button', { type: 'button', class: 'inbox-thumb-btn', 'aria-label': `Open photo ${n + 1} of ${items.length}${i.taken_at ? `, taken ${dateTimeText(i.taken_at)}` : ''}`,
       onclick: () => openPhoto(i, `Photo ${n + 1} of ${items.length}`) },
     thumbSrc(links, i) ? h('img', { src: thumbSrc(links, i), alt: '', loading: 'lazy' }) : h('span', { class: 'inbox-noprev' }, /hei[cf]/i.test(i.mime_type || '') ? 'HEIC photo: no preview in this browser' : 'No preview')),
+    // (the photo's own note, under its picture)
+    i.note ? h('p', { class: 'inbox-thumb-note', title: i.note }, i.note) : null,
     split && n > 0 ? h('button', { type: 'button', class: 'btn btn-small inbox-split-here', 'aria-label': `Next patient starts at photo ${n + 1}`, onclick: () => split(i) }, 'Next patient starts here') : null)));
+
+  // ---------------------------------------------------------------- the note with each photo of the upload list
+  // Typed before the photo is registered, it goes with it (photo_inbox_add_items); typed later, it is saved by itself (photo_inbox_item_note)
+  // NOTE_SAVE_MS after the last key (at once when the box is left), tried again after a lost connection like the rest of the page. The
+  // note of a photo that is not registered yet is kept by the photo's fingerprint while the page is open: choosing the same photos again
+  // (after a lost connection) brings it back. Saving a note matches that day again a moment later.
+  const pendingNotes = new Map(); // sha256 -> the text typed for a photo whose note is not saved yet
+  const unsaved = new Set(); // rows of registered photos whose note is not saved yet (the page asks before it is closed)
+  const previews = new Set(); // the object URLs of the upload list's pictures
+  const dropPreviews = () => { for (const u of previews) URL.revokeObjectURL(u); previews.clear(); };
+  const noteOf = (r) => r.noteBox.value.replace(/\s+/g, ' ').trim().slice(0, NOTE_MAX) || null;
+  const noteState = (r, text, bad = false) => { r.noteState.textContent = text; r.noteState.classList.toggle('inbox-file-note-bad', bad); };
+  const rematchTimers = new Map();
+  function rematchSoon(cityId, day) {
+    if (!day || signal?.aborted) return;
+    const key = `${cityId}|${day}`;
+    clearTimeout(rematchTimers.get(key));
+    rematchTimers.set(key, setTimeout(async () => {
+      rematchTimers.delete(key);
+      if (signal?.aborted || city.id !== cityId) return;
+      if (uploading || matching.has(key)) { rematchSoon(cityId, day); return; }
+      try { await matchDay(day); refreshCounts(); } catch { /* the matching every 3 minutes tries again */ }
+    }, 2500));
+  }
+  async function saveNote(r) {
+    clearTimeout(r.noteTimer);
+    if (!r.itemId) return;
+    const want = noteOf(r);
+    // (a photo uploaded before, whose note this page does not know: an empty box changes nothing)
+    if (want === r.savedNote || (r.savedNote === undefined && want === null)) { unsaved.delete(r); return; }
+    if (r.noteSaving) { r.noteAgain = true; return; }
+    r.noteSaving = true;
+    unsaved.add(r);
+    noteState(r, 'Saving…');
+    try {
+      await withRetry(() => d.photoInboxItemNote(r.itemId, want), signal);
+      r.savedNote = want;
+      if (r.sha && noteOf(r) === want) pendingNotes.delete(r.sha);
+      noteState(r, want ? 'Saved' : '');
+      rematchSoon(r.cityId, r.day);
+    } catch (e) {
+      if (isConnectionProblem(e) && !signal?.aborted) {
+        noteState(r, 'Not saved yet (connection): it is tried again in a minute.', true);
+        r.noteTimer = setTimeout(() => saveNote(r), 60000);
+      } else {
+        unsaved.delete(r);
+        noteState(r, friendlyError(e), true);
+      }
+    } finally {
+      r.noteSaving = false;
+      if (noteOf(r) === r.savedNote) unsaved.delete(r);
+      if (r.noteAgain) { r.noteAgain = false; saveNote(r); }
+    }
+  }
+  function noteTyped(r) {
+    r.noteTouched = true;
+    if (r.sha) { if (noteOf(r)) pendingNotes.set(r.sha, r.noteBox.value); else pendingNotes.delete(r.sha); }
+    if (r.itemId) {
+      unsaved.add(r);
+      noteState(r, '');
+      clearTimeout(r.noteTimer);
+      r.noteTimer = setTimeout(() => saveNote(r), NOTE_SAVE_MS);
+    } else noteState(r, noteOf(r) ? 'Kept: it is saved with the photo.' : '');
+  }
+  /** The photo is registered (or found uploaded before): its note is saved now when it differs from what the database has. */
+  function noteRegistered(r, { itemId, cityId, day, note }) {
+    r.itemId = itemId;
+    r.cityId = cityId;
+    r.day = day;
+    if (note !== undefined) {
+      // (a photo uploaded before, with a note, and nothing typed here: its note is shown)
+      if (note && !r.noteTouched && !noteOf(r)) r.noteBox.value = note;
+      r.savedNote = note;
+    }
+    if (r.sha && noteOf(r) === r.savedNote) pendingNotes.delete(r.sha);
+    if (noteOf(r) !== r.savedNote && (r.noteTouched || noteOf(r))) saveNote(r);
+    else if (r.savedNote) noteState(r, 'Saved');
+  }
+  const noteLeaveWarning = (e) => { if (unsaved.size) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', noteLeaveWarning);
+  signal?.addEventListener('abort', () => {
+    window.removeEventListener('beforeunload', noteLeaveWarning);
+    for (const r of [...unsaved]) saveNote(r); // (what was typed a moment ago is sent now)
+    for (const t of rematchTimers.values()) clearTimeout(t);
+    dropPreviews();
+  }, { once: true });
 
   // ---------------------------------------------------------------- Upload
   async function renderUpload() {
@@ -265,6 +359,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     const note = noteBox.value.replace(/\s+/g, ' ').trim().slice(0, NOTE_MAX) || null;
     const batch = crypto.randomUUID();
     const pickedAt = Date.now();
+    dropPreviews(); // (the pictures of the list before)
     const summary = h('p', { class: 'inbox-summary', 'aria-live': 'polite' }, `Reading ${plural(files.length, 'photo')}…`);
     const bar = h('progress', { max: String(files.length), value: '0', 'aria-label': 'Upload progress' });
     const status = h('p', { class: 'inbox-progress', role: 'status' });
@@ -275,13 +370,34 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     try { wake = await navigator.wakeLock?.request?.('screen'); } catch { /* not offered: the screen may sleep */ }
     const leaveWarning = (e) => { e.preventDefault(); e.returnValue = ''; };
     window.addEventListener('beforeunload', leaveWarning);
-    const rows = files.map((file) => ({ file, li: h('li', {}, h('span', { class: 'inbox-file-name' }, file.name), ' ', h('span', { class: 'inbox-file-state' }, 'Waiting')), state: 'waiting' }));
+    // Each row: the photo's small picture (a tile with its name until it is read, or when this browser cannot show it), its name and
+    // state, and its own note box.
+    const rows = files.map((file) => {
+      const r = { file, state: 'waiting', itemId: null, savedNote: undefined, cityId: cityNow.id, day: null, sha: null };
+      r.tile = h('div', { class: 'inbox-file-pic', 'aria-hidden': 'true' }, h('span', { class: 'inbox-file-noprev' }, file.name));
+      r.noteBox = h('input', { type: 'text', class: 'inbox-file-note', maxlength: String(NOTE_MAX), placeholder: 'Details: name, Mr#, month', autocomplete: 'off',
+        'aria-label': `Details for ${file.name} (optional)`, oninput: () => noteTyped(r), onchange: () => { if (r.itemId) saveNote(r); } });
+      r.noteState = h('span', { class: 'inbox-file-note-state' });
+      r.li = h('li', { class: 'inbox-file' }, r.tile, h('div', { class: 'inbox-file-main' },
+        h('div', { class: 'inbox-file-head' }, h('span', { class: 'inbox-file-name' }, file.name), ' ', h('span', { class: 'inbox-file-state' }, 'Waiting')),
+        r.noteBox, r.noteState));
+      return r;
+    });
     list.append(...rows.map((r) => r.li));
     const setRow = (r, stateName, note = '') => {
       r.state = stateName;
       r.li.querySelector('.inbox-file-state').textContent = note || stateName;
       r.li.className = `inbox-file inbox-file-${stateName}`;
     };
+    /** The row's picture, from the small copy's preview (nothing is shown when there is none: the tile keeps the file's name). */
+    const showPreview = (r, blob, heic) => {
+      if (blob && !signal?.aborted) {
+        const url = URL.createObjectURL(blob);
+        previews.add(url);
+        mount(r.tile, h('img', { src: url, alt: '', decoding: 'async' }));
+      } else if (heic) mount(r.tile, h('span', { class: 'inbox-file-noprev' }, h('strong', {}, 'HEIC'), ' ', r.file.name));
+    };
+    const noNote = (r) => { r.noteBox.hidden = true; noteState(r, ''); };
     try {
       // 0. the upload, its kind and its note (before the update of the notes: today's photos without a note upload as before)
       try {
@@ -297,14 +413,20 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
         if (n % 10 === 0) announce(status.textContent);
         const head = await readHead(r.file);
         const sn = sniffType(head.subarray(0, 12), r.file.name, r.file.size, r.file.type);
-        if (!sn.ok) { setRow(r, 'rejected', sn.reason); continue; }
+        if (!sn.ok) { setRow(r, 'rejected', sn.reason); noNote(r); continue; }
         const exif = readExif(head);
         let t = captureTime({ exif, lastModified: r.file.lastModified, pickedAt, uploadedAt: Date.now() });
         if (old) t = oldPhotoTime(t, Date.now());
         const sha = await sha256Hex(r.file);
-        if (seen.has(sha)) { setRow(r, 'already', 'The same photo was chosen twice'); continue; }
+        if (seen.has(sha)) { setRow(r, 'already', 'The same photo was chosen twice'); noNote(r); continue; }
         seen.set(sha, r);
-        const th = await makeThumb(r.file);
+        // (its note: what was typed in the row already, else what was typed for this photo before on this page)
+        r.sha = sha;
+        if (noteOf(r)) pendingNotes.set(sha, r.noteBox.value);
+        else if (pendingNotes.has(sha)) { r.noteBox.value = pendingNotes.get(sha); r.noteTouched = true; }
+        // (the small copy for the upload and, from it, the row's picture; a photo this browser cannot read keeps its tile)
+        const th = await makeThumb(r.file, { preview: true });
+        showPreview(r, th.preview, /hei[cf]/.test(sn.ext));
         const seq = fileSeq(r.file.name);
         r.meta = { sha, ext: sn.ext, mime: sn.mime, t, thumb: th.blob, width: th.width, height: th.height, seq };
         let rowNote = 'Ready';
@@ -342,7 +464,10 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
       const knownBy = new Map(known.map((k) => [k.sha256, k]));
       for (const r of ready) {
         const k = knownBy.get(r.meta.sha);
-        if (k) setRow(r, 'already', `Already uploaded (${k.city_name}, ${dayLabel(k.photo_day)})`);
+        if (!k) continue;
+        setRow(r, 'already', `Already uploaded (${k.city_name}, ${dayLabel(k.photo_day)})`);
+        // (a note typed for it is saved on that photo)
+        if (k.item_id) noteRegistered(r, { itemId: k.item_id, cityId: k.city_id, day: k.photo_day, note: undefined });
       }
       const todo = ready.filter((r) => r.state === 'ready');
       const totalBytes = todo.reduce((s, r) => s + r.file.size, 0);
@@ -363,6 +488,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
       const register = async (force = false) => {
         while (toRegister.length && (force || toRegister.length >= 20)) {
           const part = toRegister.splice(0, 20);
+          for (const r of part) r.sentNote = noteOf(r);
           let res;
           try {
             res = await withRetry(() => d.photoInboxAddItems(part.map((r) => ({
@@ -371,6 +497,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
             camera: r.meta.t.camera, orientation: r.meta.t.orientation, file_seq_prefix: r.meta.seq?.prefix ?? null, file_seq: r.meta.seq?.seq ?? null,
             branch_hint: hint, upload_batch: batch, thumb: !!r.thumbPath,
             edited: !!r.edited, edited_thumb: !!r.editedThumb, edit_version: r.edited ? EDIT_VERSION : null,
+            note: r.sentNote,
             }))), signal);
           } catch (e) { toRegister.unshift(...part); throw e; }
           for (const x of res) {
@@ -378,6 +505,9 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
             if (!r) continue;
             if (x.state === 'added') { added.push(r); setRow(r, 'uploaded', old || r.meta.t.time_ok ? 'Uploaded' : 'Uploaded (no camera time: it waits on "Which patient?")'); }
             else setRow(r, 'already', `Already uploaded (${cities.find((c) => c.id === x.city_id)?.name || ''}, ${dayLabel(x.photo_day)})`);
+            // (the note that came with it; a database without the photo notes answers none: the note is then saved by itself)
+            const sent = 'note' in x ? (x.note ?? null) : undefined;
+            noteRegistered(r, { itemId: x.item_id, cityId: x.city_id, day: x.photo_day, note: sent });
           }
         }
       };
@@ -414,6 +544,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
             try {
               const up = await d.photoInboxUpload({ citySlug: cityNow.slug, day: r.meta.t.photo_day, sha: r.meta.sha, ext: r.meta.ext, file: r.file, thumb: r.meta.thumb, mime: r.meta.mime });
               r.thumbPath = up.thumbPath;
+              r.meta.thumb = null; // (stored: the page keeps no copy)
               if (old) { setRow(r, 'uploading', 'Making its copy'); await asIsCopy(r); }
               setRow(r, 'stored', 'Stored');
               toRegister.push(r);
@@ -540,7 +671,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
   function waitCard(data, s, links, { flagged = false } = {}) {
     const items = data.items.filter((i) => i.set_id === s.set_id).sort((a, b) => a.position - b.position);
     const oldSet = s.kind === 'old';
-    const firstMr = notesOf(data, items).map((b) => noteMrs(b.note)[0]).find(Boolean) || '';
+    const firstMr = setNoteKeys(items, data.batches || [])[0] || '';
     const range = clockRange(s.first_at, s.last_at);
     const wrongClock = items.find((i) => i.time_source === 'exif' && !i.clock_ok && i.taken_at);
     const orphan = flagged && !s.patient_id; // filed to a patient record that was removed

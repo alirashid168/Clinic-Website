@@ -2190,11 +2190,26 @@ table.sheet .name-cell.has-bill .name-btn { flex: 1 1 auto; min-width: 0; width:
 .inbox-card-old { border-style: dashed; }
 .inbox-upload { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); }
 .inbox-upload progress { width: 100%; height: 12px; }
-.inbox-files { list-style: none; margin: 0; padding: 0; max-height: 22rem; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); }
-.inbox-file { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.inbox-files { list-style: none; margin: 0; padding: 0; max-height: min(75vh, 52rem); overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); }
+/* each photo of the upload list: its small picture, its name and state, its own note box (owner, 17 Oct 2026) */
+.inbox-file { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: var(--space-2) var(--space-3); align-items: start; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.inbox-file-pic { width: 72px; height: 72px; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface-sunken); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.inbox-file-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.inbox-file-noprev { padding: 2px 4px; max-height: 100%; overflow: hidden; font-size: 10px; line-height: 1.25; color: var(--text-muted); text-align: center; overflow-wrap: anywhere; }
+.inbox-file-main { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.inbox-file-head { display: flex; flex-wrap: wrap; gap: 0 var(--space-2); }
 .inbox-file-name { font-weight: 600; overflow-wrap: anywhere; }
 .inbox-file-state { color: var(--text-muted); overflow-wrap: anywhere; }
 .inbox-file-rejected .inbox-file-state, .inbox-file-failed .inbox-file-state { color: var(--status-bad-text, #a32020); }
+.inbox-file-note { min-height: 40px; padding: var(--space-1) var(--space-2); }
+.inbox-file-note[hidden] { display: none; }
+.inbox-file-note-state { color: var(--text-muted); overflow-wrap: anywhere; }
+.inbox-file-note-state:empty { display: none; }
+.inbox-file-note-bad { color: var(--status-bad-text, #a32020); }
+@media (min-width: 640px) {
+  .inbox-file { grid-template-columns: 96px minmax(0, 1fr); }
+  .inbox-file-pic { width: 96px; height: 96px; }
+}
 .inbox-panel-head { justify-content: flex-start; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
 .inbox-panel-head h2 { margin: 0; }
 .inbox-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-m); padding: var(--space-4); margin-bottom: var(--space-3); min-width: 0; }
@@ -2207,6 +2222,7 @@ table.sheet .name-cell.has-bill .name-btn { flex: 1 1 auto; min-width: 0; width:
 .inbox-thumb-btn img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .inbox-noprev { display: flex; align-items: center; justify-content: center; height: 100%; padding: var(--space-1); font-size: 11px; color: var(--text-muted); text-align: center; }
 .inbox-split-here { white-space: normal; max-width: 96px; font-size: 11px; }
+.inbox-thumb-note { margin: 0; width: 96px; font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .inbox-candidates { display: flex; flex-direction: column; gap: var(--space-2); margin: var(--space-2) 0; }
 .inbox-candidate { min-height: 44px; justify-content: flex-start; text-align: left; white-space: normal; height: auto; padding: var(--space-2) var(--space-3); }
 .inbox-candidate-first { border-color: var(--text-accent); font-weight: 600; }

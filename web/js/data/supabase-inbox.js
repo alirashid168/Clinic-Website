@@ -12,6 +12,8 @@ const MISSING_CODES = new Set(['PGRST202', '42883', 'PGRST205', '42P01']);
 export const PHOTO_INBOX_MISSING_TEXT = 'PHOTO_INBOX_MISSING: The Photo inbox needs the database update of 17 Oct (20261017000200_photo_intake.sql). Ask Dr. Ali to apply it.';
 /** The note box and old photos (20261017000600_photo_inbox_notes.sql) before that update is applied. */
 export const PHOTO_NOTES_MISSING_TEXT = 'PHOTO_NOTES_MISSING: The note box and old photos need the database update of 17 Oct (20261017000600_photo_inbox_notes.sql). Ask Dr. Ali to apply it.';
+/** The text box with each photo (20261017000800_photo_item_notes.sql) before that update is applied. */
+export const PHOTO_ITEM_NOTES_MISSING_TEXT = 'PHOTO_ITEM_NOTES_MISSING: A note with each photo needs the database update of 17 Oct (20261017000800_photo_item_notes.sql). Ask Dr. Ali to apply it.';
 const CODE_WORD = /^(PHOTO_[A-Z_]+|NOT_ALLOWED|STORAGE_FULL|TOO_LARGE|NETWORK):/;
 
 /**
@@ -106,6 +108,19 @@ export function inboxLive({ sb, callRpc, check, plainError, signedUrls }) {
         throw e;
       }
     },
+    /**
+     * The note of one photo, typed after it was registered: { item_id, note, changed }. Before the update of the photo notes:
+     * PHOTO_ITEM_NOTES_MISSING (the page then says so next to the box).
+     */
+    async photoInboxItemNote(itemId, note) {
+      try {
+        return await rpc('photo_inbox_item_note', { p_item: itemId, p_note: note || null });
+      } catch (e) {
+        if (e.code === 'PHOTO_INBOX_MISSING') throw plainError(PHOTO_ITEM_NOTES_MISSING_TEXT, 'PHOTO_ITEM_NOTES_MISSING');
+        throw e;
+      }
+    },
+    /** Registers stored photos ({ ..., note }: a note typed with a photo comes with it); answers [{ sha256, item_id, state, city_id, photo_day, note }]. */
     async photoInboxAddItems(items) {
       const out = [];
       for (const part of chunks(items, 20)) out.push(...((await rpc('photo_inbox_add_items', { p_items: part })) || []));

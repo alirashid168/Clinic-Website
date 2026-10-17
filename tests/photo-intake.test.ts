@@ -8,6 +8,7 @@ import {
   groupItems, visitFacts, scorePair, assignDay, planDay, planUnchanged, waitSentence, WAIT_REASONS,
   VIEW_KEYS, KINDS, viewName, occasionLabel, viewLabel, downloadName, uniqueNames, editPlan, adjustPixels, GAP_SEC, MIN_PAIR,
   cameraClocks, editTransform, isConnectionProblem, noteMrs, noteMonth, noteWords, noteNameFit, oldPhotoTime, groupOld, ONE_VISIT_SEC,
+  noteKey, setNoteKeys, nameWordHits,
 } from '../web/js/lib/photo-intake.js';
 import { storageProblem } from '../web/js/data/supabase-inbox.js';
 import { VIEW_KEYS as CORE_VIEWS, KINDS as CORE_KINDS } from '../supabase/functions/photo-ai/core.ts';
@@ -715,4 +716,116 @@ test('old photos are never matched by time, even at a photo-month patient\'s tim
   assert.equal(plan.groups[0].auto, null);
   assert.equal(plan.groups[0].wait_reason, 'OLD_NO_NOTE');
   assert.deepEqual(plan.groups[0].candidates, []);
+});
+
+// ---------------------------------------------------------------- a note with each photo (owner, 17 Oct 2026: "text box with each photo")
+test('photo notes: the one Mr# of a note; a set\'s Mr#s are its photos\' own notes first, then its upload\'s; name words counted', () => {
+  assert.equal(noteKey('front, Mr# 50013'), '50013');
+  assert.equal(noteKey('50013 or 50014'), null);
+  assert.equal(noteKey('Ayesha front'), null);
+  const its = [{ note: 'left Mr# 9815', upload_batch: 'b' }, { note: null, upload_batch: 'b' }, { note: '9815 again, 347-1', upload_batch: 'b' }];
+  assert.deepEqual(setNoteKeys(its, [{ batch_id: 'b', note: 'Mr# 9818' }, { batch_id: 'x', note: 'Mr# 1111' }]), ['9815', '347-1', '9818']);
+  assert.equal(nameWordHits(noteWords('Aisha Khan front'), 'Ayesha Khan'), 2);
+  assert.equal(nameWordHits(noteWords('Aisha'), 'Mrs Ayesha Khan'), 1);
+});
+test('photo notes: photos whose own notes name different single Mr#s are never one set (a new set starts there); names or two Mr#s in one note do not split', () => {
+  const s = sitting('18:36', 4, { upload_batch: 'b' });
+  s[0].note = 'Mr# 50007 front'; s[2].note = 'Mr# 50004';
+  assert.deepEqual(ids(groupItems(s)), [[s[0].item_id, s[1].item_id], [s[2].item_id, s[3].item_id]], 'split at the photo naming another Mr#; the photos after it stay with it');
+  const t = sitting('19:36', 3, { upload_batch: 'b' });
+  t[0].note = 'Esha front'; t[1].note = '50004 or 50007'; t[2].note = 'Mr# 50007';
+  assert.equal(groupItems(t).length, 1, 'a name, or two Mr#s in one note, never split a sitting');
+  const u = sitting('20:36', 2, { upload_batch: 'b' });
+  u[0].note = 'Mr# 50007'; u[1].note = 'mr 50007 left';
+  assert.equal(groupItems(u).length, 1, 'the same Mr# twice is one set');
+  // photos without a camera time: one set per Mr# their own notes name (of one upload), each alone without one
+  const x = [item(null, { upload_batch: 'w', note: '50007' }), item(null, { upload_batch: 'w', note: 'Mr 50007' }), item(null, { upload_batch: 'w', note: '50004' }), item(null, { upload_batch: 'w' })];
+  assert.deepEqual(ids(groupItems(x)).map((g) => g.length).sort(), [1, 1, 2]);
+  // old photos: the same split
+  const o = [item('2024-03-10T06:00:00.000Z', { upload_batch: 'o', clock_ok: false, note: '9815' }), item('2024-03-10T06:00:30.000Z', { upload_batch: 'o', clock_ok: false }),
+    item('2024-03-10T06:01:00.000Z', { upload_batch: 'o', clock_ok: false, note: '9818' }), item(null, { upload_batch: 'o', note: '9815' }), item(null, { upload_batch: 'o' })];
+  assert.deepEqual(ids(groupOld(o)).map((g) => g.length).sort(), [1, 2, 2], 'old photos without a time stay one set while their notes name one Mr#');
+  const o2 = [item(null, { upload_batch: 'o2', note: '9815' }), item(null, { upload_batch: 'o2', note: '9818' }), item(null, { upload_batch: 'o2' })];
+  assert.deepEqual(ids(groupOld(o2)).map((g) => g.length), [1, 1, 1], 'two Mr#s: a set each, and the rest apart');
+});
+test('photo notes: a photo whose own note names another patient never joins a filed set; one naming the set\'s patient does', () => {
+  const f1 = item(at('18:30', 0), { seq: 5, set_id: 'F' }); const f2 = item(at('18:31', 0), { seq: 6, set_id: 'F' });
+  const filed = { set_id: 'F', status: 'filed', manual: false, camera: 'apple|iphone 13', branch_hint: null, mr_number: '9820', items: [f1, f2] };
+  assert.equal(groupItems([item(at('18:32', 0), { seq: 7, note: 'Mr# 9815' })], [filed])[0].join_set_id, null);
+  assert.equal(groupItems([item(at('18:32', 0), { seq: 7, note: 'Mr# 9820 front' })], [filed])[0].join_set_id, 'F');
+  assert.equal(groupItems([item(at('18:32', 0), { seq: 7, note: 'Sana front' })], [filed])[0].join_set_id, 'F', 'a note without an Mr# changes nothing');
+});
+test('photo notes: one Mr# over the photos\' notes and the upload\'s note files the set (note_mr), even in a whole day\'s upload; two Mr#s wait with both first; a name never files', () => {
+  const vs = [visit('danish', { branch_id: 2, photo_required: true, braces_month: 4, started_at: at('18:25'), mr_number: '50004', full_name: 'Danish Sample' }),
+    visit('esha', { branch_id: 2, photo_required: true, braces_month: 7, started_at: at('18:31'), mr_number: '50007', full_name: 'Esha Sample' })];
+  // the upload holds the day (18:36 and 21:30): the upload's note would not file, a photo's own note does
+  const s = sitting('18:36', 3, { branch_hint: 2, upload_batch: 'b1' }); const late = sitting('21:30', 2, { branch_hint: 2, upload_batch: 'b1' });
+  s[1].note = 'Esha Mr# 50007 front';
+  const p = planDay({ ...day(vs, [...s, ...late]), batches: [NOTE_BATCH('b1', null)] });
+  const g = groupOf(p, s[0]);
+  assert.deepEqual(g.item_ids, s.map((x) => x.item_id));
+  assert.equal(g.auto?.rule_kind, 'note_mr');
+  assert.equal(g.auto.visit_id, 'esha');
+  assert.equal(g.candidates[0].visit_id, 'esha');
+  assert.ok(g.candidates[0].reasons.includes('NOTE_MR'));
+  assert.equal(groupOf(p, late[0]).auto, null, 'the other photos of the upload are not filed by that note');
+  // the photo's note and the upload's note (one visit) name two Mr#s: the photo starts its own set, which waits with both first
+  const t = sitting('18:36', 3, { branch_hint: 2, upload_batch: 'b2' });
+  t[1].note = 'Mr# 50007';
+  const pt = planDay({ ...day(vs, t), batches: [NOTE_BATCH('b2', 'Danish 50004')] });
+  assert.equal(pt.groups.length, 3, 'the photo naming another Mr# than its upload is a set of its own');
+  assert.equal(groupOf(pt, t[0]).auto?.rule_kind, 'note_mr', 'the photos around it: the upload\'s note');
+  assert.equal(groupOf(pt, t[2]).auto?.visit_id, 'danish');
+  const gt = groupOf(pt, t[1]);
+  assert.equal(gt.auto, null);
+  assert.equal(gt.wait_reason, 'NOTE_SEVERAL');
+  assert.deepEqual(gt.candidates.slice(0, 2).map((c: any) => c.visit_id).sort(), ['danish', 'esha']);
+  assert.ok(gt.candidates.slice(0, 2).every((c: any) => c.reasons.includes('NOTE_MR')));
+  // one photo naming both: waits, both offered
+  const w = sitting('18:36', 2, { branch_hint: 2, upload_batch: 'b3' });
+  w[0].note = '50004 or 50007?';
+  const gw = groupOf(planDay({ ...day(vs, w), batches: [NOTE_BATCH('b3', null)] }), w[0]);
+  assert.equal(gw.auto, null);
+  assert.equal(gw.wait_reason, 'NOTE_SEVERAL');
+  // a name alone in a photo's note: first on the card, never filed
+  const n = sitting('18:36', 2, { branch_hint: 2, upload_batch: 'b4' });
+  n[0].note = 'Danish front';
+  const gn = groupOf(planDay({ ...day(vs, n), batches: [NOTE_BATCH('b4', null)] }), n[0]);
+  assert.equal(gn.auto, null);
+  assert.equal(gn.candidates[0].visit_id, 'danish');
+  assert.ok(gn.candidates[0].reasons.includes('NOTE_NAME'));
+});
+test('photo notes: the time\'s clear case waits when a photo\'s own note names another patient (or one not on the list); filed by time when it agrees', () => {
+  const vs = [visit('ayesha', { photo_required: true, braces_month: 10, started_at: at('18:31'), completed_at: at('18:49'), mr_number: '50010', full_name: 'Ayesha Sample' }),
+    visit('bilal', { braces_month: 5, started_at: at('18:13'), completed_at: at('18:23'), mr_number: '50005', full_name: 'Bilal Sample' })];
+  const run = (note: string) => { const c = sitting('18:35', 3, { upload_batch: 'b9' }); c[2].note = note; return groupOf(planDay({ ...day(vs, c), batches: [NOTE_BATCH('b9', null)] }), c[0]); };
+  assert.equal(run('Mr# 50005').wait_reason, 'NOTE_OTHER');
+  assert.equal(run('Mr# 50005').auto, null);
+  assert.equal(run('Mr# 77777').wait_reason, 'NOTE_NO_VISIT');
+  assert.equal(run('Bilal front').wait_reason, 'NOTE_OTHER', 'a photo\'s note naming another patient by name: a person looks');
+  const ok = run('Mr# 50010 front');
+  assert.equal(ok.auto?.visit_id, 'ayesha');
+  assert.equal(ok.auto.rule_kind, undefined, 'the note agrees with the time: filed by the time rule');
+});
+test('photo notes, old photos: a photo\'s Mr# (its patient from note_patients) files the set (old_note_mr); two photos naming two Mr#s wait; a name in a photo\'s note offers the patient', () => {
+  const p = (id: string, mr: string, name: string, city = 1) => ({ patient_id: id, mr_number: mr, full_name: name, branch_id: 1, city_id: city });
+  const old = (b: string, k = 2) => Array.from({ length: k }, (_, i) => item(null, { upload_batch: b, time_source: 'exif_modified', taken_at: '2024-03-10T06:00:00.000Z', clock_ok: false, file_name: `old${i}.jpg` }));
+  const a = old('o1'); a[0].note = 'Sana Mr# 9820 M6';
+  const pa = planDay({ ...day([], a), batches: [NOTE_BATCH('o1', null, 'old')], note_patients: [p('p-sana', '9820', 'Sana Farooq')] });
+  assert.equal(pa.groups.length, 1);
+  assert.equal(pa.groups[0].auto?.rule_kind, 'old_note_mr');
+  assert.equal(pa.groups[0].auto.patient_id, 'p-sana');
+  const b = old('o2'); b[0].note = '9815'; b[1].note = '9818';
+  const pb = planDay({ ...day([], b), batches: [NOTE_BATCH('o2', null, 'old')], note_patients: [p('p-f', '9815', 'Fatima Noor', 3), p('p-a', '9818', 'Ayesha Kamal')] });
+  assert.equal(pb.groups.length, 2, 'two Mr#s in two photos\' notes: two sets');
+  const c = old('o3', 1); c[0].note = '9815';
+  const pc = planDay({ ...day([], c), batches: [NOTE_BATCH('o3', 'Mr# 9818', 'old', { mr_patients: [p('p-a', '9818', 'Ayesha Kamal')] })], note_patients: [p('p-f', '9815', 'Fatima Noor', 3)] });
+  assert.equal(pc.groups[0].auto, null);
+  assert.equal(pc.groups[0].wait_reason, 'OLD_SEVERAL', 'a photo and its upload naming two Mr#s wait');
+  assert.deepEqual(pc.groups[0].candidates.map((x: any) => x.patient_id), ['p-a', 'p-f'], 'both offered (this city\'s first)');
+  const n = old('o4', 1); n[0].note = 'Aisha Khan front';
+  const pn = planDay({ ...day([], n), batches: [NOTE_BATCH('o4', null, 'old')], note_patients: [p('p-r', '9001', 'Ayesha Rajpoot'), p('p-k', '9002', 'Ayesha Khan')] });
+  assert.equal(pn.groups[0].auto, null);
+  assert.equal(pn.groups[0].wait_reason, 'OLD_NAME');
+  assert.deepEqual(pn.groups[0].candidates.map((x: any) => [x.patient_id, x.reasons[0]]), [['p-k', 'NOTE_NAME_FULL'], ['p-r', 'NOTE_NAME']]);
 });

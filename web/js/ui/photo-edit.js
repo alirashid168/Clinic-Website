@@ -38,8 +38,11 @@ const context = (c, opts) => {
 /** Gives a canvas's memory back at once (iPhone Safari keeps it until the page is tidied otherwise). */
 const release = (c) => { try { c.width = 0; c.height = 0; } catch { /* already gone */ } };
 const toBlob = (canvas, quality) => new Promise((resolve) => canvas.toBlob((b) => resolve(b && b.size ? b : null), 'image/jpeg', quality));
-/** A JPEG copy of a decoded photo with its long edge at most `edge` px (never enlarged), white under transparency. */
-async function scaled(bmp, edge, quality) {
+/**
+ * A JPEG copy of a decoded photo with its long edge at most `edge` px (never enlarged), white under transparency. then(canvas): more made
+ * from that small canvas before it is given back (the upload list's preview is drawn from the small copy, not from the photo again).
+ */
+async function scaled(bmp, edge, quality, then = null) {
   const r = Math.min(1, edge / Math.max(bmp.width, bmp.height));
   const c = canvasOf(bmp.width * r, bmp.height * r);
   try {
@@ -48,20 +51,26 @@ async function scaled(bmp, edge, quality) {
     ctx.fillRect(0, 0, c.width, c.height);
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(bmp, 0, 0, c.width, c.height);
-    return { blob: await toBlob(c, quality), width: c.width, height: c.height };
+    const blob = await toBlob(c, quality);
+    let more = null;
+    if (then) { try { more = await then(c); } catch { more = null; } }
+    return { blob, width: c.width, height: c.height, more };
   } finally { release(c); }
 }
+/** The preview of the upload list: PREVIEW_EDGE px, a few kB, drawn from the small copy. */
+export const PREVIEW_EDGE = 144;
 /**
  * The small copy (320 px, the same settings as the profile's thumbnails) and the photo's upright size: { blob, width, height }, or
- * { blob: null, width: null, height: null } when the browser cannot decode it. Never throws.
+ * { blob: null, width: null, height: null } when the browser cannot decode it. With { preview: true } also `preview`: a PREVIEW_EDGE px
+ * JPEG drawn from the small copy (null when it could not be made). Never throws; the decoded photo is closed before it answers.
  */
-export async function makeThumb(file) {
+export async function makeThumb(file, { preview = false } = {}) {
   const bmp = await decode(file);
-  if (!bmp) return { blob: null, width: null, height: null };
+  if (!bmp) return { blob: null, width: null, height: null, preview: null };
   try {
-    const t = await scaled(bmp, THUMB_EDGE, THUMB_QUALITY);
-    return { blob: t.blob, width: bmp.width, height: bmp.height };
-  } catch { return { blob: null, width: bmp.width, height: bmp.height }; } finally { bmp.close?.(); }
+    const t = await scaled(bmp, THUMB_EDGE, THUMB_QUALITY, preview ? async (c) => (await scaled(c, PREVIEW_EDGE, 0.7)).blob : null);
+    return { blob: t.blob, width: bmp.width, height: bmp.height, preview: t.more || null };
+  } catch { return { blob: null, width: bmp.width, height: bmp.height, preview: null }; } finally { bmp.close?.(); }
 }
 /** The copy Claude sees: 1024 px long edge, JPEG q0.80, as base64 (no EXIF: a canvas copy keeps no metadata). */
 export async function aiCopy(bmp) {

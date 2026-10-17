@@ -11,6 +11,9 @@
 // The note box (owner, 17 Oct 2026) and old photos (already edited): noteMrs, noteMonth, noteWords, noteNameFit, oldPhotoTime, and in
 // planDay the note's Mr#s and names first on "Which patient?", a single Mr# filing by itself (rules note_mr / old_note_mr; the database
 // reads the note the same way and checks again: supabase/migrations/20261017000600_photo_inbox_notes.sql).
+// A note with each photo (owner, 17 Oct 2026: "text box with each photo"): a set's notes are its photos' own notes + its upload's note
+// (setNoteKeys); planDay never groups photos whose own notes name different single Mr#s (it splits there) and files by the notes only
+// when they name exactly one Mr# (20261017000800_photo_item_notes.sql checks the same).
 import { nameNorm, nameSpelling } from './checkups.js';
 
 // ---------------------------------------------------------------- constants (first guesses: tune after the first real days)
@@ -417,6 +420,26 @@ export function noteWords(note) {
   return [...out].sort();
 }
 const NAME_TITLES = new Set('m mr mrs ms miss dr md muhammad mohammad muhammed mohammed mohd syed syeda sayed hafiz haji baby master kid'.split(' '));
+/** The one Mr# a note names, or null (none, or more than one). */
+export function noteKey(note) {
+  const k = noteMrs(note);
+  return k.length === 1 ? k[0] : null;
+}
+const uniq = (list) => [...new Set(list)];
+/**
+ * The Mr#s of a set's notes: its photos' own notes (in photo order) first, then the notes of the uploads they came with, each once.
+ * items: the set's photos ({ note, upload_batch }); batches: photo_inbox_day.batches.
+ */
+export function setNoteKeys(items, batches = []) {
+  const own = items.flatMap((it) => noteMrs(it.note));
+  const ups = uniq(items.map((it) => it.upload_batch).filter(Boolean)).map((id) => batches.find((b) => b.batch_id === id)).filter(Boolean);
+  return uniq([...own, ...ups.flatMap((b) => noteMrs(b.note))]);
+}
+/** How many words of a patient's name are among a note's words (for the order of the patients a name fits). */
+export function nameWordHits(words, fullName) {
+  const set = new Set(words || []);
+  return nameNorm(fullName).split(' ').filter((w) => w && !NAME_TITLES.has(w)).map(nameSpelling).filter((w) => w && set.has(w)).length;
+}
 /**
  * How a patient's name fits a note's words (noteWords): 'full' (every word of the name is in the note), 'first' (the first name is), or
  * null. Only ever a hint on "Which patient?": a name alone never files photos.
@@ -465,16 +488,21 @@ const joinKey = (it) => `${it.camera || 'unknown'}|${it.branch_hint ?? 'any'}|${
  * filedSets: [{ set_id, camera, branch_hint, manual, status, items: [...] }].
  * oneSetBatches: uploads whose note names exactly one patient (an Mr#): their photos without a usable time are one set together (one
  * patient), not a set each.
+ * keyOf(photo): the one Mr# the photo's notes name (its own note, else its upload's), or null. Photos whose keys differ are never one set
+ * (a new set starts there), photos without a usable time with the same key of one upload are one set, and a set whose photos' own notes
+ * name another patient never joins a filed set.
  */
-export function groupItems(items, filedSets = [], { oneSetBatches = new Set() } = {}) {
+export function groupItems(items, filedSets = [], { oneSetBatches = new Set(), keyOf = (it) => noteKey(it.note) } = {}) {
   const groups = [];
   const streams = new Map();
   const noTimeOf = new Map();
   for (const it of items) {
     if (!usableTime(it)) {
-      if (it.upload_batch && oneSetBatches.has(it.upload_batch)) {
-        if (!noTimeOf.has(it.upload_batch)) { noTimeOf.set(it.upload_batch, []); groups.push(noTimeOf.get(it.upload_batch)); }
-        noTimeOf.get(it.upload_batch).push(it);
+      const k = keyOf(it) ?? (it.upload_batch && oneSetBatches.has(it.upload_batch) ? '' : null);
+      if (k !== null) {
+        const g = `${it.upload_batch || `-${it.uploaded_by ?? ''}`}|${k}`;
+        if (!noTimeOf.has(g)) { noTimeOf.set(g, []); groups.push(noTimeOf.get(g)); }
+        noTimeOf.get(g).push(it);
       } else groups.push([it]);
       continue;
     }
@@ -485,14 +513,17 @@ export function groupItems(items, filedSets = [], { oneSetBatches = new Set() } 
   for (const list of streams.values()) {
     list.sort(byPhotoOrder);
     let cur = null;
+    let curKey = null;
     for (const it of list) {
       const t = ms(it.taken_at);
+      const k = keyOf(it);
       if (cur) {
         const prev = cur[cur.length - 1];
-        if (t - ms(prev.taken_at) > GAP_SEC * 1000 || t - ms(cur[0].taken_at) > SPAN_SEC * 1000 || counterBreaks(prev, it)) cur = null;
+        if (t - ms(prev.taken_at) > GAP_SEC * 1000 || t - ms(cur[0].taken_at) > SPAN_SEC * 1000 || counterBreaks(prev, it) || (k && curKey && k !== curKey)) cur = null;
       }
-      if (!cur) { cur = []; groups.push(cur); }
+      if (!cur) { cur = []; curKey = null; groups.push(cur); }
       cur.push(it);
+      curKey = curKey || k;
     }
   }
   const filed = filedSets.filter((s) => s.status === 'filed' && !s.manual && s.items?.length).map((s) => {
@@ -506,8 +537,11 @@ export function groupItems(items, filedSets = [], { oneSetBatches = new Set() } 
       const first = g[0];
       const last = g[g.length - 1];
       const key = joinKey(first);
+      const own = uniq(g.flatMap((it) => noteMrs(it.note)));
       const fits = filed.filter((f) => {
         if (f.key !== key || g.some((it) => joinKey(it) !== key) || f.count + g.length > MAX_AUTO_PHOTOS) return false;
+        // (a photo whose own note names another patient than the filed set's never joins it)
+        if (own.length && (own.length > 1 || String(f.s.mr_number ?? '').toLowerCase() !== own[0])) return false;
         const fFirst = f.its[0];
         const fLast = f.its[f.its.length - 1];
         const span = Math.max(ms(last.taken_at), ms(fLast.taken_at)) - Math.min(ms(first.taken_at), ms(fFirst.taken_at));
@@ -528,9 +562,10 @@ export function groupItems(items, filedSets = [], { oneSetBatches = new Set() } 
 /**
  * Old photos (already edited) as sets: never by the clinic's list, never joined to a filed set. Per upload: its photos with a camera time
  * (the clock does not matter here) split by pauses like a sitting (one phone, GAP_SEC, SPAN_SEC: several patients in one upload come
- * apart), and its photos without one (edited in an app, sent through WhatsApp) together as one set.
+ * apart), and its photos without one (edited in an app, sent through WhatsApp) together as one set. keyOf as in groupItems: photos
+ * whose notes name different single Mr#s are never one set.
  */
-export function groupOld(items) {
+export function groupOld(items, { keyOf = (it) => noteKey(it.note) } = {}) {
   const groups = [];
   const byBatch = new Map();
   for (const it of items) {
@@ -545,14 +580,21 @@ export function groupOld(items) {
     for (const timed of cams.values()) {
       timed.sort(byPhotoOrder);
       let cur = null;
+      let curKey = null;
       for (const it of timed) {
         const t = ms(it.taken_at);
-        if (cur && (t - ms(cur[cur.length - 1].taken_at) > GAP_SEC * 1000 || t - ms(cur[0].taken_at) > SPAN_SEC * 1000)) cur = null;
-        if (!cur) { cur = []; groups.push(cur); }
+        const k = keyOf(it);
+        if (cur && (t - ms(cur[cur.length - 1].taken_at) > GAP_SEC * 1000 || t - ms(cur[0].taken_at) > SPAN_SEC * 1000 || (k && curKey && k !== curKey))) cur = null;
+        if (!cur) { cur = []; curKey = null; groups.push(cur); }
         cur.push(it);
+        curKey = curKey || k;
       }
     }
-    if (untimed.length) groups.push(untimed.sort((a, b) => String(a.file_name || '').localeCompare(String(b.file_name || '')) || String(a.sha256).localeCompare(String(b.sha256))));
+    // (without a usable time: one set, as one patient's; but when their notes name several Mr#s, one set per Mr# and one for the rest)
+    const keys = new Set(untimed.map(keyOf).filter(Boolean));
+    const byKey = new Map();
+    for (const it of untimed) { const k = keys.size > 1 ? keyOf(it) ?? '' : ''; if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(it); }
+    for (const g of byKey.values()) groups.push(g.sort((a, b) => String(a.file_name || '').localeCompare(String(b.file_name || '')) || String(a.sha256).localeCompare(String(b.sha256))));
   }
   const first = (g) => (usableTime(g[0]) ? ms(g[0].taken_at) : Infinity);
   return groups.sort((a, b) => (first(a) - first(b)) || String(a[0].file_name || '').localeCompare(String(b[0].file_name || '')) || String(a[0].item_id).localeCompare(String(b[0].item_id)))
@@ -745,6 +787,7 @@ const WAIT_SENTENCES = {
   SERVER_CHECK: () => 'The automatic filing was stopped by a final check: choose the patient.',
   NOTE_OTHER: () => 'The note with these photos names another patient than the one the photo time fits: check, then choose the patient.',
   NOTE_NO_VISIT: (c) => `The note names Mr# ${c.mr || ''}, but that patient is not on the ${c.city || ''} Aaj ki List for ${c.day || 'that day'}. Add them there and press Check again, or choose them with "Search all patients".`.replace('the  Aaj', 'the Aaj'),
+  NOTE_SEVERAL: () => 'The notes with these photos name more than one Mr#: tap the right patient (or split the set).',
   OLD_NO_NOTE: () => 'Old photos without a note: search the patient by name or Mr# below.',
   OLD_NOT_FOUND: (c) => `No patient has the Mr# in the note (${c.mr || 'the number typed'}): check the number, or search the patient below.`,
   OLD_SEVERAL: () => 'The note names more than one patient: tap the right one for these photos.',
@@ -831,8 +874,10 @@ export function planDay(day) {
   const regItems = items.filter(isRegroupable);
   const filedSets = sets.filter((s) => s.status === 'filed' && s.kind !== 'old').map((s) => ({ ...s, items: items.filter((it) => it.set_id === s.set_id) }));
   const oneSetBatches = new Set([...batches.values()].filter((b) => b.kind !== 'old' && keysOf.get(b.batch_id).length === 1).map((b) => b.batch_id));
-  const groups = [...groupItems(regItems.filter((it) => !isOld(it)), filedSets, { oneSetBatches }),
-    ...groupOld(regItems.filter(isOld)).map((g) => ({ ...g, old: true }))];
+  // (photo notes) each photo's one Mr#: its own note's, else its upload's; photos of different ones are never one set
+  const keyOf = (it) => noteKey(it.note) ?? (keysOf.get(it.upload_batch)?.length === 1 ? keysOf.get(it.upload_batch)[0] : null);
+  const groups = [...groupItems(regItems.filter((it) => !isOld(it)), filedSets, { oneSetBatches, keyOf }),
+    ...groupOld(regItems.filter(isOld), { keyOf }).map((g) => ({ ...g, old: true }))];
   const reused = new Set();
   for (const g of groups) {
     if (g.join_set_id) continue;
@@ -841,13 +886,14 @@ export function planDay(day) {
   }
   const units = groups.map((g, i) => {
     const its = g.item_ids.map((id) => itemById.get(id));
-    return unitFacts(`g${i}`, its, { ai_flag: setById.get(g.reuse_set_id)?.ai_flag ?? null, join: g.join_set_id, group: g, oldKind: !!g.old, batch: batchOf(its) });
+    return unitFacts(`g${i}`, its, { ai_flag: setById.get(g.reuse_set_id)?.ai_flag ?? null, join: g.join_set_id, group: g, oldKind: !!g.old, batch: batchOf(its),
+      itemNotes: its.map((it) => it.note).filter(Boolean) });
   });
   const manualSets = sets.filter((s) => s.status === 'waiting' && s.manual);
   for (const s of manualSets) {
     const its = items.filter((it) => it.set_id === s.set_id).sort(byPhotoOrder);
     units.push(unitFacts(`s${s.set_id}`, its, { manual: true, ai_flag: s.ai_flag ?? null, prev_reason: s.wait_reason, set: s,
-      oldKind: s.kind === 'old' || (its.length > 0 && its.every(isOld)), batch: batchOf(its) }));
+      oldKind: s.kind === 'old' || (its.length > 0 && its.every(isOld)), batch: batchOf(its), itemNotes: its.map((it) => it.note).filter(Boolean) }));
   }
   const cands = dayCandidates(day.visits || []);
   const multiBranch = (day.branches || []).length > 1;
@@ -886,16 +932,26 @@ export function planDay(day) {
   const twoSets = (u, v) => open.some((w) => w !== u && ((!w.manual && passesAuto(w, v, cands, multiBranch)) || (w.manual && w.time_ok && fitsTightly(w, v))));
   const mrOf = (x) => String(x?.mr_number ?? '').toLowerCase();
 
-  // Today's photos: by time (section 7), with the note's Mr#s and names first on the card, and a single Mr# filing by itself (note_mr).
+  // Today's photos: by time (section 7), with the notes' Mr#s and names first on the card, and a single Mr# filing by itself (note_mr).
+  // (photo notes) The notes are the photos' own notes + the upload's note. A photo's own note is about that photo; the upload's note is
+  // about these photos only when the upload is one visit (single).
   const decide = (u) => {
     const note = u.batch ? batches.get(u.batch) : null;
-    const keys = note ? keysOf.get(note.batch_id) : [];
-    const words = note?.note ? noteWords(note.note) : [];
+    const own = u.itemNotes || [];
+    const itemKeys = uniq(own.flatMap(noteMrs));
+    const itemWords = uniq(own.flatMap(noteWords));
+    const keys = uniq([...itemKeys, ...(note ? keysOf.get(note.batch_id) : [])]);
+    const words = uniq([...itemWords, ...(note?.note ? noteWords(note.note) : [])]);
     const byMr = keys.length ? cands.filter((c) => keys.includes(mrOf(c))).sort((a, b) => keys.indexOf(mrOf(a)) - keys.indexOf(mrOf(b))) : [];
     const fits = words.length ? cands.filter((c) => !byMr.includes(c)).map((c) => ({ c, fit: noteNameFit(words, c.full_name) })).filter((x) => x.fit) : [];
     const byName = fits.sort((a, b) => Number(b.fit === 'full') - Number(a.fit === 'full')).map((x) => x.c);
     const notedHow = (c) => (byMr.includes(c) ? 'NOTE_MR' : byName.includes(c) ? 'NOTE_NAME' : null);
     const single = oneVisit(u.batch);
+    const hasOwn = own.length > 0;
+    // the notes that are surely about these photos
+    const aboutKeys = single ? keys : itemKeys;
+    const aboutWords = single ? words : itemWords;
+    const isAbout = (c) => aboutKeys.includes(mrOf(c)) || (!!aboutWords.length && !!noteNameFit(aboutWords, c.full_name));
 
     const proposalId = u.join ? null : assigned.get(u.key) ?? null;
     const scored = cands.map((c) => ({ c, ...scorePair(u, c) })).sort(byScore);
@@ -909,7 +965,8 @@ export function planDay(day) {
     // other photo patients who were in the chair (also those who already have photos), then by score.
     const pinned = new Set(blockers.map((c) => c.visit_id));
     const noted = [...byMr, ...byName].map((c) => scored.find((x) => x.c === c)).filter(Boolean);
-    const front = single ? [...noted, lead] : [lead, ...noted];
+    const aboutNoted = noted.filter((x) => isAbout(x.c));
+    const front = single ? [...noted, lead] : hasOwn ? [...aboutNoted, lead, ...noted] : [lead, ...noted];
     const seen = new Set();
     const ordered = [...front, ...scored.filter((x) => pinned.has(x.c.visit_id)), ...scored].filter((x) => x && !seen.has(x) && seen.add(x));
     // A set without a usable camera time gets no likely patients from the time (the day cannot be trusted): only the note's.
@@ -918,21 +975,28 @@ export function planDay(day) {
       proposal: x === lead, reasons: reasonsFor(u, x.c, x === lead, notedHow(x.c)),
     }));
     if (v && passesAuto(u, v, cands, multiBranch) && !twoSets(u, v)) {
-      // (an upload of one visit whose note names other patients, or an Mr# that is not on the list, than the one the time fits: a person looks)
-      if (single && (noted.length || keys.length) && !noted.some((x) => x.c.patient_id === v.patient_id)) {
-        return { candidates, wait_reason: keys.length === 1 && !byMr.length ? 'NOTE_NO_VISIT' : 'NOTE_OTHER', auto: null };
+      // (photo notes) the photos' own notes name another patient (or two) than the one the time fits: a person looks (the database
+      // refuses that filing too)
+      if (itemKeys.length && (itemKeys.length > 1 || itemKeys[0] !== mrOf(v))) {
+        return { candidates, wait_reason: itemKeys.length > 1 ? 'NOTE_SEVERAL' : byMr.some((c) => mrOf(c) === itemKeys[0]) ? 'NOTE_OTHER' : 'NOTE_NO_VISIT', auto: null };
+      }
+      // (notes about these photos that name other patients, or an Mr# that is not on the list, than the one the time fits: a person looks)
+      if ((single || hasOwn) && (aboutNoted.length || aboutKeys.length) && !aboutNoted.some((x) => x.c.patient_id === v.patient_id)) {
+        return { candidates, wait_reason: aboutKeys.length === 1 && !byMr.some((c) => aboutKeys.includes(mrOf(c))) ? 'NOTE_NO_VISIT' : 'NOTE_OTHER', auto: null };
       }
       return { candidates, wait_reason: null, auto: { visit_id: v.visit_id, patient_id: v.patient_id, anchor_at: new Date(v.anchor).toISOString(),
         rule: `Automatic: the only photo-month patient in the chair at ${karachiClock(u.first)} (${branchCode(v.branch_id)})` } };
     }
-    // The note names exactly one Mr#, that patient is on the list that day, and the upload is one visit: filed to that patient.
-    if (!u.manual && !u.ai_flag && single && keys.length === 1 && byMr.length === 1) {
+    // The notes name exactly one Mr#, that patient is on the list that day, and the note is about these photos (a photo's own note, or
+    // the upload's note of one visit): filed to that patient.
+    if (!u.manual && !u.ai_flag && keys.length === 1 && aboutKeys.length === 1 && byMr.length === 1) {
       const c = byMr[0];
       return { candidates, wait_reason: null, auto: { visit_id: c.visit_id, patient_id: c.patient_id, rule_kind: 'note_mr',
         rule: `Automatic (note_mr): the note with these photos names Mr# ${keys[0]}, on the ${branchCode(c.branch_id)} list that day` } };
     }
     let reason;
-    if (!u.manual && single && keys.length === 1 && !byMr.length) reason = 'NOTE_NO_VISIT';
+    if (!u.manual && keys.length === 1 && aboutKeys.length === 1 && !byMr.length) reason = 'NOTE_NO_VISIT';
+    else if (!u.manual && keys.length > 1 && itemKeys.length) reason = 'NOTE_SEVERAL';
     else if (!u.time_ok) reason = u.no_time ? 'NO_TIME' : u.old ? 'OLD' : 'CLOCK';
     else if (!cands.length) reason = 'NO_VISIT_DAY';
     else if (u.manual) reason = u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL';
@@ -954,14 +1018,19 @@ export function planDay(day) {
 
   // Old photos: never by time. The patients the note names: by Mr# (this city's first, then any city), then by name (the whole name before
   // the first name alone; at most 5). A note with a single Mr# that one patient has files the photos to that patient (old_note_mr).
+  // (photo notes) the notes of a set of old photos: its photos' own notes + its upload's note; the patients the photos' notes name come
+  // with the day (note_patients)
+  const dedupe = (list) => { const seen = new Set(); return list.filter((p) => p && !seen.has(p.patient_id) && seen.add(p.patient_id)); };
   const decideOld = (u) => {
     const note = u.batch ? batches.get(u.batch) : null;
-    const keys = note ? keysOf.get(note.batch_id) : [];
-    const words = note?.note ? noteWords(note.note) : [];
+    const own = u.itemNotes || [];
+    const keys = uniq([...own.flatMap(noteMrs), ...(note ? keysOf.get(note.batch_id) : [])]);
+    const words = uniq([...own.flatMap(noteWords), ...(note?.note ? noteWords(note.note) : [])]);
     const here = (p) => Number(p.city_id === day.city?.id);
-    const mrHits = keys.flatMap((k) => (note?.mr_patients || []).filter((p) => mrOf(p) === k)).sort((a, b) => here(b) - here(a));
-    const nameHits = (note?.name_patients || []).filter((p) => !mrHits.some((m) => m.patient_id === p.patient_id))
-      .map((p) => ({ p, fit: noteNameFit(words, p.full_name) })).filter((x) => x.fit)
+    const pool = dedupe([...(note?.mr_patients || []), ...(note?.name_patients || []), ...(day.note_patients || [])]);
+    const mrHits = keys.flatMap((k) => pool.filter((p) => mrOf(p) === k)).sort((a, b) => here(b) - here(a));
+    const nameHits = pool.filter((p) => !mrHits.some((m) => m.patient_id === p.patient_id))
+      .map((p) => ({ p: { ...p, hits: own.length || p.hits == null ? nameWordHits(words, p.full_name) : p.hits }, fit: noteNameFit(words, p.full_name) })).filter((x) => x.fit)
       .sort((a, b) => (Number(b.fit === 'full') - Number(a.fit === 'full')) || ((b.p.hits || 0) - (a.p.hits || 0)) || (here(b.p) - here(a.p))
         || String(a.p.mr_number).localeCompare(String(b.p.mr_number)))
       .slice(0, 5);
@@ -972,7 +1041,7 @@ export function planDay(day) {
       return { candidates, wait_reason: null, auto: { visit_id: null, patient_id: mrHits[0].patient_id, rule_kind: 'old_note_mr',
         rule: `Automatic (old_note_mr): old photos; the note with them names Mr# ${keys[0]}` } };
     }
-    const reason = u.manual ? (u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL') : !note?.note ? 'OLD_NO_NOTE'
+    const reason = u.manual ? (u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL') : !note?.note && !own.length ? 'OLD_NO_NOTE'
       : keys.length === 1 && !mrHits.length ? 'OLD_NOT_FOUND' : keys.length > 1 ? 'OLD_SEVERAL' : nameHits.length ? 'OLD_NAME' : 'OLD_NO_MATCH';
     return { candidates, wait_reason: reason, auto: null };
   };
