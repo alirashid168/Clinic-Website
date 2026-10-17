@@ -5,6 +5,10 @@
 // database. The real SQL has its own tests (supabase/tests/25_aaj_sync_test.sql) and the script was also run against it; this
 // file is only as faithful as the tests need.
 //
+// keepRows (default true): the website has 20261017000100_aaj_keep_rows.sql. A call that says keep_rows (the script keeps rows on the tab:
+// no nightly clear) lets a deleted row of a patient who is done (Completed, Treatment, Cancelled) go off the sheet instead of putting it
+// back. keepRows: false is the website before that file (it ignores the flag), for the tests of the two orders of putting them live.
+//
 // Usage: const server = createServer({ now: () => clock.ms });
 //        env.fetchHandler = server.handler;           // see tests/apps-script-mock.mjs
 //        server.addPatient({ mr: '9700', name: 'Sadia Khan', phone: '03001234567' });
@@ -117,9 +121,11 @@ const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const fail = (code, status, message) => ({ code: status, body: JSON.stringify({ code, message }) });
 const TAB_OF = { GUL: 'Gulshan KHI', NN: 'North Nazimabad', DHA: 'DHA KHI', LHR: 'Gulberg Lhr', ISB: 'Islamabad' };
 
-export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT_CLINICIANS, branches = ['GUL', 'NN', 'DHA', 'LHR', 'ISB'], photoMonths = [], sequenceStart = 50013 } = {}) {
+export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT_CLINICIANS, branches = ['GUL', 'NN', 'DHA', 'LHR', 'ISB'], photoMonths = [], sequenceStart = 50013, keepRows = true } = {}) {
   const S = {
     patients: [], visits: [], checkups: [], audit: [], calls: [], log: [], removedLog: [], keptLog: [], letGo: [], lookups: 0, released: new Map(), removedToday: {}, nextMr: sequenceStart, nextId: 1, seq: 0,
+    offLog: [],                   // records taken off the sheet while done (keep_rows): kept on the website as they are (SHEET_OFF in the audit log)
+    keepRows,
     secret, clinicians, branches, photoMonths, admin: 'admin',
     // faults a test can switch on
     faults: { timeoutOverRows: 0, busy: false, lostAnswers: 0, down: 0, status500: 0, rateLimit: 0 },
@@ -161,8 +167,15 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       treatment: v.treatment_label || '', token: lossy('token', v.token, v.token ? String(v.token) : ''),
       status: STATUS_LABEL[v.status], group: lossy('group', v.group, v.group ? `Group ${v.group}` : ''),
       doctors, details: v.details || '', pp: dues(p) > 0 ? Math.round(dues(p)).toLocaleString('en-US') : '',
-      removed: S.released.has(v.id), claimed: !!v.sheet_key, updated_at: new Date(v.updated_at).toISOString(),
+      removed: removedMark(v.id, v.status === 'waiting' || v.status === 'scheduled'), claimed: !!v.sheet_key, updated_at: new Date(v.updated_at).toISOString(),
     };
+  }
+  // private.aaj_day_list: a record taken off the sheet while done (released as completed / in_treatment) is "removed" for the script only once
+  // it works again (Waiting or Scheduled; a checkup Waiting): before that the sheet does not get it back (claimed, not removed)
+  function removedMark(id, working) {
+    if (!S.released.has(id)) return false;
+    const as = S.released.get(id);
+    return as === 'completed' || as === 'in_treatment' ? working : true;
   }
   const checkupKey = (c) => c.sheet_key || 'W-' + c.id;
   function canonCheckup(c) {
@@ -170,7 +183,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
     return {
       key: checkupKey(c), id: c.id, kind: 'checkup', mr: p ? p.mr : '', name: c.name, phone: c.phone || '', month: '', treatment: c.checkup_for || '',
       token: c.token || '', status: c.day_status ? STATUS_LABEL[c.day_status] : '', group: '', doctors: c.doctors || '', details: c.details || '', pp: '',
-      removed: S.released.has(c.id), claimed: !!c.sheet_key, updated_at: new Date(c.updated_at).toISOString(),
+      removed: removedMark(c.id, (c.day_status || 'waiting') === 'waiting'), claimed: !!c.sheet_key, updated_at: new Date(c.updated_at).toISOString(),
     };
   }
   function dayList(branch, date) {
@@ -639,10 +652,15 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       if (vs.length && vs.every((x) => x.branch === tab.branch && x.date === date && x.sheet_key && !present.includes(x.sheet_key))) fp = checkMr(tab.branch, date, mrIn, name, set.phone, fp.patient);
     }
     const who = normName(name) + '|' + (normPhone(set.phone) || '');
+    // keep_rows (20261017000100, private.aaj_sync_row v_keepnew): a new row that is not done (Waiting, Scheduled, no Status) of a patient whose
+    // visit of today (or checkup registered as them) is done and was taken off the sheet is that patient come again: a visit of its own (REV2 R2B)
+    const sv = set.status && set.status.v ? set.status.v : 'waiting';
+    const keepNew = !!S.keepCall && (sv === 'waiting' || sv === 'scheduled');
+    const offDone = (x, kind) => { const st = S.released.get(x.id); const now = kind === 'visit' ? x.status : x.day_status; return (st === 'completed' || st === 'in_treatment') && (now === 'completed' || now === 'in_treatment'); };
     // the day's 200 refused lookups are used up: every row that would make a visit or a patient gets the same answer, fit or not; it counts
     // for the call's five. A patient already on today's list, and a refused row sent again, go on.
-    const onList = fp.outcome === 'mr' && (S.visits.some((x) => x.mr === fp.patient.mr && x.branch === tab.branch && x.date === date)
-      || S.checkups.some((c) => c.patient_mr === fp.patient.mr && c.branch === tab.branch && c.date === date));
+    const onList = fp.outcome === 'mr' && (S.visits.some((x) => x.mr === fp.patient.mr && x.branch === tab.branch && x.date === date && !(keepNew && offDone(x, 'visit')))
+      || S.checkups.some((c) => c.patient_mr === fp.patient.mr && c.branch === tab.branch && c.date === date && !(keepNew && offDone(c, 'checkup'))));
     if (!onList && S.lookups >= 200 && (fp.outcome === 'mr' || fp.outcome === 'mr_new' || !(S.lookupKeys && S.lookupKeys.has(row.key + '|' + fp.outcome + '|' + mrIn + '|' + who)))) {
       S.refusedThisCall = (S.refusedThisCall || 0) + 1;
       res.outcome = 'needs_patient'; res.level = 'error'; res.message = BUDGET_MSG;
@@ -676,7 +694,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       else lookupRefused(res, tab, row.key, mrIn, `Mr# ${mrIn} is not on the website. Check the number.`, `Mr# ${mrIn} is not on the website. Check the number.`, true, null, who);
       return res;
     }
-    const e = S.visits.filter((x) => x.mr === p.mr && x.branch === tab.branch && x.date === date)
+    const e = S.visits.filter((x) => x.mr === p.mr && x.branch === tab.branch && x.date === date && !(keepNew && offDone(x, 'visit')))
       .sort((a, b) => (b.status !== 'cancelled') - (a.status !== 'cancelled') || a.seq - b.seq)[0];
     if (e) {
       const ek = visitKey(e);
@@ -696,9 +714,10 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       // no visit, but a checkup of today registered as this patient whose row is not on the sheet: that checkup (never turned into a visit;
       // a row with a Month is the patient's visit, never a checkup)
       const ck = S.checkups.find((c) => c.patient_mr === p.mr && c.branch === tab.branch && c.date === date && c.source !== 'archive'
-        && checkupKey(c) !== row.key && !present.includes(checkupKey(c)));
+        && checkupKey(c) !== row.key && !present.includes(checkupKey(c)) && !(keepNew && offDone(c, 'checkup')));
       if (ck) return adoptCheckup(ck, tab, set, row, res);
     }
+    const first = keepNew ? S.visits.filter((x) => x.mr === p.mr && x.branch === tab.branch && x.date === date && offDone(x, 'visit')).sort((a, b) => b.seq - a.seq)[0] : null;
     const v2 = createVisit(tab, p, set, res, row.key, date);
     v2.status = 'waiting';
     const { warns } = applyFields(v2, tab, set, null, row.edited_at, res, true);
@@ -707,27 +726,46 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       v2.token = (used.length ? Math.max(...used) : 0) + 1;
     }
     res.outcome = 'created'; res.visit_id = v2.id;
+    if (first) warns.push({ ok: `Second visit of this patient today: the first (${(first.treatment_label || '').trim() || 'a visit'}) is done and was taken off the sheet.` });
     return finish(res, warn ? [warn, ...warns] : warns);
   }
 
   // Rows that left the sheet (owner rule: the visit / checkup is removed, unless something real hangs on it)
   // private.aaj_let_go_seen: the website let this record's row go today, and the record was not changed since
   const letGoSeen = (kind, x) => S.letGo.some((l) => l.kind === kind && l.id === x.id && l.key === x.sheet_key && x.updated_at <= l.at && pkDate(l.at) === pkDate(now()));
-  function removals(tab, date, present) {
+  function removals(tab, date, present, keep) {
     const out = [];
     const vcands = S.visits.filter((v) => v.branch === tab.branch && v.date === date && v.sheet_key && !present.includes(v.sheet_key) && v.status !== 'cancelled' && !S.released.has(v.id));
     const ccands = S.checkups.filter((c) => c.branch === tab.branch && c.date === date && c.sheet_key && !present.includes(c.sheet_key) && c.day_status !== 'cancelled' && !S.released.has(c.id));
     const n = vcands.length + ccands.length;
     if (!n) return out;
+    // keep_rows (20261017000100): a record of a patient who is done (Completed, Treatment) whose row left the sheet goes off the sheet and stays
+    // on the website as it is, whatever else happened (one row or a whole tab). A record the website let go itself (RV9-2) is not one of them
+    const offV = new Set(keep ? vcands.filter((v) => (v.status === 'completed' || v.status === 'in_treatment') && !letGoSeen('visit', v)).map((v) => v.id) : []);
+    const offC = new Set(keep ? ccands.filter((c) => (c.day_status === 'completed' || c.day_status === 'in_treatment') && !letGoSeen('checkup', c)).map((c) => c.id) : []);
+    const off = offV.size + offC.size;
     const total = S.visits.filter((v) => v.branch === tab.branch && v.date === date && v.sheet_key && v.status !== 'cancelled' && !S.released.has(v.id)).length
       + S.checkups.filter((c) => c.branch === tab.branch && c.date === date && c.sheet_key && c.day_status !== 'cancelled' && !S.released.has(c.id)).length;
     const done = S.removedToday[tab.branch] || 0;
-    const cap = Math.max(15, Math.ceil(0.35 * (total + done)));      // 35 in 100 of the day's rows, at least 15 (RS12-1)
-    const hold = n > 3 || (n >= 2 && (present.length === 0 || n * 4 >= total)) || done + n > cap;
-    const why = done + n > cap && n <= 3
+    // keep_rows: the records taken off the sheet earlier today while done are still rows the sheet had today: they stay in the cap's base
+    const isDone = (x) => S.released.get(x.id) === 'completed' || S.released.get(x.id) === 'in_treatment';
+    const offDone = keep ? S.visits.filter((v) => v.branch === tab.branch && v.date === date && isDone(v)).length
+      + S.checkups.filter((c) => c.branch === tab.branch && c.date === date && isDone(c)).length : 0;
+    const cap = Math.max(15, Math.ceil(0.35 * (total + done + offDone)));      // 35 in 100 of the day's rows, at least 15 (RS12-1)
+    // "at once" counts every row that left the sheet (done ones too: waiting patients in a big deletion are likely a mistake); the day's cap
+    // counts removals only
+    const hold = n > 3 || (n >= 2 && (present.length === 0 || n * 4 >= total)) || done + (n - off) > cap;
+    const why = (done + (n - off) > cap && n <= 3
       ? 'Needs attention: too many rows were deleted from this tab today, so nothing was removed from the website. Delete wrong entries on the website.'
-      : `Needs attention: ${n} rows disappeared at once, so nothing was removed from the website. Delete wrong entries on the website, or delete fewer rows at a time.`;
+      : `Needs attention: ${n} rows disappeared at once, so nothing was removed from the website. Delete wrong entries on the website, or delete fewer rows at a time.`)
+        + (off ? ' (The rows of patients who are done stay off the sheet.)' : '');
+    const takeOff = (kind, x, status, name) => {
+      S.released.set(x.id, status);
+      S.offLog.push({ kind, id: x.id, key: x.sheet_key, branch: tab.branch, date, status, at: now() });
+      out.push({ key: x.sheet_key, action: 'released', name, message: `Taken off the sheet; kept on the website (${STATUS_LABEL[status]}).` });
+    };
     for (const v of vcands) {
+      if (offV.has(v.id)) { takeOff('visit', v, v.status, patientByMr(v.mr).name); continue; }
       if (hold) { out.push({ key: v.sheet_key, action: 'restore', message: why }); continue; }
       // a visit whose row the website let go (the Mr# corrected on a row whose file the sync made from a slip) goes whatever its status (RV9-2)
       const letGo = letGoSeen('visit', v) && !v.attached;
@@ -758,6 +796,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       } else out.push({ key: v.sheet_key, action: 'restore', message: `Not removed: this visit is ${STATUS_LABEL[v.status]} on the website. To take a patient off, set Status to Cancelled.` });
     }
     for (const c of ccands) {
+      if (offC.has(c.id)) { takeOff('checkup', c, c.day_status, c.name); continue; }
       if (hold) { out.push({ key: c.sheet_key, action: 'restore', message: why }); continue; }
       // a checkup in Treatment or Completed is never removed by its deleted row, like a Completed visit (sheet-behaviour RV-2), unless the
       // website let its row go (an Mr# of a patient it has, or a Month, typed into it): then it goes whatever its status (RV9-2)
@@ -831,6 +870,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
     if (S.faults.timeoutOverRows && rowCount > S.faults.timeoutOverRows) return fail('57014', 500, 'canceling statement due to statement timeout');
     const out = { ok: true, date: payload.date, server_time: new Date(now()).toISOString(), tabs: [] };
     S.refusedThisCall = 0;                                  // refused lookups in this call: after 5 the call's other new Mr# rows wait
+    S.keepCall = S.keepRows && payload.keep_rows === true;  // (private.aaj_sync_row reads it for a new row too, REV2 R2B)
     for (const t of tabs) {
       const hasPresent = Array.isArray(t.present);
       const present = hasPresent ? t.present : [];
@@ -846,17 +886,20 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       if (hasPresent && present.length && Array.isArray(t.doubled)) restoreKept(t, payload.date, t.doubled.filter((k) => present.includes(k)));
       const results = [];
       for (const row of t.rows || []) results.push(processRow(t, row, payload.date, present));
+      // keep_rows (20261017000100): the call comes from a script that keeps rows on the tab; a website without that file ignores it
+      const keep = S.keepRows && payload.keep_rows === true;
+      const offNow = [];             // Cancelled records released in this call: the log says they went off the sheet (keep_rows only)
       if (hasPresent && payload.date === pkDate(now())) {
         for (const v of S.visits) if (v.branch === t.branch && v.date === payload.date && v.sheet_key) {
           if (present.includes(v.sheet_key)) S.released.delete(v.id);
-          else if (v.status === 'cancelled' && !S.released.has(v.id)) S.released.set(v.id, 'cancelled');
+          else if (v.status === 'cancelled' && !S.released.has(v.id)) { S.released.set(v.id, 'cancelled'); offNow.push({ key: v.sheet_key, action: 'released', name: patientByMr(v.mr).name, message: 'Taken off the sheet; kept on the website (Cancelled).' }); }
         }
         for (const c of S.checkups) if (c.branch === t.branch && c.date === payload.date && c.sheet_key) {
           if (present.includes(c.sheet_key)) S.released.delete(c.id);
-          else if (c.day_status === 'cancelled' && !S.released.has(c.id)) S.released.set(c.id, 'cancelled');
+          else if (c.day_status === 'cancelled' && !S.released.has(c.id)) { S.released.set(c.id, 'cancelled'); offNow.push({ key: c.sheet_key, action: 'released', name: c.name, message: 'Taken off the sheet; kept on the website (Cancelled).' }); }
         }
       }
-      const removed = payload.check_removed && payload.date === pkDate(now()) && hasPresent ? removals(t, payload.date, present) : [];
+      const removed = (keep ? offNow : []).concat(payload.check_removed && payload.date === pkDate(now()) && hasPresent ? removals(t, payload.date, present, keep) : []);
       const list = dayList(t.branch, payload.date);
       const hash = crypto.createHash('md5').update(JSON.stringify(list)).digest('hex');
       const unchanged = !(t.rows || []).length && t.hash === hash && !removed.length && !forceList;
