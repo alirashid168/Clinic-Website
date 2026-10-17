@@ -5,8 +5,8 @@
 // Claude (photo-ai Edge Function for the numbers, the canvas here for the pixels); without the AI key the photos wait, already filed.
 // Tabs: Upload · Which patient? · Filed · Set aside. Who may: "Use the Photo inbox" and "View raw clinic photos folder" (shell.js);
 // moving and undoing a filing: "Delete clinic photos and X-rays". docs/PHOTO-INTAKE.md explains it to staff.
-import { h, mount, toast, friendlyError, modal, field, select, empty, tabs, announce, busy, todayISO } from '../../ui/dom.js';
-import { state, can, isAdmin } from '../../state.js';
+import { h, mount, toast, friendlyError, modal, field, select, empty, tabs, announce, busy, todayISO, shortDate } from '../../ui/dom.js';
+import { state, can, isAdmin, branchName } from '../../state.js';
 import { readExif, captureTime, cameraClocks, fileSeq, sniffType, planDay, planUnchanged, waitSentence, karachiClock, dayLabel, karachiDate, isConnectionProblem, EDIT_VERSION } from '../../lib/photo-intake.js';
 import { sha256Hex, readHead, makeThumb, decode, aiCopy, renderEdit, canHeic } from '../../ui/photo-edit.js';
 import { STATUS_LABELS } from './common.js';
@@ -122,11 +122,35 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     } catch { /* the count is a convenience */ }
   }
 
+  // "Photo requests" (owner, 17 Oct 2026): patients who pressed "Please upload my photos" in their account. Oldest first, with Open patient
+  // and Done; a request closes by itself when photos are saved for that patient (a profile upload or a filing here). The count is in the heading.
+  const requestsPanel = h('details', { class: 'panel photo-requests', open: true });
+  async function drawRequests() {
+    let rows = [];
+    try { rows = typeof d.photoRequestsOpen === 'function' ? await d.photoRequestsOpen() : []; } catch { rows = []; }
+    mount(requestsPanel,
+      h('summary', {}, h('h2', { style: { display: 'inline' } }, `Photo requests${rows.length ? ` (${rows.length})` : ''}`)),
+      rows.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'list photo-requests-list' },
+        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Patient'), h('th', { scope: 'col' }, 'Branch'), h('th', { scope: 'col' }, 'Last visit'), h('th', { scope: 'col' }, 'Asked on'), h('th', { scope: 'col' }, srOnlyText('Actions')))),
+        h('tbody', {}, rows.map((r) => h('tr', {},
+          h('td', {}, h('strong', {}, r.full_name), ' ', h('span', { class: 'mr' }, `Mr# ${r.mr_number}`)),
+          h('td', {}, r.first_branch_id ? branchName(r.first_branch_id) : ''),
+          h('td', { class: 'nowrap' }, r.last_visit ? shortDate(r.last_visit) : 'No visit yet'),
+          h('td', { class: 'nowrap' }, shortDate(String(r.requested_at).slice(0, 10))),
+          h('td', { class: 'right nowrap' }, h('span', { class: 'inline', style: { justifyContent: 'flex-end' } },
+            h('a', { class: 'btn btn-small', href: `#/staff/patient/${r.patient_id}` }, 'Open patient'),
+            h('button', { type: 'button', class: 'btn btn-small', onclick: busy(async () => { await d.photoRequestDone(r.id); toast('Marked done.', 'ok'); await drawRequests(); }) }, 'Done'))))))))
+        : h('p', { class: 'muted', style: { margin: '8px 0 0' } }, 'No patient is asking for photos right now. A patient asks with "Please upload my photos" in their account.'));
+  }
+  const srOnlyText = (t) => h('span', { class: 'sr-only' }, t);
+
   mount(root,
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Photo inbox'),
       h('p', { class: 'muted' }, 'Take the photos all day; after the last patient, choose them all here in one go, into the city folder. Each patient is found by the time the photo was taken; when it is not clear you are asked "Which patient?". Claude edits them, and every photo gets a proper name.'))),
+    requestsPanel,
     h('div', { class: 'photo-inbox' }, folderBar, branchRow, aiBanner, strip.el, panel, costLine));
   drawFolders();
+  drawRequests();
 
   async function loadOverview() {
     overview = await d.photoInboxOverview(city.id);

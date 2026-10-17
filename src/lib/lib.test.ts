@@ -141,9 +141,10 @@ test('permission grid defaults', () => {
   assert.equal(hasPermission('coordinator', 'complaints.view', grid), true);
   assert.equal(hasPermission('front_desk', 'complaints.view', grid), false);
   assert.equal(hasPermission('admin', 'anything.at.all', grid), true);
-  // Owner decision, 9 Oct 2026: front desk, coordinator and admin may create and reset patient portal logins (same as the database grid).
+  // Owner decisions, 9 and 17 Oct 2026: the front desk, assistants, the coordinator and admin create and reset patient logins ("give button
+  // for assistant, admin, coordinator and front desk to create patient user login"; same as the database grid, 20261017000300).
   const mayMakeLogins = ['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'portal.invite', grid));
-  assert.deepEqual(mayMakeLogins, ['front_desk', 'coordinator', 'admin']);
+  assert.deepEqual(mayMakeLogins, ['front_desk', 'assistant', 'coordinator', 'admin']);
   // Job applications from the website (CNIC, phone, CV) are admin only until Dr. Ali ticks someone else (20261011000200).
   assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'jobs.view', grid)), ['admin']);
   // Owner, 16 Oct 2026: "front desk can upload pictures and x rays and consent forms, so can the assistants" (20261016000100). The raw

@@ -4,12 +4,16 @@
 //   Invoice        a patient search (name, Mr# or phone), then the invoice form with the payment (billing.create) at the person's
 //                  branch, for the patient's visit on today's list there when they are on it;
 //   Health record  a patient search, then the patient's medical history (changed with patients.edit) and, when they are on today's
-//                  Aaj ki List, that visit's treatment details and notes (changed with sheet.edit), the fields the list writes.
+//                  Aaj ki List, that visit's treatment details and notes (changed with sheet.edit), the fields the list writes;
+//   Patient login  a patient search, then the patient's website login in one press (portal.invite; owner, 17 Oct 2026: "give button for
+//                  assistant, admin, coordinator and front desk to create patient user login"): login name = Mr#, password = the mobile
+//                  number on file, and a card to hand over, print or copy (portal-login.js). A patient who has one gets Reset instead.
 // shell.js shows the menu with the items the person may use (the same permissions as here), and loads this file the first time one is chosen.
 import { h, modal, toast, friendlyError, field, localISO, capFirst } from '../../ui/dom.js';
 import { state, can, defaultBranchId, branchName } from '../../state.js';
 import { patientSearch, newPatientModal, STATUS_LABELS } from './common.js';
 import { newInvoiceModal } from './invoice.js';
+import { patientLoginModal, showLoginCard } from './portal-login.js';
 
 export async function openCreate(key) {
   if (key === 'patient' && can('patients.create')) {
@@ -19,7 +23,23 @@ export async function openCreate(key) {
     pickPatient({ title: 'New invoice', hint: 'Find the patient by name, Mr# or phone. Then the invoice, the payment and the printed bill.', onPick: invoiceFor, allowNew: true });
   } else if (key === 'health' && (can('treatment.enter') || can('patients.edit'))) {
     pickPatient({ title: 'Health record', hint: 'Find the patient by name, Mr# or phone.', onPick: healthRecord });
+  } else if (key === 'login' && can('portal.invite')) {
+    pickPatient({ title: 'Patient login', hint: 'Find the patient by name, Mr# or phone. Their login name is the Mr# and the password their mobile number.', onPick: patientLogin });
   }
+}
+
+/** The patient's login: Create for a patient without one; for one made at the clinic, the card again or Reset; an invited patient is told so. */
+async function patientLogin(p) {
+  const d = state.data;
+  const refresh = () => document.dispatchEvent(new CustomEvent('sheet-reload'));
+  if (!p.portal_user_id) { patientLoginModal(p, { mode: 'create', onDone: refresh }); return; }
+  const info = await d.portalLoginInfo(p.id);
+  if (!info.clinic_login) { toast(`${p.full_name} logs in with their own email address (invited). They reset the password with "Forgot password" on the login page.`, 'info', 6000); return; }
+  modal(`Patient login · ${p.full_name}`, h('p', {}, `${p.full_name} (Mr# ${p.mr_number}) already has a login.`, info.pending ? ' It was registered on the website and waits for approval (Patients → New registrations).' : ''), [
+    { label: 'Close' },
+    { label: 'Show the card', onClick: () => { showLoginCard(p, info.username); } },
+    { label: 'Reset password', primary: true, onClick: () => { patientLoginModal(p, { mode: 'reset', username: info.username, onDone: refresh }); } },
+  ]);
 }
 
 /** A dialog with the patient search; onPick(patient) once one is chosen (allowNew: "+ New patient" registers one first). */

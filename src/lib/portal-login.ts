@@ -1,7 +1,10 @@
-// Patient portal logins made at the clinic. Staff create the login and hand the patient a username and a
-// password; the patient chooses their own password the first time they log in.
+// Patient portal logins made at the clinic. Staff press one button; the patient logs in with their Mr# and their own mobile
+// number (the owner, 17 Oct 2026: "the patient user creation should be simple, and we keep the password, the patient can change
+// it themselves later"; his choices: the password is the phone number on file, the login name is the Mr#, no forced change).
 //
-// The username is the patient's name and Mr# at the clinic's domain, for example "alirashid-1705@dralirashid.com".
+// Behind the scenes a login is an email address at the clinic's domain: since 17 Oct 2026 "mr-50013@dralirashid.com" (the Mr#
+// alone, so the login page turns a typed Mr# into the address by itself: no lookup, nothing to leak); before that it was the
+// name and Mr#, "alirashid-1705@dralirashid.com", and those logins still work when typed in full or as the part before the @.
 // This file is the one source of the rules. scripts/build-lib.sh writes the browser copy (web/js/lib/portal-login.js)
 // and a copy for the admin-users Edge Function (supabase/functions/admin-users/portal-login.ts); a test fails when the
 // copies are out of date. Keep it free of imports and of Deno / browser / Node specifics.
@@ -52,6 +55,39 @@ export function portalLoginEmail(fullName: string, mr: string, domain: string): 
   return username ? `${username}@${String(domain).trim().toLowerCase()}` : '';
 }
 
+/** What a Mr# login's address starts with: "mr-50013@...". It has the reserved patient shape below (letters, a dash, a number). */
+export const MR_LOGIN_PREFIX = 'mr-';
+
+/** "mr-50013@dralirashid.com" (a legacy Mr# keeps its dash: "mr-347-1@..."), or '' when there is no usable Mr#. The login made since 17 Oct 2026. */
+export function mrLoginEmail(mr: string, domain: string): string {
+  const mrPart = portalMrPart(mr);
+  return mrPart ? `${MR_LOGIN_PREFIX}${mrPart}@${String(domain).trim().toLowerCase()}` : '';
+}
+
+/** True when this login address is the Mr# login of this patient (so the profile can say "Login: Mr# 50013" instead of showing the address). */
+export function isMrLoginEmail(email: string, mr: string, domain: string): boolean {
+  const made = mrLoginEmail(mr, domain);
+  return !!made && String(email ?? '').trim().toLowerCase() === made;
+}
+
+/**
+ * The password of a login made at the clinic: the patient's mobile number as on file, digits only ("0300-555 1234" -> "03005551234").
+ * '' when there is no phone. Families share a phone, so the phone is never the login name, only the password behind a unique Mr#.
+ */
+export function phonePassword(phone: string | null | undefined): string {
+  return String(phone ?? '').replace(/[^0-9]/g, '');
+}
+
+/** What staff are told when the phone on file cannot be the password (none, or too short for the login server). */
+export const PHONE_PASSWORD_MESSAGE = `This patient has no mobile number on file with at least ${PASSWORD_MIN} digits. Add the phone number first (Edit), or type a password below.`;
+
+/** The problem with using the phone on file as the password, or null when it will do. */
+export function checkPhonePassword(phone: string | null | undefined): string | null {
+  const digits = phonePassword(phone);
+  if (digits.length < PASSWORD_MIN || digits.length > PASSWORD_MAX) return PHONE_PASSWORD_MESSAGE;
+  return null;
+}
+
 const PATIENT_LOGIN_LOCAL = /^[a-z0-9]+-[a-z0-9-]*[0-9][a-z0-9-]*$/;
 
 /**
@@ -69,13 +105,21 @@ export function isPatientLoginName(email: string, domain: string): boolean {
 }
 
 /**
- * What the patient types on the login page, turned into the address to sign in with: the whole address, or just the part
- * before the @ (the clinic's domain is added). Spaces are removed (a copied username can carry them) and letters are lowercased.
+ * What the patient types on the login page, turned into the address to sign in with:
+ *   - a Mr# ("50013", "Mr# 50013", "mr-50013", a legacy "347-1"): the Mr# login, mr-50013@<domain>;
+ *   - a username from an older slip ("alirashid-1705"): that username at the clinic's domain;
+ *   - a whole email address: as typed.
+ * Spaces are removed (a copied username can carry them) and letters are lowercased. Anything that starts with a digit (after an
+ * optional "mr", "mr#" or "mr-") is a Mr#: an older username always starts with a letter.
  */
 export function normalizeLoginInput(input: string, domain: string): string {
   const text = String(input ?? '').replace(/\s+/g, '').toLowerCase();
   if (!text) return '';
-  return text.includes('@') ? text : `${text}@${String(domain).trim().toLowerCase()}`;
+  if (text.includes('@')) return text;
+  const host = String(domain).trim().toLowerCase();
+  const mr = text.match(/^(?:mr)?[#.:-]*([0-9][a-z0-9-]*)$/);
+  if (mr) return mrLoginEmail(mr[1], host) || `${text}@${host}`;
+  return `${text}@${host}`;
 }
 
 /** The problem with a password staff or a patient chose, in plain words, or null when it is fine. */
@@ -84,71 +128,4 @@ export function checkPortalPassword(password: string): string | null {
   if (text.length < PASSWORD_MIN) return `The password needs at least ${PASSWORD_MIN} characters.`;
   if (text.length > PASSWORD_MAX) return `The password can be at most ${PASSWORD_MAX} characters.`;
   return null;
-}
-
-/** A first password typed by staff (the one on the slip) needs at least this many characters. The patient's own later password only needs PASSWORD_MIN. */
-export const SLIP_PASSWORD_MIN = 10;
-
-/**
- * The problem with a first password that staff typed for a patient, or null when it is fine. Stricter than checkPortalPassword
- * because it is printed, handed over and valid until the patient first logs in: at least SLIP_PASSWORD_MIN characters and not
- * only digits (a phone number or "12345678"). The edge function applies the same rule, so a changed page cannot get round it.
- */
-export function checkSlipPassword(password: string): string | null {
-  const text = String(password ?? '');
-  if (text.length > PASSWORD_MAX) return `The password can be at most ${PASSWORD_MAX} characters.`;
-  if (text.length < SLIP_PASSWORD_MIN) return `The password needs at least ${SLIP_PASSWORD_MIN} characters.`;
-  // A phone number keeps its separators ("0300-1234567", "+92 300 1234567", "(021) 3456789"), so they are ignored here.
-  if (/^\d+$/.test(text.replace(/[\s+().\/-]/g, ''))) return 'The password cannot be a phone number or only digits. Use the suggested password, or add letters.';
-  return null;
-}
-
-// Short, easy, neutral words: 3 to 5 letters, none with the letters i, l or o, and the digits below skip 0 and 1, so nothing in a
-// password can be mistaken for something else when it is read off a slip (l / 1 / I, o / 0). Three words from this list and
-// four digits give log2(PASSWORD_WORDS.length ^ 3 * 8 ^ 4) bits, more than 37 with the words below. A test fails if the
-// list ever shrinks below 256 words (36 bits), has a duplicate or a word with a look-alike letter.
-export const PASSWORD_WORDS: readonly string[] = [
-  'sunny', 'happy', 'bread', 'peach', 'grape', 'zebra', 'sheep', 'berry', 'brave', 'bunny', 'candy', 'dusty', 'fresh', 'jumpy',
-  'navy', 'peace', 'queen', 'range', 'sweet', 'tasty', 'water', 'zesty', 'stars', 'smart', 'green', 'grass', 'dream', 'cream',
-  'crane', 'chase', 'dance', 'fence', 'bench', 'beach', 'chess', 'chart', 'charm', 'cheer', 'dawn', 'dune', 'farm', 'fern',
-  'gate', 'hare', 'hunt', 'jade', 'keep', 'nest', 'pear', 'pump', 'rush', 'sand', 'seed', 'tent', 'tree', 'tuna',
-  'vase', 'wave', 'yarn', 'yard', 'zest', 'cage', 'cake', 'camp', 'cave', 'dare', 'baby', 'bake', 'bark', 'barn',
-  'base', 'bath', 'bead', 'beam', 'bean', 'beat', 'beef', 'bend', 'best', 'bank', 'band', 'baker', 'brass', 'brush',
-  'busy', 'buzz', 'cane', 'card', 'care', 'cart', 'case', 'cash', 'cedar', 'cheek', 'chest', 'chunk', 'cube', 'cure',
-  'curve', 'cute', 'carry', 'cause', 'chat', 'chef', 'chew', 'crab', 'crepe', 'crew', 'dash', 'data', 'deck', 'deep',
-  'deer', 'desk', 'dandy', 'daze', 'dent', 'dense', 'drape', 'draw', 'dress', 'drum', 'duck', 'duke', 'each', 'earn',
-  'ease', 'east', 'easy', 'edge', 'eager', 'ember', 'enemy', 'entry', 'extra', 'face', 'fact', 'fade', 'fame', 'fang',
-  'fare', 'fast', 'fate', 'feast', 'feed', 'feet', 'fetch', 'fever', 'fund', 'funny', 'frame', 'frank', 'furry', 'gaze',
-  'gear', 'gust', 'grand', 'graze', 'greet', 'grey', 'grub', 'guard', 'guess', 'guest', 'hand', 'hard', 'harp', 'heap',
-  'heart', 'heat', 'hedge', 'herb', 'herd', 'huge', 'hurry', 'hush', 'jeep', 'jump', 'jury', 'just', 'keen', 'kept',
-  'kayak', 'knee', 'knack', 'made', 'mane', 'many', 'march', 'mask', 'mast', 'mate', 'maze', 'mean', 'meat', 'mend',
-  'mess', 'muse', 'must', 'math', 'mare', 'merry', 'mercy', 'name', 'near', 'neat', 'neck', 'need', 'nerve', 'next',
-  'nurse', 'pace', 'pack', 'page', 'pane', 'park', 'part', 'party', 'pass', 'past', 'path', 'pause', 'peak', 'perch',
-  'prune', 'puff', 'pure', 'push', 'purse', 'punch', 'quake', 'quart', 'queue', 'quest', 'quack', 'race', 'rack', 'raft',
-  'rage', 'rake', 'ramp', 'rank', 'rare', 'rate', 'reach', 'rear', 'rent', 'rest', 'rune', 'rust', 'ranch', 'raven',
-  'ready', 'reef', 'safe', 'sage', 'same', 'sank', 'save', 'scarf', 'seat', 'sent', 'serve', 'shade', 'shake', 'shape',
-  'share', 'shark', 'sharp', 'shed', 'sheet', 'shrub', 'snack', 'snake', 'snap', 'sneak', 'spare', 'spark', 'speak', 'speed',
-  'spent', 'stack', 'staff', 'stage', 'stamp', 'stand', 'star', 'start', 'state', 'stay', 'steam', 'steer', 'stem', 'step',
-  'stew', 'stump', 'such', 'sugar', 'sure', 'surf', 'swan', 'sweep', 'swarm', 'sway', 'tack', 'take', 'tame', 'tank',
-  'tape', 'task', 'team', 'tend', 'term', 'test', 'thank', 'that', 'thaw', 'them', 'then', 'they', 'thump', 'tuck',
-  'tune', 'turn', 'tray', 'treat', 'trend', 'tread', 'trap', 'truck', 'trust', 'truth', 'urge', 'used', 'user', 'vary',
-  'vast', 'veer', 'verb', 'very', 'vest', 'vane', 'wade', 'wage', 'wake', 'wand', 'warm', 'warn', 'wash', 'weed',
-  'went', 'west', 'what', 'wheat', 'when', 'wedge', 'yeast', 'yawn', 'zany',
-];
-export const PASSWORD_DIGITS = '23456789';
-
-/** A random whole number from 0 to n-1 from the system's secure random numbers (no modulo bias). */
-export function secureRandomInt(n: number): number {
-  const limit = Math.floor(0x100000000 / n) * n;
-  const one = new Uint32Array(1);
-  do { globalThis.crypto.getRandomValues(one); } while (one[0] >= limit);
-  return one[0] % n;
-}
-
-/** Three short words and four digits, like "sunny-grape-zebra-4827": about 37 bits, still easy to read out and type for the few minutes it is needed. */
-export function generatePortalPassword(randomInt: (n: number) => number = secureRandomInt): string {
-  const word = () => PASSWORD_WORDS[randomInt(PASSWORD_WORDS.length)];
-  let digits = '';
-  for (let i = 0; i < 4; i += 1) digits += PASSWORD_DIGITS[randomInt(PASSWORD_DIGITS.length)];
-  return `${word()}-${word()}-${word()}-${digits}`;
 }

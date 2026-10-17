@@ -131,6 +131,17 @@ async function route() {
       return await show(gen, view, first, () => (join ? forms.renderJoin(view) : forms.renderFeedback(view)));
     }
 
+    // A patient registers their own login (owner, 17 Oct 2026); the clinic approves it. Needs the clinic system, like the two forms.
+    if (parts[0] === 'register') {
+      setMeta(`Register for your patient account | ${SITE}`, "Patients of Dr. Ali Rashid's Dental Clinic: make your own login with your Mr# and mobile number to see your visits, invoices and photos.");
+      await state.ready;
+      if (!current() || unavailable(view)) return;
+      if ((signingOut ? null : state.session)?.kind === 'patient') return go('#/patient');
+      const { renderRegister } = await import('./views/register.js');
+      if (!current()) return;
+      return await show(gen, view, first, () => renderRegister(view));
+    }
+
     if (parts[0] === 'login') {
       const who = parts[1] === 'patient' ? 'patient' : 'staff';
       setMeta(who === 'patient' ? `Patient login | ${SITE}` : `Staff login | ${SITE}`,

@@ -1,6 +1,6 @@
-// Patient portal: invoices, dues, X-rays and photos, visit history, the
-// "see Dr. Ali" message, ratings and the complaint button.
-import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors, announce, capFirst } from '../ui/dom.js';
+// Patient portal: invoices, dues, X-rays and photos, documents (consent forms), visit history, the
+// "see Dr. Ali" message, ratings, the complaint button and "Please upload my photos".
+import { h, mount, rupees, shortDate, toast, friendlyError, modal, field, empty, localISO, srOnly, showFormErrors, clearFieldErrors, announce, capFirst, busy } from '../ui/dom.js';
 import { state, branchName } from '../state.js';
 import { signThumbs } from '../ui/photos.js';
 import { checkPortalPassword, PASSWORD_MIN } from '../lib/portal-login.js';
@@ -102,16 +102,32 @@ function loading(root, text) {
   mount(root, h('main', { class: 'public-main', 'aria-busy': 'true' }, h('p', { class: 'empty', role: 'status' }, text)));
 }
 
+/**
+ * A patient who registered themselves on the website and is not approved yet (owner, 17 Oct 2026: "it creates their id and awaits
+ * confirmation by our staff"): only this screen, nothing of the record (the database gives the login nothing until the clinic approves).
+ */
+function renderWaiting(root, signOut) {
+  mount(root, h('div', { class: 'login-wrap' },
+    h('main', { class: 'login-card' },
+      h('h1', { tabindex: '-1' }, 'Your account is waiting for the clinic\'s approval'),
+      h('p', {}, 'Thank you for registering. The clinic checks your details, usually at your next visit or within a day. After that, logging in with your Mr# and your password opens your account.'),
+      h('p', { class: 'muted' }, 'In a hurry? Ask at the front desk: they can approve it while you wait.'),
+      h('p', { style: { marginTop: '16px' } }, h('button', { type: 'button', class: 'btn', onclick: signOut }, 'Log out')))));
+  root.querySelector('h1')?.focus();
+}
+
 export async function renderPortal(root, signOut) {
   const d = state.data;
+  // Registered on the website, not approved yet: the waiting screen and nothing else.
+  if (state.session?.pending) return renderWaiting(root, signOut);
   const me = state.session?.patient;
   // The route guard checked the login, but it can end (another tab signed out) while this page's code was loading.
   if (!me) { location.replace('#/login/patient'); return; }
   // A login the clinic made: the patient chooses their own password before anything else.
   if (state.session?.mustChangePassword) return renderChoosePassword(root, signOut);
   loading(root, 'Loading your account…');
-  const [p, ratings] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => [])]);
-  return portalPage(root, { d, p, ratings, signOut, preview: false });
+  const [p, ratings, photoRequest] = await Promise.all([d.getPatient(me.id), d.myRatings().catch(() => []), typeof d.myPhotoRequest === 'function' ? d.myPhotoRequest().catch(() => null) : null]);
+  return portalPage(root, { d, p, ratings, signOut, preview: false, photoRequest });
 }
 
 /** Public demo: a made-up sample patient, so anyone can see what the portal looks like before logging in. */
@@ -196,7 +212,30 @@ function photoImg(d, ph) {
   return link;
 }
 
-async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel = branchName }) {
+/** A document's Open link: the signed link from the record, signed again when it has run out (an hour), like a photo's full-size link. */
+function documentLink(d, doc) {
+  const canSign = doc.storage_path && typeof d.signedUrls === 'function';
+  return h('a', {
+    class: 'btn btn-small', href: doc.url, target: '_blank', rel: 'noopener', 'aria-label': `Open ${doc.title || 'document'} (opens in a new tab)`,
+    onclick: async (e) => {
+      if (!canSign || !doc.url_expires_at || Date.now() < doc.url_expires_at - 60000) return;
+      e.preventDefault();
+      const tab = window.open('', '_blank');
+      if (tab) tab.opener = null;
+      try {
+        const url = (await d.signedUrls([doc.storage_path], { bucket: 'patient-documents' })).get(doc.storage_path);
+        if (!url) throw new Error('No link');
+        doc.url = e.currentTarget.href = url;
+        doc.url_expires_at = Date.now() + 3600 * 1000;
+        if (tab) tab.location = url;
+      } catch (err) { tab?.close(); toast(patientError(err), 'error'); }
+    },
+  }, 'Open');
+}
+
+const DOCUMENT_KINDS = { consent: 'Consent form', id: 'ID copy', report: 'Report', other: 'Document' };
+
+async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel = branchName, photoRequest = null }) {
   const rated = new Set(ratings.map((r) => r.visit_id));
   const completed = p.visits.filter((v) => v.status === 'completed');
   const complaints = p.complaints || [];
@@ -295,6 +334,27 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
   };
   drawMessages();
 
+  // "Please upload my photos" (owner, 17 Oct 2026): one open request at a time; it shows "Requested on <date>" with Cancel afterwards,
+  // and the clinic's list of requests (Photo inbox → Photo requests) closes by itself once photos are saved for the patient. Prominent
+  // when the patient has no photos yet. Not in the staff preview or the sample account (nothing to send there).
+  const photoRequestHost = h('span', { class: 'inline' });
+  let openRequest = photoRequest;
+  const drawPhotoRequest = () => {
+    if (preview || typeof d.requestPhotos !== 'function') { photoRequestHost.replaceChildren(); return; }
+    if (openRequest) {
+      photoRequestHost.replaceChildren(h('span', { class: 'muted photo-request-state' }, `Requested on ${shortDate(openRequest.requested_at)}`), ' ',
+        h('button', { type: 'button', class: 'btn btn-small', onclick: busy(async () => {
+          await d.cancelPhotoRequest(openRequest.id); openRequest = null; toast('Request cancelled.', 'ok'); drawPhotoRequest();
+        }) }, 'Cancel request'));
+    } else {
+      photoRequestHost.replaceChildren(h('button', { type: 'button', class: ['btn', p.photos.length ? 'btn-small' : 'btn-primary'], onclick: busy(async () => {
+        try { openRequest = await d.requestPhotos(); } catch (e) { if (!/duplicate|one_open/i.test(String(e?.message))) throw e; openRequest = await d.myPhotoRequest(); }
+        toast('Thank you. The clinic has been asked to upload your photos.', 'ok');
+        drawPhotoRequest();
+      }) }, 'Please upload my photos'));
+    }
+  };
+
   const issued = p.invoices.filter((i) => i.status === 'issued');
   const today = localISO();
   const next = p.visits.filter((v) => v.status === 'scheduled' && v.visit_date >= today).sort((a, b) => a.visit_date.localeCompare(b.visit_date))[0];
@@ -355,9 +415,19 @@ async function portalPage(root, { d, p, ratings, signOut, preview, branchLabel =
               h('p', { class: 'muted', role: 'status' }, 'Your installment plan could not load. Reload the page to try again.'),
               h('button', { type: 'button', class: 'btn btn-small', onclick: () => location.reload() }, 'Reload the page')) : null)),
       h('section', { class: 'panel' },
-        h('h2', {}, 'Photos and X-rays'),
+        h('div', { class: 'panel-head' }, h('h2', {}, 'Photos and X-rays'), photoRequestHost),
         p.photos.length ? h('div', { class: 'photo-grid' }, p.photos.map((ph) => h('figure', {},
           photoImg(d, ph),
           h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label].filter(Boolean).join(' · '))))) : empty('Your before, progress and after photos will appear here after the clinic uploads them.')),
+      // Consent forms, ID copies and reports on the patient's file (owner, 17 Oct 2026: the profile "containing the invoice, photos, consent form etc").
+      // The database shows a patient only their own documents and files.
+      h('section', { class: 'panel' },
+        h('h2', {}, 'Your documents'),
+        (p.documents || []).length ? h('table', { class: 'list' },
+          h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Date'), h('th', { scope: 'col' }, 'Document'), h('th', { scope: 'col' }, srOnly('Open')))),
+          h('tbody', {}, p.documents.map((doc) => h('tr', {},
+            h('td', { class: 'nowrap' }, shortDate(doc.added_on)), h('td', {}, h('strong', {}, DOCUMENT_KINDS[doc.kind] || 'Document'), doc.title ? h('div', { class: 'muted' }, doc.title) : null),
+            h('td', { class: 'right' }, doc.url ? documentLink(d, doc) : h('span', { class: 'muted' }, 'Not available')))))) : empty('Your signed consent forms and other documents will appear here.')),
       messagesHost));
+  drawPhotoRequest();
 }

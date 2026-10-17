@@ -31,10 +31,11 @@ export async function renderLogin(root, who, onSignedIn) {
   const isStaff = who !== 'patient';
   const title = isStaff ? 'Staff login' : 'Patient login';
 
-  // Staff type their whole email. A patient types the username from the clinic's slip (the part before the @ is enough) or their own email.
+  // Staff type their whole email. A patient types their Mr# (the login name since 17 Oct 2026; the page makes the address from it,
+  // normalizeLoginInput), the username from an older slip (the part before the @ is enough) or their own email.
   const email = isStaff
     ? h('input', { type: 'email', name: 'email', autocomplete: 'username', required: true, placeholder: 'name@dralirashid.com' })
-    : h('input', { type: 'text', name: 'username', autocomplete: 'username', required: true, inputmode: 'email', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', placeholder: 'For example alirashid-1705' });
+    : h('input', { type: 'text', name: 'username', autocomplete: 'username', required: true, inputmode: 'email', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', placeholder: 'For example 50013' });
   const typedAddress = () => (isStaff ? email.value.trim() : normalizeLoginInput(email.value, CONFIG.STAFF_EMAIL_DOMAIN));
   const password = h('input', { type: 'password', name: 'password', autocomplete: 'current-password', required: true });
   const submit = h('button', { class: 'btn btn-primary', type: 'submit', style: { width: '100%' } }, 'Log in');
@@ -102,7 +103,7 @@ export async function renderLogin(root, who, onSignedIn) {
       const address = typedAddress();
       const errors = [];
       if (!address) errors.push({ input: email, message: isStaff ? 'Type your email address.' : 'Type your username or email address.' });
-      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) errors.push({ input: email, message: isStaff ? 'Type the whole email address, for example name@example.com.' : 'Type your username exactly as on your slip, for example alirashid-1705, or the whole email address.' });
+      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) errors.push({ input: email, message: isStaff ? 'Type the whole email address, for example name@example.com.' : 'Type your Mr# (patient number), for example 50013, or the whole email address.' });
       if (!password.value) errors.push({ input: password, message: 'Type your password.' });
       if (errors.length) { showFormErrors(form, errors); return; }
       submit.disabled = true;
@@ -118,7 +119,7 @@ export async function renderLogin(root, who, onSignedIn) {
       }
     },
   },
-  isStaff ? field('Email', email) : field('Username or email', email, 'Use the username on the slip the clinic gave you. Patients who were invited by email use that email address.'),
+  isStaff ? field('Email', email) : field('Mr# or email', email, 'Your Mr# is your patient number (on your invoice or card); the password is your mobile number unless you changed it. Patients who were invited by email use that email address.'),
   field('Password', password),
   problem,
   submit,
@@ -144,6 +145,8 @@ export async function renderLogin(root, who, onSignedIn) {
       h('h1', {}, title),
       // The demo's patient page also takes a login a staff member made, so the whole first-login path can be tried.
       isStaff ? (demo || form) : h('div', {}, demo, demo ? h('h2', { style: { fontSize: 'var(--fs-lg)', margin: 'var(--space-4) 0 var(--space-2)' } }, 'Or log in with a username and password') : null, form),
+      // Registering (owner, 17 Oct 2026): a patient of the clinic makes their own login with their name, Mr# and mobile number; staff approve it.
+      !isStaff ? h('p', { class: 'muted', style: { fontSize: '14px', marginTop: '12px' } }, 'No login yet? ', h('a', { class: 'login-link', href: '#/register' }, 'Register with your Mr# and mobile number'), '.') : null,
       !isStaff && !demo ? h('div', { class: 'login-demo' },
         h('p', { class: 'muted' }, 'Not sure what your account shows? Your visits, invoices and dues, progress photos and X-rays, your next appointment and a direct line to Dr. Ali.'),
         h('a', { class: 'btn', href: '#/patient/demo', style: { width: '100%' } }, 'See a sample patient account')) : null,

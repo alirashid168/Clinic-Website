@@ -1,58 +1,76 @@
 // The patient portal login actions of the admin-users Edge Function, run in Node against a stand-in for the service-role
-// client. What this pins down:
-//   - create_patient_login derives the username from the patient's CURRENT name and Mr#, makes the login with email_confirm
-//     (so no email is sent) and must_change_password, links it to the patient, audits it, and never lets the password
-//     reach the audit log or the answer;
-//   - it refuses a patient who already has a login, a short password, a caller without portal.invite, and undoes the login
-//     it made when the link to the patient fails;
-//   - reset_patient_password only works on logins that create_patient_login made, decided from data a user cannot edit
-//     (the reserved username shape, app_metadata, and not being in the staff table), sets must_change_password again, and audits
-//     without the password;
-//   - a first password typed by staff has at least 10 characters and is not only digits (checked here, on the server);
+// client. What this pins down (the owner, 17 Oct 2026: a simple login, password = the phone on file, no forced change; patients may
+// register themselves and wait for approval):
+//   - create_patient_login makes the login "mr-<Mr#>@<domain>" with email_confirm (so no email is sent), the password = the patient's
+//     mobile number as digits (or the one staff typed), must_change_password OFF, links it to the patient, audits it (with whether the
+//     password was the phone or typed, never the password itself);
+//   - it refuses a patient who already has a login, a patient with no usable phone when nothing was typed, a short typed password, a caller
+//     without portal.invite, and undoes the login it made when the link to the patient fails;
+//   - reset_patient_password only works on logins that create_patient_login made, decided from data a user cannot edit (the reserved
+//     username shape, app_metadata, and not being in the staff table), sets the password back to the phone (or the typed one), keeps
+//     must_change_password off, and audits without the password;
 //   - the link to the patient is conditional, and a login made for a patient who was linked in the meantime is deleted again;
+//   - self_register makes a pending login only when the Mr#, the mobile number and the name all fit, answers the same sentence either
+//     way, writes one SELF_REGISTER audit row per call (outcome, Mr#, address, a hash of the number) and stops at its caps;
+//   - reject_registration removes only a login that self_register made;
 //   - invite_patient refuses an address at the clinic domain, or one that already has a login, links the patient only if the patient
 //     still has no login (and says so when it did not), and audits the address the invitation went to;
 //   - nothing here lets an address pass for a staff login (and create_staff / update_login refuse the patient shape).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createPatientLogin, resetPatientPassword, portalLoginInfo, invitePatient, findLoginByEmail, isClinicPatientLogin } from '../supabase/functions/admin-users/patient-login-actions.ts';
+import {
+  createPatientLogin, resetPatientPassword, portalLoginInfo, invitePatient, findLoginByEmail, isClinicPatientLogin,
+  selfRegister, rejectRegistration, nameFits, normalizePhone, REGISTERED_MESSAGE, REGISTER_CAPS,
+} from '../supabase/functions/admin-users/patient-login-actions.ts';
 
 const DOMAIN = 'dralirashid.com';
 
 type Row = Record<string, any>;
 
 /** A stand-in for supabase-js's service client: just the calls the actions make, over in-memory tables, recording every write. */
-function fakeAdmin(seed: { patients?: Row[]; staff?: Row[]; users?: Row[] } = {}) {
+function fakeAdmin(seed: { patients?: Row[]; staff?: Row[]; users?: Row[]; audit_log?: Row[]; registrations?: Row[] } = {}) {
   const f: any = {
-    tables: { patients: seed.patients ?? [], staff: seed.staff ?? [], audit_log: [] as Row[] } as Record<string, Row[]>,
+    tables: { patients: seed.patients ?? [], staff: seed.staff ?? [], audit_log: seed.audit_log ?? [], patient_registrations: seed.registrations ?? [] } as Record<string, Row[]>,
     users: new Map<string, Row>((seed.users ?? []).map((u) => [u.id, u])),
     calls: [] as Array<[string, any]>,
     failLink: false,
+    failTable: null as null | string, // every read and write of this table fails
     beforeLink: null as null | (() => void), // runs just before the patient row is updated: another request getting in first
     createError: null as null | { message: string },
     nextId: 1,
   };
+  // "new_data->>ip" reads the json column's key, as PostgREST does.
+  const read = (r: Row, col: string) => (col.includes('->>') ? r[col.split('->>')[0]]?.[col.split('->>')[1]] : r[col]);
   f.from = (table: string) => {
     let rows = f.tables[table] as Row[];
     let patch: Row | null = null;
-    const filters: Array<[string, unknown]> = [];
+    let counting = false;
+    const filters: Array<[string, string, unknown]> = [];
     const b: any = {
-      select() { return b; },
-      eq(col: string, value: unknown) { filters.push([col, value]); return b; },
-      is(col: string, value: null) { filters.push([col, value]); return b; }, // "is null": a missing value counts as null
+      select(_cols?: string, opts?: Row) { counting = !!opts?.count; return b; },
+      eq(col: string, value: unknown) { filters.push(['eq', col, value]); return b; },
+      gte(col: string, value: unknown) { filters.push(['gte', col, value]); return b; },
+      is(col: string, value: null) { filters.push(['eq', col, value]); return b; }, // "is null": a missing value counts as null
       update(p: Row) { patch = p; return b; },
-      then(resolve: any, reject: any) { return b.maybeSingle().then(resolve, reject); }, // awaited without maybeSingle (an update whose answer nobody reads)
-      insert(row: Row) { f.calls.push([`insert ${table}`, row]); rows.push(row); return Promise.resolve({ data: null, error: null }); },
+      then(resolve: any, reject: any) { return b.maybeSingle().then(resolve, reject); }, // awaited without maybeSingle (an update whose answer nobody reads, a count)
+      insert(row: Row) {
+        f.calls.push([`insert ${table}`, row]);
+        if (f.failTable === table) return Promise.resolve({ data: null, error: { message: `${table} is down` } });
+        rows.push({ at: new Date().toISOString(), ...row });
+        return Promise.resolve({ data: null, error: null });
+      },
       async maybeSingle() {
+        if (f.failTable === table) return { data: null, error: { message: `${table} is down` }, count: null };
         if (patch && table === 'patients') f.beforeLink?.();
-        const hit = rows.filter((r) => filters.every(([c, v]) => (v === null ? r[c] == null : r[c] === v)));
+        const hit = rows.filter((r) => filters.every(([op, c, v]) => (op === 'gte' ? String(read(r, c)) >= String(v) : v === null ? read(r, c) == null : read(r, c) === v)));
         if (patch) {
           f.calls.push([`update ${table}`, patch]);
           if (table === 'patients' && f.failLink) return { data: null, error: { message: 'link failed' } };
           for (const r of hit) Object.assign(r, patch);
           return { data: hit[0] ? { id: hit[0].id } : null, error: null };
         }
+        if (counting) return { data: null, error: null, count: hit.length };
         return { data: hit[0] ? { ...hit[0] } : null, error: null };
       },
     };
@@ -96,99 +114,112 @@ function fakeAdmin(seed: { patients?: Row[]; staff?: Row[]; users?: Row[] } = {}
   return f;
 }
 
-const ali = () => ({ id: 'pat-1', full_name: 'Ali Rashid', mr_number: '1705', portal_user_id: null });
+const ali = () => ({ id: 'pat-1', full_name: 'Ali Rashid', mr_number: '1705', phone: '0300-555 1234', portal_user_id: null });
 const deps = (admin: any, perms: string[] = ['portal.invite']) => ({ admin, can: async (k: string) => perms.includes(k), caller: 'staff-1', domain: DOMAIN });
-const password = 'sunny-grape-zebra-4827';
+const PHONE = '03005551234'; // the password the phone on file becomes
+const USERNAME = 'mr-1705@dralirashid.com';
+const createCall = (admin: any) => admin.calls.find(([k]: [string]) => k === 'createUser')?.[1];
 
 // ---------------------------------------------------------------- create_patient_login
-test('create: the username is the name and Mr# at the clinic domain; the login is confirmed, must change its password, and is linked', async () => {
+test('create: the login name is the Mr# at the clinic domain, the password the phone on file as digits, no forced change, confirmed and linked', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body, { ok: true, username: 'alirashid-1705@dralirashid.com' });
-  const [, attrs] = admin.calls.find(([k]: [string]) => k === 'createUser');
-  assert.deepEqual(attrs, {
-    email: 'alirashid-1705@dralirashid.com', password, email_confirm: true,
+  assert.deepEqual(res.body, { ok: true, username: USERNAME, password_kind: 'phone' });
+  assert.deepEqual(createCall(admin), {
+    email: USERNAME, password: PHONE, email_confirm: true,
     app_metadata: { kind: 'patient', clinic_login: true }, // only the server can write this: it is what marks a clinic login
-    user_metadata: { kind: 'patient', must_change_password: true }, // a prompt the patient can edit, deliberately not a lock
+    user_metadata: { kind: 'patient', must_change_password: false }, // the owner: no forced change at the first login
   });
   assert.equal(admin.tables.patients[0].portal_user_id, 'user-1', 'linked to the patient');
 });
 
-test('create: must_change_password is only a prompt in user_metadata; nothing is decided by it (it is not in app_metadata)', async () => {
+test('create: a password staff typed is used instead of the phone (8 to 72 characters, digits allowed), and the audit log says so', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
-  await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password: 'their-own-1' });
+  assert.deepEqual(res.body, { ok: true, username: USERNAME, password_kind: 'typed' });
+  assert.equal(createCall(admin).password, 'their-own-1');
+  assert.equal(admin.tables.audit_log[0].new_data.password_kind, 'typed');
+  for (const bad of ['short', '1234567', 'x'.repeat(73)]) {
+    const a = fakeAdmin({ patients: [ali()] });
+    const r = await createPatientLogin(deps(a), { patient_id: 'pat-1', password: bad });
+    assert.match(String(r.body.error), /at least 8|at most 72/, bad);
+    assert.equal(a.calls.length, 0, 'checked before anything is looked up');
+  }
+  const digits = fakeAdmin({ patients: [ali()] });
+  assert.equal((await createPatientLogin(deps(digits), { patient_id: 'pat-1', password: '12345678' })).body.ok, true, 'a typed password may be digits only: the normal password is a phone number');
+});
+
+test('create: no usable phone (none, or fewer than 8 digits) and nothing typed is refused with a plain message, and nothing is made', async () => {
+  for (const phone of [null, '', '0300', '03-00-55']) {
+    const admin = fakeAdmin({ patients: [{ ...ali(), phone }] });
+    const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
+    assert.match(String(res.body.error), /no mobile number on file with at least 8 digits/, String(phone));
+    assert.ok(!admin.calls.some(([k]: [string]) => k === 'createUser'));
+    assert.equal(admin.tables.patients[0].portal_user_id, null);
+  }
+  const typed = fakeAdmin({ patients: [{ ...ali(), phone: null }] });
+  assert.equal((await createPatientLogin(deps(typed), { patient_id: 'pat-1', password: 'typed-pass-1' })).body.ok, true, 'a typed password gets round a missing phone');
+});
+
+test('create: the phone becomes digits only, whatever way it was written', async () => {
+  for (const phone of ['0300 555 1234', '0300-5551234', '(0300) 5551234', '0300.555.1234']) {
+    const admin = fakeAdmin({ patients: [{ ...ali(), phone }] });
+    await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
+    assert.equal(createCall(admin).password, PHONE, phone);
+  }
+});
+
+test('create: the flag that forces a new password is off, and said so where it is set', async () => {
+  const admin = fakeAdmin({ patients: [ali()] });
+  await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   const user = admin.users.get('user-1');
-  assert.equal(user.user_metadata.must_change_password, true);
+  assert.equal(user.user_metadata.must_change_password, false);
   assert.ok(!('must_change_password' in user.app_metadata));
   const source = readFileSync(new URL('../supabase/functions/admin-users/patient-login-actions.ts', import.meta.url), 'utf8');
-  assert.match(source, /must_change_password is a PROMPT/, 'said in a comment where it is set');
+  assert.match(source, /No forced change: the owner chose none/, 'said in a comment where it is set');
+  assert.doesNotMatch(source, /must_change_password: true/, 'never set on');
 });
 
 test('create: no email is ever sent (a plain createUser with email_confirm, never an invitation or a magic link)', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
-  await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.deepEqual(admin.calls.map(([k]: [string]) => k), ['createUser', 'update patients', 'insert audit_log']);
   const source = readFileSync(new URL('../supabase/functions/admin-users/patient-login-actions.ts', import.meta.url), 'utf8');
   // (invite_patient, further down, is the one action that sends an invitation, to a real address)
   const mine = source.slice(source.indexOf('export async function createPatientLogin'), source.indexOf('export async function invitePatient'));
-  assert.ok(mine.length > 500 && mine.includes('resetPatientPassword') && mine.includes('portalLoginInfo'), 'the three login actions were found');
+  assert.ok(mine.length > 500 && mine.includes('resetPatientPassword') && mine.includes('portalLoginInfo') && mine.includes('selfRegister'), 'the login actions were found');
   assert.doesNotMatch(mine, /inviteUserByEmail|resetPasswordForEmail|generateLink|signInWithOtp/);
 });
 
-test('create: the audit log says PORTAL_LOGIN_CREATED with the username, and the password is nowhere in it, the answer or the calls to the patient table', async () => {
+test('create: the audit log says PORTAL_LOGIN_CREATED with the username and that the password was the phone; the password is nowhere in it, the answer or the calls to the patient table', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
-  assert.deepEqual(admin.tables.audit_log, [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_LOGIN_CREATED', actor: 'staff-1', new_data: { username: 'alirashid-1705@dralirashid.com' } }]);
-  assert.ok(!JSON.stringify(admin.tables.audit_log).includes(password));
-  assert.ok(!JSON.stringify(res).includes(password));
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
+  assert.deepEqual(admin.tables.audit_log.map(({ at, ...r }: Row) => r), [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_LOGIN_CREATED', actor: 'staff-1', new_data: { username: USERNAME, password_kind: 'phone' } }]);
+  assert.ok(!JSON.stringify(admin.tables.audit_log).includes(PHONE));
+  assert.ok(!JSON.stringify(res).includes(PHONE));
   const outsideAuth = admin.calls.filter(([k]: [string]) => k !== 'createUser');
-  assert.ok(!JSON.stringify(outsideAuth).includes(password), 'only the login server ever receives it');
+  assert.ok(!JSON.stringify(outsideAuth).includes(PHONE), 'only the login server ever receives it');
 });
 
-test('create: uses the patient\'s current name (edited since registration) and a legacy Mr#', async () => {
-  const admin = fakeAdmin({ patients: [{ id: 'pat-9', full_name: "Zoë O'Brien", mr_number: '347-1', portal_user_id: null }] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-9', password });
-  assert.equal(res.body.username, 'zoeobrien-347-1@dralirashid.com');
-});
-
-test('create: an Urdu name still gets a username', async () => {
-  const admin = fakeAdmin({ patients: [{ id: 'pat-8', full_name: 'علی رشید', mr_number: '1705', portal_user_id: null }] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-8', password });
-  assert.equal(res.body.username, 'patient-1705@dralirashid.com');
+test('create: a legacy Mr# keeps its dash; the name plays no part in the login name any more', async () => {
+  const admin = fakeAdmin({ patients: [{ id: 'pat-9', full_name: "Zoë O'Brien", mr_number: '347-1', phone: PHONE, portal_user_id: null }] });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-9' });
+  assert.equal(res.body.username, 'mr-347-1@dralirashid.com');
+  const urdu = fakeAdmin({ patients: [{ id: 'pat-8', full_name: 'علی رشید', mr_number: '1705', phone: PHONE, portal_user_id: null }] });
+  assert.equal((await createPatientLogin(deps(urdu), { patient_id: 'pat-8' })).body.username, USERNAME);
 });
 
 test('create: a patient who already has a portal login is refused, and nothing is made', async () => {
   const admin = fakeAdmin({ patients: [{ ...ali(), portal_user_id: 'user-old' }] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.deepEqual(res.body, { error: 'This patient already has a portal login.' });
   assert.equal(admin.calls.length, 0);
 });
 
-test('create: a password under 10 characters (or none) is refused before anything is made', async () => {
-  for (const bad of ['short', '', undefined, null, '1234567', 'abcdefgh', 'abcdefghi']) {
-    const admin = fakeAdmin({ patients: [ali()] });
-    const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password: bad });
-    assert.match(String(res.body.error), /at least 10 characters/, String(bad));
-    assert.equal(res.status, 200, 'a problem the person can fix is a plain answer');
-    assert.equal(admin.calls.length, 0);
-  }
-});
-
-test('create: a password of only digits is refused on the server, however long (a phone number, 12345678...)', async () => {
-  for (const bad of ['1234567890', '03001234567', '12345678901234567890', '0300-1234567', '+92 300 1234567']) {
-    const admin = fakeAdmin({ patients: [ali()] });
-    const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password: bad });
-    assert.match(String(res.body.error), /only digits/, bad);
-    assert.equal(admin.calls.length, 0);
-  }
-  const fine = fakeAdmin({ patients: [ali()] });
-  assert.equal((await createPatientLogin(deps(fine), { patient_id: 'pat-1', password: 'abcdefghij' })).body.ok, true, 'ten characters with letters pass');
-});
-
 test('create: a caller without portal.invite is refused (403) before the patient is even looked up', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
-  const res = await createPatientLogin(deps(admin, ['patients.view']), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin, ['patients.view']), { patient_id: 'pat-1' });
   assert.equal(res.status, 403);
   assert.equal(admin.calls.length, 0);
   assert.equal(admin.tables.patients[0].portal_user_id, null);
@@ -196,39 +227,31 @@ test('create: a caller without portal.invite is refused (403) before the patient
 
 test('create: an unknown patient, and a missing patient id', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
-  assert.deepEqual((await createPatientLogin(deps(admin), { patient_id: 'nope', password })).body, { error: 'Patient not found.' });
-  assert.deepEqual((await createPatientLogin(deps(admin), { password })).body, { error: 'Patient not found.' });
+  assert.deepEqual((await createPatientLogin(deps(admin), { patient_id: 'nope' })).body, { error: 'Patient not found.' });
+  assert.deepEqual((await createPatientLogin(deps(admin), {})).body, { error: 'Patient not found.' });
   assert.equal(admin.calls.length, 0);
 });
 
-test('create: a patient with no usable Mr# gets no login (never "name-@")', async () => {
-  const admin = fakeAdmin({ patients: [{ id: 'pat-7', full_name: 'Ali', mr_number: '///', portal_user_id: null }] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-7', password });
-  assert.match(String(res.body.error), /Mr#/);
-  assert.equal(admin.calls.length, 0);
-});
-
-test('create: a Mr# with no digit would give a username outside the reserved patient shape, so it is refused with a clear message (nothing is made)', async () => {
-  for (const mr of ['abc', 'A-B', 'x']) {
-    const admin = fakeAdmin({ patients: [{ id: 'pat-6', full_name: 'Ali Rashid', mr_number: mr, portal_user_id: null }] });
-    const res = await createPatientLogin(deps(admin), { patient_id: 'pat-6', password });
+test('create: a patient with no usable Mr# (none, or no digit in it) gets no login, with a clear message', async () => {
+  for (const mr of ['///', 'abc', 'A-B', 'x', '']) {
+    const admin = fakeAdmin({ patients: [{ id: 'pat-7', full_name: 'Ali', mr_number: mr, phone: PHONE, portal_user_id: null }] });
+    const res = await createPatientLogin(deps(admin), { patient_id: 'pat-7' });
     assert.deepEqual(res.body, { error: 'This patient has no usable Mr# (it needs a number in it), so a username cannot be made.' }, mr);
     assert.equal(admin.calls.length, 0, 'no login made, nothing linked');
-    assert.equal(admin.tables.patients[0].portal_user_id, null);
   }
 });
 
 test('create: a username that is already a login is refused in plain words', async () => {
-  const admin = fakeAdmin({ patients: [ali()], users: [{ id: 'user-x', email: 'alirashid-1705@dralirashid.com' }] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const admin = fakeAdmin({ patients: [ali()], users: [{ id: 'user-x', email: USERNAME }] });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.deepEqual(res.body, { error: 'That username is already used by another login.' });
   assert.equal(admin.tables.patients[0].portal_user_id, null);
   assert.equal(admin.tables.audit_log.length, 0);
 });
 
 test('create: an address that is a staff login is never reused', async () => {
-  const admin = fakeAdmin({ patients: [ali()], staff: [{ id: 's1', email: 'alirashid-1705@dralirashid.com' }] });
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const admin = fakeAdmin({ patients: [ali()], staff: [{ id: 's1', email: USERNAME }] });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.match(String(res.body.error), /already used/);
   assert.ok(!admin.calls.some(([k]: [string]) => k === 'createUser'));
 });
@@ -236,7 +259,7 @@ test('create: an address that is a staff login is never reused', async () => {
 test('create: when the login cannot be linked to the patient, the login just made is removed again and nothing is audited', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
   admin.failLink = true;
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.equal(res.body.error, 'link failed');
   assert.deepEqual(admin.calls.filter(([k]: [string]) => k === 'deleteUser'), [['deleteUser', 'user-1']]);
   assert.equal(admin.users.size, 0, 'no orphan login');
@@ -245,13 +268,13 @@ test('create: when the login cannot be linked to the patient, the login just mad
 
 test('create: the link to the patient is conditional (update ... where portal_user_id is null)', async () => {
   const source = readFileSync(new URL('../supabase/functions/admin-users/patient-login-actions.ts', import.meta.url), 'utf8');
-  assert.match(source, /\.update\(\{ portal_user_id: userId \}\)\.eq\('id', patient\.id\)\.is\('portal_user_id', null\)/);
+  assert.equal((source.match(/\.update\(\{ portal_user_id: userId \}\)\.eq\('id', patient\.id\)\.is\('portal_user_id', null\)/g) || []).length, 2, 'create and self_register');
 });
 
 test('create: when another request linked the patient between the check and the link, the login just made is deleted, the other link stays, and the staff member is told to reload', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
   admin.beforeLink = () => { admin.tables.patients[0].portal_user_id = 'user-from-the-other-request'; };
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.deepEqual(res.body, { error: 'This patient was just given a login. Reload the page and use Reset portal password if you need a new one.' });
   assert.equal(admin.tables.patients[0].portal_user_id, 'user-from-the-other-request', 'never overwritten');
   assert.deepEqual(admin.calls.filter(([k]: [string]) => k === 'deleteUser'), [['deleteUser', 'user-1']], 'the login made just now is removed again');
@@ -259,78 +282,72 @@ test('create: when another request linked the patient between the check and the 
   assert.equal(admin.tables.audit_log.length, 0);
 });
 
-test('create: a simultaneous create for the same patient (the other request made the login and linked it) says the patient was just given a login, not "used by another login"', async () => {
-  const admin = fakeAdmin({ patients: [ali()], users: [{ id: 'user-other', email: 'alirashid-1705@dralirashid.com' }] });
-  // By the time this request looks again, the other one has linked its login.
-  const make = admin.auth.admin.createUser;
-  admin.auth.admin.createUser = async (attrs: Row) => { const r = await make(attrs); admin.tables.patients[0].portal_user_id = 'user-other'; return r; };
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
-  assert.equal(res.body.error, 'This patient was just given a login. Reload the page and use Reset portal password if you need a new one.');
-  assert.equal(admin.tables.patients[0].portal_user_id, 'user-other');
-});
-
 test('create: any other error of the login server is passed on in its own words', async () => {
   const admin = fakeAdmin({ patients: [ali()] });
   admin.createError = { message: 'Password is known to be weak' };
-  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
+  const res = await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
   assert.deepEqual(res.body, { error: 'Password is known to be weak' });
   assert.equal(admin.tables.patients[0].portal_user_id, null);
-});
-
-test('create: a second try for the same patient is refused (the login exists now)', async () => {
-  const admin = fakeAdmin({ patients: [ali()] });
-  assert.equal((await createPatientLogin(deps(admin), { patient_id: 'pat-1', password })).body.ok, true);
-  const again = await createPatientLogin(deps(admin), { patient_id: 'pat-1', password: 'another-pass-2222' });
-  assert.deepEqual(again.body, { error: 'This patient already has a portal login.' });
-  assert.equal(admin.users.size, 1);
 });
 
 // ---------------------------------------------------------------- reset_patient_password
 async function withLogin() {
   const admin = fakeAdmin({ patients: [ali()] });
-  await createPatientLogin(deps(admin), { patient_id: 'pat-1', password });
-  // The patient chose their own password at the first login: the flag is off.
+  await createPatientLogin(deps(admin), { patient_id: 'pat-1' });
+  // The patient changed their password from the portal menu since.
   admin.users.get('user-1').user_metadata = { kind: 'patient', must_change_password: false };
   admin.calls.length = 0;
   admin.tables.audit_log.length = 0;
   return admin;
 }
 
-test('reset: sets the password, turns must_change_password back on, keeps the rest of the metadata, and audits without the password', async () => {
+test('reset: sets the password back to the phone on file (digits), keeps the forced change off and the rest of the metadata, and audits without the password', async () => {
   const admin = await withLogin();
-  const next = 'peach-zebra-berry-5936';
-  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password: next });
-  assert.deepEqual(res, { status: 200, body: { ok: true, username: 'alirashid-1705@dralirashid.com' } });
+  admin.tables.patients[0].phone = '0300 555 9999'; // the number changed since the login was made: the new one counts
+  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1' });
+  assert.deepEqual(res, { status: 200, body: { ok: true, username: USERNAME, password_kind: 'phone' } });
   const [, attrs] = admin.calls.find(([k]: [string]) => k === 'updateUserById');
-  assert.deepEqual(attrs, { id: 'user-1', password: next, user_metadata: { kind: 'patient', must_change_password: true } });
-  assert.deepEqual(admin.tables.audit_log, [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_PASSWORD_RESET', actor: 'staff-1', new_data: { username: 'alirashid-1705@dralirashid.com' } }]);
-  assert.ok(!JSON.stringify(admin.tables.audit_log).includes(next));
-  assert.ok(!JSON.stringify(res).includes(next));
+  assert.deepEqual(attrs, { id: 'user-1', password: '03005559999', user_metadata: { kind: 'patient', must_change_password: false } });
+  assert.deepEqual(admin.tables.audit_log.map(({ at, ...r }: Row) => r), [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_PASSWORD_RESET', actor: 'staff-1', new_data: { username: USERNAME, password_kind: 'phone' } }]);
+  assert.ok(!JSON.stringify(admin.tables.audit_log).includes('03005559999'));
+  assert.ok(!JSON.stringify(res).includes('03005559999'));
 });
 
-test('reset: the username comes from the login itself, so a patient renamed since still gets the right one', async () => {
+test('reset: a typed password is used instead; an older login still prompted for a new password is no longer prompted', async () => {
   const admin = await withLogin();
-  admin.tables.patients[0].full_name = 'Alia Rashid Khan';
-  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password: 'peach-zebra-berry-5936' });
+  admin.users.get('user-1').user_metadata = { kind: 'patient', must_change_password: true };
+  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password: 'peach-zebra-5936' });
+  assert.equal(res.body.password_kind, 'typed');
+  const [, attrs] = admin.calls.find(([k]: [string]) => k === 'updateUserById');
+  assert.deepEqual(attrs, { id: 'user-1', password: 'peach-zebra-5936', user_metadata: { kind: 'patient', must_change_password: false } });
+});
+
+test('reset: the username comes from the login itself (an older name-Mr# login keeps it)', async () => {
+  const admin = fakeAdmin({
+    patients: [{ ...ali(), portal_user_id: 'u-old' }],
+    users: [{ id: 'u-old', email: 'alirashid-1705@dralirashid.com', app_metadata: { kind: 'patient', clinic_login: true }, user_metadata: { kind: 'patient' } }],
+  });
+  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1' });
   assert.equal(res.body.username, 'alirashid-1705@dralirashid.com');
 });
 
-test('reset: refused for a patient with no login, with a real-email login, and for a short password or a caller without portal.invite', async () => {
+test('reset: refused for a patient with no login, with a real-email login, with no usable phone and nothing typed, for a short typed password, or a caller without portal.invite', async () => {
   const none = fakeAdmin({ patients: [ali()] });
-  assert.match(String((await resetPatientPassword(deps(none), { patient_id: 'pat-1', password })).body.error), /no portal login yet/);
+  assert.match(String((await resetPatientPassword(deps(none), { patient_id: 'pat-1' })).body.error), /no portal login yet/);
 
   const invited = fakeAdmin({
     patients: [{ ...ali(), portal_user_id: 'user-mail' }],
     users: [{ id: 'user-mail', email: 'ali@gmail.com', user_metadata: { kind: 'patient', full_name: 'Ali Rashid' } }],
   });
-  const refused = await resetPatientPassword(deps(invited), { patient_id: 'pat-1', password });
+  const refused = await resetPatientPassword(deps(invited), { patient_id: 'pat-1' });
   assert.match(String(refused.body.error), /own email address/);
   assert.ok(!invited.calls.some(([k]: [string]) => k === 'updateUserById'), 'the invited patient\'s password is never touched');
 
   const admin = await withLogin();
-  assert.match(String((await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password: 'abc' })).body.error), /at least 10/);
-  assert.match(String((await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password: '0300123456789' })).body.error), /only digits/);
-  assert.equal((await resetPatientPassword(deps(admin, []), { patient_id: 'pat-1', password })).status, 403);
+  admin.tables.patients[0].phone = null;
+  assert.match(String((await resetPatientPassword(deps(admin), { patient_id: 'pat-1' })).body.error), /no mobile number on file/);
+  assert.match(String((await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password: 'abc' })).body.error), /at least 8/);
+  assert.equal((await resetPatientPassword(deps(admin, []), { patient_id: 'pat-1' })).status, 403);
   assert.equal(admin.calls.length, 0);
 });
 
@@ -339,32 +356,29 @@ test('reset: never works on a staff login, even one at the clinic domain', async
     patients: [{ ...ali(), portal_user_id: 'user-staff' }], // a bad link: the patient row points at a staff login
     users: [{ id: 'user-staff', email: 'reception@dralirashid.com', user_metadata: { full_name: 'Reception' } }],
   });
-  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password });
+  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1' });
   assert.match(String(res.body.error), /own email address/);
   assert.ok(!admin.calls.some(([k]: [string]) => k === 'updateUserById'));
 });
 
 test('reset: a staff user whose own user_metadata says kind "patient", linked to a patient, is refused (user_metadata is the user\'s to edit, it proves nothing)', async () => {
-  // The attack: a coordinator links a patient to a staff address, that staff member's login carries user_metadata.kind = 'patient'
-  // (planted by an invitation, or edited by the owner of the login), and a reset would change the staff member's password.
   const admin = fakeAdmin({
     patients: [{ ...ali(), portal_user_id: 'user-staff' }],
     staff: [{ id: 'user-staff', email: 'newdoc@dralirashid.com' }],
     users: [{ id: 'user-staff', email: 'newdoc@dralirashid.com', user_metadata: { kind: 'patient', must_change_password: false } }],
   });
-  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password });
+  const res = await resetPatientPassword(deps(admin), { patient_id: 'pat-1' });
   assert.match(String(res.body.error), /own email address/);
   assert.ok(!admin.calls.some(([k]: [string]) => k === 'updateUserById'), 'the staff member\'s password is never touched');
   assert.equal(admin.tables.audit_log.length, 0);
-  // Not even the info action treats it as a clinic login, so the reset button never shows for it.
-  assert.deepEqual((await portalLoginInfo(deps(admin), { patient_id: 'pat-1' })).body, { ok: true, has_login: true, clinic_login: false, username: null });
+  assert.deepEqual((await portalLoginInfo(deps(admin), { patient_id: 'pat-1' })).body, { ok: true, has_login: true, clinic_login: false, username: null, pending: false });
 });
 
 test('reset: each check alone refuses: the username shape, app_metadata, and the staff table', async () => {
-  const user = (over: Row) => ({ id: 'u-x', email: 'alirashid-1705@dralirashid.com', app_metadata: { kind: 'patient', clinic_login: true }, user_metadata: { kind: 'patient' }, ...over });
+  const user = (over: Row) => ({ id: 'u-x', email: USERNAME, app_metadata: { kind: 'patient', clinic_login: true }, user_metadata: { kind: 'patient' }, ...over });
   const attempt = async (u: Row, staff: Row[] = []) => {
     const admin = fakeAdmin({ patients: [{ ...ali(), portal_user_id: 'u-x' }], staff, users: [u] });
-    return { res: await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password }), admin };
+    return { res: await resetPatientPassword(deps(admin), { patient_id: 'pat-1' }), admin };
   };
   const good = await attempt(user({}));
   assert.equal(good.res.body.ok, true, 'all three hold: allowed');
@@ -372,7 +386,7 @@ test('reset: each check alone refuses: the username shape, app_metadata, and the
   const noAppMetadata = await attempt(user({ app_metadata: undefined }));
   const wrongKind = await attempt(user({ app_metadata: { kind: 'staff', clinic_login: true } }));
   const notFlagged = await attempt(user({ app_metadata: { kind: 'patient' } }));
-  const inStaffTable = await attempt(user({}), [{ id: 'u-x', email: 'alirashid-1705@dralirashid.com' }]);
+  const inStaffTable = await attempt(user({}), [{ id: 'u-x', email: USERNAME }]);
   for (const [name, r] of Object.entries({ wrongShape, noAppMetadata, wrongKind, notFlagged, inStaffTable })) {
     assert.match(String(r.res.body.error), /own email address/, name);
     assert.ok(!r.admin.calls.some(([k]: [string]) => k === 'updateUserById'), name);
@@ -381,19 +395,22 @@ test('reset: each check alone refuses: the username shape, app_metadata, and the
 
 test('reset: a login that no longer exists is reported, not crashed on', async () => {
   const admin = fakeAdmin({ patients: [{ ...ali(), portal_user_id: 'user-gone' }] });
-  assert.match(String((await resetPatientPassword(deps(admin), { patient_id: 'pat-1', password })).body.error), /could not be found/);
+  assert.match(String((await resetPatientPassword(deps(admin), { patient_id: 'pat-1' })).body.error), /could not be found/);
 });
 
 // ---------------------------------------------------------------- portal_login_info
-test('info: no login, a clinic login (with its username), and a real-email login (no username)', async () => {
+test('info: no login, a clinic login (with its username), a real-email login (no username), and a registration waiting for approval', async () => {
   const none = fakeAdmin({ patients: [ali()] });
-  assert.deepEqual((await portalLoginInfo(deps(none), { patient_id: 'pat-1' })).body, { ok: true, has_login: false, clinic_login: false, username: null });
+  assert.deepEqual((await portalLoginInfo(deps(none), { patient_id: 'pat-1' })).body, { ok: true, has_login: false, clinic_login: false, username: null, pending: false });
 
   const made = await withLogin();
-  assert.deepEqual((await portalLoginInfo(deps(made), { patient_id: 'pat-1' })).body, { ok: true, has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' });
+  assert.deepEqual((await portalLoginInfo(deps(made), { patient_id: 'pat-1' })).body, { ok: true, has_login: true, clinic_login: true, username: USERNAME, pending: false });
 
   const invited = fakeAdmin({ patients: [{ ...ali(), portal_user_id: 'u' }], users: [{ id: 'u', email: 'ali@gmail.com', user_metadata: { kind: 'patient' } }] });
-  assert.deepEqual((await portalLoginInfo(deps(invited), { patient_id: 'pat-1' })).body, { ok: true, has_login: true, clinic_login: false, username: null });
+  assert.deepEqual((await portalLoginInfo(deps(invited), { patient_id: 'pat-1' })).body, { ok: true, has_login: true, clinic_login: false, username: null, pending: false });
+
+  made.tables.patient_registrations.push({ id: 'r1', patient_id: 'pat-1', user_id: 'user-1', status: 'pending' });
+  assert.equal((await portalLoginInfo(deps(made), { patient_id: 'pat-1' })).body.pending, true);
 
   assert.equal((await portalLoginInfo(deps(made, []), { patient_id: 'pat-1' })).status, 403);
 });
@@ -401,17 +418,171 @@ test('info: no login, a clinic login (with its username), and a real-email login
 test('isClinicPatientLogin: the patient shape at the clinic domain, app_metadata set by the function, and not in the staff table; user_metadata proves nothing', async () => {
   const admin = fakeAdmin();
   const mine = { id: 'u1', app_metadata: { kind: 'patient', clinic_login: true } };
-  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'a-1@dralirashid.com' }, DOMAIN), true);
-  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'A-1@DrAliRashid.com' }, DOMAIN), true);
+  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'mr-1@dralirashid.com' }, DOMAIN), true);
+  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'a-1@dralirashid.com' }, DOMAIN), true, 'an older name-Mr# login');
+  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'MR-1@DrAliRashid.com' }, DOMAIN), true);
   assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'reception@dralirashid.com' }, DOMAIN), false);
-  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'a-1@gmail.com' }, DOMAIN), false);
-  assert.equal(await isClinicPatientLogin(admin, { id: 'u1', email: 'a-1@dralirashid.com', user_metadata: { kind: 'patient' } }, DOMAIN), false, 'user_metadata alone');
-  assert.equal(await isClinicPatientLogin(admin, { email: 'a-1@dralirashid.com', app_metadata: mine.app_metadata }, DOMAIN), false, 'no id');
+  assert.equal(await isClinicPatientLogin(admin, { ...mine, email: 'mr-1@gmail.com' }, DOMAIN), false);
+  assert.equal(await isClinicPatientLogin(admin, { id: 'u1', email: 'mr-1@dralirashid.com', user_metadata: { kind: 'patient' } }, DOMAIN), false, 'user_metadata alone');
+  assert.equal(await isClinicPatientLogin(admin, { email: 'mr-1@dralirashid.com', app_metadata: mine.app_metadata }, DOMAIN), false, 'no id');
   assert.equal(await isClinicPatientLogin(admin, null, DOMAIN), false);
   // A failed look at the staff table is "no" (it fails closed).
   const broken = fakeAdmin();
   broken.from = () => { const b: any = { select: () => b, eq: () => b, maybeSingle: async () => ({ data: null, error: { message: 'down' } }) }; return b; };
-  assert.equal(await isClinicPatientLogin(broken, { ...mine, email: 'a-1@dralirashid.com' }, DOMAIN), false);
+  assert.equal(await isClinicPatientLogin(broken, { ...mine, email: 'mr-1@dralirashid.com' }, DOMAIN), false);
+});
+
+// ---------------------------------------------------------------- self_register
+const reg = (admin: any, body: Row, ip = '203.0.113.5') => selfRegister({ admin, domain: DOMAIN }, body, { ip });
+const good = () => ({ full_name: 'Ali Rashid', mr: '1705', phone: '+92 300 5551234', password: 'my-own-pass-8' });
+const registerRows = (admin: any) => admin.tables.audit_log.filter((r: Row) => r.action === 'SELF_REGISTER');
+
+test('self_register: Mr#, phone and name match: a pending login with the chosen password, linked, one registration row, one SELF_REGISTER audit row, the neutral answer', async () => {
+  const admin = fakeAdmin({ patients: [ali()] });
+  const res = await reg(admin, good());
+  assert.deepEqual(res, { status: 200, body: { ok: true, message: REGISTERED_MESSAGE } });
+  assert.deepEqual(createCall(admin), {
+    email: USERNAME, password: 'my-own-pass-8', email_confirm: true,
+    app_metadata: { kind: 'patient', clinic_login: true, self_registered: true },
+    user_metadata: { kind: 'patient', must_change_password: false },
+  });
+  assert.equal(admin.tables.patients[0].portal_user_id, 'user-1');
+  const [row] = admin.tables.patient_registrations;
+  assert.deepEqual({ ...row, at: undefined }, { patient_id: 'pat-1', user_id: 'user-1', typed_name: 'Ali Rashid', typed_phone: PHONE, status: 'pending', at: undefined });
+  const notes = registerRows(admin);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].new_data.outcome, 'registered');
+  assert.equal(notes[0].new_data.mr, '1705');
+  assert.equal(notes[0].new_data.ip, '203.0.113.5');
+  assert.match(notes[0].new_data.who, /^[0-9a-f]{16}$/, 'a hash of the number, not the number');
+  assert.ok(!JSON.stringify(admin.tables.audit_log).includes(PHONE) && !JSON.stringify(admin.tables.audit_log).includes('my-own-pass-8'));
+});
+
+test('self_register: no such Mr#, a wrong number, a wrong name, or a patient who already has a login: the SAME answer, nothing made, the outcome in the audit log', async () => {
+  const cases: Array<[string, Row, Row]> = [
+    ['no such Mr#', ali(), { ...good(), mr: '1706' }],
+    ['wrong number', ali(), { ...good(), phone: '0300 5559999' }],
+    ['wrong name', ali(), { ...good(), full_name: 'Sara Khan' }],
+    ['has a login', { ...ali(), portal_user_id: 'user-old' }, good()],
+  ];
+  for (const [name, patient, body] of cases) {
+    const admin = fakeAdmin({ patients: [patient] });
+    const res = await reg(admin, body);
+    assert.deepEqual(res.body, { ok: true, message: REGISTERED_MESSAGE }, name);
+    assert.ok(!admin.calls.some(([k]: [string]) => k === 'createUser'), name);
+    assert.equal(admin.tables.patient_registrations.length, 0, name);
+    assert.match(registerRows(admin)[0].new_data.outcome, /no_match|has_login/, name);
+  }
+});
+
+test('self_register: bad input is the one thing said plainly, before anything is looked up or logged', async () => {
+  const admin = fakeAdmin({ patients: [ali()] });
+  assert.match(String((await reg(admin, { ...good(), full_name: 'A' })).body.error), /your name/);
+  assert.match(String((await reg(admin, { ...good(), mr: '' })).body.error), /Mr#/);
+  assert.match(String((await reg(admin, { ...good(), phone: '0300' })).body.error), /mobile number/);
+  assert.match(String((await reg(admin, { ...good(), password: 'short' })).body.error), /at least 8/);
+  assert.equal(admin.calls.length, 0);
+  assert.equal(admin.tables.audit_log.length, 0);
+});
+
+test('self_register: the caps: 3 tries per number a day, 10 per address an hour, 200 a day in all; beyond them the same answer and nothing made (also when the log cannot be read)', async () => {
+  assert.deepEqual(REGISTER_CAPS, { perPhoneDay: 3, perIpHour: 10, perDay: 200 });
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 26 * 3600 * 1000).toISOString();
+  const tries = (n: number, data: Row, at = now) => Array.from({ length: n }, () => ({ action: 'SELF_REGISTER', at, new_data: data }));
+  // The number: three earlier tries today (two of them with another Mr#) use up the number's three.
+  const byPhone = fakeAdmin({ patients: [ali()] });
+  await reg(byPhone, { ...good(), mr: '1' }); await reg(byPhone, { ...good(), mr: '2' }); await reg(byPhone, { ...good(), mr: '3' });
+  assert.equal(registerRows(byPhone).length, 3);
+  const capped = await reg(byPhone, good());
+  assert.deepEqual(capped.body, { ok: true, message: REGISTERED_MESSAGE });
+  assert.ok(!byPhone.calls.some(([k]: [string]) => k === 'createUser'), 'the fourth try with the right details makes nothing');
+  assert.equal(registerRows(byPhone).at(-1).new_data.outcome, 'capped');
+  // Yesterday's tries do not count.
+  const yesterday = fakeAdmin({ patients: [ali()], audit_log: tries(5, { who: 'x', ip: '203.0.113.5' }, old) });
+  assert.ok((await reg(yesterday, good())).body.ok && yesterday.calls.some(([k]: [string]) => k === 'createUser'));
+  // The address: ten tries this hour from it, any numbers.
+  const byIp = fakeAdmin({ patients: [ali()], audit_log: tries(10, { who: 'other', ip: '203.0.113.5' }) });
+  await reg(byIp, good());
+  assert.ok(!byIp.calls.some(([k]: [string]) => k === 'createUser'));
+  assert.equal(registerRows(byIp).at(-1).new_data.outcome, 'capped');
+  const otherIp = fakeAdmin({ patients: [ali()], audit_log: tries(10, { who: 'other', ip: '198.51.100.9' }) });
+  await reg(otherIp, good());
+  assert.ok(otherIp.calls.some(([k]: [string]) => k === 'createUser'), 'another address is not held back by it');
+  // The day: 200 in all.
+  const day = fakeAdmin({ patients: [ali()], audit_log: tries(200, { who: 'many', ip: '198.51.100.1' }) });
+  await reg(day, good());
+  assert.ok(!day.calls.some(([k]: [string]) => k === 'createUser'));
+  // The log cannot be read: capped (fails closed), still the same answer.
+  const blind = fakeAdmin({ patients: [ali()] });
+  blind.failTable = 'audit_log';
+  assert.deepEqual((await reg(blind, good())).body, { ok: true, message: REGISTERED_MESSAGE });
+  assert.ok(!blind.calls.some(([k]: [string]) => k === 'createUser'));
+});
+
+test('self_register: a login that appears meanwhile (the username exists) gets the neutral answer; a failed link or registration row undoes the login', async () => {
+  const taken = fakeAdmin({ patients: [ali()], users: [{ id: 'u-x', email: USERNAME }] });
+  assert.deepEqual((await reg(taken, good())).body, { ok: true, message: REGISTERED_MESSAGE });
+  assert.equal(registerRows(taken)[0].new_data.outcome, 'has_login');
+  assert.equal(taken.tables.patients[0].portal_user_id, null);
+
+  const raced = fakeAdmin({ patients: [ali()] });
+  raced.beforeLink = () => { raced.tables.patients[0].portal_user_id = 'other-login'; };
+  assert.deepEqual((await reg(raced, good())).body, { ok: true, message: REGISTERED_MESSAGE });
+  assert.equal(raced.tables.patients[0].portal_user_id, 'other-login', 'never overwritten');
+  assert.equal(raced.users.size, 0, 'the login made just now is removed again');
+  assert.equal(raced.tables.patient_registrations.length, 0);
+
+  const noRow = fakeAdmin({ patients: [ali()] });
+  noRow.failTable = 'patient_registrations';
+  assert.deepEqual((await reg(noRow, good())).body, { ok: true, message: REGISTERED_MESSAGE });
+  assert.equal(noRow.users.size, 0, 'without the pending row the login would open the whole record: it is removed');
+  assert.equal(noRow.tables.patients[0].portal_user_id, null, 'and unlinked');
+  assert.equal(registerRows(noRow)[0].new_data.outcome, 'failed');
+});
+
+test('normalizePhone and nameFits: the ways a number and a name are written', () => {
+  for (const p of ['0300 5551234', '+92 300 5551234', '0092-300-5551234', '923005551234', '3005551234', '0300-555-1234']) assert.equal(normalizePhone(p), PHONE, p);
+  assert.equal(normalizePhone(''), '');
+  assert.equal(normalizePhone('021 34567890'), '02134567890', 'a landline stays as typed');
+  assert.equal(nameFits('Ali Rashid', 'Ali Rashid'), true);
+  assert.equal(nameFits('ali', 'Ali Rashid'), true, 'the first name alone');
+  assert.equal(nameFits('Mr. Ali', 'Dr Ali Rashid'), true, 'titles do not count');
+  assert.equal(nameFits('Rashid Ali', 'Ali Rashid'), true, 'the words in another order');
+  assert.equal(nameFits('AliRashid', 'Ali Rashid'), true, 'spaces do not matter');
+  assert.equal(nameFits('Zoë', "Zoe O'Brien"), true, 'accents do not matter');
+  assert.equal(nameFits('Sara Khan', 'Ali Rashid'), false);
+  assert.equal(nameFits('Rashid', 'Ali Rashid'), true, 'a family name on its own fits (the Mr# and the number already matched)');
+  assert.equal(nameFits('Hamza Rashid', 'Ali Rashid'), false, 'another member of the family does not');
+  assert.equal(nameFits('', 'Ali Rashid'), false);
+  assert.equal(nameFits('علی', 'Ali Rashid'), false, 'no Latin letters: no fit (register at the clinic instead)');
+});
+
+// ---------------------------------------------------------------- reject_registration
+test('reject: the database function decides (as the caller) and answers the login id; the patient is unlinked, and the login removed only when self_register made it', async () => {
+  const selfMade = { id: 'u-self', email: USERNAME, app_metadata: { kind: 'patient', clinic_login: true, self_registered: true } };
+  const rpc = (answer: Row) => ({ rpc: async (name: string, args: Row) => { calls.push([name, args]); return answer; } });
+  let calls: Array<[string, Row]> = [];
+  const admin = fakeAdmin({ patients: [{ ...ali(), portal_user_id: 'u-self' }], users: [selfMade] });
+  const res = await rejectRegistration({ admin, asCaller: rpc({ data: 'u-self', error: null }), can: async () => true }, { patient_id: 'pat-1', reason: 'not this family' });
+  assert.deepEqual(res.body, { ok: true, removed: true });
+  assert.deepEqual(calls, [['reject_registration', { p_patient: 'pat-1', p_reason: 'not this family' }]]);
+  assert.equal(admin.tables.patients[0].portal_user_id, null, 'unlinked with the service role (the link is guarded against staff changes)');
+  assert.equal(admin.users.size, 0);
+  // A login staff made (not self_registered), a staff login, or no login: nothing is deleted.
+  for (const user of [{ id: 'u-staffmade', email: USERNAME, app_metadata: { kind: 'patient', clinic_login: true } }, { id: 'u-s', email: 'reception@dralirashid.com', app_metadata: {} }]) {
+    calls = [];
+    const a = fakeAdmin({ users: [user], staff: user.id === 'u-s' ? [{ id: 'u-s' }] : [] });
+    const r = await rejectRegistration({ admin: a, asCaller: rpc({ data: user.id, error: null }), can: async () => true }, { patient_id: 'pat-1' });
+    assert.deepEqual(r.body, { ok: true, removed: false }, user.id);
+    assert.equal(a.users.size, 1, user.id);
+  }
+  // The database refuses (already decided, or no permission): its words, nothing deleted.
+  const a2 = fakeAdmin({ users: [selfMade] });
+  const refused = await rejectRegistration({ admin: a2, asCaller: rpc({ data: null, error: { message: 'This registration was already decided. Reload the list.' } }), can: async () => true }, { patient_id: 'pat-1' });
+  assert.match(String(refused.body.error), /already decided/);
+  assert.equal(a2.users.size, 1);
+  assert.equal((await rejectRegistration({ admin: a2, asCaller: rpc({ data: 'u-self', error: null }), can: async () => false }, { patient_id: 'pat-1' })).status, 403);
 });
 
 // ---------------------------------------------------------------- invite_patient (the step that plants a login)
@@ -432,7 +603,7 @@ test('invite: a real email still gets the invitation, linked and audited as befo
   const [, sent] = admin.calls.find(([k]: [string]) => k === 'inviteUserByEmail');
   assert.deepEqual(sent, { email: 'ali@gmail.com', redirectTo: 'https://www.dralirashid.com/reset-password.html', data: { full_name: 'Ali Rashid', kind: 'patient' } });
   assert.equal(admin.tables.patients[0].portal_user_id, 'user-1');
-  assert.deepEqual(admin.tables.audit_log, [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_INVITE', actor: 'staff-1', new_data: { email: 'ali@gmail.com' } }]);
+  assert.deepEqual(admin.tables.audit_log.map(({ at, ...r }: Row) => r), [{ table_name: 'patients', row_id: 'pat-1', action: 'PORTAL_INVITE', actor: 'staff-1', new_data: { email: 'ali@gmail.com' } }]);
   // an invited login is never a clinic login: its password is reset by email
   assert.equal((await portalLoginInfo(deps(admin), { patient_id: 'pat-1' })).body.clinic_login, false);
 });
@@ -501,11 +672,16 @@ test('findLoginByEmail: a list that cannot be read is an error, never "no login"
 });
 
 // ---------------------------------------------------------------- the function itself
-test('index.ts routes the three actions and keeps the staff address guard on create_staff and update_login', () => {
+test('index.ts routes the actions, lets only self_register in without a login, and keeps the staff address guard on create_staff and update_login', () => {
   const index = readFileSync(new URL('../supabase/functions/admin-users/index.ts', import.meta.url), 'utf8');
-  for (const action of ['create_patient_login', 'reset_patient_password', 'portal_login_info']) assert.match(index, new RegExp(`'${action}'`));
+  for (const action of ['create_patient_login', 'reset_patient_password', 'portal_login_info', 'self_register', 'reject_registration']) assert.match(index, new RegExp(`'${action}'`));
   assert.equal((index.match(/isPatientLoginName\(email, STAFF_DOMAIN\)/g) || []).length, 2, 'create_staff and update_login');
   // The existing actions are still there, unchanged in name.
   for (const action of ['create_staff', 'ban_user', 'unban_user', 'update_login', 'invite_patient']) assert.match(index, new RegExp(`'${action}'`));
   assert.match(index, /await run\(\{ admin, can, caller, domain: STAFF_DOMAIN \}, body\)/);
+  // self_register is answered before the login check; every other action comes after it.
+  const selfAt = index.indexOf("action === 'self_register'");
+  const loginCheck = index.indexOf("return json({ error: 'Please log in again.' }, 401)");
+  assert.ok(selfAt > 0 && loginCheck > selfAt, 'self_register needs no login');
+  for (const action of ['create_staff', 'reject_registration', 'create_patient_login', 'invite_patient']) assert.ok(index.indexOf(`'${action}'`, loginCheck) > loginCheck, `${action} after the login check`);
 });

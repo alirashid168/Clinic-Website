@@ -29,7 +29,9 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: 'patients.view', label: 'View patient profiles', category: 'Patients', defaults: [Y, Y, Y, Y, Y] },
   { key: 'patients.create', label: 'Register new patients (auto Mr#)', category: 'Patients', defaults: [Y, N, N, Y, N] },
   { key: 'patients.edit', label: 'Edit patient details', category: 'Patients', defaults: [Y, N, N, Y, N] },
-  { key: 'portal.invite', label: 'Invite patients to the patient portal', category: 'Patients', defaults: [Y, N, N, Y, N] },
+  // The patient's website login, made in one press (owner, 17 Oct 2026: "give button for assistant, admin, coordinator and front desk to
+  // create patient user login"; 20261017000300_patient_login_simple.sql), and the approval of patients who registered themselves.
+  { key: 'portal.invite', label: 'Create patient logins', category: 'Patients', defaults: [Y, Y, N, Y, N] },
   { key: 'sheet.view', label: 'View Aaj ki List / queue', category: 'Daily list', defaults: [Y, Y, Y, Y, Y] },
   { key: 'sheet.edit', label: 'Add and edit Aaj ki List entries', category: 'Daily list', defaults: [Y, Y, Y, Y, N] },
   { key: 'treatment.enter', label: 'Enter treatment done / braces details', category: 'Daily list', defaults: [N, Y, Y, N, N] },
