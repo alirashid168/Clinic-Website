@@ -10218,6 +10218,7 @@ await step('"Try Claude again" with Claude back: the three photos are edited by 
   let text = '';
   for (let i = 0; i < 40; i++) {
     await pboxRedo.waitForTimeout(750);
+    await pboxRedo.getByRole('tab', { name: 'Upload' }).click();
     await pboxRedo.getByRole('tab', { name: 'Filed' }).click();
     await pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' }).waitFor();
     text = await pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' }).innerText();

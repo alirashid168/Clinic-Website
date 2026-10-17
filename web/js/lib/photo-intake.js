@@ -505,9 +505,9 @@ export function visitFacts(visits) {
 
 /**
  * One candidate per patient. Several rows of one patient that day (a monthly visit and a Dr. Ali visit: tokens are per treatment, so this
- * is normal; or an imported row and a sheet row): the photo month first (a tap files to that visit, and its Month names the photos), then
- * not imported, then with times, then the earliest. The other rows are kept as `also` (with their times and occasion): the patient counts
- * as in the chair at any of them when other sets are judged.
+ * is normal; or an imported row and a sheet row): not imported first, then the photo month (a tap files to that visit, and its Month names
+ * the photos), then with times, then the earliest. The other rows are kept as `also` (with their times and occasion): the patient counts
+ * as in the chair at any of them, with any of their occasions, when other sets are judged.
  */
 export function dayCandidates(visits) {
   const facts = visitFacts(visits).filter((v) => CANDIDATE_STATUSES.includes(v.status));
@@ -518,7 +518,7 @@ export function dayCandidates(visits) {
   }
   const out = [];
   for (const list of byPatient.values()) {
-    list.sort((a, b) => (Number(!a.photo_required) - Number(!b.photo_required)) || (Number(!!a.legacy) - Number(!!b.legacy)) || (Number(a.anchor === null) - Number(b.anchor === null))
+    list.sort((a, b) => (Number(!!a.legacy) - Number(!!b.legacy)) || (Number(!a.photo_required) - Number(!b.photo_required)) || (Number(a.anchor === null) - Number(b.anchor === null))
       || ((a.anchor ?? a.created ?? Infinity) - (b.anchor ?? b.created ?? Infinity)) || String(a.visit_id).localeCompare(String(b.visit_id)));
     out.push({ ...list[0], also: list.slice(1) });
   }

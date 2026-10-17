@@ -16,6 +16,9 @@ const UPLOADS_AT_ONCE = 3;
 const RETRY_WAITS = [2, 5, 15, 30, 60]; // seconds, after a connection problem
 const REMATCH_MS = 3 * 60 * 1000;
 const CITY_KEY = (id) => `photo-inbox-city:${id}`;
+// The token that holds photos for editing: one per browser tab (this module is loaded once per tab), so leaving the Photo inbox and
+// coming back in the same tab takes up the photos where the worker stopped, while another tab or device is another worker.
+const TAB_LEASE = crypto.randomUUID();
 const NO_TIME_NOTE = 'No camera time on this photo (it was sent through WhatsApp, edited in an app, or it is a screenshot). It waits on "Which patient?". Next time upload from the phone\'s gallery (Photos / Gallery app), not from WhatsApp.';
 const HEIC_NOTE = 'iPhone HEIC photo: uploaded and kept, but this browser cannot show or edit it. Open the Photo inbox on an iPhone or a Mac once to edit it, or set iPhone Settings > Camera > Formats > Most Compatible.';
 
@@ -341,6 +344,8 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
       if (todo.length) { showProgress(); await Promise.all(Array.from({ length: Math.min(UPLOADS_AT_ONCE, todo.length) }, worker)); }
       if (!regError) { try { await register(true); } catch (e) { regError = e; } }
       for (const r of toRegister) setRow(r, 'failed', 'Stored, but not yet in the list (connection): choose the same photos again to finish (nothing is uploaded twice)');
+      // (photos the stopped workers did not reach)
+      for (const r of queue) setRow(r, 'failed', stopped?.code === 'STORAGE_FULL' ? 'Not uploaded: storage full' : 'Not uploaded yet: choose the same photos again to finish (nothing is uploaded twice)');
       bar.value = String(rows.length);
       status.textContent = '';
       // 5. match every day touched, the whole day at once (what did register is matched even when the rest did not)
@@ -616,7 +621,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
   let workerRunning = false;
   let editedNow = 0;
   let poke = null; // ends the worker's wait at once (a batch was uploaded)
-  const lease = crypto.randomUUID();
+  const lease = TAB_LEASE;
   let heicOk = canHeic(); // false after this browser failed to decode an iPhone HEIC photo once
   const nap = (ms) => new Promise((resolve) => {
     const t = setTimeout(done, ms);
@@ -782,6 +787,8 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
         }
         // a round that edited nothing (photos not readable here, the connection): a pause, so the page never loops on the same photos
         if (!progress) await nap(30000);
+        // the Filed list shows the editing as it goes (unless someone is using it)
+        else if (currentTab === 'filed' && !panel.contains(document.activeElement) && !document.querySelector('.modal')) renderFiled().catch(() => {});
       }
     } finally { workerRunning = false; }
   }
