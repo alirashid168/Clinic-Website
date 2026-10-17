@@ -46,6 +46,10 @@ export const PERMISSIONS: PermissionDef[] = [
   // Delete on each picture and X-ray of the patient profile (owner, 16 Oct 2026, asked whether the front desk and assistants may delete a
   // wrong picture or X-ray: "they can delete assistant and coordinator"; 20261016000200_photo_xray_delete.sql). Not the front desk.
   { key: 'photos.delete', label: 'Delete clinic photos and X-rays', category: 'Photos', defaults: [N, Y, N, Y, N] },
+  // The Photo inbox (owner, 17 Oct 2026: "the upload photos option should be abailale for assistants, admin, and coordinator";
+  // 20261017000200_photo_intake.sql): the day's photos into the city folders, "Which patient?", hide or show filed photos. Not the front
+  // desk, which keeps Upload picture / Upload X-ray on the profile (photos.upload). The inbox also needs photos.view_raw.
+  { key: 'photos.intake', label: 'Use the Photo inbox', category: 'Photos', defaults: [N, Y, N, Y, N] },
   { key: 'dues.view', label: 'See $$ pending dues flag', category: 'Billing', defaults: [Y, Y, Y, Y, Y] },
   { key: 'dues.override', label: 'Override the dues hold', category: 'Billing', defaults: [N, N, N, N, Y] },
   { key: 'billing.view', label: 'View invoices and payments', category: 'Billing', defaults: [Y, N, N, Y, Y] },

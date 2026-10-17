@@ -144,6 +144,12 @@ select pg_temp.check((select count(*) from public.role_permissions where permiss
                      and (select string_agg(role::text, ',' order by role::text) from public.role_permissions where permission_key = 'photos.delete' and allowed) = 'admin,assistant,coordinator'
                      and not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'UPDATE' and new_data ->> 'permission_key' = 'photos.delete'),
   'photos.delete came in as new cells (assistant, coordinator and admin ticked), never as a change to a cell');
+-- And "Use the Photo inbox" (photos.intake, 20261017000200, the owner's "the upload photos option should be abailale for assistants, admin,
+-- and coordinator") the same way: one cell per role, ticked for the assistant, the coordinator and admin, never an UPDATE of a cell.
+select pg_temp.check((select count(*) from public.role_permissions where permission_key = 'photos.intake') = (select count(*) from unnest(enum_range(null::public.staff_role)))
+                     and (select string_agg(role::text, ',' order by role::text) from public.role_permissions where permission_key = 'photos.intake' and allowed) = 'admin,assistant,coordinator'
+                     and not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'UPDATE' and new_data ->> 'permission_key' = 'photos.intake'),
+  'photos.intake came in as new cells (assistant, coordinator and admin ticked), never as a change to a cell');
 select pg_temp.check((select string_agg(role::text || '=' || allowed::text, ',' order by role::text) from public.role_permissions where permission_key = 'portal.invite')
                       = 'accountant=false,admin=true,assistant=false,coordinator=true,doctor=false,front_desk=true',
   'portal.invite: front desk, coordinator and admin yes; assistant, doctor and accountant still no');

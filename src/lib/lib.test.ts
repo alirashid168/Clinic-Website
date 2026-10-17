@@ -157,7 +157,12 @@ test('permission grid defaults', () => {
   assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'photos.delete', grid)),
     ['assistant', 'coordinator', 'admin']);
   const photoKeys = PERMISSIONS.filter((p) => p.category === 'Photos').map((p) => p.key);
-  assert.deepEqual(photoKeys, ['photos.upload', 'photos.view_raw', 'xrays.view', 'photos.delete'], 'in the access list order of the database (sort_order 50-53)');
+  // Owner, 17 Oct 2026: "the upload photos option should be abailale for assistants, admin, and coordinator" (the Photo inbox,
+  // 20261017000200). The front desk keeps its profile uploads (photos.upload above).
+  assert.deepEqual(['front_desk', 'assistant', 'doctor', 'coordinator', 'accountant', 'admin'].filter((r) => hasPermission(r as Role, 'photos.intake', grid)),
+    ['assistant', 'coordinator', 'admin']);
+  assert.deepEqual(photoKeys, ['photos.upload', 'photos.view_raw', 'xrays.view', 'photos.delete', 'photos.intake'], 'in the access list order of the database (sort_order 50-54)');
+  assert.equal(PERMISSIONS.find((p) => p.key === 'photos.intake')?.label, 'Use the Photo inbox');
   assert.equal(PERMISSIONS.find((p) => p.key === 'photos.delete')?.label, 'Delete clinic photos and X-rays');
   assert.equal(hasPermission(null, 'patients.view', grid), false);
   assert.equal(new Set(PERMISSIONS.map((p) => p.key)).size, PERMISSIONS.length, 'no duplicate keys');
