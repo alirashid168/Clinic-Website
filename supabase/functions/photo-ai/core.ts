@@ -15,6 +15,8 @@ export const MAX_TOKENS = 16000;
 // category, inside the same call ("default" picks it; the beta header goes with that form).
 export const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 // Photos per call: a sitting is usually 5-10 photos. 8 keeps one call well inside the Edge Function's 150 s answer limit (index.ts).
+// A longer set goes in several calls; each later call starts with one photo of the earlier call as a reference ("already reported"),
+// so the one-sitting check also sees the place where one call ends and the next begins (two patients photographed one after the other).
 export const MAX_PHOTOS_PER_CALL = 8;
 export const MAX_IMAGE_CHARS = 700000; // base64 of a 1024 px JPEG is ~150-250 kB; anything bigger is refused before it costs anything
 
@@ -126,7 +128,7 @@ Report only what you can see. If you are unsure of a photo, use view other with 
 straighten_deg 0 and crop 0, 0, 1, 1 unless the right turn is obvious. Return exactly one entry per photo, in order, with
 index equal to the photo number.`;
 
-export type AnalyzeItem = { item_id: string; image: string; width: number; height: number };
+export type AnalyzeItem = { item_id: string; image: string; width: number; height: number; reference?: boolean };
 export type Crop = { left: number; top: number; right: number; bottom: number };
 export type PhotoResult = {
   index: number; kind: string; view: string; confidence: string; rotate: number; mirror: boolean; straighten: number;
@@ -135,11 +137,16 @@ export type PhotoResult = {
 export type Normalized = { one_sitting: string; photos: PhotoResult[] };
 export type Status = 'ok' | 'refused' | 'truncated' | 'invalid';
 
-/** The request to Claude for one sitting's photos (1 to MAX_PHOTOS_PER_CALL). Only "Photo k" labels and the images: no patient data. */
+/**
+ * The request to Claude for one sitting's photos (1 to MAX_PHOTOS_PER_CALL). Only "Photo k" labels and the images: no patient data. A
+ * reference photo (the first, from an earlier call of the same set) is labelled so; it is reported like the others and counts for
+ * one_sitting, and its answer is not used again.
+ */
 export function buildRequest(items: AnalyzeItem[]) {
   const content: Array<Record<string, unknown>> = [{ type: 'text', text: `One sitting, ${items.length} photos.` }];
   items.forEach((it, i) => {
-    content.push({ type: 'text', text: `Photo ${i + 1} (${Math.round(it.width)}x${Math.round(it.height)} pixels)` });
+    const ref = it.reference ? ', from the same set, already reported in an earlier request: include it in one_sitting' : '';
+    content.push({ type: 'text', text: `Photo ${i + 1} (${Math.round(it.width)}x${Math.round(it.height)} pixels${ref})` });
     content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: it.image } });
   });
   content.push({ type: 'text', text: 'Report every photo, in order, with index = the photo number.' });
@@ -252,10 +259,13 @@ export async function runAnalyze({ create, items, setId, now = () => Date.now() 
   const started = now();
   const response = await create(params);
   const read = readResponse(response, items.map((it) => it.item_id));
+  // the reference photo was answered before: its answer here only served the one-sitting check
+  const refs = new Set(items.filter((it) => it.reference).map((it) => it.item_id));
+  const results = read.results.filter((r) => !refs.has(r.item_id));
   const usage = response?.usage || {};
   const call = {
     set_id: setId,
-    item_ids: items.map((it) => it.item_id),
+    item_ids: items.filter((it) => !it.reference).map((it) => it.item_id),
     photo_count: items.length,
     model: MODEL,
     served_model: read.served_model,
@@ -272,10 +282,13 @@ export async function runAnalyze({ create, items, setId, now = () => Date.now() 
     request_id: response?._request_id || response?.id || null,
     one_sitting: read.one_sitting,
   };
-  return { status: read.status, results: read.results, call };
+  return { status: read.status, results, call };
 }
 
-/** The analyze request's body checked: { set_id, items: [{ item_id, image (base64 JPEG), width, height }] } with 1-8 items. */
+/**
+ * The analyze request's body checked: { set_id, items: [{ item_id, image (base64 JPEG), width, height, reference? }] } with 1-8 items; only
+ * the first may be a reference, and at least one is not.
+ */
 export function checkAnalyzeBody(body: unknown): { ok: true; setId: string; items: AnalyzeItem[] } | { ok: false; why: string } {
   const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
   const setId = String(b.set_id || '');
@@ -292,8 +305,10 @@ export function checkAnalyzeBody(body: unknown): { ok: true; setId: string; item
     if (!/^[0-9a-f-]{36}$/.test(id) || seen.has(id)) return { ok: false, why: 'item_id' };
     if (!image.startsWith('/9j/') || image.length > MAX_IMAGE_CHARS || !/^[A-Za-z0-9+/=]+$/.test(image)) return { ok: false, why: 'image' };
     if (!(w > 0 && w <= 10000 && h > 0 && h <= 10000)) return { ok: false, why: 'size' };
+    if (it?.reference === true && items.length > 0) return { ok: false, why: 'reference' };
     seen.add(id);
-    items.push({ item_id: id, image, width: w, height: h });
+    items.push(it?.reference === true ? { item_id: id, image, width: w, height: h, reference: true } : { item_id: id, image, width: w, height: h });
   }
+  if (!items.some((it) => !it.reference)) return { ok: false, why: 'reference' };
   return { ok: true, setId, items };
 }

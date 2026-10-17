@@ -7,11 +7,13 @@
 import { h, mount, toast, friendlyError, modal, field, select, empty, busy, shortDate, announce, todayISO } from '../../ui/dom.js';
 import { state, can, branchName } from '../../state.js';
 import { VIEW_KEYS, viewName, downloadName, uniqueNames } from '../../lib/photo-intake.js';
-import { zipParts } from '../../lib/zip.js';
+import { zipPartsBlobs } from '../../lib/zip.js';
 
 const PAGE_SIZE = 120;
 const ZIP_MAX_FILES = 300;
-const ZIP_MAX_BYTES = 1.5 * 1024 * 1024 * 1024;
+// A phone or a modest laptop holds the photos once (as downloaded) while the zip is saved: 500 MB is about 1,000 edited photos or 120
+// originals.
+const ZIP_MAX_BYTES = 500 * 1024 * 1024;
 const FILTERS = ['q', 'city', 'branch', 'month', 'view', 'from', 'to', 'kind'];
 
 export async function renderPhotoLibrary(root, params = new URLSearchParams(), signal) {
@@ -120,14 +122,15 @@ export async function renderPhotoLibrary(root, params = new URLSearchParams(), s
       if ((i + 1) % 10 === 0) announce(progress.textContent);
       const blob = await d.photoBlob(list[i].storage_path);
       bytes += blob.size;
-      if (bytes > ZIP_MAX_BYTES) { progress.remove(); toast('Choose fewer photos: the zip would be larger than 1.5 GB.', 'error'); return; }
-      files.push({ name: names[i], bytes: new Uint8Array(await blob.arrayBuffer()), date: new Date(`${list[i].taken_on}T12:00:00`) });
+      if (bytes > ZIP_MAX_BYTES) { progress.remove(); toast('Choose fewer photos: the zip would be larger than 500 MB.', 'error'); return; }
+      files.push({ name: names[i], blob, date: new Date(`${list[i].taken_on}T12:00:00`) });
     }
+    const parts = await zipPartsBlobs(files);
     const patients = new Set(list.map((r) => r.patient_id));
     const zipName = patients.size === 1
       ? `${downloadName({ full_name: list[0].full_name, mr_number: list[0].mr_number, view_label: 'photos', taken_on: null }).replace(/\.jpg$/, '')}.zip`
       : `Clinic photos - ${todayISO().split('-').reverse().join('-')} - ${list.length} files.zip`;
-    const url = URL.createObjectURL(new Blob(zipParts(files), { type: 'application/zip' }));
+    const url = URL.createObjectURL(new Blob(parts, { type: 'application/zip' }));
     const a = h('a', { href: url, download: zipName, class: 'library-zip-link', hidden: true });
     document.body.append(a);
     a.click();

@@ -2,7 +2,9 @@
 // the database's rules (supabase/migrations/20261017000200_photo_intake.sql): who may (photos.intake + photos.view_raw + the city), the
 // exact paths, the plan's checks and the automatic filing's re-checks, the patient's 24-hour window, the visit's "photos uploaded" tick.
 // Files live in a Map (path -> Blob) and are shown through object URLs. Claude is a deterministic stand-in (no network): the view cycles
-// through front, right, left, upper, lower, face front, face smile, profile right; upper and lower are mirror shots.
+// through front, right, left, upper, lower, face front, face smile, profile right; the right side and the occlusal views are mirror shots
+// (the right side straightened 4 degrees), the left side is turned a quarter. localStorage 'demo-photo-ai' plays the other answers:
+// 'off' (no key), 'refused', 'invalid', and the error codes 'RATE_LIMIT', 'API_DOWN', 'BAD_REQUEST', 'BILLING', 'BAD_KEY', 'CONFIG'.
 // The demo's day of the Photo inbox (made-up visits of YESTERDAY at DHA, Gulshan and North Nazimabad; none in Lahore) is added the first
 // time the Photo inbox is opened on a page, so no other screen's sample numbers change. Made-up people only.
 import { inboxPaths, citySlug, karachiDate, viewName, MAX_AUTO_PHOTOS, EDIT_VERSION } from '../lib/photo-intake.js';
@@ -35,7 +37,7 @@ function seedInboxDay(db, uid) {
   add(4, 3, { key: 'V2', token: 12, label: 'Monthly', braces_month: 7, photo: true, start: at('19:10'), done: at('19:45') });
   add(7, 3, { key: 'V3', token: 13, label: 'Monthly', braces_month: 4, photo: true, start: at('19:12'), done: at('19:40') });
   add(10, 3, { key: 'V4', token: 14, label: 'Monthly', braces_month: 5, photo: false, start: at('18:10'), done: at('18:25') });
-  add(20, 1, { key: 'G1', token: 21, label: 'Scaling', start: at('18:40'), done: at('19:05') });
+  add(20, 1, { key: 'G1', token: 21, label: 'Scaling', start: at('18:50'), done: at('19:10') });
   add(21, 2, { key: 'N1', token: 31, label: 'Checkup', start: at('19:00'), done: at('19:20') });
 }
 
@@ -75,7 +77,9 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     audit('photo_inbox_sets', 'INSERT', s);
     return s;
   };
+  /** A set's times, count, camera, hint and numbering again; answers whether the set changed. */
   const refresh = (s) => {
+    const before = JSON.stringify([s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint]);
     const its = itemsOf(s.id).sort((a, b) => ((a.taken_at ? Date.parse(a.taken_at) : Infinity) - (b.taken_at ? Date.parse(b.taken_at) : Infinity))
       || ((a.file_seq ?? Infinity) - (b.file_seq ?? Infinity)) || String(a.file_name).localeCompare(String(b.file_name)) || a.sha256.localeCompare(b.sha256));
     its.forEach((it, i) => { it.position = i + 1; });
@@ -88,7 +92,20 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     s.camera = cams.length === 1 ? cams[0] : its.length ? 'mixed' : null;
     const hints = [...new Set(its.map((i) => i.branch_hint ?? null))];
     s.branch_hint = hints.length === 1 ? hints[0] : null;
+    return before !== JSON.stringify([s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint]);
   };
+  // Whether a visit's patient may have been in the chair between two moments (private.photo_inbox_was_there).
+  const wasThere = (u, first, last, tight) => {
+    const t = (x) => (x ? Date.parse(x) : null);
+    const st = t(u.started_at); const ci = t(u.checked_in_at); const co = t(u.completed_at);
+    if (u.legacy_source || (st === null && ci === null)) return true;
+    const known = [st, ci].filter((x) => x !== null);
+    const lo = Math.min(...known); const hi = Math.max(...known);
+    const end = Math.max(co !== null && co >= lo ? co : -Infinity, hi + (tight ? 120 : 180) * MIN) + (tight ? 10 : 15) * MIN;
+    return first <= end && last >= lo - (tight ? 10 : 30) * MIN;
+  };
+  const PHOTO_LIKELY = /(bond|braces off|debond|record|smile|veneer|aligner|consult)/i;
+  const IN_LIST = ['waiting', 'in_treatment', 'completed'];
   const visitTick = (visitId) => { const v = db().visits.find((x) => x.id === visitId); if (v && !v.photos_uploaded) v.photos_uploaded = true; };
   const untick = (visitId) => {
     if (!visitId || db().photos.some((p) => p.visit_id === visitId)) return false;
@@ -102,6 +119,8 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   const fileRows = (s) => {
     if (s.status !== 'filed' || !s.patient_id) return 0;
     const v = db().visits.find((x) => x.id === s.visit_id) || null;
+    // an edited copy made after the filing gets its own window from now
+    const release = new Date(Math.max(s.release_after ? Date.parse(s.release_after) : Date.now(), Date.now() + hold())).toISOString();
     let n = 0;
     for (const it of itemsOf(s.id).sort((a, b) => a.position - b.position)) {
       const key = viewKeyOf(it);
@@ -119,12 +138,21 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       }
       if (it.edit_status === 'done' && it.edited_path && !it.edited_photo_id) {
         const ed = { id: uid(), ...base, kind: 'edited', storage_path: it.edited_path, thumb_path: it.edited_thumb_path, edited_from: it.raw_photo_id,
-          url: urlOf(it.edited_path), thumb_url: urlOf(it.edited_thumb_path) || urlOf(it.edited_path), release_after: s.release_after,
+          url: urlOf(it.edited_path), thumb_url: urlOf(it.edited_thumb_path) || urlOf(it.edited_path), release_after: release,
           held_back: !!s.hidden || s.ai_flag === 'mixed_people' };
         db().photos.push(ed);
         audit('photos', 'INSERT', ed);
         it.edited_photo_id = ed.id;
         n++;
+      } else if (it.edit_status === 'done' && it.edited_path) {
+        // edited again: the row points at the new copy, with a new window
+        const ed = db().photos.find((x) => x.id === it.edited_photo_id);
+        if (ed && ed.storage_path !== it.edited_path) {
+          Object.assign(ed, { storage_path: it.edited_path, thumb_path: it.edited_thumb_path, url: urlOf(it.edited_path), thumb_url: urlOf(it.edited_thumb_path) || urlOf(it.edited_path),
+            view_key: key, view_label: label(s.occasion, key, it.position), release_after: release });
+          audit('photos', 'UPDATE', ed);
+          n++;
+        }
       }
     }
     return n;
@@ -175,22 +203,24 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       return { set_id: s.id, status: s.status, manual: s.manual, first_at: s.first_at, last_at: s.last_at, photo_count: s.photo_count, time_ok: s.time_ok, camera: s.camera,
         branch_hint: s.branch_hint, candidates: clone(s.candidates), wait_reason: s.wait_reason, patient_id: s.patient_id, visit_id: s.visit_id, branch_id: s.branch_id,
         occasion: s.occasion, filed_how: s.filed_how, filed_rule: s.filed_rule, filed_by_name: db().staff.find((x) => x.id === s.filed_by)?.full_name || null,
-        filed_at: s.filed_at, release_after: s.release_after, hidden: s.hidden, ai_flag: s.ai_flag, set_aside_reason: s.set_aside_reason, version: s.version,
+        filed_at: s.filed_at, hidden: s.hidden, ai_flag: s.ai_flag, set_aside_reason: s.set_aside_reason, version: s.version,
+        release_after: [s.release_after, ...db().photos.filter((ph) => ph.intake_set_id === s.id && ph.kind === 'edited').map((ph) => ph.release_after)].filter(Boolean).sort().pop() || null,
         full_name: p?.full_name || null, mr_number: p?.mr_number || null };
     });
     const items = inbox().items.filter((i) => i.city_id === Number(cityId) && i.photo_day === day).map((i) => ({
       item_id: i.id, set_id: i.set_id, position: i.position, sha256: i.sha256, storage_path: i.storage_path, thumb_path: i.thumb_path, edited_path: i.edited_path,
       edited_thumb_path: i.edited_thumb_path, file_name: i.file_name, mime_type: i.mime_type, width: i.width, height: i.height, taken_at: i.taken_at,
       time_source: i.time_source, clock_ok: i.clock_ok, camera: i.camera, file_seq_prefix: i.file_seq_prefix, file_seq: i.file_seq, branch_hint: i.branch_hint,
-      uploaded_by: i.uploaded_by, uploaded_at: i.uploaded_at, ai_status: i.ai_status, ai_kind: i.ai_result?.kind || null, ai_view: i.ai_result?.view || null,
+      uploaded_by: i.uploaded_by, uploaded_at: i.uploaded_at, upload_batch: i.upload_batch, edit_round: i.edit_round, ai_status: i.ai_status, ai_kind: i.ai_result?.kind || null, ai_view: i.ai_result?.view || null,
       ai_issues: i.ai_result?.issues || [], edit_status: i.edit_status, edit_basic: i.edit_basic, raw_photo_id: i.raw_photo_id, edited_photo_id: i.edited_photo_id,
     }));
     const c = city(cityId);
     return { city: { id: c.id, name: c.name, slug: citySlug(c.name) }, day, hold_hours: hold() / (60 * MIN), branches: branches.map((b) => ({ id: b.id, code: b.code, name: b.name })),
       visits, sets, items };
   };
-  const claimable = (i, canHeic) => (i.edit_status === 'pending' || (i.edit_status === 'failed' && i.edit_attempts < 3) || (canHeic && i.edit_status === 'needs_safari'))
-    && (!i.edit_lease_until || Date.parse(i.edit_lease_until) < Date.now() || i.edit_lease_by === me()?.id);
+  const claimable = (i, canHeic, lease) => (i.edit_status === 'pending' || (i.edit_status === 'failed' && i.edit_attempts < 3) || (canHeic && i.edit_status === 'needs_safari' && i.edit_attempts < 3))
+    && (!i.edit_lease_until || Date.parse(i.edit_lease_until) < Date.now() || i.edit_lease_by === lease);
+  const leaseFree = (i, lease) => !i.edit_lease_by || i.edit_lease_by === lease || !i.edit_lease_until || Date.parse(i.edit_lease_until) < Date.now();
   const blobUrl = (blob) => (typeof URL !== 'undefined' && URL.createObjectURL ? URL.createObjectURL(blob) : null);
   const putFile = (path, blob) => {
     if (store().has(path)) return true;
@@ -201,11 +231,8 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     const [root, slug, day, rest] = String(path).split('/');
     return root === 'inbox' && !!rest && /^\d{4}-\d{2}-\d{2}$/.test(day) && db().cities.some((c) => citySlug(c.name) === slug && cityOk(c.id));
   };
-  const aiStatus = () => {
-    let off = false;
-    try { off = localStorage.getItem('demo-photo-ai') === 'off'; } catch { /* storage blocked: the demo AI is on */ }
-    return { key: !off, model: 'claude-opus-5-5' };
-  };
+  const aiMode = () => { try { return localStorage.getItem('demo-photo-ai') || ''; } catch { return ''; } };
+  const aiStatus = () => ({ key: aiMode() !== 'off', model: 'claude-opus-5-5' });
   const record = (call, results) => {
     const row = { id: inbox().calls.length + 1, created_at: nowIso(), called_by: me()?.id || null, ...call };
     inbox().calls.push(row);
@@ -223,6 +250,14 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         s.ai_flag = 'mixed_people';
         touch(s);
         for (const p of db().photos) if (p.intake_set_id === s.id && p.kind === 'edited') p.held_back = true;
+      }
+    } else if (call.status === 'refused') {
+      for (const id of call.item_ids) { const it = mine(id); if (it && it.ai_status === 'pending') Object.assign(it, { ai_status: 'refused', ai_call_id: row.id, ai_attempts: it.ai_attempts + 1 }); }
+    } else if (['invalid', 'truncated'].includes(call.status) || (call.status === 'error' && call.error_code === 'BAD_REQUEST')) {
+      // (only an answer that could not be used for these photos counts; rate limits, Anthropic down, credit, key: nothing)
+      for (const id of call.item_ids) {
+        const it = mine(id);
+        if (it && it.ai_status === 'pending') Object.assign(it, { ai_attempts: it.ai_attempts + 1, ai_call_id: row.id, ai_status: it.ai_attempts + 1 >= 3 ? 'failed' : 'pending' });
       }
     }
     return row;
@@ -280,7 +315,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
           camera: String(x.camera || 'unknown').slice(0, 120), orientation: x.orientation || null, file_seq_prefix: x.file_seq_prefix || null, file_seq: x.file_seq ?? null,
           branch_hint: x.branch_hint ?? null, uploaded_by: me().id, uploaded_at: nowIso(), upload_batch: x.upload_batch || null, set_id: null, position: null,
           raw_photo_id: null, edited_photo_id: null, ai_status: 'pending', ai_result: null, ai_attempts: 0, ai_call_id: null, edit_status: 'pending', edit_basic: false,
-          edit_version: null, edit_attempts: 0, edit_lease_until: null, edit_lease_by: null };
+          edit_version: null, edit_attempts: 0, edit_round: 1, edit_lease_until: null, edit_lease_by: null };
         inbox().items.push(it);
         out.push({ sha256: sha, item_id: it.id, state: 'added', city_id: it.city_id, photo_day: it.photo_day });
       }
@@ -297,7 +332,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         waiting: sets.filter((s) => s.photo_day === day && s.status === 'waiting').length,
         filed: sets.filter((s) => s.photo_day === day && s.status === 'filed').length,
         set_aside: sets.filter((s) => s.photo_day === day && s.status === 'set_aside').length,
-        flagged: sets.filter((s) => s.photo_day === day && s.status === 'filed' && s.ai_flag).length,
+        flagged: sets.filter((s) => s.photo_day === day && s.status === 'filed' && (s.ai_flag || !s.patient_id)).length,
         unedited: its.filter((i) => i.photo_day === day && !['done', 'skipped'].includes(i.edit_status)).length,
       }));
       const count = (f) => its.filter(f).length;
@@ -306,7 +341,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         ai: { pending: count((i) => i.ai_status === 'pending'), done: count((i) => i.ai_status === 'done'), refused: count((i) => i.ai_status === 'refused'),
           failed: count((i) => i.ai_status === 'failed'), needs_safari: count((i) => i.edit_status === 'needs_safari'), unedited: count((i) => ['pending', 'failed'].includes(i.edit_status)) },
         waiting_days: [...new Set([...sets.filter((s) => s.status === 'waiting').map((s) => s.photo_day), ...its.filter((i) => !i.set_id).map((i) => i.photo_day)])].sort(),
-        check_days: [...new Set(sets.filter((s) => s.status === 'filed' && s.ai_flag).map((s) => s.photo_day))].sort(),
+        check_days: [...new Set(sets.filter((s) => s.status === 'filed' && (s.ai_flag || !s.patient_id)).map((s) => s.photo_day))].sort(),
       };
     },
     async photoInboxDay(cityId, day) { require(cityId); openInbox(); return dayView(cityId, day); },
@@ -318,33 +353,64 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       const groupIds = (plan.groups || []).flatMap((g) => g.item_ids || []).sort();
       if (JSON.stringify(cur) !== JSON.stringify(planIds) || JSON.stringify(groupIds) !== JSON.stringify(cur)) fail('PHOTO_STALE_PLAN: the photos changed while matching; it is tried again.');
       const out = { sets: [], filed: 0, joined: 0, waiting: 0, server_refused: [] };
+      const touched = new Set(regroupable.map((i) => i.set_id).filter(Boolean));
       const reused = new Set();
-      const autoVisits = new Set();
-      for (const g of plan.groups) {
+      const targets = [];
+      // 2. where each group goes (a join is checked again: same camera, branch chosen and uploader, inside or within 3 minutes, 15 minutes and 20 photos at most)
+      for (const g of plan.groups || []) {
         const ids = g.item_ids || [];
-        if (!ids.length) continue;
+        if (!ids.length) { targets.push(null); continue; }
         const its = ids.map((id) => inbox().items.find((i) => i.id === id));
         const join = g.join_set_id ? setById(g.join_set_id) : null;
-        if (join && join.status === 'filed' && !join.manual && join.city_id === Number(cityId) && join.photo_day === day && its.every(timeOk)) {
-          its.forEach((it) => { it.set_id = join.id; });
-          refresh(join);
-          fileRows(join);
-          touch(join);
+        let ok = false;
+        if (join && join.status === 'filed' && !join.manual && join.city_id === Number(cityId) && join.photo_day === day) {
+          const fits = itemsOf(join.id);
+          const ft = fits.filter((i) => i.time_source === 'exif' && i.taken_at).map((i) => Date.parse(i.taken_at));
+          const gt = its.filter((i) => i.taken_at).map((i) => Date.parse(i.taken_at));
+          const fa = Math.min(...ft); const fl = Math.max(...ft); const ga = Math.min(...gt); const gl = Math.max(...gt);
+          ok = ft.length > 0 && gt.length > 0 && its.every(timeOk)
+            && its.every((i) => fits.every((f) => f.camera === i.camera && (f.branch_hint ?? 0) === (i.branch_hint ?? 0) && f.uploaded_by === i.uploaded_by))
+            && fits.length + its.length <= MAX_AUTO_PHOTOS && Math.max(fl, gl) - Math.min(fa, ga) <= 900 * 1000
+            && ((ga >= fa && gl <= fl) || (ga >= fl && ga - fl <= 180 * 1000) || (gl <= fa && fa - gl <= 180 * 1000));
+        }
+        let s;
+        if (ok) s = join;
+        else {
+          const old = setById(its[0].set_id);
+          s = old && old.status === 'waiting' && !old.manual && !reused.has(old.id) ? old : newSet(cityId, day);
+          reused.add(s.id);
+        }
+        let moved = 0;
+        for (const it of its) if (it.set_id !== s.id) { it.set_id = s.id; moved++; }
+        targets.push({ g, s, ids, join: ok, moved });
+      }
+      // every set that gained or lost photos, worked out again
+      const changed = new Set();
+      for (const id of new Set([...touched, ...targets.filter(Boolean).map((t) => t.s.id)])) { const s = setById(id); if (s && refresh(s)) changed.add(id); }
+      const multi = db().branches.filter((b) => b.city_id === Number(cityId)).length > 1;
+      const inCity = (u) => u.visit_date === day && branch(u.branch_id)?.city_id === Number(cityId) && IN_LIST.includes(u.status);
+      const autoVisits = new Set();
+      for (const t of targets) {
+        if (!t) continue;
+        const { g, s, ids } = t;
+        if (t.join) {
+          fileRows(s);
+          touch(s);
+          audit('photo_inbox_sets', 'PHOTO_JOINED', { id: s.id, item_ids: ids, patient_id: s.patient_id, visit_id: s.visit_id });
           out.joined++;
-          out.sets.push({ set_id: join.id, item_ids: ids, status: 'filed' });
+          out.sets.push({ set_id: s.id, item_ids: ids, status: 'filed' });
           continue;
         }
-        const old = setById(its[0].set_id);
-        const s = old && old.status === 'waiting' && !old.manual && !reused.has(old.id) ? old : newSet(cityId, day);
-        reused.add(s.id);
-        its.forEach((it) => { it.set_id = s.id; });
-        refresh(s);
-        Object.assign(s, { status: 'waiting', candidates: Array.isArray(g.candidates) ? clone(g.candidates) : [], wait_reason: g.wait_reason ? String(g.wait_reason).slice(0, 40) : null, matched_at: nowIso() });
-        touch(s);
+        const cands = Array.isArray(g.candidates) ? g.candidates : [];
+        let reason = g.wait_reason ? String(g.wait_reason).slice(0, 40) : null;
         if (g.auto && Number(plan.matcher_version) >= 1) {
           const v = db().visits.find((x) => x.id === g.auto.visit_id);
-          const anchor = v ? (v.started_at || v.checked_in_at) : null;
+          const at = (x) => (x ? Date.parse(x) : null);
+          const given = g.auto.anchor_at ? Date.parse(g.auto.anchor_at) : null;
+          const anchor = !v ? null : given !== null && v.checked_in_at && Math.abs(given - at(v.checked_in_at)) <= 1000 ? at(v.checked_in_at)
+            : given !== null && v.started_at && Math.abs(given - at(v.started_at)) <= 1000 ? at(v.started_at) : at(v.started_at || v.checked_in_at);
           const first = s.first_at ? Date.parse(s.first_at) : NaN;
+          const last = s.last_at ? Date.parse(s.last_at) : NaN;
           const why = !v ? 'no such visit'
             : !s.time_ok || s.manual || s.ai_flag || s.photo_count > MAX_AUTO_PHOTOS ? 'the photos are not clear enough'
               : v.visit_date !== day || branch(v.branch_id)?.city_id !== Number(cityId) ? 'the visit is not of this city and day'
@@ -352,17 +418,27 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
                   : v.legacy_source || !['in_treatment', 'completed'].includes(v.status) ? 'the visit is not in treatment or completed'
                     : !v.photo_required ? 'not a photo month'
                       : v.photos_uploaded || db().photos.some((p) => p.visit_id === v.id) || inbox().sets.some((x) => x.visit_id === v.id && x.status === 'filed') ? 'the visit has photos already'
-                        : !anchor || first < Date.parse(anchor) - 10 * MIN || first > Date.parse(anchor) + 120 * MIN ? 'the photos do not fit the visit\'s times'
-                          : autoVisits.has(v.id) ? 'two sets for one visit' : null;
+                        : anchor === null || first < anchor - 10 * MIN || first > anchor + 120 * MIN ? 'the photos do not fit the visit\'s times'
+                          : db().visits.some((u) => u.patient_id !== v.patient_id && inCity(u) && (!s.branch_hint || u.branch_id === s.branch_hint)
+                            && (u.photo_required || PHOTO_LIKELY.test(String(u.treatment_label || ''))) && wasThere(u, first, last, false)) ? 'another photo patient may have been in the chair then'
+                            : !s.branch_hint && multi && db().visits.some((u) => u.patient_id !== v.patient_id && u.branch_id !== v.branch_id && inCity(u) && wasThere(u, first, last, true))
+                              ? 'no branch was chosen and another branch had a patient in the chair then'
+                              : autoVisits.has(v.id) ? 'two sets for one visit' : null;
           if (!why) {
             doFile(s, { visit: v, patientId: v.patient_id, branchId: v.branch_id, occasion: occasionOf(v) }, 'auto', g.auto.rule);
+            Object.assign(s, { candidates: clone(cands), matched_at: nowIso() });
             autoVisits.add(v.id);
             out.filed++;
             out.sets.push({ set_id: s.id, item_ids: ids, status: 'filed' });
             continue;
           }
-          s.wait_reason = 'SERVER_CHECK';
+          reason = 'SERVER_CHECK';
           out.server_refused.push({ set_id: s.id, why });
+        }
+        // (written only when something changed)
+        if (changed.has(s.id) || t.moved > 0 || s.status !== 'waiting' || JSON.stringify(s.candidates) !== JSON.stringify(cands) || (s.wait_reason ?? null) !== reason) {
+          Object.assign(s, { status: 'waiting', candidates: clone(cands), wait_reason: reason, matched_at: nowIso() });
+          touch(s);
         }
         out.waiting++;
         out.sets.push({ set_id: s.id, item_ids: ids, status: 'waiting' });
@@ -370,9 +446,10 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       for (const f of plan.fixed_updates || []) {
         const s = setById(f.set_id);
         if (!s || s.city_id !== Number(cityId) || s.photo_day !== day || s.status !== 'waiting' || !s.manual) continue;
-        if (Array.isArray(f.candidates)) s.candidates = clone(f.candidates);
-        if (f.wait_reason) s.wait_reason = String(f.wait_reason).slice(0, 40);
-        s.matched_at = nowIso();
+        const cands = Array.isArray(f.candidates) ? f.candidates : s.candidates;
+        const reason = f.wait_reason ? String(f.wait_reason).slice(0, 40) : s.wait_reason;
+        if (JSON.stringify(cands) === JSON.stringify(s.candidates) && reason === s.wait_reason) continue;
+        Object.assign(s, { candidates: clone(cands), wait_reason: reason, matched_at: nowIso() });
         touch(s);
       }
       const D = inbox();
@@ -457,7 +534,8 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       Object.assign(s, { patient_id: t.patientId, visit_id: t.visit?.id || null, branch_id: t.branchId ?? s.branch_hint, occasion: t.occasion, release_after: release,
         filed_by: me()?.id || null, filed_at: nowIso() });
       touch(s);
-      return { moved_photos: n };
+      // (a set left without a patient: its rows are made for the new patient)
+      return { moved_photos: n + fileRows(s) };
     },
     async photoInboxTakeOut(itemId) {
       const it = inbox().items.find((i) => i.id === itemId);
@@ -491,31 +569,44 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     async photoInboxCounts() {
       if (!allowed()) return { waiting: 0, check: 0 };
       const mine = inbox().sets.filter((s) => cityOk(s.city_id));
-      return { waiting: mine.filter((s) => s.status === 'waiting').length, check: mine.filter((s) => s.status === 'filed' && s.ai_flag).length };
+      return { waiting: mine.filter((s) => s.status === 'waiting').length, check: mine.filter((s) => s.status === 'filed' && (s.ai_flag || !s.patient_id)).length };
     },
-    async photoInboxClaimEdits(limit = 8, canHeic = false) {
+    async photoInboxClaimEdits(limit = 8, canHeic = false, lease = null) {
       require(null);
-      const cand = inbox().items.filter((i) => i.set_id && setById(i.set_id)?.status !== 'set_aside' && cityOk(i.city_id) && claimable(i, canHeic));
+      const token = lease || me()?.id;
+      const cand = inbox().items.filter((i) => i.set_id && setById(i.set_id)?.status !== 'set_aside' && cityOk(i.city_id) && claimable(i, canHeic, token));
       if (!cand.length) return [];
       const sets = [...new Set(cand.map((i) => i.set_id))].map(setById).sort((a, b) => (Number(b.status === 'filed') - Number(a.status === 'filed'))
         || a.photo_day.localeCompare(b.photo_day) || String(a.first_at || '~').localeCompare(String(b.first_at || '~')));
       const s = sets[0];
       const picked = cand.filter((i) => i.set_id === s.id).sort((a, b) => (a.position ?? 99) - (b.position ?? 99)).slice(0, Math.min(10, Math.max(1, limit)));
       const until = new Date(Date.now() + 10 * MIN).toISOString();
-      return picked.map((i) => {
-        i.edit_lease_until = until; i.edit_lease_by = me().id;
-        return { item_id: i.id, set_id: i.set_id, set_status: s.status, city_slug: citySlug(city(i.city_id).name), photo_day: i.photo_day, sha256: i.sha256,
-          storage_path: i.storage_path, mime_type: i.mime_type, orientation: i.orientation, width: i.width, height: i.height, position: i.position,
-          ai_status: i.ai_status, ai_result: clone(i.ai_result), edit_status: i.edit_status };
-      });
+      for (const i of picked) { i.edit_lease_until = until; i.edit_lease_by = token; }
+      // the set's reference photo for Claude: one it already answered, just before these
+      const firstPending = Math.min(...picked.filter((i) => i.ai_status === 'pending').map((i) => i.position ?? 99), 32767);
+      const ref = itemsOf(s.id).filter((i) => i.ai_status === 'done' && i.ai_result?.kind !== 'not_clinical')
+        .sort((a, b) => (Number((b.position ?? 0) < firstPending) - Number((a.position ?? 0) < firstPending)) || (Math.abs((a.position ?? 0) - firstPending) - Math.abs((b.position ?? 0) - firstPending)))[0] || null;
+      return picked.map((i) => ({ item_id: i.id, set_id: i.set_id, set_status: s.status, city_slug: citySlug(city(i.city_id).name), photo_day: i.photo_day, sha256: i.sha256,
+        storage_path: i.storage_path, mime_type: i.mime_type, orientation: i.orientation, width: i.width, height: i.height, position: i.position,
+        ai_status: i.ai_status, ai_result: clone(i.ai_result), edit_status: i.edit_status, edit_round: i.edit_round,
+        ref_item_id: ref?.id || null, ref_storage_path: ref?.storage_path || null, ref_mime_type: ref?.mime_type || null }));
     },
-    async photoInboxSaveEdit({ itemId, editedPath, editedThumbPath = null, editVersion = EDIT_VERSION, basic = false }) {
+    async photoInboxRenewEdits(itemIds, lease) {
+      require(null);
+      const until = new Date(Date.now() + 10 * MIN).toISOString();
+      let n = 0;
+      for (const i of inbox().items) if (itemIds.includes(i.id) && i.edit_lease_by === lease && i.edit_status !== 'done') { i.edit_lease_until = until; n++; }
+      return n;
+    },
+    async photoInboxSaveEdit({ itemId, editedPath, editedThumbPath = null, editVersion = EDIT_VERSION, basic = false, lease = null }) {
       const it = inbox().items.find((i) => i.id === itemId);
       if (!it) { require(null); fail('PHOTO_SET_STATE: that photo is not there any more.'); }
       require(it.city_id);
+      if (!leaseFree(it, lease || me()?.id)) fail('PHOTO_SET_STATE: another page is editing this photo.');
       const dir = it.storage_path.slice(0, it.storage_path.lastIndexOf('/') + 1);
-      const want = `${dir}edited/${it.sha256}.jpg`;
-      if (editedPath !== want || (editedThumbPath && editedThumbPath !== `${dir}edited/thumbs/${it.sha256}.jpg`)) fail('PHOTO_BAD_INPUT: the edited copy is not where it belongs.');
+      const round = it.edit_round > 1 ? `-r${it.edit_round}` : '';
+      const want = `${dir}edited/${it.sha256}${round}.jpg`;
+      if (editedPath !== want || (editedThumbPath && editedThumbPath !== `${dir}edited/thumbs/${it.sha256}${round}.jpg`)) fail('PHOTO_BAD_INPUT: the edited copy is not where it belongs.');
       if (!store().has(want)) fail('PHOTO_FILE_MISSING: the edited photo did not finish uploading.');
       Object.assign(it, { edited_path: want, edited_thumb_path: editedThumbPath && store().has(editedThumbPath) ? editedThumbPath : null, edit_status: 'done',
         edit_basic: !!basic, edit_version: editVersion, edit_lease_until: null, edit_lease_by: null });
@@ -524,17 +615,31 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         const raw = db().photos.find((p) => p.id === it.raw_photo_id);
         const key = viewKeyOf(it);
         if (raw) { raw.view_key = key; raw.view_label = label(s.occasion, key, it.position); }
-        if (!it.edited_photo_id) fileRows(s);
+        fileRows(s);
       }
       return { edited_photo_id: it.edited_photo_id };
     },
-    async photoInboxEditFailed(itemId, code) {
+    async photoInboxEditFailed(itemId, code, lease = null) {
       const it = inbox().items.find((i) => i.id === itemId);
       if (!it) { require(null); fail('PHOTO_SET_STATE: that photo is not there any more.'); }
       require(it.city_id);
       if (!['HEIC_DECODE', 'DECODE', 'UPLOAD', 'OTHER'].includes(code)) fail('PHOTO_BAD_INPUT: unknown problem code.');
-      if (it.edit_status !== 'done') Object.assign(it, { edit_status: code === 'HEIC_DECODE' ? 'needs_safari' : 'failed', edit_attempts: it.edit_attempts + 1, edit_lease_until: null, edit_lease_by: null });
+      if (it.edit_status !== 'done' && leaseFree(it, lease || me()?.id)) {
+        Object.assign(it, { edit_status: code === 'HEIC_DECODE' ? 'needs_safari' : 'failed', edit_attempts: Math.min(99, it.edit_attempts + 1), edit_lease_until: null, edit_lease_by: null });
+      }
       return { edit_status: it.edit_status };
+    },
+    async photoInboxRedoEdits(setId) {
+      const s = getSet(setId);
+      let n = 0;
+      for (const i of itemsOf(s.id)) {
+        if (!((i.edit_status === 'done' && i.edit_basic) || (i.edit_status === 'failed' && i.edit_attempts >= 3) || (i.edit_status === 'needs_safari' && i.edit_attempts >= 3))) continue;
+        const again = ['failed', 'refused'].includes(i.ai_status) || (i.edit_status === 'done' && i.edit_basic);
+        Object.assign(i, { ai_status: again ? 'pending' : i.ai_status, ai_attempts: again ? 0 : i.ai_attempts, edit_round: i.edit_status === 'done' ? i.edit_round + 1 : i.edit_round,
+          edit_status: ['done', 'failed'].includes(i.edit_status) ? 'pending' : i.edit_status, edit_attempts: 0, edit_lease_until: null, edit_lease_by: null });
+        n++;
+      }
+      return { photos: n };
     },
     async photoInboxUploadEdit({ path, thumbPath = null, blob, thumb = null }) {
       if (!can('photos.intake') || !folderOk(path)) throw Object.assign(new Error('NOT_ALLOWED: Your login cannot upload into the Photo inbox (needs "Use the Photo inbox").'), { code: 'NOT_ALLOWED' });
@@ -545,15 +650,35 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     async photoAiStatus() { return aiStatus(); },
     async photoAiAnalyze(setId, items) {
       if (!allowed()) return { ok: false, code: 'NOT_ALLOWED' };
-      if (!aiStatus().key) return { ok: false, code: 'NO_KEY' };
-      const results = items.map((x, i) => {
-        const view = FAKE_VIEWS[i % FAKE_VIEWS.length];
-        return { item_id: x.item_id, result: { index: i + 1, kind: view.startsWith('face_') ? 'extraoral' : 'intraoral', view, confidence: 'high', rotate: 0,
-          mirror: view === 'intra_upper' || view === 'intra_lower', straighten: 0, crop: { left: 0.05, top: 0.05, right: 0.95, bottom: 0.95 }, exposure: 'ok', color_cast: 'none', issues: [] } };
+      const mode = aiMode();
+      if (mode === 'off') return { ok: false, code: 'NO_KEY' };
+      const s = setById(setId);
+      if (!s) return { ok: false, code: 'NOT_ALLOWED' };
+      // each photo of that set; the ones to answer still wait for Claude; a reference photo only for the one-sitting check
+      const list = items.filter((x) => { const it = inbox().items.find((i) => i.id === x.item_id); return it && it.set_id === s.id && (x.reference || it.ai_status === 'pending'); });
+      const answer = list.filter((x) => !x.reference);
+      if (!answer.length) return { ok: true, status: 'skipped', results: [], cost_usd: 0, served_model: null };
+      const call = { set_id: setId, item_ids: answer.map((x) => x.item_id), photo_count: list.length, model: 'claude-opus-5-5', served_model: 'claude-opus-5-5', fallback_used: false,
+        stop_reason: 'end_turn', error_code: null, input_tokens: 1200 * list.length, output_tokens: 250 * list.length, cache_creation_input_tokens: 0, cache_read_input_tokens: 1500,
+        cost_usd: 0.01, one_sitting: 'yes', duration_ms: 5, request_id: 'demo' };
+      const ERRORS = { RATE_LIMIT: { retry_after: 5 }, API_DOWN: {}, BAD_REQUEST: {}, BILLING: {}, BAD_KEY: {}, CONFIG: {} };
+      if (ERRORS[mode]) {
+        record({ ...call, status: 'error', error_code: mode, stop_reason: null, output_tokens: 0, cost_usd: 0 }, []);
+        return { ok: false, code: mode, ...ERRORS[mode] };
+      }
+      if (mode === 'refused' || mode === 'invalid') {
+        record({ ...call, status: mode, stop_reason: mode === 'refused' ? 'refusal' : 'end_turn', one_sitting: null }, []);
+        return { ok: true, status: mode, results: [], cost_usd: 0.01, served_model: 'claude-opus-5-5' };
+      }
+      const offset = list.length - answer.length; // the reference photo is Photo 1
+      const results = answer.map((x) => {
+        const it = inbox().items.find((i) => i.id === x.item_id);
+        const view = FAKE_VIEWS[((it.position || 1) - 1) % FAKE_VIEWS.length];
+        return { item_id: x.item_id, result: { index: list.indexOf(x) + 1, kind: view.startsWith('face_') ? 'extraoral' : 'intraoral', view, confidence: 'high',
+          rotate: view === 'intra_left' ? 90 : 0, mirror: ['intra_right', 'intra_upper', 'intra_lower'].includes(view), straighten: view === 'intra_right' ? 4 : 0,
+          crop: { left: 0.05, top: 0.05, right: 0.95, bottom: 0.95 }, exposure: 'ok', color_cast: view === 'intra_front' ? 'warm' : 'none', issues: [] } };
       });
-      record({ set_id: setId, item_ids: items.map((x) => x.item_id), photo_count: items.length, model: 'claude-opus-5-5', served_model: 'claude-opus-5-5', fallback_used: false,
-        status: 'ok', stop_reason: 'end_turn', error_code: null, input_tokens: 1200 * items.length, output_tokens: 250 * items.length, cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 1500, cost_usd: 0.01, one_sitting: 'yes', duration_ms: 5, request_id: 'demo' }, results);
+      record({ ...call, status: 'ok', reference_photos: offset }, results);
       return { ok: true, status: 'ok', results, cost_usd: 0.01, served_model: 'claude-opus-5-5' };
     },
     async photoBlob(path) {
@@ -596,12 +721,26 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       }
       return [...months.values()].sort((a, b) => b.month.localeCompare(a.month));
     },
-    /** For the demo's profile Delete: an inbox photo names no file (the original stays in the inbox), and its item lets go of it. */
+    /**
+     * For the demo's profile Delete (private.photo_inbox_photo_gone): an inbox photo names no file (the original stays in the inbox); its
+     * other row goes too and the photo is taken out of its filed set and set aside, so it never comes back by itself.
+     */
     inboxPhotoDeleted(photo) {
-      for (const it of inbox().items) {
-        if (it.raw_photo_id === photo.id) it.raw_photo_id = null;
-        if (it.edited_photo_id === photo.id) it.edited_photo_id = null;
-      }
+      const it = inbox().items.find((i) => i.id === photo.intake_item_id);
+      if (!it) return;
+      removeRows((p) => p.intake_item_id === it.id && p.id !== photo.id);
+      const s = setById(it.set_id);
+      if (s?.status === 'filed') {
+        const b = newSet(s.city_id, s.photo_day, { status: 'set_aside', set_aside_reason: 'taken_out', manual: true });
+        Object.assign(it, { set_id: b.id, raw_photo_id: null, edited_photo_id: null });
+        refresh(s); refresh(b); touch(s);
+        audit('photo_inbox_sets', 'PHOTO_TAKEN_OUT', { id: s.id, item_id: it.id, set_id: b.id, via: 'Delete on the patient profile' });
+        if (!itemsOf(s.id).length) inbox().sets = inbox().sets.filter((x) => x !== s);
+      } else Object.assign(it, { raw_photo_id: null, edited_photo_id: null });
+    },
+    /** For the demo's merge of two patients: the Photo inbox sets follow the photo rows (private.photo_inbox_photo_moved). */
+    inboxPatientMerged(keepId, removeId) {
+      for (const s of inbox().sets) if (s.patient_id === removeId) { s.patient_id = keepId; touch(s); }
     },
     inboxUrl: urlOf,
   };

@@ -44,13 +44,19 @@
 --    the audit log (PHOTO_FILED, PHOTO_MOVED, PHOTO_UNFILED, PHOTO_TAKEN_OUT, and every photo row and set change by audit_row).
 -- 6. The patient sees an edited Photo inbox photo in the portal only 24 hours after it was filed (app setting photo_inbox_hold_hours,
 --    0-168), and never while it is hidden or Claude thinks the set shows more than one patient (photos.held_back); staff can hide, move
---    or undo in that time. Enforced in the photos rules ("staff view photos") and in a new storage rule for inbox files.
+--    or undo in that time. An edited copy made later (Claude editing starts when the key is added, maybe days after filing; "Try Claude
+--    again"; photos that join a filed set) gets its own window from the moment it is made. Enforced in the photos rules ("staff view
+--    photos") and in a new storage rule for inbox files (edited copies only).
 -- 7. Storage rules: the Photo inbox folder takes uploads only from "Use the Photo inbox" holders, into a city they may use (the profile
 --    uploads of photos.upload go to the patient's own folder, as before, and no longer into inbox/); a filed edited copy is read by
 --    everyone who opens patient profiles (the profile and the library); the patient reads their visible edited copies.
--- 8. Unchanged on purpose: private.photo_guard (inbox functions need photos.view_raw, and for such callers the guard only fixes who saved
---    a photo and when), private.photo_files (for a row pointing into inbox/ it names no file, so the profile's Delete removes the row and
---    keeps the original in the inbox), the profile uploads.
+-- 8. private.photo_guard gains one rule (the rest is as in 20261016000200): only the Photo inbox functions (and Dr. Ali, and server
+--    jobs) make a photo row that points at a Photo inbox photo, change a row's hold or window (held_back, release_after), or move such a
+--    row to another patient, visit or file; a direct change through the API is refused. private.photo_files is unchanged (for a row
+--    pointing into inbox/ it names no file, so the profile's Delete removes the row and keeps the original in the inbox). When the
+--    profile's Delete removes an inbox photo (its raw row or its edited copy), the other row goes too and the photo is taken out of its
+--    set and put aside (as "Take out" does), so it never comes back into the patient's file by itself.
+--    Merging two patients (merge_patients moves the photo rows) moves the Photo inbox set with them.
 -- 9. Admin -> Staff accounts -> Delete (20261015000200): private.staff_record_columns() also counts the Photo inbox photos a login uploaded,
 --    the sets it filed and its Claude calls, so such an account is kept (switched off), never removed.
 --
@@ -61,11 +67,12 @@
 -- (public.begin_photo_delete, photos.delete) first; live has it. Then deploy the Edge Function photo-ai (index.ts and core.ts), then put
 -- the website live and reload the staff tabs (Ctrl+F5). Claude editing starts once Dr. Ali adds ANTHROPIC_API_KEY (docs/PHOTO-INTAKE.md).
 -- THE WEBSITE WITHOUT IT: the Photo inbox says it needs the database update of 17 Oct and does nothing; nothing else changes.
--- TO UNDO: drop the functions photo_inbox_*, photo_library, photo_ai_costs, photo_object_visible_to_patient, photo_inbox_city_folder_ok
--- and private.photo_inbox_*; the storage policies "photo inbox uploads", "staff read filed intake edits", "patients read visible intake
--- photos"; the tables photo_inbox_items, photo_ai_calls, photo_inbox_sets; the photos columns intake_item_id, intake_set_id, view_key,
--- occasion, release_after, held_back; restore "staff view photos" (20261005000300), "staff upload clinic photos" (20261005000500) and the
--- trigger photos_mark_visit (after insert only, 20261005000200) and private.staff_record_columns() (20261015000200).
+-- TO UNDO: drop the triggers photos_inbox_gone and photos_inbox_moved on public.photos; drop the functions photo_inbox_*, photo_library,
+-- photo_ai_costs, photo_object_visible_to_patient, photo_inbox_city_folder_ok and private.photo_inbox_*; the storage policies "photo
+-- inbox uploads", "staff read filed intake edits", "patients read visible intake photos"; the tables photo_inbox_items, photo_ai_calls,
+-- photo_inbox_sets; the photos columns intake_item_id, intake_set_id, view_key, occasion, release_after, held_back; restore "staff view
+-- photos" (20261005000300), "staff upload clinic photos" (20261005000500), the trigger photos_mark_visit (after insert only,
+-- 20261005000200), private.staff_record_columns() (20261015000200) and private.photo_guard() (20261016000200).
 -- =============================================================================
 begin;
 
@@ -181,8 +188,9 @@ create table if not exists public.photo_inbox_items (
   edit_basic boolean not null default false,
   edit_version smallint,
   edit_attempts smallint not null default 0,
+  edit_round smallint not null default 1,         -- 2, 3 ...: edited again ("Try Claude again"), stored as edited/<sha>-r2.jpg ...
   edit_lease_until timestamptz,
-  edit_lease_by uuid
+  edit_lease_by uuid                              -- the page that holds the photo for editing (a token of that page)
 );
 
 create index if not exists photo_inbox_items_city_day_idx on public.photo_inbox_items (city_id, photo_day);
@@ -373,9 +381,12 @@ returns date language sql stable set search_path = public as $$
 $$;
 revoke all on function private.photo_inbox_taken_on(public.photo_inbox_items, date) from public, anon, authenticated;
 
--- A set's camera times, count, camera and branch hint, and its photos numbered 1..n in photo order.
+-- A set's camera times, count, camera and branch hint, and its photos numbered 1..n in photo order. The set row is written only when
+-- something changed (each write is an audit row). Answers whether it changed.
 create or replace function private.photo_inbox_refresh_set(p_set uuid)
-returns void language plpgsql security definer set search_path = public as $$
+returns boolean language plpgsql security definer set search_path = public as $$
+declare
+  n integer;
 begin
   update public.photo_inbox_items i set position = r.pos
     from (select id, row_number() over (order by taken_at nulls last, file_seq nulls last, file_name, sha256) as pos
@@ -390,12 +401,43 @@ begin
                  case when count(distinct camera) = 1 then min(camera) when count(*) = 0 then null else 'mixed' end as camera,
                  case when count(distinct coalesce(branch_hint, 0)) = 1 then min(branch_hint) else null end as hint
             from public.photo_inbox_items where set_id = p_set) a
-   where s.id = p_set;
+   where s.id = p_set
+     and (s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint) is distinct from (a.first_at, a.last_at, a.n, a.time_ok, a.camera, a.hint);
+  get diagnostics n = row_count;
+  return n > 0;
 end $$;
 revoke all on function private.photo_inbox_refresh_set(uuid) from public, anon, authenticated;
 
--- The patient's photo rows of a filed set: for each photo without one, the raw photo; and the edited copy once it is edited.
--- Returns how many rows it made.
+-- The Photo inbox functions say "this is the inbox writing" while they make, move or hold back photo rows, so the photo guard lets
+-- them (and only them) do it; transaction-local, switched off again at once (see private.photo_guard below).
+create or replace function private.photo_inbox_writing(p_on boolean)
+returns void language plpgsql volatile set search_path = public as $$
+begin
+  perform set_config('app.photo_inbox', case when p_on then '1' else '' end, true);
+end $$;
+revoke all on function private.photo_inbox_writing(boolean) from public, anon, authenticated;
+
+-- Whether a visit's patient may have been in the chair between two moments, from the list's own times. Wide (another photo patient
+-- "may have been there"): 30 minutes before the earlier of check-in and start to 15 minutes after the later of the completion and 3
+-- hours on. Tight ("in the chair"): 10 minutes before to 10 minutes after the completion or 2 hours on. A row without a check-in and
+-- a start, or an imported one, may have been there at any time that day. (Larger than the windows of the website, never smaller.)
+create or replace function private.photo_inbox_was_there(u public.visits, p_first timestamptz, p_last timestamptz, p_tight boolean)
+returns boolean language sql stable set search_path = public as $$
+  select case
+    when u.legacy_source is not null or coalesce(u.started_at, u.checked_in_at) is null then true
+    else p_first <= greatest(case when u.completed_at >= least(u.started_at, u.checked_in_at) then u.completed_at end,
+                             greatest(u.started_at, u.checked_in_at) + case when p_tight then interval '120 minutes' else interval '180 minutes' end)
+                    + case when p_tight then interval '10 minutes' else interval '15 minutes' end
+     and p_last >= least(u.started_at, u.checked_in_at) - case when p_tight then interval '10 minutes' else interval '30 minutes' end
+  end
+$$;
+revoke all on function private.photo_inbox_was_there(public.visits, timestamptz, timestamptz, boolean) from public, anon, authenticated;
+
+-- The patient's photo rows of a filed set: for each photo without one, the raw photo; and the edited copy once it is edited (or its new
+-- file, when it was edited again). An edited copy made after the filing gets its own check window from now (staff see Claude's edit
+-- before the patient does, however late the editing ran). A photo the profile's Delete removed has left the set (see the trigger
+-- below), so nothing comes back by itself. A filed set without a patient (the patient's record was removed) makes no rows: it is shown
+-- under "Check these". Returns how many rows it made or changed.
 create or replace function private.photo_inbox_file_rows(p_set uuid)
 returns integer language plpgsql security definer set search_path = public as $$
 declare
@@ -406,6 +448,7 @@ declare
   v_edited uuid;
   v_key text;
   v_taken date;
+  v_release timestamptz;
   n integer := 0;
 begin
   select * into s from public.photo_inbox_sets where id = p_set;
@@ -413,6 +456,8 @@ begin
     return 0;
   end if;
   select * into v from public.visits where id = s.visit_id;
+  v_release := greatest(coalesce(s.release_after, now()), now() + private.photo_inbox_hold());
+  perform private.photo_inbox_writing(true);
   for it in select * from public.photo_inbox_items where set_id = p_set order by position, sha256 loop
     v_key := case when it.ai_status = 'done' and private.photo_inbox_view_name(it.ai_result ->> 'view') is not null then it.ai_result ->> 'view' end;
     v_taken := private.photo_inbox_taken_on(it, v.visit_date);
@@ -432,12 +477,19 @@ begin
                                  release_after, held_back)
       values (s.patient_id, s.visit_id, s.branch_id, v_taken, 'edited', private.photo_inbox_label(s.occasion, v_key, it.position), v_key,
               v.braces_month, s.occasion, it.edited_path, it.edited_thumb_path, v_raw, false, auth.uid(), it.id, s.id,
-              s.release_after, s.hidden or coalesce(s.ai_flag = 'mixed_people', false))
+              v_release, s.hidden or coalesce(s.ai_flag = 'mixed_people', false))
       returning id into v_edited;
       update public.photo_inbox_items set edited_photo_id = v_edited where id = it.id;
       n := n + 1;
+    elsif it.edit_status = 'done' and it.edited_path is not null then
+      -- edited again: the row points at the new file and the window starts again
+      update public.photos set storage_path = it.edited_path, thumb_path = it.edited_thumb_path, view_key = v_key,
+          view_label = private.photo_inbox_label(s.occasion, v_key, it.position), release_after = v_release
+       where id = it.edited_photo_id and storage_path is distinct from it.edited_path;
+      if found then n := n + 1; end if;
     end if;
   end loop;
+  perform private.photo_inbox_writing(false);
   return n;
 end $$;
 revoke all on function private.photo_inbox_file_rows(uuid) from public, anon, authenticated;
@@ -533,6 +585,140 @@ end $$;
 revoke all on function private.photo_inbox_set_for_change(uuid) from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------------------------------------------
+-- 8. The photo guard, and a Photo inbox photo's rows kept in step with its set
+-- ---------------------------------------------------------------------------------------------------------------
+-- The guard of 20261016000200 with one rule more (first): a photo row that points at a Photo inbox photo is made, moved (patient, visit,
+-- file, kind) or held back and released (held_back, release_after) only by the Photo inbox functions. Through the API, any login with
+-- "Upload clinic photos" and "View raw clinic photos folder" (the doctor too, who has neither "Use the Photo inbox" nor "Delete") could
+-- otherwise let a set Claude flagged, or one staff hid, reach the patient at once, or move it to another patient with no PHOTO_MOVED
+-- entry. Dr. Ali and server jobs are not checked, as before.
+create or replace function private.photo_guard() returns trigger
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_thumb text;
+begin
+  if auth.uid() is null or public.is_admin() then
+    return new;
+  end if;
+  if coalesce(current_setting('app.photo_inbox', true), '') <> '1' then
+    if tg_op = 'INSERT' and (new.intake_item_id is not null or new.intake_set_id is not null) then
+      raise exception 'NOT_ALLOWED: Photo inbox photos are filed by the Photo inbox.' using errcode = '42501';
+    end if;
+    if tg_op = 'UPDATE'
+       and ((new.held_back, new.release_after, new.intake_item_id, new.intake_set_id)
+              is distinct from (old.held_back, old.release_after, old.intake_item_id, old.intake_set_id)
+            or (old.intake_item_id is not null
+                and (new.patient_id, new.visit_id, new.storage_path, new.thumb_path, new.kind)
+                      is distinct from (old.patient_id, old.visit_id, old.storage_path, old.thumb_path, old.kind))) then
+      raise exception 'NOT_ALLOWED: a Photo inbox photo is moved, hidden or shown on the Photo inbox (Filed).' using errcode = '42501';
+    end if;
+  end if;
+  if tg_op = 'INSERT' then
+    new.uploaded_by := auth.uid();
+    new.created_at := now();
+    -- (Whoever may not upload at all is refused by "staff upload photos", after this.)
+    if public.has_perm('photos.upload') and not public.has_perm('photos.view_raw') then
+      v_thumb := public.photo_thumb_path(new.storage_path);
+      if new.patient_id is null
+         or split_part(new.storage_path, '/', 1) <> new.patient_id::text
+         or split_part(new.storage_path, '/', 2) <> new.kind::text
+         or split_part(new.storage_path, '/', 3) = ''
+         or split_part(new.storage_path, '/', 4) <> ''
+         or (new.thumb_path is not null and new.thumb_path <> v_thumb) then
+        raise exception 'NOT_ALLOWED: a photo is saved in its patient''s own folder (<patient>/raw or edited/<file>), with its small copy beside it in thumbs/.'
+          using errcode = '42501';
+      end if;
+      -- (A row with the very same file is left to the unique storage_path: "duplicate key" is how the website knows a retried
+      -- upload was saved the first time.)
+      if exists (select 1 from public.photos o
+                  where o.storage_path <> new.storage_path and (o.thumb_path = v_thumb or public.photo_thumb_path(o.storage_path) = v_thumb))
+         or exists (select 1 from storage.objects so
+                     where so.bucket_id = 'clinic-photos' and so.name in (new.storage_path, v_thumb)
+                       and coalesce(so.owner::text, to_jsonb(so) ->> 'owner_id') <> auth.uid()::text) then
+        raise exception 'NOT_ALLOWED: a photo of that name is already saved for this patient. Upload the picture again (it gets a new name).'
+          using errcode = '42501';
+      end if;
+    end if;
+  else
+    new.uploaded_by := old.uploaded_by;
+    new.created_at := old.created_at;
+    if new.public_ok is distinct from old.public_ok then
+      raise exception 'NOT_ALLOWED: only Dr. Ali changes whether a saved photo may be shown on the website.' using errcode = '42501';
+    end if;
+    if not public.has_perm('photos.view_raw')
+       and (new.storage_path, new.thumb_path, new.patient_id, new.kind) is distinct from (old.storage_path, old.thumb_path, old.patient_id, old.kind) then
+      raise exception 'NOT_ALLOWED: a saved photo keeps its file, patient and kind.' using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end $$;
+revoke all on function private.photo_guard() from public, anon, authenticated;
+
+-- When the profile's Delete removes a Photo inbox photo (its raw row or its edited copy), the other row goes too and the photo leaves its
+-- set, put aside on its own ("Taken out of a filed set", with "Put back"), as "Take out" on the Filed list does. The original stays in
+-- the inbox, and the photo never comes back into the patient's file by itself (before, editing another photo of the set, or photos
+-- joining it, made its rows again, and its edited copy then skipped the window). The Photo inbox's own deletes are left alone.
+create or replace function private.photo_inbox_photo_gone() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  it public.photo_inbox_items;
+  s public.photo_inbox_sets;
+  v_new uuid;
+begin
+  if coalesce(current_setting('app.photo_inbox', true), '') = '1' then
+    return old;
+  end if;
+  select * into it from public.photo_inbox_items where id = old.intake_item_id;
+  if it.id is null then
+    return old;
+  end if;
+  perform private.photo_inbox_lock(it.city_id, it.photo_day);
+  perform private.photo_inbox_writing(true);
+  delete from public.photos where intake_item_id = it.id;
+  select * into s from public.photo_inbox_sets where id = it.set_id for update;
+  if s.id is not null and s.status = 'filed' then
+    insert into public.photo_inbox_sets (city_id, photo_day, status, set_aside_reason, manual)
+    values (s.city_id, s.photo_day, 'set_aside', 'taken_out', true) returning id into v_new;
+    update public.photo_inbox_items set set_id = v_new, raw_photo_id = null, edited_photo_id = null where id = it.id;
+    perform private.photo_inbox_refresh_set(s.id);
+    perform private.photo_inbox_refresh_set(v_new);
+    update public.photo_inbox_sets set version = version + 1 where id = s.id;
+    insert into public.audit_log (table_name, row_id, action, old_data, new_data, actor)
+    values ('photo_inbox_sets', s.id::text, 'PHOTO_TAKEN_OUT', jsonb_build_object('patient_id', s.patient_id, 'visit_id', s.visit_id),
+            jsonb_build_object('item_id', it.id, 'set_id', v_new, 'via', 'the patient profile''s Delete'), auth.uid());
+    -- (the set's last photo: the empty set goes; its photos are all set aside)
+    delete from public.photo_inbox_sets x where x.id = s.id and not exists (select 1 from public.photo_inbox_items i where i.set_id = s.id);
+  else
+    update public.photo_inbox_items set raw_photo_id = null, edited_photo_id = null where id = it.id;
+  end if;
+  perform private.photo_inbox_writing(false);
+  return old;
+end $$;
+revoke all on function private.photo_inbox_photo_gone() from public, anon, authenticated;
+drop trigger if exists photos_inbox_gone on public.photos;
+create trigger photos_inbox_gone after delete on public.photos
+  for each row when (old.intake_item_id is not null) execute function private.photo_inbox_photo_gone();
+
+-- Merging two patients moves the photo rows (merge_patients, 20261007001400) and then removes the other record: the Photo inbox set of
+-- those rows follows them (patient and visit), so it is not left filed to nobody (its later edited copies and joined photos would have
+-- reached no file). The Photo inbox's own moves change the set themselves.
+create or replace function private.photo_inbox_photo_moved() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(current_setting('app.photo_inbox', true), '') = '1' then
+    return new;
+  end if;
+  update public.photo_inbox_sets set patient_id = new.patient_id, visit_id = new.visit_id, version = version + 1
+   where id = new.intake_set_id and status = 'filed' and (patient_id, visit_id) is distinct from (new.patient_id, new.visit_id);
+  return new;
+end $$;
+revoke all on function private.photo_inbox_photo_moved() from public, anon, authenticated;
+drop trigger if exists photos_inbox_moved on public.photos;
+create trigger photos_inbox_moved after update of patient_id, visit_id on public.photos
+  for each row when (new.intake_set_id is not null) execute function private.photo_inbox_photo_moved();
+
+-- ---------------------------------------------------------------------------------------------------------------
 -- 7. Storage rules
 -- ---------------------------------------------------------------------------------------------------------------
 -- Whether a file name is in the inbox folder of a city the caller may use (inbox/<city>/<day>/...).
@@ -575,7 +761,8 @@ create policy "staff read filed intake edits" on storage.objects for select to a
          and exists (select 1 from public.photos ph where ph.kind = 'edited' and (ph.storage_path = objects.name or ph.thumb_path = objects.name)));
 drop policy if exists "patients read visible intake photos" on storage.objects;
 create policy "patients read visible intake photos" on storage.objects for select to authenticated
-  using (bucket_id = 'clinic-photos' and (storage.foldername(name))[1] = 'inbox' and public.photo_object_visible_to_patient(name));
+  using (bucket_id = 'clinic-photos' and (storage.foldername(name))[1] = 'inbox' and (storage.foldername(name))[4] = 'edited'
+         and public.photo_object_visible_to_patient(name));
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- 4. The Photo inbox functions (each checks who is asking; errors start with a code word the website turns into a sentence)
@@ -733,7 +920,7 @@ begin
                      (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'waiting') as waiting,
                      (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'filed') as filed,
                      (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'set_aside') as set_aside,
-                     (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'filed' and s.ai_flag is not null) as flagged,
+                     (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'filed' and (s.ai_flag is not null or s.patient_id is null)) as flagged,
                      count(*) filter (where i.edit_status not in ('done', 'skipped')) as unedited,
                      bool_or(i.set_id is null) as unset
                 from public.photo_inbox_items i where i.city_id = p_city group by i.photo_day) d
@@ -748,7 +935,7 @@ begin
         select distinct s.photo_day as d from public.photo_inbox_sets s where s.city_id = p_city and s.status = 'waiting'
         union select distinct i.photo_day from public.photo_inbox_items i where i.city_id = p_city and i.set_id is null) x), '[]'::jsonb),
     'check_days', coalesce((select jsonb_agg(distinct s.photo_day order by s.photo_day) from public.photo_inbox_sets s
-                             where s.city_id = p_city and s.status = 'filed' and s.ai_flag is not null), '[]'::jsonb));
+                             where s.city_id = p_city and s.status = 'filed' and (s.ai_flag is not null or s.patient_id is null)), '[]'::jsonb));
 end $$;
 revoke all on function public.photo_inbox_overview(smallint) from public, anon;
 grant execute on function public.photo_inbox_overview(smallint) to authenticated;
@@ -784,7 +971,9 @@ begin
                'time_ok', s.time_ok, 'camera', s.camera, 'branch_hint', s.branch_hint, 'candidates', s.candidates, 'wait_reason', s.wait_reason,
                'patient_id', s.patient_id, 'visit_id', s.visit_id, 'branch_id', s.branch_id, 'occasion', s.occasion, 'filed_how', s.filed_how,
                'filed_rule', s.filed_rule, 'filed_by_name', (select st.full_name from public.staff st where st.id = s.filed_by), 'filed_at', s.filed_at,
-               'release_after', s.release_after, 'hidden', s.hidden, 'ai_flag', s.ai_flag, 'set_aside_reason', s.set_aside_reason,
+               -- (an edited copy made after the filing has a later window: the latest one is shown)
+               'release_after', greatest(s.release_after, (select max(ph.release_after) from public.photos ph where ph.intake_set_id = s.id and ph.kind = 'edited')),
+               'hidden', s.hidden, 'ai_flag', s.ai_flag, 'set_aside_reason', s.set_aside_reason,
                'version', s.version, 'full_name', pt.full_name, 'mr_number', pt.mr_number)
              order by s.first_at nulls last, s.created_at, s.id)
         from public.photo_inbox_sets s left join public.patients pt on pt.id = s.patient_id
@@ -795,7 +984,8 @@ begin
                'thumb_path', i.thumb_path, 'edited_path', i.edited_path, 'edited_thumb_path', i.edited_thumb_path, 'file_name', i.file_name,
                'mime_type', i.mime_type, 'width', i.width, 'height', i.height, 'taken_at', i.taken_at, 'time_source', i.time_source,
                'clock_ok', i.clock_ok, 'camera', i.camera, 'file_seq_prefix', i.file_seq_prefix, 'file_seq', i.file_seq,
-               'branch_hint', i.branch_hint, 'uploaded_by', i.uploaded_by, 'uploaded_at', i.uploaded_at, 'ai_status', i.ai_status,
+               'branch_hint', i.branch_hint, 'uploaded_by', i.uploaded_by, 'uploaded_at', i.uploaded_at, 'upload_batch', i.upload_batch,
+               'edit_round', i.edit_round, 'ai_status', i.ai_status,
                'ai_kind', i.ai_result ->> 'kind', 'ai_view', i.ai_result ->> 'view', 'ai_issues', coalesce(i.ai_result -> 'issues', '[]'::jsonb),
                'edit_status', i.edit_status, 'edit_basic', i.edit_basic, 'raw_photo_id', i.raw_photo_id, 'edited_photo_id', i.edited_photo_id)
              order by i.taken_at nulls last, i.file_seq nulls last, i.file_name, i.sha256)
@@ -808,10 +998,17 @@ grant execute on function public.photo_inbox_day(smallint, date) to authenticate
 -- that city and day:
 --   1. the photos the plan regrouped must be exactly the regroupable ones now (no set, or a waiting set nobody changed), each once:
 --      else PHOTO_STALE_PLAN (the page reloads the day and plans again);
---   2. each group: joins a filed set (the rest of its sitting) when that is right, else reuses the set of its earliest photo or gets a
---      new one; candidates and the reason come from the plan;
---   3. "auto" is filed only when the rules hold again here, from the raw columns (see the inline checks); else it waits (SERVER_CHECK);
+--   2. each group: joins a filed set (the rest of its sitting) only when that is checked again here (same camera, branch chosen and
+--      uploader as the set's photos, every photo with a right camera time, inside the set's time or within 3 minutes of it, at most 15
+--      minutes and 20 photos in all; the joined photos get their own check window and PHOTO_JOINED in the audit log), else it reuses the
+--      set of its earliest photo or gets a new one; every set that gained or lost photos is worked out again;
+--   3. "auto" is filed only when the rules hold again here, from the list's own times: a photo month of that city and day, in treatment
+--      or completed, not imported, with no photos yet; the photos within 10 minutes before to 2 hours after the start or check-in the
+--      page went by (one of the two); no other patient with a photo occasion who may have been in the chair then (also one who already
+--      has photos); without a chosen branch, nobody of another branch in the chair then; one set per visit. Else it waits (SERVER_CHECK);
 --   4. sets a person changed get fresh candidates (their photos are not touched); 5. regroupable sets left empty are removed.
+-- A set is written (and its version and the audit log move) only when its photos, candidates or reason change, so the page's matching
+-- every few minutes leaves an unchanged day alone.
 -- Answers { sets: [{ set_id, item_ids, status }], filed, joined, waiting, server_refused: [{ set_id, why }] }.
 create or replace function public.photo_inbox_apply(p_city smallint, p_day date, p_plan jsonb)
 returns jsonb language plpgsql security definer set search_path = public as $$
@@ -821,17 +1018,34 @@ declare
   v_plan_ids uuid[];
   v_group_ids uuid[];
   g jsonb;
+  k integer;
+  n integer;
   v_items uuid[];
   v_join uuid;
   v_set uuid;
   v_old uuid;
+  v_one uuid;
   v_reused uuid[] := '{}';
+  v_targets uuid[] := '{}';
+  v_joins boolean[] := '{}';
+  v_moved integer[] := '{}';
+  v_touched uuid[];
+  v_changed uuid[] := '{}';
   v_auto_visits uuid[] := '{}';
   s public.photo_inbox_sets;
   v public.visits;
   v_city smallint;
   v_anchor timestamptz;
+  v_anchor_in timestamptz;
   v_why text;
+  v_reason text;
+  v_cands jsonb;
+  v_ok boolean;
+  v_multi boolean;
+  v_fa timestamptz;
+  v_fl timestamptz;
+  v_ga timestamptz;
+  v_gl timestamptz;
   v_out jsonb := '[]'::jsonb;
   v_refused jsonb := '[]'::jsonb;
   v_filed integer := 0;
@@ -855,47 +1069,95 @@ begin
   if v_current <> v_plan_ids or v_group_ids <> v_current then
     raise exception 'PHOTO_STALE_PLAN: the photos changed while matching; it is tried again.';
   end if;
+  -- (the sets these photos are in now: they may lose photos)
+  select coalesce(array_agg(distinct i.set_id), '{}') into v_touched from public.photo_inbox_items i where i.id = any (v_current) and i.set_id is not null;
 
-  -- 2. the groups
+  -- 2. where each group goes
   for g in select * from jsonb_array_elements(p_plan -> 'groups') loop
     select array_agg(x::uuid order by o) into v_items from jsonb_array_elements_text(g -> 'item_ids') with ordinality as t(x, o);
-    if coalesce(array_length(v_items, 1), 0) = 0 then continue; end if;
+    if coalesce(array_length(v_items, 1), 0) = 0 then
+      v_targets := v_targets || null::uuid;
+      v_joins := v_joins || false;
+      v_moved := v_moved || 0;
+      continue;
+    end if;
     v_join := nullif(g ->> 'join_set_id', '')::uuid;
+    v_ok := false;
     if v_join is not null then
       select * into s from public.photo_inbox_sets where id = v_join for update;
-      if s.id is not null and s.status = 'filed' and not s.manual and s.city_id = p_city and s.photo_day = p_day
-         and not exists (select 1 from public.photo_inbox_items where id = any (v_items) and not (time_source = 'exif' and clock_ok)) then
-        update public.photo_inbox_items set set_id = v_join where id = any (v_items);
-        perform private.photo_inbox_refresh_set(v_join);
-        perform private.photo_inbox_file_rows(v_join);
-        update public.photo_inbox_sets set version = version + 1 where id = v_join;
-        v_joined := v_joined + 1;
-        v_out := v_out || jsonb_build_array(jsonb_build_object('set_id', v_join, 'item_ids', to_jsonb(v_items), 'status', 'filed'));
-        continue;
+      if s.id is not null and s.status = 'filed' and not s.manual and s.city_id = p_city and s.photo_day = p_day then
+        select min(taken_at), max(taken_at) into v_fa, v_fl from public.photo_inbox_items where set_id = v_join and time_source = 'exif';
+        select min(taken_at), max(taken_at) into v_ga, v_gl from public.photo_inbox_items where id = any (v_items);
+        v_ok := v_fa is not null and v_ga is not null
+          and not exists (select 1 from public.photo_inbox_items where id = any (v_items) and not (time_source = 'exif' and clock_ok and taken_at is not null))
+          and not exists (select 1 from public.photo_inbox_items gi, public.photo_inbox_items fi
+                           where gi.id = any (v_items) and fi.set_id = v_join
+                             and (gi.camera, coalesce(gi.branch_hint, 0), gi.uploaded_by) is distinct from (fi.camera, coalesce(fi.branch_hint, 0), fi.uploaded_by))
+          and (select count(*) from public.photo_inbox_items where set_id = v_join) + array_length(v_items, 1) <= 20
+          and greatest(v_fl, v_gl) - least(v_fa, v_ga) <= interval '900 seconds'
+          and ((v_ga >= v_fa and v_gl <= v_fl)
+               or (v_ga >= v_fl and v_ga - v_fl <= interval '180 seconds')
+               or (v_gl <= v_fa and v_fa - v_gl <= interval '180 seconds'));
       end if;
     end if;
-    select i.set_id into v_old from public.photo_inbox_items i where i.id = v_items[1];
-    v_set := null;
-    if v_old is not null and not (v_old = any (v_reused))
-       and exists (select 1 from public.photo_inbox_sets where id = v_old and status = 'waiting' and not manual) then
-      v_set := v_old;
+    if v_ok then
+      v_set := v_join;
     else
-      insert into public.photo_inbox_sets (city_id, photo_day) values (p_city, p_day) returning id into v_set;
+      select i.set_id into v_old from public.photo_inbox_items i where i.id = v_items[1];
+      if v_old is not null and not (v_old = any (v_reused))
+         and exists (select 1 from public.photo_inbox_sets where id = v_old and status = 'waiting' and not manual) then
+        v_set := v_old;
+      else
+        insert into public.photo_inbox_sets (city_id, photo_day) values (p_city, p_day) returning id into v_set;
+      end if;
+      v_reused := v_reused || v_set;
     end if;
-    v_reused := v_reused || v_set;
-    update public.photo_inbox_items set set_id = v_set where id = any (v_items);
-    perform private.photo_inbox_refresh_set(v_set);
-    update public.photo_inbox_sets set status = 'waiting',
-        candidates = case when jsonb_typeof(g -> 'candidates') = 'array' then g -> 'candidates' else '[]'::jsonb end,
-        wait_reason = left(nullif(g ->> 'wait_reason', ''), 40), matched_at = now(), version = version + 1
-     where id = v_set;
+    update public.photo_inbox_items set set_id = v_set where id = any (v_items) and set_id is distinct from v_set;
+    get diagnostics n = row_count;
+    v_targets := v_targets || v_set;
+    v_joins := v_joins || v_ok;
+    v_moved := v_moved || n;
+  end loop;
 
-    -- 3. automatic filing, checked again from the raw columns
+  -- every set that gained or lost photos: its times, count, camera, branch chosen and numbering again
+  for v_one in select distinct t from unnest(v_touched || v_targets) t where t is not null loop
+    if private.photo_inbox_refresh_set(v_one) then
+      v_changed := v_changed || v_one;
+    end if;
+  end loop;
+
+  -- 3. each group's set: joined, filed by itself (checked again here), or waiting with the plan's candidates and reason
+  select count(*) > 1 into v_multi from public.branches where city_id = p_city;
+  k := 0;
+  for g in select * from jsonb_array_elements(p_plan -> 'groups') loop
+    k := k + 1;
+    v_set := v_targets[k];
+    if v_set is null then continue; end if;
+    select array_agg(x::uuid order by o) into v_items from jsonb_array_elements_text(g -> 'item_ids') with ordinality as t(x, o);
+    if v_joins[k] then
+      perform private.photo_inbox_file_rows(v_set);
+      update public.photo_inbox_sets set version = version + 1 where id = v_set;
+      insert into public.audit_log (table_name, row_id, action, new_data, actor)
+      values ('photo_inbox_sets', v_set::text, 'PHOTO_JOINED',
+              jsonb_build_object('item_ids', to_jsonb(v_items), 'patient_id', (select patient_id from public.photo_inbox_sets where id = v_set),
+                                 'visit_id', (select visit_id from public.photo_inbox_sets where id = v_set)), auth.uid());
+      v_joined := v_joined + 1;
+      v_out := v_out || jsonb_build_array(jsonb_build_object('set_id', v_set, 'item_ids', to_jsonb(v_items), 'status', 'filed'));
+      continue;
+    end if;
+    v_cands := case when jsonb_typeof(g -> 'candidates') = 'array' then g -> 'candidates' else '[]'::jsonb end;
+    v_reason := left(nullif(g ->> 'wait_reason', ''), 40);
+
     if jsonb_typeof(g -> 'auto') = 'object' and coalesce((p_plan ->> 'matcher_version')::int, 0) >= c_matcher then
       select * into s from public.photo_inbox_sets where id = v_set;
       select * into v from public.visits where id = nullif(g -> 'auto' ->> 'visit_id', '')::uuid;
       select b.city_id into v_city from public.branches b where b.id = v.branch_id;
-      v_anchor := coalesce(v.started_at, v.checked_in_at);
+      -- The time the page went by: the start, or the check-in when the starts were marked in one go (it must be one of the two).
+      v_anchor_in := case when coalesce(g -> 'auto' ->> 'anchor_at', '') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' then (g -> 'auto' ->> 'anchor_at')::timestamptz end;
+      v_anchor := case
+        when v_anchor_in is not null and v.checked_in_at is not null and abs(extract(epoch from (v_anchor_in - v.checked_in_at))) <= 1 then v.checked_in_at
+        when v_anchor_in is not null and v.started_at is not null and abs(extract(epoch from (v_anchor_in - v.started_at))) <= 1 then v.started_at
+        else coalesce(v.started_at, v.checked_in_at) end;
       v_why := case
         when v.id is null then 'no such visit'
         when not s.time_ok or s.manual or s.ai_flag is not null or s.photo_count > 20 then 'the photos are not clear enough'
@@ -906,28 +1168,45 @@ begin
         when v.photos_uploaded or exists (select 1 from public.photos ph where ph.visit_id = v.id)
              or exists (select 1 from public.photo_inbox_sets x where x.visit_id = v.id and x.status = 'filed') then 'the visit has photos already'
         when v_anchor is null or s.first_at < v_anchor - interval '10 minutes' or s.first_at > v_anchor + interval '120 minutes' then 'the photos do not fit the visit''s times'
+        when exists (select 1 from public.visits u join public.branches ub on ub.id = u.branch_id
+                      where ub.city_id = p_city and u.visit_date = p_day and u.patient_id <> v.patient_id
+                        and u.status in ('waiting', 'in_treatment', 'completed')
+                        and (s.branch_hint is null or u.branch_id = s.branch_hint)
+                        and (u.photo_required or coalesce(u.treatment_label, '') ~* '(bond|braces off|debond|record|smile|veneer|aligner|consult)')
+                        and private.photo_inbox_was_there(u, s.first_at, s.last_at, false)) then 'another photo patient may have been in the chair then'
+        when s.branch_hint is null and v_multi
+             and exists (select 1 from public.visits u join public.branches ub on ub.id = u.branch_id
+                          where ub.city_id = p_city and u.visit_date = p_day and u.patient_id <> v.patient_id and u.branch_id <> v.branch_id
+                            and u.status in ('waiting', 'in_treatment', 'completed')
+                            and private.photo_inbox_was_there(u, s.first_at, s.last_at, true)) then 'no branch was chosen and another branch had a patient in the chair then'
         when v.id = any (v_auto_visits) then 'two sets for one visit'
         else null end;
       if v_why is null then
         perform private.photo_inbox_file(v_set, v.id, v.patient_id, v.branch_id, private.photo_inbox_occasion(v), 'auto', g -> 'auto' ->> 'rule');
+        update public.photo_inbox_sets set candidates = v_cands, matched_at = now() where id = v_set;
         v_auto_visits := v_auto_visits || v.id;
         v_filed := v_filed + 1;
         v_out := v_out || jsonb_build_array(jsonb_build_object('set_id', v_set, 'item_ids', to_jsonb(v_items), 'status', 'filed'));
         continue;
       end if;
-      update public.photo_inbox_sets set wait_reason = 'SERVER_CHECK' where id = v_set;
+      v_reason := 'SERVER_CHECK';
       v_refused := v_refused || jsonb_build_array(jsonb_build_object('set_id', v_set, 'why', v_why));
     end if;
+    update public.photo_inbox_sets set status = 'waiting', candidates = v_cands, wait_reason = v_reason, matched_at = now(), version = version + 1
+     where id = v_set
+       and (v_set = any (v_changed) or v_moved[k] > 0 or status <> 'waiting' or candidates is distinct from v_cands or wait_reason is distinct from v_reason);
     v_waiting := v_waiting + 1;
     v_out := v_out || jsonb_build_array(jsonb_build_object('set_id', v_set, 'item_ids', to_jsonb(v_items), 'status', 'waiting'));
   end loop;
 
-  -- 4. sets a person changed: fresh candidates only
+  -- 4. sets a person changed: fresh candidates only (written only when they changed)
   for f in select * from jsonb_array_elements(coalesce(p_plan -> 'fixed_updates', '[]'::jsonb)) loop
     update public.photo_inbox_sets set
         candidates = case when jsonb_typeof(f -> 'candidates') = 'array' then f -> 'candidates' else candidates end,
         wait_reason = coalesce(left(nullif(f ->> 'wait_reason', ''), 40), wait_reason), matched_at = now(), version = version + 1
-     where id = nullif(f ->> 'set_id', '')::uuid and city_id = p_city and photo_day = p_day and status = 'waiting' and manual;
+     where id = nullif(f ->> 'set_id', '')::uuid and city_id = p_city and photo_day = p_day and status = 'waiting' and manual
+       and ((jsonb_typeof(f -> 'candidates') = 'array' and candidates is distinct from f -> 'candidates')
+            or wait_reason is distinct from coalesce(left(nullif(f ->> 'wait_reason', ''), 40), wait_reason));
   end loop;
 
   -- 5. regroupable sets left without photos
@@ -1077,10 +1356,12 @@ begin
   if s.status <> 'filed' then
     raise exception 'PHOTO_SET_STATE: these photos are not filed. The list is reloaded.';
   end if;
+  perform private.photo_inbox_writing(true);
   delete from public.photos where intake_set_id = p_set and kind = 'edited';
   get diagnostics n = row_count;
   delete from public.photos where intake_set_id = p_set;
   get diagnostics m = row_count;
+  perform private.photo_inbox_writing(false);
   update public.photo_inbox_items set raw_photo_id = null, edited_photo_id = null where set_id = p_set;
   v_unticked := private.photo_inbox_untick(s.visit_id);
   update public.photo_inbox_sets set status = 'waiting', manual = true, wait_reason = 'UNDONE', patient_id = null, visit_id = null, branch_id = null,
@@ -1095,7 +1376,8 @@ end $$;
 revoke all on function public.photo_inbox_unfile_set(uuid) from public, anon;
 grant execute on function public.photo_inbox_unfile_set(uuid) to authenticated;
 
--- "Move to another patient": a filed set's photo rows go to another visit or patient (the window starts again).
+-- "Move to another patient": a filed set's photo rows go to another visit or patient (the window starts again). A set left without a
+-- patient (the patient's record was removed) gets its rows made for the new patient.
 create or replace function public.photo_inbox_move_set(p_set uuid, p_visit uuid, p_patient uuid)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
@@ -1112,6 +1394,7 @@ begin
   end if;
   select * into t from private.photo_inbox_target(s.city_id, s.photo_day, s.time_ok, p_visit, p_patient);
   select * into v from public.visits where id = t.o_visit;
+  perform private.photo_inbox_writing(true);
   update public.photos ph set patient_id = t.o_patient, visit_id = t.o_visit, branch_id = coalesce(t.o_branch, s.branch_hint),
       braces_month = v.braces_month, occasion = t.o_occasion,
       view_label = private.photo_inbox_label(t.o_occasion, ph.view_key, i.position),
@@ -1120,12 +1403,14 @@ begin
     from public.photo_inbox_items i
    where ph.intake_set_id = p_set and i.id = ph.intake_item_id;
   get diagnostics n = row_count;
+  perform private.photo_inbox_writing(false);
   if s.visit_id is distinct from t.o_visit then
     perform private.photo_inbox_untick(s.visit_id);
   end if;
   update public.photo_inbox_sets set patient_id = t.o_patient, visit_id = t.o_visit, branch_id = coalesce(t.o_branch, branch_hint),
       occasion = t.o_occasion, release_after = v_release, filed_by = auth.uid(), filed_at = now(), version = version + 1
    where id = p_set;
+  n := n + private.photo_inbox_file_rows(p_set);
   insert into public.audit_log (table_name, row_id, action, old_data, new_data, actor)
   values ('photo_inbox_sets', p_set::text, 'PHOTO_MOVED', jsonb_build_object('patient_id', s.patient_id, 'visit_id', s.visit_id),
           jsonb_build_object('patient_id', t.o_patient, 'visit_id', t.o_visit, 'photos', n), auth.uid());
@@ -1152,8 +1437,10 @@ begin
   if s.status <> 'filed' then
     raise exception 'PHOTO_SET_STATE: that photo is not in a filed set. The list is reloaded.';
   end if;
+  perform private.photo_inbox_writing(true);
   delete from public.photos where intake_item_id = p_item and kind = 'edited';
   delete from public.photos where intake_item_id = p_item;
+  perform private.photo_inbox_writing(false);
   insert into public.photo_inbox_sets (city_id, photo_day, status, set_aside_reason, manual) values (s.city_id, s.photo_day, 'set_aside', 'taken_out', true)
   returning id into v_new;
   update public.photo_inbox_items set set_id = v_new, raw_photo_id = null, edited_photo_id = null where id = p_item;
@@ -1181,9 +1468,11 @@ begin
     raise exception 'PHOTO_SET_STATE: these photos are not filed. The list is reloaded.';
   end if;
   update public.photo_inbox_sets set hidden = coalesce(p_hidden, false), version = version + 1 where id = p_set;
+  perform private.photo_inbox_writing(true);
   update public.photos set held_back = coalesce(p_hidden, false) or coalesce(s.ai_flag = 'mixed_people', false)
    where intake_set_id = p_set and kind = 'edited';
   get diagnostics n = row_count;
+  perform private.photo_inbox_writing(false);
   return jsonb_build_object('photos', n);
 end $$;
 revoke all on function public.photo_inbox_hide_set(uuid, boolean) from public, anon;
@@ -1197,13 +1486,16 @@ declare
 begin
   s := private.photo_inbox_set_for_change(p_set);
   update public.photo_inbox_sets set ai_flag = null, version = version + 1 where id = p_set;
+  perform private.photo_inbox_writing(true);
   update public.photos set held_back = s.hidden where intake_set_id = p_set and kind = 'edited';
+  perform private.photo_inbox_writing(false);
   return jsonb_build_object('ok', true);
 end $$;
 revoke all on function public.photo_inbox_resolve_flag(uuid) from public, anon;
 grant execute on function public.photo_inbox_resolve_flag(uuid) to authenticated;
 
--- The badge: sets waiting on "Which patient?" and filed sets Claude flagged, in the caller's cities. Zeros for anyone else (no error).
+-- The badge: sets waiting on "Which patient?" and filed sets to check (Claude flagged them, or the patient's record they were filed to was
+-- removed), in the caller's cities. Zeros for anyone else (no error).
 create or replace function public.photo_inbox_counts()
 returns jsonb language plpgsql stable security definer set search_path = public as $$
 begin
@@ -1211,27 +1503,34 @@ begin
     return jsonb_build_object('waiting', 0, 'check', 0);
   end if;
   return (select jsonb_build_object('waiting', count(*) filter (where s.status = 'waiting'),
-                                    'check', count(*) filter (where s.status = 'filed' and s.ai_flag is not null))
+                                    'check', count(*) filter (where s.status = 'filed' and (s.ai_flag is not null or s.patient_id is null)))
             from public.photo_inbox_sets s
-           where (s.status = 'waiting' or (s.status = 'filed' and s.ai_flag is not null)) and public.can_access_city(s.city_id));
+           where (s.status = 'waiting' or (s.status = 'filed' and (s.ai_flag is not null or s.patient_id is null))) and public.can_access_city(s.city_id));
 end $$;
 revoke all on function public.photo_inbox_counts() from public, anon;
 grant execute on function public.photo_inbox_counts() to authenticated;
 
--- The edit worker takes photos of ONE set to analyse and edit (filed sets first, then the oldest day), for 10 minutes; two open pages
--- share the work this way. HEIC that only Safari can decode goes only to a page that can (p_can_heic).
-create or replace function public.photo_inbox_claim_edits(p_limit integer default 10, p_can_heic boolean default false)
+-- The edit worker takes photos of ONE set to analyse and edit (filed sets first, then the oldest day), for 10 minutes (the page renews
+-- the claim while it works). Two open pages share the work this way, also two pages of one login: the claim belongs to a token of the
+-- page (p_lease), not to the login. HEIC that only Safari can decode goes only to a page that says it can (p_can_heic), at most 3 times.
+-- Each photo carries the set's reference photo for Claude (ref_*: a photo of the same set Claude already answered, just before these),
+-- so the one-sitting check also sees the place where one call ends and the next begins.
+create or replace function public.photo_inbox_claim_edits(p_limit integer default 10, p_can_heic boolean default false, p_lease uuid default null)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   v_set uuid;
   v_out jsonb;
+  v_lease uuid := coalesce(p_lease, auth.uid());
+  v_first integer;
+  v_ref public.photo_inbox_items;
 begin
   perform private.photo_inbox_require(null);
   select i.set_id into v_set
     from public.photo_inbox_items i join public.photo_inbox_sets s on s.id = i.set_id
    where s.status <> 'set_aside' and public.can_access_city(i.city_id)
-     and (i.edit_status = 'pending' or (i.edit_status = 'failed' and i.edit_attempts < 3) or (coalesce(p_can_heic, false) and i.edit_status = 'needs_safari'))
-     and (i.edit_lease_until is null or i.edit_lease_until < now() or i.edit_lease_by = auth.uid())
+     and (i.edit_status = 'pending' or (i.edit_status = 'failed' and i.edit_attempts < 3)
+          or (coalesce(p_can_heic, false) and i.edit_status = 'needs_safari' and i.edit_attempts < 3))
+     and (i.edit_lease_until is null or i.edit_lease_until < now() or i.edit_lease_by = v_lease)
    order by (s.status = 'filed') desc, s.photo_day, s.first_at nulls last, s.id
    limit 1;
   if v_set is null then
@@ -1240,28 +1539,57 @@ begin
   with picked as (
     select i.id from public.photo_inbox_items i
      where i.set_id = v_set
-       and (i.edit_status = 'pending' or (i.edit_status = 'failed' and i.edit_attempts < 3) or (coalesce(p_can_heic, false) and i.edit_status = 'needs_safari'))
-       and (i.edit_lease_until is null or i.edit_lease_until < now() or i.edit_lease_by = auth.uid())
+       and (i.edit_status = 'pending' or (i.edit_status = 'failed' and i.edit_attempts < 3)
+            or (coalesce(p_can_heic, false) and i.edit_status = 'needs_safari' and i.edit_attempts < 3))
+       and (i.edit_lease_until is null or i.edit_lease_until < now() or i.edit_lease_by = v_lease)
      order by i.position nulls last, i.sha256
      limit least(greatest(coalesce(p_limit, 10), 1), 10)
      for update skip locked)
-  update public.photo_inbox_items i set edit_lease_until = now() + interval '10 minutes', edit_lease_by = auth.uid()
+  update public.photo_inbox_items i set edit_lease_until = now() + interval '10 minutes', edit_lease_by = v_lease
     from picked where i.id = picked.id;
+  select min(i.position) into v_first from public.photo_inbox_items i
+   where i.set_id = v_set and i.edit_lease_by = v_lease and i.edit_lease_until > now() and i.ai_status = 'pending';
+  select * into v_ref from public.photo_inbox_items i
+   where i.set_id = v_set and i.ai_status = 'done' and coalesce(i.ai_result ->> 'kind', '') <> 'not_clinical'
+   order by (coalesce(i.position, 0) < coalesce(v_first, 32767)) desc, abs(coalesce(i.position, 0) - coalesce(v_first, 0)), i.sha256
+   limit 1;
   select coalesce(jsonb_agg(jsonb_build_object('item_id', i.id, 'set_id', i.set_id, 'set_status', s.status,
            'city_slug', private.photo_inbox_city_slug(i.city_id), 'photo_day', i.photo_day, 'sha256', i.sha256, 'storage_path', i.storage_path,
            'mime_type', i.mime_type, 'orientation', i.orientation, 'width', i.width, 'height', i.height, 'position', i.position,
-           'ai_status', i.ai_status, 'ai_result', i.ai_result, 'edit_status', i.edit_status) order by i.position nulls last, i.sha256), '[]'::jsonb)
+           'ai_status', i.ai_status, 'ai_result', i.ai_result, 'edit_status', i.edit_status, 'edit_round', i.edit_round,
+           'ref_item_id', v_ref.id, 'ref_storage_path', v_ref.storage_path, 'ref_mime_type', v_ref.mime_type) order by i.position nulls last, i.sha256), '[]'::jsonb)
     into v_out
     from public.photo_inbox_items i join public.photo_inbox_sets s on s.id = i.set_id
-   where i.set_id = v_set and i.edit_lease_by = auth.uid() and i.edit_lease_until > now()
-     and (i.edit_status = 'pending' or (i.edit_status = 'failed' and i.edit_attempts < 3) or (coalesce(p_can_heic, false) and i.edit_status = 'needs_safari'));
+   where i.set_id = v_set and i.edit_lease_by = v_lease and i.edit_lease_until > now()
+     and (i.edit_status = 'pending' or (i.edit_status = 'failed' and i.edit_attempts < 3)
+          or (coalesce(p_can_heic, false) and i.edit_status = 'needs_safari' and i.edit_attempts < 3));
   return v_out;
 end $$;
-revoke all on function public.photo_inbox_claim_edits(integer, boolean) from public, anon;
-grant execute on function public.photo_inbox_claim_edits(integer, boolean) to authenticated;
+revoke all on function public.photo_inbox_claim_edits(integer, boolean, uuid) from public, anon;
+grant execute on function public.photo_inbox_claim_edits(integer, boolean, uuid) to authenticated;
 
--- The edited copy of a photo is stored: the item records it, and when its set is filed the patient gets the edited photo row.
-create or replace function public.photo_inbox_save_edit(p_item uuid, p_edited_path text, p_edited_thumb_path text, p_edit_version integer, p_basic boolean)
+-- The page keeps the photos it is working on (another 10 minutes): a slow connection or a long wait for Claude does not let another page
+-- take them meanwhile. Answers how many it still holds.
+create or replace function public.photo_inbox_renew_edits(p_items uuid[], p_lease uuid)
+returns integer language plpgsql security definer set search_path = public as $$
+declare
+  n integer;
+begin
+  perform private.photo_inbox_require(null);
+  update public.photo_inbox_items i set edit_lease_until = now() + interval '10 minutes'
+   where i.id = any (p_items) and i.edit_lease_by = p_lease and i.edit_status <> 'done' and public.can_access_city(i.city_id);
+  get diagnostics n = row_count;
+  return n;
+end $$;
+revoke all on function public.photo_inbox_renew_edits(uuid[], uuid) from public, anon;
+grant execute on function public.photo_inbox_renew_edits(uuid[], uuid) to authenticated;
+
+-- The edited copy of a photo is stored: the item records it, and when its set is filed the patient gets the edited photo row (with its
+-- own check window), or the row points at the new copy when the photo was edited again. The path is inbox/<city>/<day>/edited/<sha>.jpg
+-- (edited/<sha>-r2.jpg ... when edited again). Locks in the same order as moving, undoing or taking out a set (the city and day, then
+-- the set, then the photo), so a move at the same moment either sees this edited row or makes it for the new patient itself.
+create or replace function public.photo_inbox_save_edit(p_item uuid, p_edited_path text, p_edited_thumb_path text, p_edit_version integer, p_basic boolean,
+  p_lease uuid default null)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   it public.photo_inbox_items;
@@ -1277,11 +1605,13 @@ begin
     raise exception 'PHOTO_SET_STATE: that photo is not there any more.';
   end if;
   perform private.photo_inbox_require(it.city_id);
+  perform private.photo_inbox_lock(it.city_id, it.photo_day);
+  perform 1 from public.photo_inbox_sets where id = it.set_id for update;
   select * into it from public.photo_inbox_items where id = p_item for update;
-  if it.edit_lease_by is not null and it.edit_lease_by <> auth.uid() and it.edit_lease_until > now() then
+  if it.edit_lease_by is not null and it.edit_lease_by <> coalesce(p_lease, auth.uid()) and it.edit_lease_until > now() then
     raise exception 'PHOTO_SET_STATE: another page is editing this photo.';
   end if;
-  v_path := private.photo_inbox_dir(it.storage_path) || 'edited/' || it.sha256 || '.jpg';
+  v_path := private.photo_inbox_dir(it.storage_path) || 'edited/' || it.sha256 || case when it.edit_round > 1 then '-r' || it.edit_round else '' end || '.jpg';
   if p_edited_path is distinct from v_path or (p_edited_thumb_path is not null and p_edited_thumb_path <> public.photo_thumb_path(v_path)) then
     raise exception 'PHOTO_BAD_INPUT: the edited copy is not where it belongs.';
   end if;
@@ -1301,18 +1631,18 @@ begin
     v_key := case when it.ai_status = 'done' and private.photo_inbox_view_name(it.ai_result ->> 'view') is not null then it.ai_result ->> 'view' end;
     update public.photos set view_key = v_key, view_label = private.photo_inbox_label(s.occasion, v_key, it.position)
      where id = it.raw_photo_id and view_key is distinct from v_key;
-    if v_edited is null then
-      perform private.photo_inbox_file_rows(s.id);
-      select edited_photo_id into v_edited from public.photo_inbox_items where id = p_item;
-    end if;
+    perform private.photo_inbox_file_rows(s.id);
+    select edited_photo_id into v_edited from public.photo_inbox_items where id = p_item;
   end if;
   return jsonb_build_object('edited_photo_id', v_edited);
 end $$;
-revoke all on function public.photo_inbox_save_edit(uuid, text, text, integer, boolean) from public, anon;
-grant execute on function public.photo_inbox_save_edit(uuid, text, text, integer, boolean) to authenticated;
+revoke all on function public.photo_inbox_save_edit(uuid, text, text, integer, boolean, uuid) from public, anon;
+grant execute on function public.photo_inbox_save_edit(uuid, text, text, integer, boolean, uuid) to authenticated;
 
--- A photo the page could not edit: HEIC this browser cannot decode waits for Safari; anything else is tried again (3 times at most).
-create or replace function public.photo_inbox_edit_failed(p_item uuid, p_code text)
+-- A photo the page could not edit: HEIC this browser cannot decode waits for Safari (3 times at most); a photo it could not read is tried
+-- again (3 times at most). A connection problem is not reported here (the page tries again later without using up a try). A photo
+-- another page holds is left alone.
+create or replace function public.photo_inbox_edit_failed(p_item uuid, p_code text, p_lease uuid default null)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   it public.photo_inbox_items;
@@ -1328,12 +1658,38 @@ begin
     raise exception 'PHOTO_BAD_INPUT: unknown problem code.';
   end if;
   v_status := case when p_code = 'HEIC_DECODE' then 'needs_safari' else 'failed' end;
-  update public.photo_inbox_items set edit_status = v_status, edit_attempts = edit_attempts + 1, edit_lease_until = null, edit_lease_by = null
-   where id = p_item and edit_status <> 'done';
+  update public.photo_inbox_items set edit_status = v_status, edit_attempts = least(edit_attempts + 1, 99), edit_lease_until = null, edit_lease_by = null
+   where id = p_item and edit_status <> 'done'
+     and (edit_lease_by is null or edit_lease_by = coalesce(p_lease, auth.uid()) or edit_lease_until < now());
   return jsonb_build_object('edit_status', (select edit_status from public.photo_inbox_items where id = p_item));
 end $$;
-revoke all on function public.photo_inbox_edit_failed(uuid, text) from public, anon;
-grant execute on function public.photo_inbox_edit_failed(uuid, text) to authenticated;
+revoke all on function public.photo_inbox_edit_failed(uuid, text, uuid) from public, anon;
+grant execute on function public.photo_inbox_edit_failed(uuid, text, uuid) to authenticated;
+
+-- "Try Claude again" (Filed list): the photos of a set that got only a basic edit (Claude refused them, its answer could not be read 3
+-- times, or the page could not send them), or whose editing failed 3 times (also HEIC from Safari), are edited again from the original:
+-- Claude looks again and a new edited copy is made (edited/<sha>-r2.jpg ...; the old file stays), and the patient's edited row then
+-- points at it, with a new check window. Answers how many photos wait for editing again.
+create or replace function public.photo_inbox_redo_edits(p_set uuid)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  s public.photo_inbox_sets;
+  n integer;
+begin
+  s := private.photo_inbox_set_for_change(p_set);
+  update public.photo_inbox_items set
+      ai_status = case when ai_status in ('failed', 'refused') or (edit_status = 'done' and edit_basic) then 'pending' else ai_status end,
+      ai_attempts = case when ai_status in ('failed', 'refused') or (edit_status = 'done' and edit_basic) then 0 else ai_attempts end,
+      edit_round = case when edit_status = 'done' then edit_round + 1 else edit_round end,
+      edit_status = case when edit_status in ('done', 'failed') then 'pending' else edit_status end,
+      edit_attempts = 0, edit_lease_until = null, edit_lease_by = null
+   where set_id = p_set
+     and ((edit_status = 'done' and edit_basic) or (edit_status = 'failed' and edit_attempts >= 3) or (edit_status = 'needs_safari' and edit_attempts >= 3));
+  get diagnostics n = row_count;
+  return jsonb_build_object('photos', n);
+end $$;
+revoke all on function public.photo_inbox_redo_edits(uuid) from public, anon;
+grant execute on function public.photo_inbox_redo_edits(uuid) to authenticated;
 
 -- The photo-ai Edge Function's check of its caller.
 create or replace function public.photo_inbox_ai_allowed()
@@ -1345,7 +1701,10 @@ grant execute on function public.photo_inbox_ai_allowed() to authenticated;
 
 -- What Claude said and what it cost (the Edge Function, with the service role only). Results for photos that are not in the call's set
 -- are ignored. A photo Claude finds not clinical is not edited and its set is flagged; a set Claude finds shows more than one patient is
--- flagged and its edited copies are held back from the patient.
+-- flagged and its edited copies are held back from the patient. A try is counted against a photo (3 at most, then a basic edit) only
+-- when the answer could not be used for these photos (unreadable, cut off, or Anthropic refused the request as such); rate limits,
+-- Anthropic being down, the connection, the credit or the key are not the photos' fault and count nothing. Locks the city and day, then
+-- the set, like the other set changes.
 create or replace function public.photo_inbox_ai_record(p_call jsonb, p_results jsonb)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
@@ -1355,20 +1714,29 @@ declare
   v_ids uuid[];
   r jsonb;
   v_item uuid;
+  v_city smallint;
+  v_day date;
 begin
   if v_status not in ('ok', 'refused', 'truncated', 'invalid', 'error') then v_status := 'error'; end if;
   select coalesce(array_agg(x::uuid), '{}') into v_ids from jsonb_array_elements_text(coalesce(p_call -> 'item_ids', '[]'::jsonb)) x;
+  if v_set is not null then
+    select city_id, photo_day into v_city, v_day from public.photo_inbox_sets where id = v_set;
+    if v_city is not null then
+      perform private.photo_inbox_lock(v_city, v_day);
+      perform 1 from public.photo_inbox_sets where id = v_set for update;
+    end if;
+  end if;
   insert into public.photo_ai_calls (called_by, set_id, item_ids, photo_count, model, served_model, fallback_used, status, stop_reason, error_code,
                                      input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cost_usd, one_sitting,
                                      duration_ms, request_id)
-  values (nullif(p_call ->> 'called_by', '')::uuid, case when exists (select 1 from public.photo_inbox_sets where id = v_set) then v_set end,
+  values (nullif(p_call ->> 'called_by', '')::uuid, case when v_city is not null then v_set end,
           v_ids, coalesce((p_call ->> 'photo_count')::int, coalesce(array_length(v_ids, 1), 0)), coalesce(p_call ->> 'model', 'claude-opus-5-5'),
           p_call ->> 'served_model', coalesce((p_call ->> 'fallback_used')::boolean, false), v_status, p_call ->> 'stop_reason', p_call ->> 'error_code',
           coalesce((p_call ->> 'input_tokens')::int, 0), coalesce((p_call ->> 'output_tokens')::int, 0),
           coalesce((p_call ->> 'cache_creation_input_tokens')::int, 0), coalesce((p_call ->> 'cache_read_input_tokens')::int, 0),
           coalesce((p_call ->> 'cost_usd')::numeric, 0), p_call ->> 'one_sitting', (p_call ->> 'duration_ms')::int, p_call ->> 'request_id')
   returning id into v_id;
-  if v_set is null then
+  if v_city is null then
     return jsonb_build_object('call_id', v_id);
   end if;
   if v_status = 'ok' then
@@ -1383,12 +1751,14 @@ begin
     end loop;
     if p_call ->> 'one_sitting' = 'no' then
       update public.photo_inbox_sets set ai_flag = 'mixed_people', version = version + 1 where id = v_set;
+      perform private.photo_inbox_writing(true);
       update public.photos set held_back = true where intake_set_id = v_set and kind = 'edited';
+      perform private.photo_inbox_writing(false);
     end if;
   elsif v_status = 'refused' then
     update public.photo_inbox_items set ai_status = 'refused', ai_call_id = v_id, ai_attempts = ai_attempts + 1
      where id = any (v_ids) and set_id = v_set and ai_status = 'pending';
-  else
+  elsif v_status in ('invalid', 'truncated') or (v_status = 'error' and p_call ->> 'error_code' = 'BAD_REQUEST') then
     update public.photo_inbox_items set ai_attempts = ai_attempts + 1, ai_call_id = v_id,
         ai_status = case when ai_attempts + 1 >= 3 then 'failed' else ai_status end
      where id = any (v_ids) and set_id = v_set and ai_status = 'pending';

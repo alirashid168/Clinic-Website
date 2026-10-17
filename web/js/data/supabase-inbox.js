@@ -12,16 +12,23 @@ const MISSING_CODES = new Set(['PGRST202', '42883', 'PGRST205', '42P01']);
 export const PHOTO_INBOX_MISSING_TEXT = 'PHOTO_INBOX_MISSING: The Photo inbox needs the database update of 17 Oct (20261017000200_photo_intake.sql). Ask Dr. Ali to apply it.';
 const CODE_WORD = /^(PHOTO_[A-Z_]+|NOT_ALLOWED|STORAGE_FULL|TOO_LARGE|NETWORK):/;
 
-/** What Storage's answer to an upload means: already there, too large, storage full, not allowed, a connection problem, or something else. */
+/**
+ * What Storage's answer to an upload means: already there, too large, storage full, not allowed, a connection problem, or something else.
+ * The status code decides first (a rate limit or a gateway error whose message says "exceeded" is a connection problem to retry, not a
+ * full storage); the words only when there is no telling status.
+ */
 export function storageProblem(error) {
   if (!error) return null;
   const status = Number(error.status || error.statusCode || error.originalError?.status || 0);
   const msg = String(error.message || error.error || '');
   if (status === 409 || /already exists|duplicate/i.test(msg)) return 'ALREADY';
-  if (status === 413 || /maximum allowed size|too large|payload too large|exceeded the maximum/i.test(msg)) return 'TOO_LARGE';
-  if (status === 402 || /quota|exceed|insufficient|space|payment|limit reached/i.test(msg)) return 'STORAGE_FULL';
-  if (status === 401 || status === 403 || /row-level security|unauthori[sz]ed|not allowed|permission/i.test(msg)) return 'NOT_ALLOWED';
-  if (!status || status >= 500 || status === 429 || status === 408 || /fetch|network|timed? ?out|load failed/i.test(msg) || error.name === 'StorageUnknownError') return 'NETWORK';
+  if (status === 413 || /maximum allowed size|payload too large|object too large|exceeded the maximum allowed size/i.test(msg)) return 'TOO_LARGE';
+  if (status === 402) return 'STORAGE_FULL';
+  if (status === 401 || status === 403) return 'NOT_ALLOWED';
+  if (status === 429 || status === 408 || status >= 500) return 'NETWORK';
+  if (/storage quota|quota exceeded|exceed(ed)? (the |your )?(storage )?quota|insufficient storage|storage limit|spend cap|payment required/i.test(msg)) return 'STORAGE_FULL';
+  if (/row-level security|unauthori[sz]ed|not allowed|permission/i.test(msg)) return 'NOT_ALLOWED';
+  if (!status || /fetch|network|timed? ?out|load failed|rate limit/i.test(msg) || error.name === 'StorageUnknownError') return 'NETWORK';
   return 'OTHER';
 }
 const STORAGE_TEXT = {
@@ -108,11 +115,15 @@ export function inboxLive({ sb, callRpc, check, plainError, signedUrls }) {
     async photoInboxCounts() {
       try { const r = await rpc('photo_inbox_counts', {}); return { waiting: Number(r?.waiting) || 0, check: Number(r?.check) || 0 }; } catch { return { waiting: 0, check: 0 }; }
     },
-    async photoInboxClaimEdits(limit = 8, canHeic = false) { return (await rpc('photo_inbox_claim_edits', { p_limit: limit, p_can_heic: !!canHeic })) || []; },
-    async photoInboxSaveEdit({ itemId, editedPath, editedThumbPath = null, editVersion, basic = false }) {
-      return rpc('photo_inbox_save_edit', { p_item: itemId, p_edited_path: editedPath, p_edited_thumb_path: editedThumbPath, p_edit_version: editVersion, p_basic: !!basic });
+    /** Photos of one set to edit, held for this page (lease: a token of the page) for 10 minutes. */
+    async photoInboxClaimEdits(limit = 8, canHeic = false, lease = null) { return (await rpc('photo_inbox_claim_edits', { p_limit: limit, p_can_heic: !!canHeic, p_lease: lease })) || []; },
+    async photoInboxRenewEdits(itemIds, lease) { return rpc('photo_inbox_renew_edits', { p_items: itemIds, p_lease: lease }); },
+    async photoInboxSaveEdit({ itemId, editedPath, editedThumbPath = null, editVersion, basic = false, lease = null }) {
+      return rpc('photo_inbox_save_edit', { p_item: itemId, p_edited_path: editedPath, p_edited_thumb_path: editedThumbPath, p_edit_version: editVersion, p_basic: !!basic, p_lease: lease });
     },
-    async photoInboxEditFailed(itemId, code) { return rpc('photo_inbox_edit_failed', { p_item: itemId, p_code: code }); },
+    async photoInboxEditFailed(itemId, code, lease = null) { return rpc('photo_inbox_edit_failed', { p_item: itemId, p_code: code, p_lease: lease }); },
+    /** "Try Claude again": the set's basic edits (and photos whose editing failed) go back to Claude. */
+    async photoInboxRedoEdits(setId) { return rpc('photo_inbox_redo_edits', { p_set: setId }); },
     /** The edited copy and its small copy (already there = an earlier attempt stored them). */
     async photoInboxUploadEdit({ path, thumbPath = null, blob, thumb = null }) {
       await put(path, blob, 'image/jpeg');
@@ -120,11 +131,15 @@ export function inboxLive({ sb, callRpc, check, plainError, signedUrls }) {
       if (thumb && thumbPath) { try { await put(thumbPath, thumb, 'image/jpeg'); stored = thumbPath; } catch (e) { if (e.code === 'STORAGE_FULL') throw e; } }
       return { path, thumbPath: stored };
     },
-    /** Whether Claude editing is set up: { key }; { key: false, missing: true } when the function is not deployed or does not answer. */
+    /**
+     * Whether Claude editing is set up: { key: true | false }; { key: false, code: 'NOT_DEPLOYED' } when the function is not there; and
+     * { key: null, code } when it could not be asked just now (connection, login): not known, asked again later.
+     */
     async photoAiStatus() {
       const r = await photoAi({ action: 'status' });
       if (r?.ok) return { key: !!r.key, model: r.model };
-      return { key: false, missing: true, code: r?.code };
+      if (r?.code === 'NOT_DEPLOYED') return { key: false, missing: true, code: r.code };
+      return { key: null, code: r?.code || 'NETWORK' };
     },
     async photoAiAnalyze(setId, items) { return photoAi({ action: 'analyze', set_id: setId, items }); },
     /** A stored photo as a Blob (a signed link, then the file). */

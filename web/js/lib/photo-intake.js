@@ -15,6 +15,7 @@ export const SPAN_SEC = 900; // a set never runs longer than this from its first
 export const SEQ_JUMP = 30; // the camera's file counter jumping more than this (or going back) starts a new set
 export const MAX_AUTO_PHOTOS = 20; // more photos than this in one set is never filed by itself
 export const MIN_PAIR = 60; // a set and a patient are paired by the day's assignment only from this score up
+export const CLOCK_AHEAD_SEC = 300; // a camera whose newest photo is later than this after the upload has a clock that runs ahead
 export const MATCHER_VERSION = 1;
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const THUMB_EDGE = 320; // px, long edge of every small copy
@@ -248,7 +249,9 @@ export function parseExifDate(s, offset, subsec) {
  *   'exif_modified' only IFD0 DateTime: an app saved the photo again, so it is treated like a file date;
  *   'file_date'     no EXIF time: the file's date (File.lastModified), unless that is within 10 minutes of choosing the photo ('none').
  * clock_ok: the time is within the last 7 days (an upload the next morning) and at most 15 minutes ahead of the upload. Only 'exif' with
- * clock_ok is a usable time (time_ok). photo_day: the Karachi date of a usable time, else the upload day.
+ * clock_ok is a usable time (time_ok); cameraClocks() then judges each camera of the batch as a whole. photo_day: the Karachi date of the
+ * photo's time when that is within the last 7 days (up to a day ahead), so a photo without a camera time, or from a camera whose clock is
+ * off by minutes or hours, is still shown with that day's list; else (no time, or a date weeks away) the upload day.
  */
 export function captureTime({ exif = null, lastModified = null, pickedAt = Date.now(), uploadedAt = pickedAt } = {}) {
   let taken = null;
@@ -259,17 +262,60 @@ export function captureTime({ exif = null, lastModified = null, pickedAt = Date.
   if (taken === null && Number.isFinite(lastModified) && lastModified > 0) {
     if (Math.abs(pickedAt - lastModified) > 10 * MIN) { taken = lastModified; source = 'file_date'; }
   }
-  const clockOk = taken !== null && taken >= uploadedAt - 7 * 24 * 60 * MIN && taken <= uploadedAt + 15 * MIN;
+  const week = 7 * 24 * 60 * MIN;
+  const clockOk = taken !== null && taken >= uploadedAt - week && taken <= uploadedAt + 15 * MIN;
   const timeOk = source === 'exif' && clockOk;
+  const dayKnown = taken !== null && taken >= uploadedAt - week && taken <= uploadedAt + 24 * 60 * MIN;
   return {
     taken_at: taken === null ? null : new Date(taken).toISOString(),
     time_source: source,
     clock_ok: clockOk,
     time_ok: timeOk,
-    photo_day: karachiDate(timeOk ? taken : uploadedAt),
+    photo_day: karachiDate(dayKnown ? taken : uploadedAt),
     camera: cameraKey(exif?.make, exif?.model),
     orientation: exif?.orientation || null,
   };
+}
+
+/**
+ * Each camera of one upload judged as a whole (a clock is wrong for every photo of that camera, not one photo at a time):
+ *   'ahead': its newest photo is more than CLOCK_AHEAD_SEC after the upload, so the clock runs ahead (by at least that much, for all of
+ *            its photos, also the ones that do not look like the future);
+ *   'zone':  the camera time and the file's own date (File.lastModified, when it is a real file date: more than 10 minutes before the
+ *            photos were chosen) differ by the same whole number of hours on at least 80 % of its photos (2 or more): the phone's time
+ *            zone is wrong, so its camera times are hours off.
+ * list: [{ t: captureTime() answer, lastModified, pickedAt }]. Answers [{ camera, count, newest (ms), suspect, why }] for the cameras with
+ * a camera time ('exif'), newest photo first; the page marks every photo of a suspect camera as not having a usable time (it waits on
+ * "Which patient?", CLOCK) and shows each camera's newest photo time so staff can see a wrong clock.
+ */
+export function cameraClocks(list, uploadedAt) {
+  const byCam = new Map();
+  for (const x of list || []) {
+    if (!x?.t || x.t.time_source !== 'exif' || !x.t.taken_at) continue;
+    if (!byCam.has(x.t.camera)) byCam.set(x.t.camera, []);
+    byCam.get(x.t.camera).push(x);
+  }
+  const out = [];
+  for (const [camera, xs] of byCam) {
+    const newest = Math.max(...xs.map((x) => Date.parse(x.t.taken_at)));
+    let why = null;
+    if (newest > uploadedAt + CLOCK_AHEAD_SEC * 1000) why = 'ahead';
+    else {
+      const diffs = xs.filter((x) => Number.isFinite(x.lastModified) && x.lastModified > 0 && Math.abs((x.pickedAt ?? uploadedAt) - x.lastModified) > 10 * MIN)
+        .map((x) => x.lastModified - Date.parse(x.t.taken_at));
+      if (diffs.length >= 2) {
+        const hours = new Map();
+        for (const d of diffs) {
+          const k = Math.round(d / (60 * MIN));
+          if (k !== 0 && Math.abs(k) <= 14 && Math.abs(d - k * 60 * MIN) <= 90 * 1000) hours.set(k, (hours.get(k) || 0) + 1);
+        }
+        const best = Math.max(0, ...hours.values());
+        if (best >= 2 && best >= 0.8 * diffs.length) why = 'zone';
+      }
+    }
+    out.push({ camera, count: xs.length, newest, suspect: !!why, why });
+  }
+  return out.sort((a, b) => b.newest - a.newest || a.camera.localeCompare(b.camera));
 }
 
 /** 'make|model', lower case, spaces collapsed; 'unknown' without either. */
@@ -327,16 +373,22 @@ const byPhotoOrder = (a, b) => (ms(a.taken_at) - ms(b.taken_at)) || ((a.file_seq
   || String(a.file_name || '').localeCompare(String(b.file_name || '')) || String(a.sha256 || a.item_id).localeCompare(String(b.sha256 || b.item_id));
 const counterBreaks = (prev, it) => prev.file_seq_prefix != null && it.file_seq_prefix === prev.file_seq_prefix && prev.file_seq != null && it.file_seq != null
   && (it.file_seq < prev.file_seq || it.file_seq - prev.file_seq > SEQ_JUMP);
-const streamKey = (it) => `${it.camera || 'unknown'}|${it.branch_hint ?? 'any'}`;
+// A stream is one phone's photos as one person uploaded them in one go: the camera (make and model), the branch chosen, who uploaded and
+// the upload. Two phones of the same model (Android phones name their files by date and time, so the file counter cannot tell them apart)
+// are two streams as soon as two people upload them, or one person uploads them one after the other.
+const streamKey = (it) => `${it.camera || 'unknown'}|${it.branch_hint ?? 'any'}|${it.uploaded_by ?? '-'}|${it.upload_batch ?? '-'}`;
+// Joining a filed set (the rest of a sitting, uploaded later: another upload by the same person) looks at the camera, branch and uploader.
+const joinKey = (it) => `${it.camera || 'unknown'}|${it.branch_hint ?? 'any'}|${it.uploaded_by ?? '-'}`;
 
 /**
  * The day's regroupable photos as sets, one patient's sitting each: [{ item_ids (in photo order), join_set_id }].
  *   - photos without a usable time are each a set of their own (nobody can tell which sitting they belong to);
- *   - the others are split by camera and branch hint ("streams"), and a new set starts after a pause of more than GAP_SEC, more than
- *     SPAN_SEC after the set's first photo, or when the file counter goes back or jumps (a second phone of the same model, a break);
- *   - a set that carries on right after (or right before) a filed set of the same stream, within GAP_SEC, joins it (join_set_id): the
- *     rest of a sitting uploaded later. Only photos with a usable time join, never a set a person changed (manual), and the joined set
- *     stays within SPAN_SEC.
+ *   - the others are split by stream (camera, branch chosen, uploader, upload), and a new set starts after a pause of more than GAP_SEC,
+ *     more than SPAN_SEC after the set's first photo, or when the file counter goes back or jumps (a second phone of the same model, a break);
+ *   - a set that lies inside a filed set's time, or carries on right after (or right before) it within GAP_SEC, joins it (join_set_id):
+ *     the rest of a sitting uploaded later (a failed photo retried). Same camera, branch chosen and uploader; only photos with a usable
+ *     time; never a set a person changed (manual); the joined set stays within SPAN_SEC and MAX_AUTO_PHOTOS; and when two filed sets
+ *     would fit, it joins neither (it waits on "Which patient?").
  * filedSets: [{ set_id, camera, branch_hint, manual, status, items: [...] }].
  */
 export function groupItems(items, filedSets = []) {
@@ -363,27 +415,27 @@ export function groupItems(items, filedSets = []) {
   }
   const filed = filedSets.filter((s) => s.status === 'filed' && !s.manual && s.items?.length).map((s) => {
     const its = s.items.filter(usableTime).sort(byPhotoOrder);
-    return { s, its, key: `${s.camera || 'unknown'}|${s.branch_hint ?? 'any'}` };
-  }).filter((f) => f.its.length);
+    const keys = new Set(s.items.map(joinKey));
+    return { s, its, key: keys.size === 1 ? [...keys][0] : null, count: s.items.length };
+  }).filter((f) => f.its.length && f.key);
   const out = groups.map((g) => {
     let join = null;
     if (g.every(itemTimeOk)) {
       const first = g[0];
       const last = g[g.length - 1];
-      const key = streamKey(first);
-      for (const f of filed) {
-        if (f.key !== key) continue;
+      const key = joinKey(first);
+      const fits = filed.filter((f) => {
+        if (f.key !== key || g.some((it) => joinKey(it) !== key) || f.count + g.length > MAX_AUTO_PHOTOS) return false;
         const fFirst = f.its[0];
         const fLast = f.its[f.its.length - 1];
         const span = Math.max(ms(last.taken_at), ms(fLast.taken_at)) - Math.min(ms(first.taken_at), ms(fFirst.taken_at));
-        if (span > SPAN_SEC * 1000) continue;
+        if (span > SPAN_SEC * 1000) return false;
         const after = ms(first.taken_at) - ms(fLast.taken_at);
         const before = ms(fFirst.taken_at) - ms(last.taken_at);
-        if ((after >= 0 && after <= GAP_SEC * 1000 && !counterBreaks(fLast, first)) || (before >= 0 && before <= GAP_SEC * 1000 && !counterBreaks(last, fFirst))) {
-          join = f.s.set_id;
-          break;
-        }
-      }
+        const inside = ms(first.taken_at) >= ms(fFirst.taken_at) && ms(last.taken_at) <= ms(fLast.taken_at);
+        return inside || (after >= 0 && after <= GAP_SEC * 1000 && !counterBreaks(fLast, first)) || (before >= 0 && before <= GAP_SEC * 1000 && !counterBreaks(last, fFirst));
+      });
+      if (fits.length === 1) join = fits[0].s.set_id;
     }
     return { item_ids: g.map((it) => it.item_id), join_set_id: join, first: usableTime(g[0]) ? ms(g[0].taken_at) : Infinity, name: String(g[0].file_name || '') };
   });
@@ -451,7 +503,12 @@ export function visitFacts(visits) {
   });
 }
 
-/** One candidate per patient (several rows of one patient that day: not imported first, then with times, then the earliest), with the others as `also`. */
+/**
+ * One candidate per patient. Several rows of one patient that day (a monthly visit and a Dr. Ali visit: tokens are per treatment, so this
+ * is normal; or an imported row and a sheet row): the photo month first (a tap files to that visit, and its Month names the photos), then
+ * not imported, then with times, then the earliest. The other rows are kept as `also` (with their times and occasion): the patient counts
+ * as in the chair at any of them when other sets are judged.
+ */
 export function dayCandidates(visits) {
   const facts = visitFacts(visits).filter((v) => CANDIDATE_STATUSES.includes(v.status));
   const byPatient = new Map();
@@ -461,12 +518,15 @@ export function dayCandidates(visits) {
   }
   const out = [];
   for (const list of byPatient.values()) {
-    list.sort((a, b) => (Number(!!a.legacy) - Number(!!b.legacy)) || (Number(a.anchor === null) - Number(b.anchor === null))
+    list.sort((a, b) => (Number(!a.photo_required) - Number(!b.photo_required)) || (Number(!!a.legacy) - Number(!!b.legacy)) || (Number(a.anchor === null) - Number(b.anchor === null))
       || ((a.anchor ?? a.created ?? Infinity) - (b.anchor ?? b.created ?? Infinity)) || String(a.visit_id).localeCompare(String(b.visit_id)));
-    out.push({ ...list[0], also: list.slice(1).map((v) => ({ visit_id: v.visit_id, branch_id: v.branch_id })) });
+    out.push({ ...list[0], also: list.slice(1) });
   }
   return out;
 }
+/** Every row of a candidate: the one it stands for and its `also` rows. */
+const rowsOf = (c) => [c, ...(c.also || [])];
+const PHOTO_OCCASIONS = ['photo_month', 'photo_likely'];
 
 const overlaps = (u, w) => u.first <= w[1] && u.last >= w[0];
 /** The window of a candidate wide enough to say "this patient may have been in the chair then". */
@@ -474,6 +534,11 @@ export function wideWindow(c) {
   if (c.quality === 'good') return [c.anchor - 30 * MIN, (c.end ?? c.anchor + 180 * MIN) + 15 * MIN];
   if (c.quality === 'late_entry') return [c.created - 240 * MIN, c.created + 15 * MIN];
   return [-Infinity, Infinity];
+}
+/** The time a candidate was surely in the chair: 10 minutes before the start (or check-in) to 10 minutes after the end (or 2 hours on). */
+export function chairWindow(c) {
+  if (c.quality === 'good') return [c.anchor - 10 * MIN, (c.end ?? c.anchor + 120 * MIN) + 10 * MIN];
+  return wideWindow(c);
 }
 const fitsTightly = (u, c) => c.anchor !== null && u.first >= c.anchor - 10 * MIN && u.first <= c.anchor + 120 * MIN && (c.end === null || u.last <= c.end + 10 * MIN);
 
@@ -543,8 +608,9 @@ export function assignDay(units, cands) {
 
 // The sentence on a card for each reason a set waits (section 7.7).
 const WAIT_SENTENCES = {
-  NO_TIME: () => 'No camera time (WhatsApp, edited in an app, or a screenshot). Choose the patient.',
-  CLOCK: (c) => `The camera's date is wrong (${c.date || 'not today'}). Choose the patient; set the phone to automatic date and time.`,
+  NO_TIME: () => 'No camera time (WhatsApp, edited in an app, or a screenshot). Type the patient\'s name or Mr# below.',
+  CLOCK: (c) => `The camera's clock looks wrong (this photo says ${c.date || 'another time'}). Type the patient's name or Mr# below; set the phone to automatic date, time and time zone.`,
+  OLD: (c) => `Taken more than a week before it was uploaded (${c.date || 'an older date'}). Type the patient's name or Mr# below and use "Search all patients".`,
   NO_VISIT_DAY: (c) => `Nobody is on the ${c.city || ''} Aaj ki List for ${c.day || 'that day'}. Add the patient there and press Check again, or choose the patient with "Search all patients".`.replace('the  Aaj', 'the Aaj'),
   MANUAL: () => 'Split or put back: choose the patient.',
   UNDONE: () => 'The filing was undone: choose the patient.',
@@ -556,9 +622,10 @@ const WAIT_SENTENCES = {
   AFTER_LEAVING: () => 'Taken after the patient was marked Completed.',
   AMBIGUOUS: () => 'More than one photo-month (or bonding / braces-off) patient was in the chair then.',
   TWO_SETS: () => 'Another set of photos points to the same patient.',
-  HAS_PHOTOS: () => 'This patient already has photos for this visit.',
+  HAS_PHOTOS: () => 'A patient in the chair then already has photos for this visit (marked "already has photos"): check whose photos these are.',
   NO_PHOTO_MONTH: () => 'No photo-month patient was in the chair then.',
   OTHER_BRANCH: () => 'The likely patient was at another branch than the one chosen.',
+  NO_BRANCH: () => 'Patients were in the chair at more than one branch then, and the branch of these photos was not chosen. Choose the patient (next time, choose the branch before uploading).',
   SERVER_CHECK: () => 'The automatic filing was stopped by a final check: choose the patient.',
 };
 export const WAIT_REASONS = Object.keys(WAIT_SENTENCES);
@@ -579,8 +646,11 @@ function unitFacts(key, its, extra = {}) {
     no_time: its.some((it) => !usableTime(it)),
     bad_clock: its.some((it) => usableTime(it) && !it.clock_ok),
     clock_shown: (its.find((it) => usableTime(it) && !it.clock_ok) || {}).taken_at || null,
+    // a camera time more than a week before the upload: an old photo, not a wrong clock
+    old: its.some((it) => usableTime(it) && !it.clock_ok && Number.isFinite(ms(it.uploaded_at)) && ms(it.taken_at) < ms(it.uploaded_at) - 7 * 24 * 60 * MIN),
     span: first === null ? 0 : (last - first) / 1000,
     camera: its[0]?.camera || 'unknown',
+    stream: its[0] ? streamKey(its[0]) : '',
     hint: hints.length === 1 ? hints[0] : null,
     manual: false, ai_flag: null, prev_reason: null, join: null,
     ...extra,
@@ -590,9 +660,21 @@ function unitFacts(key, its, extra = {}) {
 const autoA1 = (u) => u.time_ok && !u.manual && !u.ai_flag && u.count <= MAX_AUTO_PHOTOS && u.span <= SPAN_SEC;
 const autoA2 = (u, v) => v.occasion === 'photo_month' && v.quality === 'good' && (v.status === 'in_treatment' || v.status === 'completed')
   && !v.has_photos && (!u.hint || v.branch_id === u.hint);
-const autoA4 = (u, v, cands) => !cands.some((c) => c.visit_id !== v.visit_id && (c.occasion === 'photo_month' || c.occasion === 'photo_likely')
-  && !c.has_photos && (!u.hint || c.branch_id === u.hint) && overlaps(u, wideWindow(c)));
-const passesA1toA4 = (u, v, cands) => autoA1(u) && autoA2(u, v) && fitsTightly(u, v) && autoA4(u, v, cands);
+/**
+ * A4: the other patients with a photo occasion (photo month, bonding, braces off ...) who may have been in the chair while the set was
+ * taken: any of their rows that day, at the chosen branch when there is one, whether or not they already have photos (a patient whose
+ * other set was filed a moment ago still counts: these photos may be theirs too).
+ */
+const photoBlockers = (u, v, cands) => cands.filter((c) => c.visit_id !== v.visit_id && c.patient_id !== v.patient_id
+  && rowsOf(c).some((r) => PHOTO_OCCASIONS.includes(r.occasion) && (!u.hint || r.branch_id === u.hint) && overlaps(u, wideWindow(r))));
+/**
+ * A6: without a chosen branch, in a city of several branches, the patients of any treatment at another branch than v's who were in the
+ * chair then (their photos may be these: the branch is not known).
+ */
+const branchBlockers = (u, v, cands, multiBranch) => (!multiBranch || u.hint ? [] : cands.filter((c) => c.patient_id !== v.patient_id
+  && rowsOf(c).some((r) => r.branch_id !== v.branch_id && overlaps(u, chairWindow(r)))));
+const passesAuto = (u, v, cands, multiBranch) => autoA1(u) && autoA2(u, v) && fitsTightly(u, v) && !photoBlockers(u, v, cands).length
+  && !branchBlockers(u, v, cands, multiBranch).length;
 
 const canon = (x) => (Array.isArray(x) ? `[${x.map(canon).join(',')}]`
   : x && typeof x === 'object' ? `{${Object.keys(x).filter((k) => x[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canon(x[k])}`).join(',')}}`
@@ -600,9 +682,11 @@ const canon = (x) => (Array.isArray(x) ? `[${x.map(canon).join(',')}]`
 
 /**
  * The plan for one city and day (section 7.9), from photo_inbox_day's answer: the regroupable photos grouped again, each set matched
- * against the city's visits of that day as ONE order-keeping assignment, the sets that are clear marked to be filed by themselves
- * (`auto`, re-checked by the server), the others with their likely patients (`candidates`) and why they wait (`wait_reason`).
- * Sets a person changed (split, put back, undone) keep their photos and get fresh candidates (`fixed_updates`).
+ * against the city's visits of that day (one order-keeping assignment per chosen branch, and per phone for photos without a chosen
+ * branch: the order of one phone's sets follows the order of that branch's patients, but the branches' days are not tied together), the
+ * sets that are clear marked to be filed by themselves (`auto`, re-checked by the server), the others with their likely patients
+ * (`candidates`) and why they wait (`wait_reason`). Sets a person changed (split, put back, undone) keep their photos and get fresh
+ * candidates (`fixed_updates`). A set the server already refused to file by itself, with the same candidates, is not sent again.
  */
 export function planDay(day) {
   const items = day.items || [];
@@ -628,16 +712,25 @@ export function planDay(day) {
     units.push(unitFacts(`s${s.set_id}`, its, { manual: true, ai_flag: s.ai_flag ?? null, prev_reason: s.wait_reason, set: s }));
   }
   const cands = dayCandidates(day.visits || []);
-  const candById = new Map(cands.map((c) => [c.visit_id, c]));
+  const multiBranch = (day.branches || []).length > 1;
   const branchCode = (id) => (day.branches || []).find((b) => b.id === id)?.code || '';
-  const assigned = assignDay(units.filter((u) => !u.join), cands);
   const open = units.filter((u) => !u.join);
+  // The assignment: per chosen branch (against that branch's patients), and per phone (stream) for photos without a chosen branch.
+  const assigned = new Map();
+  const buckets = new Map();
+  for (const u of open) {
+    const k = u.hint ? `hint:${u.hint}` : `stream:${u.stream}`;
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(u);
+  }
+  for (const us of buckets.values()) {
+    const hint = us[0].hint;
+    for (const [key, id] of assignDay(us, hint ? cands.filter((c) => c.branch_id === hint) : cands)) assigned.set(key, id);
+  }
 
-  const ranked = (u, proposalId) => cands.map((c) => ({ c, ...scorePair(u, c) })).sort((a, b) =>
-    (Number(b.c.visit_id === proposalId) - Number(a.c.visit_id === proposalId)) || (b.score - a.score)
-    || (Math.abs(a.d ?? Infinity) - Math.abs(b.d ?? Infinity))
+  const byScore = (a, b) => (b.score - a.score) || (Math.abs(a.d ?? Infinity) - Math.abs(b.d ?? Infinity))
     || ((a.c.anchor ?? a.c.created ?? Infinity) - (b.c.anchor ?? b.c.created ?? Infinity))
-    || String(a.c.full_name || '').localeCompare(String(b.c.full_name || '')) || String(a.c.visit_id).localeCompare(String(b.c.visit_id)));
+    || String(a.c.full_name || '').localeCompare(String(b.c.full_name || '')) || String(a.c.visit_id).localeCompare(String(b.c.visit_id));
   const reasonsFor = (u, c, proposal) => {
     const r = [];
     if (c.anchor_kind === 'start') r.push('IN_CHAIR'); else if (c.anchor_kind === 'checkin') r.push('CHECKED_IN');
@@ -651,24 +744,31 @@ export function planDay(day) {
     if (proposal) r.push('ORDER');
     return r;
   };
+  const twoSets = (u, v) => open.some((w) => w !== u && ((!w.manual && passesAuto(w, v, cands, multiBranch)) || (w.manual && w.time_ok && fitsTightly(w, v))));
 
   const decide = (u) => {
     const proposalId = u.join ? null : assigned.get(u.key) ?? null;
-    const list = ranked(u, proposalId);
-    const candidates = list.slice(0, 5).map((x, i) => ({
+    const scored = cands.map((c) => ({ c, ...scorePair(u, c) })).sort(byScore);
+    // The day's order puts its pairing first only when no other patient scores higher (a pairing that scores lower is never highlighted).
+    const prop = proposalId ? scored.find((x) => x.c.visit_id === proposalId) : null;
+    const lead = prop && prop.score >= scored[0].score - 1e-9 ? prop : null;
+    const v = lead ? lead.c : null;
+    const f = v || scored[0]?.c || null;
+    const blockers = u.time_ok && f ? photoBlockers(u, f, cands) : [];
+    // The card: the pairing, then the other photo patients who were in the chair (also those who already have photos), then by score.
+    const pinned = new Set(blockers.map((c) => c.visit_id));
+    const ordered = [lead, ...scored.filter((x) => x !== lead && pinned.has(x.c.visit_id)), ...scored.filter((x) => x !== lead && !pinned.has(x.c.visit_id))].filter(Boolean);
+    // A set without a usable camera time gets no likely patients: the day cannot be trusted, so the person types the name.
+    const candidates = !u.time_ok ? [] : ordered.slice(0, 5).map((x, i) => ({
       visit_id: x.c.visit_id, patient_id: x.c.patient_id, rank: i + 1, score: x.score, d: x.d,
-      proposal: x.c.visit_id === proposalId, reasons: reasonsFor(u, x.c, x.c.visit_id === proposalId),
+      proposal: x === lead, reasons: reasonsFor(u, x.c, x === lead),
     }));
-    const v = proposalId ? candById.get(proposalId) : null;
-    const others = open.filter((w) => w !== u);
-    if (v && autoA1(u) && passesA1toA4(u, v, cands)
-      && !others.some((w) => (!w.manual && passesA1toA4(w, v, cands)) || (w.manual && w.time_ok && fitsTightly(w, v)))) {
-      return { candidates, wait_reason: null, auto: { visit_id: v.visit_id, patient_id: v.patient_id,
+    if (v && passesAuto(u, v, cands, multiBranch) && !twoSets(u, v)) {
+      return { candidates, wait_reason: null, auto: { visit_id: v.visit_id, patient_id: v.patient_id, anchor_at: new Date(v.anchor).toISOString(),
         rule: `Automatic: the only photo-month patient in the chair at ${karachiClock(u.first)} (${branchCode(v.branch_id)})` } };
     }
-    const f = v || list[0]?.c || null;
     let reason;
-    if (!u.time_ok) reason = u.no_time ? 'NO_TIME' : 'CLOCK';
+    if (!u.time_ok) reason = u.no_time ? 'NO_TIME' : u.old ? 'OLD' : 'CLOCK';
     else if (!cands.length) reason = 'NO_VISIT_DAY';
     else if (u.manual) reason = u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL';
     else if (u.ai_flag === 'mixed_people') reason = 'MIXED';
@@ -677,11 +777,12 @@ export function planDay(day) {
     else if (!f || f.quality !== 'good' || f.status === 'waiting') reason = 'WEAK_TIMES';
     else if (u.first < f.anchor - 10 * MIN) reason = 'BEFORE_ARRIVAL';
     else if (u.first > f.anchor + 120 * MIN || (f.end !== null && u.last > f.end + 10 * MIN)) reason = 'AFTER_LEAVING';
-    else if (!autoA4(u, f, cands)) reason = 'AMBIGUOUS';
-    else if (others.some((w) => (!w.manual && passesA1toA4(w, f, cands)) || (w.manual && w.time_ok && fitsTightly(w, f)))) reason = 'TWO_SETS';
+    else if (blockers.length) reason = blockers.some((c) => !c.has_photos) ? 'AMBIGUOUS' : 'HAS_PHOTOS';
+    else if (twoSets(u, f)) reason = 'TWO_SETS';
     else if (f.has_photos) reason = 'HAS_PHOTOS';
     else if (f.occasion !== 'photo_month') reason = 'NO_PHOTO_MONTH';
     else if (u.hint && f.branch_id !== u.hint) reason = 'OTHER_BRANCH';
+    else if (branchBlockers(u, f, cands, multiBranch).length) reason = 'NO_BRANCH';
     else reason = 'TWO_SETS'; // the day's order gave this patient to another set
     return { candidates, wait_reason: reason, auto: null };
   };
@@ -689,9 +790,15 @@ export function planDay(day) {
   const plan = { matcher_version: MATCHER_VERSION, regroup_item_ids: regItems.map((it) => it.item_id).sort(), groups: [], fixed_updates: [] };
   for (const u of units) {
     const r = decide(u);
-    if (u.manual) plan.fixed_updates.push({ set_id: u.set.set_id, wait_reason: r.wait_reason, candidates: r.candidates });
-    else plan.groups.push({ item_ids: u.group.item_ids, join_set_id: u.group.join_set_id, reuse_set_id: u.group.reuse_set_id || null,
-      auto: u.join ? null : r.auto, wait_reason: r.auto ? null : r.wait_reason, candidates: r.candidates });
+    if (u.manual) { plan.fixed_updates.push({ set_id: u.set.set_id, wait_reason: r.wait_reason, candidates: r.candidates }); continue; }
+    let auto = u.join ? null : r.auto;
+    let reason = r.auto ? null : r.wait_reason;
+    // The server refused this filing before and nothing it was based on changed (same likely patients, same scores): it waits for a tap,
+    // so the page does not send the same refused filing again every few minutes.
+    const before = setById.get(u.group.reuse_set_id);
+    if (auto && before?.wait_reason === 'SERVER_CHECK' && canon(before.candidates || []) === canon(r.candidates)) { auto = null; reason = 'SERVER_CHECK'; }
+    plan.groups.push({ item_ids: u.group.item_ids, join_set_id: u.group.join_set_id, reuse_set_id: u.group.reuse_set_id || null,
+      auto, wait_reason: reason, candidates: r.candidates });
   }
   return plan;
 }
@@ -719,6 +826,19 @@ export function planUnchanged(plan, day) {
   return true;
 }
 
+/**
+ * A database, storage or function call that did not get through (no answer, a timeout, a rate limit or a gateway error): worth trying
+ * again after a pause, and never counted against a photo. A refusal with a reason (a code word, a permission) is not.
+ */
+export function isConnectionProblem(e) {
+  if (!e) return false;
+  if (e.code === 'NETWORK' || e.photoCode === 'NETWORK' || e.code === 'TIMEOUT') return true;
+  if (e.photoCode && e.photoCode !== 'NETWORK') return false;
+  const status = Number(e.status || e.context?.status || 0);
+  return status === 408 || status === 429 || status >= 500
+    || /failed to fetch|fetch failed|networkerror|network error|timed? ?out|timeout|load failed|connection|ECONN|aborted/i.test(String(e.message || ''));
+}
+
 // ---------------------------------------------------------------- names and labels
 /** 'Month 6' for a braces month, else the treatment ('Scaling'), else null. Same as private.photo_inbox_occasion in the database. */
 export function occasionLabel(visit) {
@@ -741,7 +861,8 @@ const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f\u007f/\\:*?"<>|
  * row: { full_name, mr_number, occasion, view_key, view_label, taken_on, kind, storage_path }, position: the photo's number in its set.
  */
 export function downloadName(row, { position = 1 } = {}) {
-  const occasion = row.occasion || null;
+  // (photos saved on the profile have no occasion, but a braces month: "Month 6" all the same)
+  const occasion = row.occasion || (row.braces_month ? `Month ${row.braces_month}` : null);
   let view = viewName(row.view_key);
   if (!view && row.view_label) {
     const lbl = String(row.view_label);
@@ -813,10 +934,25 @@ export function editPlan(ai, srcW, srcH) {
   const r = Math.min(1, EDIT_EDGE / Math.max(vw, vh));
   const colour = ai && ai.color_cast && ai.color_cast !== 'none' && (ai.kind === 'intraoral' || ai.kind === 'extraoral');
   return {
-    sx, sy, sw, sh, angle: (rotate + straighten) * Math.PI / 180, flip,
+    // Claude's straightening is a clockwise turn of the picture AFTER the quarter turn and the mirror flip. The page draws
+    // flip(turn(picture)), and flip . turn(a) = turn(-a) . flip, so for a mirrored photo the straightening is drawn the other way round.
+    sx, sy, sw, sh, angle: (rotate + (flip ? -straighten : straighten)) * Math.PI / 180, flip,
     outW: Math.max(1, Math.round(vw * r)), outH: Math.max(1, Math.round(vh * r)), scale: r, inner: k,
     wb: !!colour, gammaFloor: ai && ai.exposure === 'dark' ? 0.7 : 0.8,
   };
+}
+
+/**
+ * The canvas transform of the edited copy (ctx.setTransform(a, b, c, d, e, f)): the centre of the kept part of the photo goes to the
+ * centre of the output, turned by plan.angle (clockwise), flipped left to right when plan.flip, scaled by plan.scale. As a product:
+ * translate(centre) . flip . turn(angle) . scale. Pure, so a test can follow a tilted line through it (tests/photo-intake.test.ts).
+ */
+export function editTransform(plan) {
+  const fx = plan.flip ? -1 : 1;
+  const cos = Math.cos(plan.angle);
+  const sin = Math.sin(plan.angle);
+  const s = plan.scale;
+  return { a: s * fx * cos, b: s * sin, c: -s * fx * sin, d: s * cos, e: plan.outW / 2, f: plan.outH / 2 };
 }
 
 /**

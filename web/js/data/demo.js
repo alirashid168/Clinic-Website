@@ -2123,6 +2123,7 @@ export function createDemoAdapter() {
       for (const list of [db.visits, db.invoices, db.payments, db.braces_cases, db.retainer_cases, db.photos, db.reminders, db.complaints, db.patient_flags, db.visit_ratings, db.documents, db.payment_plans || []]) {
         for (const row of list) if (row.patient_id === removeId) { row.patient_id = keepId; if (list === db.visits) visits++; if (list === db.invoices) invoices++; if (list === db.payments) payments++; }
       }
+      inboxApi.inboxPatientMerged(keepId, removeId);
       for (const k of ['email', 'gender', 'date_of_birth', 'address', 'first_branch_id']) if (!keep[k] && rem[k]) keep[k] = rem[k];
       keep.notes = [keep.notes, `Merged with Mr# ${rem.mr_number} (${rem.full_name})`].filter(Boolean).join(' · ');
       db.patients = db.patients.filter((p) => p.id !== removeId);

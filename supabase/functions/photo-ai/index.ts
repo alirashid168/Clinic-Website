@@ -4,9 +4,15 @@
 // edits the original in the browser (Edge Functions have about 2 s of CPU: no pixel work here) and saves the edited copy.
 //
 //   POST { action: 'status' }  -> { ok: true, key: boolean, model }   (key: whether ANTHROPIC_API_KEY is set; never the key itself)
-//   POST { action: 'analyze', set_id, items: [{ item_id, image (base64 JPEG <= 1024 px), width, height }] }   (1-8 photos)
-//        -> { ok: true, status: 'ok' | 'refused' | 'truncated' | 'invalid', results: [{ item_id, result }], cost_usd, served_model }
-//        or { ok: false, code: 'NO_KEY' | 'BAD_REQUEST' | 'RATE_LIMIT' | 'BAD_KEY' | 'NETWORK' | 'API_DOWN' | 'SERVER', retry_after? }
+//   POST { action: 'analyze', set_id, items: [{ item_id, image (base64 JPEG <= 1024 px), width, height, reference? }] }   (1-8 photos;
+//        the first may be a reference photo of the same set from an earlier call, for the one-sitting check)
+//        -> { ok: true, status: 'ok' | 'refused' | 'truncated' | 'invalid' | 'skipped', results: [{ item_id, result }], cost_usd, served_model }
+//        or { ok: false, code, retry_after? } with code:
+//           BAD_BODY (this function refused the request itself: the page makes a basic edit), NO_KEY, BAD_KEY, BILLING (no credit left
+//           at Anthropic), CONFIG (the model or the request size was refused: a setup problem) - the page stops editing and says so;
+//           BAD_REQUEST (Anthropic refused these photos: counted as one of the photo's 3 tries); RATE_LIMIT, API_DOWN, NETWORK, SERVER -
+//           the page waits and tries again (not counted against the photos).
+//        'skipped': none of the photos still waited for Claude (another page did them): nothing was sent.
 // Who may: anyone with "Use the Photo inbox" and "View raw clinic photos folder" (public.photo_inbox_ai_allowed), for a set of a city
 // they may use (the set must be readable through their own login). Nothing about the patient is sent to Claude (core.ts).
 //
@@ -40,7 +46,10 @@ function classify(e: unknown): { code: string; retry_after?: number } {
   if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) return { code: 'BAD_KEY' };
   if (e instanceof Anthropic.BadRequestError) return { code: 'BAD_REQUEST' };
   if (e instanceof Anthropic.APIConnectionError) return { code: 'NETWORK' };
-  if (e instanceof Anthropic.APIError && Number((e as { status?: number }).status) >= 500) return { code: 'API_DOWN' };
+  const status = Number((e as { status?: number })?.status);
+  if (status === 402) return { code: 'BILLING' };
+  if (status === 404 || status === 413) return { code: 'CONFIG' };
+  if (e instanceof Anthropic.APIError && status >= 500) return { code: 'API_DOWN' };
   return { code: 'SERVER' };
 }
 
@@ -61,18 +70,25 @@ Deno.serve(async (req: Request) => {
   if (allowed !== true) return json({ ok: false, code: 'NOT_ALLOWED', error: 'The Photo inbox needs "Use the Photo inbox" and "View raw clinic photos folder" in the access list.' }, 403);
 
   let body: Record<string, unknown>;
-  try { body = await req.json(); } catch { return json({ ok: false, code: 'BAD_REQUEST' }, 400); }
+  try { body = await req.json(); } catch { return json({ ok: false, code: 'BAD_BODY' }, 400); }
   const apiKey = (Deno.env.get('ANTHROPIC_API_KEY') ?? '').trim();
 
   if (body?.action === 'status') return json({ ok: true, key: apiKey.length > 0, model: MODEL });
-  if (body?.action !== 'analyze') return json({ ok: false, code: 'BAD_REQUEST', error: 'Unknown action' }, 400);
+  if (body?.action !== 'analyze') return json({ ok: false, code: 'BAD_BODY', error: 'Unknown action' }, 400);
 
   const checked = checkAnalyzeBody(body);
-  if (!checked.ok) { console.log('photo-ai bad request', checked.why); return json({ ok: false, code: 'BAD_REQUEST' }, 400); }
+  if (!checked.ok) { console.log('photo-ai bad request', checked.why); return json({ ok: false, code: 'BAD_BODY' }, 400); }
   if (!apiKey) return json({ ok: false, code: 'NO_KEY' });
   // The set must be one the caller may see (its city): read through their own login, so the inbox's row rules decide.
   const { data: set } = await asCaller.from('photo_inbox_sets').select('id').eq('id', checked.setId).maybeSingle();
   if (!set) return json({ ok: false, code: 'NOT_ALLOWED', error: 'These photos are not in a city folder you may use.' }, 403);
+  // Each photo must be of that set; the ones to answer must still wait for Claude (two pages of one login, or a slow page whose claim ran
+  // out, may send the same photos: they are paid for once). A reference photo must be of the set too.
+  const ids = checked.items.map((it) => it.item_id);
+  const { data: rows } = await asCaller.from('photo_inbox_items').select('id, set_id, ai_status').in('id', ids);
+  const known = new Map((rows || []).map((r: { id: string; set_id: string; ai_status: string }) => [r.id, r]));
+  const items = checked.items.filter((it) => known.get(it.item_id)?.set_id === checked.setId && (it.reference || known.get(it.item_id)?.ai_status === 'pending'));
+  if (!items.some((it) => !it.reference)) return json({ ok: true, status: 'skipped', results: [], cost_usd: 0, served_model: null });
 
   const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
   const record = async (call: Record<string, unknown>, results: unknown[]) => {
@@ -85,16 +101,16 @@ Deno.serve(async (req: Request) => {
   const started = Date.now();
   try {
     // deno-lint-ignore no-explicit-any
-    const out = await runAnalyze({ create: (params) => client.beta.messages.create(params as any) as any, items: checked.items, setId: checked.setId });
+    const out = await runAnalyze({ create: (params) => client.beta.messages.create(params as any) as any, items, setId: checked.setId });
     await record(out.call, out.results);
     console.log('photo-ai', checked.setId, out.status, `photos=${out.call.photo_count}`, `in=${out.call.input_tokens}`, `out=${out.call.output_tokens}`,
       `cache_read=${out.call.cache_read_input_tokens}`, `cache_write=${out.call.cache_creation_input_tokens}`, `model=${out.call.served_model}`, `ms=${out.call.duration_ms}`);
     return json({ ok: true, status: out.status, results: out.results, cost_usd: out.call.cost_usd, served_model: out.call.served_model });
   } catch (e) {
     const c = classify(e);
-    console.log('photo-ai error', checked.setId, c.code, `status=${(e as { status?: number })?.status ?? ''}`, `photos=${checked.items.length}`);
+    console.log('photo-ai error', checked.setId, c.code, `status=${(e as { status?: number })?.status ?? ''}`, `photos=${items.length}`);
     await record({
-      set_id: checked.setId, item_ids: checked.items.map((it) => it.item_id), photo_count: checked.items.length, model: MODEL,
+      set_id: checked.setId, item_ids: items.filter((it) => !it.reference).map((it) => it.item_id), photo_count: items.length, model: MODEL,
       status: 'error', error_code: c.code, duration_ms: Date.now() - started,
       request_id: (e as { requestID?: string; request_id?: string })?.requestID ?? (e as { request_id?: string })?.request_id ?? null,
     }, []).catch(() => null);

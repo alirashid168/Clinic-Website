@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
-import { crc32, zipParts } from '../web/js/lib/zip.js';
+import { crc32, crc32Blob, zipParts, zipPartsBlobs } from '../web/js/lib/zip.js';
 
 const enc = new TextEncoder();
 const join = (parts: Uint8Array[]) => {
@@ -54,4 +54,20 @@ test('a 3-file zip reads back: names (UTF-8), sizes, data and CRCs', () => {
 test('more than 65,535 files are refused (no ZIP64)', () => {
   const many = Array.from({ length: 65536 }, (_, i) => ({ name: `${i}.jpg`, bytes: new Uint8Array(0), date: new Date() }));
   assert.throws(() => zipParts(many), /ZIP_TOO_BIG/);
+});
+
+test('a zip made from Blobs (the photos as downloaded, never copied into one array) is the same zip', async () => {
+  const big = new Uint8Array(5 * 1024 * 1024 + 123);
+  for (let i = 0; i < big.length; i++) big[i] = (i * 31) & 0xFF;
+  assert.equal(await crc32Blob(new Blob([big])), (zlib as any).crc32(big), 'the CRC read 4 MB at a time');
+  const files = [
+    { name: 'A - Mr# 1 - Month 6 - Front - 17-10-2026.jpg', bytes: new Uint8Array([0xFF, 0xD8, 9, 9, 0xFF, 0xD9]), date: new Date(2026, 9, 17, 18, 0, 0) },
+    { name: 'A - Mr# 1 - Month 6 - Upper arch - 17-10-2026.jpg', bytes: big, date: new Date(2026, 9, 17, 18, 1, 0) },
+  ];
+  const fromBytes = join(zipParts(files));
+  const parts = await zipPartsBlobs(files.map((f) => ({ name: f.name, blob: new Blob([f.bytes]), date: f.date })));
+  assert.ok(parts.some((x: unknown) => x instanceof Blob), 'the photos stay Blobs');
+  const fromBlobs = new Uint8Array(await new Blob(parts).arrayBuffer());
+  assert.equal(fromBlobs.length, fromBytes.length);
+  assert.ok(fromBlobs.every((b, i) => b === fromBytes[i]), 'byte for byte the same');
 });

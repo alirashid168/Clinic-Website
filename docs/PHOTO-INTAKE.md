@@ -21,8 +21,15 @@ needs "View raw clinic photos folder"). Moving a filed set to another patient an
 
 ## 2. Taking the photos
 
-- **The phone's date and time must be automatic** (Settings → Date and time → Automatic). The time on the photo is what finds the patient.
-- Take each patient's photos together, one patient after the other. A short pause (a few minutes) between two patients helps.
+- **The phone's date, time and time zone must be automatic** (Settings → Date and time → Automatic). The time on the photo is what finds
+  the patient. The upload screen shows each phone's last photo time ("iPhone 13: 14 photos, the last at 9:10 PM (now 9:30 PM)"): if that
+  is wrong, the phone's clock is wrong. A phone whose clock runs ahead, or that is on another time zone, is noticed: all of its photos of
+  that upload then wait on "Which patient?".
+- Take each patient's photos together, one patient after the other. **Wait a few minutes between two patients** (photos less than 3
+  minutes apart on one phone count as one sitting).
+- **Two phones of the same model** (two assistants with the same Samsung): each phone's photos are told apart when each person uploads
+  their own phone, or one person uploads the phones one after the other (two uploads). Do not put two such phones' photos on a laptop
+  and upload them together in one go.
 - **Mark patients "In treatment" and "Completed" on time on the Aaj ki List.** The time the patient went into treatment (or was checked
   in) is what the photo time is compared with. Statuses marked late in one go at the end of the day cannot be used: those photos then
   wait on "Which patient?".
@@ -34,13 +41,17 @@ needs "View raw clinic photos folder"). Moving a filed set to another patient an
 
 1. **Photos → Photo inbox.**
 2. Choose the **city folder** where the patients were (Karachi, Lahore, Islamabad).
-3. Karachi has three branches: if all the photos are from one branch, choose it under "Which branch were these taken at?"; otherwise
-   leave **"All Karachi branches"**. (An assistant who works at one branch has it chosen already.)
+3. Karachi has three branches: if all the photos are from one branch, **choose it** under "Which branch were these taken at?" (an
+   assistant who works at one branch has it chosen already). With **"All Karachi branches"** a set is filed by itself only when nobody
+   was in the chair at another Karachi branch at that time; otherwise it asks (the system cannot know which branch the photos are from).
+   So the coordinator and Dr. Ali get more photos filed by themselves when they upload one branch at a time.
 4. Press **Choose photos** and select all of the day's photos **from the phone's gallery (Photos / Gallery app), not from WhatsApp**.
    WhatsApp removes the time the photo was taken. On a laptop you can also drag the photos onto the page.
 5. Wait for "uploaded" and keep the page open while it works. It says how many sets were filed by themselves and how many wait on
    "Which patient?".
-- If the wifi drops, simply choose the same photos again: nothing is uploaded twice ("Already uploaded").
+- If the wifi drops, the page tries again by itself (after 2, 5, 15, 30 and 60 seconds). If something still did not finish, simply choose
+  the same photos again: nothing is uploaded twice ("Already uploaded"), and a photo that failed in the middle of a sitting joins the
+  sitting that was filed.
 - Uploading the next morning is fine: photos go to the day they were taken.
 - A second upload the same day (another phone) is fine too: everything of that day is matched again together.
 
@@ -55,13 +66,18 @@ time, how many photos, the camera, **why it waits** (see section 5) and the like
 - **Split this set**: when one set has two patients, tap "Next patient starts here" on the first photo of the second patient.
 - **Move to another city folder**: when the photos were put in the wrong city.
 - **Check these** (at the top): filed sets where Claude thinks the photos show more than one patient, or that one photo is not a patient
-  photo. Their edited photos are held back from the patient until someone presses **It's fine**, moves them or undoes the filing.
+  photo. Their edited photos are held back from the patient until someone presses **It's fine**, moves them or undoes the filing. Also a
+  filed set whose patient record was removed (it says so): move it to the right patient.
+- A set **without a camera time** has no likely patients (its day cannot be trusted): type the patient's name or Mr# in the search that
+  is open on the card.
 - **Check again**: matches again now (for example after a missing patient was added to the Aaj ki List). This also happens by itself
   every 3 minutes while the Photo inbox is open.
 
 **Filed**: the sets filed on a day, with the patient (a link to their file), how they were filed ("Automatic: the only photo-month patient
 in the chair at 6:35 PM (DHA)" or "Confirmed by ..."), the editing state and what the patient sees. Buttons: **Hide from patient** / **Show
-to patient**; **Move to another patient…**; **Undo filing** (the photos go back to "Which patient?"; they are kept); **Take one photo out**.
+to patient**; **Try Claude again** (when a photo only got a basic edit); **Move to another patient…**; **Undo filing** (the photos go
+back to "Which patient?"; they are kept); **Take one photo out**. **Delete** on the patient's profile also takes that photo out of its set
+(it goes to Set aside and never comes back into the file by itself).
 
 **Set aside**: photos marked "Not a patient photo" or taken out of a filed set. **Put back** sends them to "Which patient?". Nothing is
 ever deleted.
@@ -70,21 +86,34 @@ The number on **Photos** in the menu (and on Today) is how many sets wait on "Wh
 
 ## 5. When it files by itself, and why it sometimes asks
 
-It files a set by itself only when **all** of this holds: every photo has its camera time; the set is one sitting (not more than 20 photos
-within 15 minutes); the patient is a **photo-month** patient of that city and day who was **in treatment or completed**, with a real
-start or check-in time that the photos fit; **no other photo-month (or bonding / braces-off) patient was in the
-chair then**; the patient has no photos yet; and no other set of the day points to the same patient. Everything else asks:
+It files a set by itself only when **all** of this holds: every photo has its camera time and the phone's clock looks right; the set is
+one sitting from one phone and one upload (not more than 20 photos within 15 minutes); the patient is a **photo-month** patient of that
+city and day who was **in treatment or completed**, with a real start or check-in time that the photos fit; **no other photo-month (or
+bonding / braces-off) patient was in the chair then, even one who already has photos**; without a chosen branch, nobody was in the chair
+at another branch then; the patient has no photos yet; and no other set of the day points to the same patient. Everything else asks.
+
+What it does **not** check (a choice, to keep most sets automatic): another patient of the **same branch** in the chair at the same time
+whose visit is not a photo month and not bonding / braces off (a Scaling or a normal monthly visit). Photos are taken at photo months, so
+the photo-month patient is taken to be the one photographed. If a non-photo-month patient was photographed less than 3 minutes after a
+photo-month patient on the same phone, both go into one set and into the photo-month patient's file; once the AI key is added, Claude
+notices two different patients in one set and holds the edited copies back. Until then: wait a few minutes between two patients, and
+look at the Filed list once a day (the patient sees nothing for 24 hours).
 
 | The card says | What to do |
 |---|---|
-| No camera time (WhatsApp, edited in an app, or a screenshot). | Choose the patient. Next time upload from the gallery. |
-| The camera's date is wrong. | Choose the patient; set the phone to automatic date and time. |
+
+| The card says | What to do |
+|---|---|
+| No camera time (WhatsApp, edited in an app, or a screenshot). | Type the patient's name. Next time upload from the gallery. |
+| The camera's clock looks wrong. | Type the patient's name; set the phone to automatic date, time and time zone. |
+| Taken more than a week before it was uploaded. | Type the patient's name and use "Search all patients". |
+| Patients were in the chair at more than one branch then, and the branch was not chosen. | Tap the patient; next time choose the branch. |
 | Nobody is on the city's Aaj ki List for that day. | Add the patient there and press Check again, or use "Search all patients". |
 | More than one photo-month (or bonding / braces-off) patient was in the chair then. | Tap the right one. |
 | Another set of photos points to the same patient. | Tap the right one for each set. |
 | The list has no real check-in or treatment times at that time. | Statuses were marked late or in one go: tap the patient. |
 | Taken before the patient was checked in / after they were marked Completed. | Check, then tap the patient. |
-| This patient already has photos for this visit. | Tap the patient if it is right (a second set is fine). |
+| A patient in the chair then already has photos for this visit. | Check whose photos these are and tap the patient (a second set is fine). |
 | No photo-month patient was in the chair then. | Tap the patient. |
 | Split or put back / The filing was undone. | A person changed this set: choose the patient. |
 | Claude thinks these photos show more than one patient / a photo is not a patient photo. | Split the set if needed, then choose. |
@@ -96,9 +125,16 @@ picture) and says what it shows (front, right side, left side, upper arch, lower
 profiles, X-ray, document) and how to turn, flip (mirror shots), straighten and crop it, and whether it is too dark or tinted. The
 website then makes the edited copy from the original: upright, mirror shots flipped, levelled, cropped, gentle brightness and colour
 (never more than 8 % on any colour, so **teeth are never whitened** and before/after photos stay comparable), at most 2048 pixels. If
-Claude cannot answer, a basic edit is made (brightness only). The original is never changed.
+Claude declines a photo, or its answer cannot be read three times, a basic edit is made (brightness only) and the Filed list offers **Try
+Claude again**. A long set goes to Claude in several parts; each part also shows Claude the last photo of the part before, so two patients
+in one set are noticed there too. The original is never changed.
 
-**The patient sees the edited photos in their portal 24 hours after they were filed**, so staff have a day to check, hide, move or undo.
+If the connection drops, Anthropic is busy, or there is a rate limit, the page simply waits and tries again (nothing is counted against
+the photos). If the key is refused or **the Anthropic account has no credit left**, editing stops and the page says so: no photo is edited
+badly meanwhile; fix it and reload the page.
+
+**The patient sees the edited photos in their portal 24 hours after they were made** (filed, or edited later: when Claude edits a photo
+days after it was filed, the 24 hours start then), so staff can check Claude's edit, hide, move or undo first.
 
 Until the AI key is added the page says **"Editing waits for the AI key"**: the photos are uploaded and filed all the same, and Claude
 edits them as soon as the key is there (nothing needs uploading again).
@@ -107,7 +143,8 @@ edits them as soon as the key is there (nothing needs uploading again).
 
 **Photos → Photo library**: every patient's edited photos. Search by name or Mr#; filter by city, branch, month, view and dates. Tap a
 photo to see it large, **Download** it (it saves under its proper name) or open the patient's file. Tick photos (or "Select all shown", or
-the box next to a patient's day) and press **Download selected (zip)** for one zip file with all the proper names (at most 300 photos).
+the box next to a patient's day) and press **Download selected (zip)** for one zip file with all the proper names (at most 300 photos and
+500 MB: about 1,000 edited photos, or 120 originals).
 Staff with "View raw clinic photos folder" can switch to the originals.
 
 ## 8. The AI key (Dr. Ali, yourself; never send it in a chat)
@@ -118,7 +155,8 @@ Staff with "View raw clinic photos folder" can switch to the originals.
    name **ANTHROPIC_API_KEY**, value = the key → **Save**.
 4. Open the Photo inbox: editing starts on the photos already uploaded.
 
-To stop AI editing, delete that secret. If the page says **"The AI key was refused"**, the key is wrong or was removed: make a new one.
+To stop AI editing, delete that secret. If the page says **"the AI key was refused"**, the key is wrong or was removed: make a new one.
+If it says **"the Anthropic account has no credit left"**: console.anthropic.com → Billing → add credit, then reload the Photo inbox.
 
 ## 9. Cost and storage
 
@@ -142,6 +180,8 @@ To stop AI editing, delete that secret. If the page says **"The AI key was refus
 | "The clinic's photo storage is full" | Dr. Ali: Supabase dashboard → Billing, turn off the spend cap or add space, then choose the photos again. |
 | "Editing waits for the AI key" | Section 8. |
 | "The AI key was refused" | Make a new key (section 8). |
+| "The Anthropic account has no credit left" | console.anthropic.com → Billing → add credit; reload the Photo inbox. |
+| "Claude could not edit N photos: basic edit made" | Filed → Try Claude again. |
 | A set went to the wrong patient | Filed → Move to another patient, or Undo filing. Within 24 hours the patient has not seen it. |
 | "The Photo inbox needs the database update of 17 Oct" | The database update has not been run yet (docs/GO-LIVE.md). |
 

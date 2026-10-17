@@ -15,7 +15,11 @@
 --   7. move, undo, take out: need "Delete clinic photos and X-rays"; rows follow, visits ticked and unticked; the photos are kept;
 --   8. Claude's answers are written only by the service role (cost logged, mixed people flagged and held back); costs for Dr. Ali and
 --      accounts only; the library shows edited photos to the front desk and originals only to raw viewers; the profile's Delete of an
---      inbox photo removes the row and names no file.
+--      inbox photo removes the row and names no file;
+--   9. the review fixes: a photo patient who already has photos stops an automatic filing; an unchanged plan writes nothing; a join is
+--      checked again (same phone and person); the profile's Delete takes the photo out for good, and an edited copy made after the
+--      window gets its own; nobody files, moves or releases inbox rows directly; Claude's errors use no tries; two pages of one login
+--      share the work; HEIC is not handed out forever; "Try Claude again"; a merge moves the set.
 \set ON_ERROR_STOP 1
 \set admin  '''00000000-0000-0000-0000-000000004000'''
 \set fd     '''00000000-0000-0000-0000-000000004001'''
@@ -111,7 +115,7 @@ select id as p3 from public.patients where mr_number = '40003' \gset
 select ((now() at time zone 'Asia/Karachi')::date - 1)::text as d1 \gset
 
 -- Yesterday at DHA (branch 3, Karachi): v1 a photo month in treatment since 18:31; v2 Scaling at the same time; v4 a photo month that has
--- photos already. v3 a photo month in Lahore (branch 4). v5 a photo month at DHA that started at 15:30.
+-- photos already (in the chair 14:00-14:40, long before the photos: a photo patient in the chair with the photos would stop the filing). v3 a photo month in Lahore (branch 4). v5 a photo month at DHA that started at 15:30.
 insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, started_at, checked_in_at)
 values (:'p1', 3, :'d1', 'in_treatment', 'Monthly', true, (:'d1' || ' 18:31:00+05')::timestamptz, (:'d1' || ' 18:20:00+05')::timestamptz);
 select id as v1 from public.visits where patient_id = :'p1' and visit_date = :'d1' \gset
@@ -121,8 +125,8 @@ select id as v2 from public.visits where patient_id = :'p2' and treatment_label 
 insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, started_at)
 values (:'p3', 4, :'d1', 'in_treatment', 'Monthly', true, (:'d1' || ' 18:31:00+05')::timestamptz);
 select id as v3 from public.visits where patient_id = :'p3' \gset
-insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, photos_uploaded, started_at)
-values (:'p2', 3, :'d1', 'in_treatment', 'Monthly', true, true, (:'d1' || ' 18:32:00+05')::timestamptz);
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, photos_uploaded, started_at, completed_at)
+values (:'p2', 3, :'d1', 'completed', 'Monthly', true, true, (:'d1' || ' 14:00:00+05')::timestamptz, (:'d1' || ' 14:40:00+05')::timestamptz);
 select id as v4 from public.visits where patient_id = :'p2' and treatment_label = 'Monthly' \gset
 insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, started_at)
 values (:'p1', 3, :'d1', 'in_treatment', 'Bonding', true, (:'d1' || ' 15:30:00+05')::timestamptz);
@@ -335,6 +339,8 @@ select pg_temp.check(not exists (select 1 from public.photos where id = :'e1') a
                      and not exists (select 1 from storage.objects where name = 'inbox/karachi/' || :'d1' || '/edited/' || pg_temp.sha('a') || '.jpg'),
   'the patient does not see it during its window (row and file)');
 reset role;
+-- (the window running out: as a server job, since no login may change a Photo inbox photo's window directly)
+select pg_temp.act_as('');
 update public.photos set release_after = now() - interval '1 minute' where id = :'e1';
 set role authenticated;
 select pg_temp.act_as(:pat);
@@ -422,6 +428,170 @@ select pg_temp.act_as(:asst);
 select pg_temp.expect_error('select public.photo_ai_costs()', 'NOT_ALLOWED', 'the assistant does not see what Claude cost');
 select pg_temp.check((public.photo_inbox_counts() ->> 'waiting')::int = (select count(*) from public.photo_inbox_sets where status = 'waiting'),
   'the badge counts the waiting sets');
+-- 9. Review fixes (17 Oct). Two days ago at DHA: v7 a photo month (Sample Forty Six) in the chair from 17:00; v8 another photo month
+-- (Sample Forty Five) in the chair from 17:05 that already has photos.
+reset role;
+select pg_temp.act_as('');
+select ((now() at time zone 'Asia/Karachi')::date - 2)::text as d2 \gset
+insert into public.patients (mr_number, full_name, phone, first_branch_id) values ('40005', 'Sample Forty Five', '03005554005', 3);
+insert into public.patients (mr_number, full_name, phone, first_branch_id) values ('40006', 'Sample Forty Six', '03005554006', 3);
+select id as p5 from public.patients where mr_number = '40005' \gset
+select id as p6 from public.patients where mr_number = '40006' \gset
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, started_at)
+values (:'p6', 3, :'d2', 'in_treatment', 'Monthly', true, (:'d2' || ' 17:00:00+05')::timestamptz);
+select id as v7 from public.visits where patient_id = :'p6' and visit_date = :'d2' \gset
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, photo_required, photos_uploaded, started_at)
+values (:'p5', 3, :'d2', 'in_treatment', 'Monthly', true, true, (:'d2' || ' 17:05:00+05')::timestamptz);
+select id as v8 from public.visits where patient_id = :'p5' and visit_date = :'d2' \gset
+set role authenticated;
+select pg_temp.act_as(:asst);
+select pg_temp.obj(pg_temp.path(pg_temp.sha('1'), :'d2'::date)), pg_temp.obj(pg_temp.path(pg_temp.sha('2'), :'d2'::date)),
+       pg_temp.obj(pg_temp.path(pg_temp.sha('3'), :'d2'::date)), pg_temp.obj(pg_temp.path(pg_temp.sha('4'), :'d2'::date)),
+       pg_temp.obj(pg_temp.path(pg_temp.sha('5'), :'d2'::date));
+select public.photo_inbox_add_items(jsonb_build_array(
+  pg_temp.item(pg_temp.sha('1'), :'d2'::date, (:'d2' || ' 17:10:00+05')::timestamptz, 301),
+  pg_temp.item(pg_temp.sha('2'), :'d2'::date, (:'d2' || ' 17:10:30+05')::timestamptz, 302),
+  pg_temp.item(pg_temp.sha('3'), :'d2'::date, (:'d2' || ' 17:11:00+05')::timestamptz, 303)));
+select id as j1 from public.photo_inbox_items where sha256 = pg_temp.sha('1') \gset
+select id as j2 from public.photo_inbox_items where sha256 = pg_temp.sha('2') \gset
+select id as j3 from public.photo_inbox_items where sha256 = pg_temp.sha('3') \gset
+-- 9a. Another photo patient in the chair stops the automatic filing, also one who already has photos.
+create temp table t40_block as select public.photo_inbox_apply(1::smallint, :'d2'::date,
+  pg_temp.plan(jsonb_build_array(:'j1', :'j2', :'j3'), jsonb_build_array(pg_temp.grp(jsonb_build_array(:'j1', :'j2', :'j3'), :'v7'::uuid)))) as r;
+select pg_temp.check((select (r ->> 'filed')::int = 0 and r -> 'server_refused' -> 0 ->> 'why' like 'another photo patient%' from t40_block),
+  'a photo patient who already has photos, in the chair then, stops the automatic filing (the server checks it too)');
+select set_id as t9 from public.photo_inbox_items where id = :'j1' \gset
+select version as t9v from public.photo_inbox_sets where id = :'t9' \gset
+-- 9b. The same plan again writes nothing (no version, no audit row).
+reset role;
+create temp table t40_aud as select count(*) as n from public.audit_log where table_name = 'photo_inbox_sets' and row_id = :'t9';
+set role authenticated;
+select pg_temp.act_as(:asst);
+select public.photo_inbox_apply(1::smallint, :'d2'::date,
+  pg_temp.plan(jsonb_build_array(:'j1', :'j2', :'j3'), jsonb_build_array(pg_temp.grp(jsonb_build_array(:'j1', :'j2', :'j3'), null, 'SERVER_CHECK'))));
+reset role;
+select pg_temp.check((select version from public.photo_inbox_sets where id = :'t9') = :t9v
+                     and (select count(*) from public.audit_log where table_name = 'photo_inbox_sets' and row_id = :'t9') = (select n from t40_aud),
+  'matching again with nothing changed writes nothing: the version and the audit log stay');
+set role authenticated;
+select pg_temp.act_as(:asst);
+select public.photo_inbox_file_set(:'t9', :'v7', null, :t9v);
+select pg_temp.check((select status = 'filed' and patient_id = :'p6'::uuid from public.photo_inbox_sets where id = :'t9'), 'one tap files it to the right patient');
+-- 9c. Joining a filed set: the same phone and person, right after it: joins; another camera, or another person: waits.
+select public.photo_inbox_add_items(jsonb_build_array(
+  pg_temp.item(pg_temp.sha('4'), :'d2'::date, (:'d2' || ' 17:12:00+05')::timestamptz, 304),
+  pg_temp.item(pg_temp.sha('5'), :'d2'::date, (:'d2' || ' 17:12:10+05')::timestamptz, 305) || jsonb_build_object('camera', 'samsung|sm-a145f')));
+select id as j4 from public.photo_inbox_items where sha256 = pg_temp.sha('4') \gset
+select id as j5 from public.photo_inbox_items where sha256 = pg_temp.sha('5') \gset
+select pg_temp.act_as(:coord);
+select pg_temp.obj(pg_temp.path(pg_temp.sha('6'), :'d2'::date));
+select public.photo_inbox_add_items(jsonb_build_array(pg_temp.item(pg_temp.sha('6'), :'d2'::date, (:'d2' || ' 17:12:20+05')::timestamptz, 306)));
+select id as j6 from public.photo_inbox_items where sha256 = pg_temp.sha('6') \gset
+select pg_temp.act_as(:asst);
+create temp table t40_join as select public.photo_inbox_apply(1::smallint, :'d2'::date, pg_temp.plan(jsonb_build_array(:'j4', :'j5', :'j6'), jsonb_build_array(
+  jsonb_build_object('item_ids', jsonb_build_array(:'j4'), 'join_set_id', :'t9', 'wait_reason', null, 'candidates', '[]'::jsonb),
+  jsonb_build_object('item_ids', jsonb_build_array(:'j5'), 'join_set_id', :'t9', 'wait_reason', 'TWO_SETS', 'candidates', '[]'::jsonb),
+  jsonb_build_object('item_ids', jsonb_build_array(:'j6'), 'join_set_id', :'t9', 'wait_reason', 'TWO_SETS', 'candidates', '[]'::jsonb)))) as r;
+reset role;
+select pg_temp.check((select (r ->> 'joined')::int = 1 and (r ->> 'waiting')::int = 2 from t40_join)
+                     and (select set_id from public.photo_inbox_items where id = :'j4') = :'t9'::uuid
+                     and (select set_id from public.photo_inbox_items where id = :'j5') <> :'t9'::uuid
+                     and (select set_id from public.photo_inbox_items where id = :'j6') <> :'t9'::uuid
+                     and exists (select 1 from public.photos where intake_item_id = :'j4' and kind = 'raw' and patient_id = :'p6'::uuid)
+                     and (select count(*) from public.audit_log where action = 'PHOTO_JOINED' and row_id = :'t9') = 1,
+  'the rest of a sitting (same phone and person, a minute after) joins the filed set (PHOTO_JOINED); another camera or another person does not');
+-- 9d. The profile''s Delete of an inbox photo: the photo leaves the set; another photo edited later does not bring it back, and an edited
+-- copy made after the window gets its own.
+select pg_temp.act_as('');
+update public.photo_inbox_sets set release_after = now() - interval '3 days' where id = :'t9';
+set role authenticated;
+select pg_temp.act_as(:asst);
+select raw_photo_id as rj1 from public.photo_inbox_items where id = :'j1' \gset
+select pg_temp.check((public.delete_patient_photo(:'rj1') ->> 'deleted')::boolean, 'the profile''s Delete removes the inbox photo');
+reset role;
+select pg_temp.check((select s.status = 'set_aside' and s.set_aside_reason = 'taken_out' from public.photo_inbox_items i join public.photo_inbox_sets s on s.id = i.set_id where i.id = :'j1')
+                     and not exists (select 1 from public.photos where intake_item_id = :'j1'),
+  'the deleted photo is taken out of its set and set aside (kept), with no rows left');
+set role authenticated;
+select pg_temp.act_as(:asst);
+select pg_temp.obj('inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('2') || '.jpg', 50);
+select public.photo_inbox_save_edit(:'j2', 'inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('2') || '.jpg', null, 1, false);
+reset role;
+select pg_temp.check(not exists (select 1 from public.photos where intake_item_id = :'j1')
+                     and (select release_after > now() + interval '23 hours' from public.photos where intake_item_id = :'j2' and kind = 'edited'),
+  'editing another photo of the set brings nothing back, and its edited copy, made after the window, gets a window of its own');
+-- 9e. Nobody files, moves or releases a Photo inbox photo directly (the doctor has "Upload" and "View raw" but not the Photo inbox).
+set role authenticated;
+select pg_temp.act_as(:doc);
+select pg_temp.expect_error(format('update public.photos set release_after = null, held_back = false where intake_item_id = %L', :'j2'), 'NOT_ALLOWED',
+  'the doctor cannot release a Photo inbox photo to the patient directly');
+select pg_temp.expect_error(format('update public.photos set patient_id = %L where intake_item_id = %L', :'p1', :'j2'), 'NOT_ALLOWED',
+  'nor move it to another patient');
+select pg_temp.act_as(:fd);
+select pg_temp.expect_error(format('insert into public.photos (patient_id, kind, storage_path, intake_item_id) values (%L, ''edited'', %L, %L)',
+  :'p6', :'p6' || '/edited/x.jpg', :'j3'), 'NOT_ALLOWED', 'the front desk cannot make a row that points at a Photo inbox photo');
+-- 9f. Claude: a rate limit, Anthropic down or the credit use up no try; an unreadable answer or a refused request do.
+reset role;
+set role service_role;
+select pg_temp.act_as('');
+select public.photo_inbox_ai_record(jsonb_build_object('set_id', :'t9', 'item_ids', jsonb_build_array(:'j3'), 'status', 'error', 'error_code', c, 'model', 'claude-opus-5-5'), '[]'::jsonb)
+  from unnest(array['RATE_LIMIT', 'API_DOWN', 'BILLING', 'NETWORK']) c;
+reset role;
+select pg_temp.check((select ai_attempts = 0 and ai_status = 'pending' from public.photo_inbox_items where id = :'j3'), 'errors that are not the photo''s fault use up no try');
+set role service_role;
+select public.photo_inbox_ai_record(jsonb_build_object('set_id', :'t9', 'item_ids', jsonb_build_array(:'j3'), 'status', s, 'error_code', e, 'model', 'claude-opus-5-5'), '[]'::jsonb)
+  from (values ('invalid', null), ('error', 'BAD_REQUEST')) x(s, e);
+reset role;
+select pg_temp.check((select ai_attempts = 2 and ai_status = 'pending' from public.photo_inbox_items where id = :'j3'), 'an unreadable answer and a refused request count');
+set role service_role;
+select public.photo_inbox_ai_record(jsonb_build_object('set_id', :'t9', 'item_ids', jsonb_build_array(:'j2'), 'status', 'ok', 'one_sitting', 'yes', 'model', 'claude-opus-5-5'),
+  jsonb_build_array(jsonb_build_object('item_id', :'j2', 'result', jsonb_build_object('kind', 'intraoral', 'view', 'intra_front'))));
+-- (the older days' photos are out of the way of the claims below)
+reset role;
+update public.photo_inbox_items set edit_status = 'skipped' where photo_day = :'d1'::date and edit_status <> 'done';
+-- 9g. Two pages of one login: the claim belongs to the page.
+set role authenticated;
+select pg_temp.act_as(:asst);
+create temp table t40_claim_a as select public.photo_inbox_claim_edits(10, false, '00000000-0000-4000-8000-00000000000a') as r;
+create temp table t40_claim_b as select public.photo_inbox_claim_edits(10, false, '00000000-0000-4000-8000-00000000000b') as r;
+select pg_temp.check((select r -> 0 ->> 'set_id' from t40_claim_a) = :'t9'
+                     and not exists (select 1 from t40_claim_b, jsonb_array_elements(r) x where x ->> 'set_id' = :'t9')
+                     and (select r -> 0 ->> 'ref_item_id' from t40_claim_a) = :'j2',
+  'a second page of the same login does not get the photos the first page holds; the first gets a reference photo of the set for Claude');
+select pg_temp.expect_error(format('select public.photo_inbox_save_edit(%L, %L, null, 1, false, %L)', :'j3', 'inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('3') || '.jpg',
+  '00000000-0000-4000-8000-00000000000b'), 'another page', 'the other page cannot save an edit of a photo the first one holds');
+select pg_temp.check(public.photo_inbox_renew_edits(array[:'j3', :'j4']::uuid[], '00000000-0000-4000-8000-00000000000a') = 2, 'the first page keeps its photos while it works');
+-- 9h. HEIC that Safari cannot decode either: three tries, then it is not handed out again.
+select public.photo_inbox_edit_failed(:'j4', 'HEIC_DECODE', '00000000-0000-4000-8000-00000000000a') from generate_series(1, 3);
+select pg_temp.check((select edit_status = 'needs_safari' and edit_attempts = 3 from public.photo_inbox_items where id = :'j4')
+                     and not exists (select 1 from jsonb_array_elements(public.photo_inbox_claim_edits(10, true, '00000000-0000-4000-8000-00000000000c')) x
+                                      where x ->> 'item_id' = :'j4'),
+  'after three failed tries a HEIC photo is not handed to a Safari page again (no endless downloads)');
+-- 9i. "Try Claude again": a basic edit goes back to Claude and gets a new file name.
+select pg_temp.obj('inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('3') || '.jpg', 50);
+select public.photo_inbox_save_edit(:'j3', 'inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('3') || '.jpg', null, 1, true, '00000000-0000-4000-8000-00000000000a');
+select pg_temp.check((public.photo_inbox_redo_edits(:'t9') ->> 'photos')::int = 2, '"Try Claude again" takes the basic edit and the HEIC photo back');
+select pg_temp.check((select ai_status = 'pending' and edit_status = 'pending' and edit_round = 2 and ai_attempts = 0 from public.photo_inbox_items where id = :'j3'),
+  'the photo waits for Claude again, as edit round 2');
+select pg_temp.expect_error(format('select public.photo_inbox_save_edit(%L, %L, null, 1, false)', :'j3', 'inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('3') || '.jpg'),
+  'PHOTO_BAD_INPUT', 'the new edit has a new file name (the old copy is not overwritten)');
+select pg_temp.obj('inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('3') || '-r2.jpg', 60);
+select public.photo_inbox_save_edit(:'j3', 'inbox/karachi/' || :'d2' || '/edited/' || pg_temp.sha('3') || '-r2.jpg', null, 1, false);
+reset role;
+select pg_temp.check((select storage_path like '%-r2.jpg' and release_after > now() + interval '23 hours' from public.photos where intake_item_id = :'j3' and kind = 'edited')
+                     and (select count(*) from public.photos where intake_item_id = :'j3' and kind = 'edited') = 1,
+  'the patient''s edited row points at the new copy, with a new window');
+-- 9j. Merging the patient into another record (their visits that day clash): the set follows the photos.
+set role authenticated;
+select pg_temp.act_as(:admin);
+select public.merge_patients(:'p5', :'p6');
+reset role;
+select pg_temp.check((select patient_id = :'p5'::uuid and visit_id = :'v8'::uuid from public.photo_inbox_sets where id = :'t9')
+                     and not exists (select 1 from public.photos where intake_set_id = :'t9' and patient_id <> :'p5'::uuid),
+  'after a merge the filed set names the kept patient and visit, like its photos');
+select pg_temp.act_as(:asst);
+set role authenticated;
+select pg_temp.check((public.photo_inbox_counts() ->> 'check')::int = 0, 'no set is left filed to nobody');
 reset role;
 select pg_temp.act_as('');
 rollback;

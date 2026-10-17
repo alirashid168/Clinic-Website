@@ -124,11 +124,28 @@ test('checkAnalyzeBody: a set, 1-8 photos, base64 JPEGs of a sane size', () => {
   assert.equal(checkAnalyzeBody({ set_id: SET, items: [{ ...items[0], image: 'iVBORw0KGgo=' }] }).ok, false, 'a PNG');
   assert.equal(checkAnalyzeBody({ set_id: SET, items: [{ ...items[0], image: '/9j/' + 'A'.repeat(700001) }] }).ok, false, 'too large');
   assert.equal(checkAnalyzeBody({ set_id: SET, items: [items[0], items[0]] }).ok, false, 'the same photo twice');
+  assert.equal(checkAnalyzeBody({ set_id: SET, items: [{ ...items[0], reference: true }, items[1]] }).ok, true, 'a reference photo first');
+  assert.equal(checkAnalyzeBody({ set_id: SET, items: [items[0], { ...items[1], reference: true }] }).ok, false, 'a reference photo only first');
+  assert.equal(checkAnalyzeBody({ set_id: SET, items: [{ ...items[0], reference: true }] }).ok, false, 'not only a reference photo');
+});
+
+test('runAnalyze: a reference photo from an earlier call is labelled, counts for one_sitting, and its answer is not used again', async () => {
+  let sent: any = null;
+  const out = await runAnalyze({ create: async (p) => { sent = p; return answer({ one_sitting: 'no', photos: [photo(1), photo(2, { view: 'intra_left' })] }) as any; },
+    items: [{ ...items[0], reference: true }, items[1]], setId: SET });
+  const labels = sent.messages[0].content.filter((b: any) => b.type === 'text').map((b: any) => b.text);
+  assert.match(labels[1], /^Photo 1 \(1024x768 pixels, from the same set, already reported in an earlier request: include it in one_sitting\)$/);
+  assert.equal(labels[2], 'Photo 2 (768x1024 pixels)');
+  assert.deepEqual(out.results.map((r) => r.item_id), [ID2], 'only the new photo is answered');
+  assert.deepEqual(out.call.item_ids, [ID2]);
+  assert.equal(out.call.photo_count, 2, 'the reference photo is paid for');
+  assert.equal(out.call.one_sitting, 'no', 'a change of patient between two calls is seen');
 });
 
 // ---------------------------------------------------------------- the handler
 const env: Record<string, string> = { SUPABASE_URL: 'http://localhost', SUPABASE_ANON_KEY: 'anon-key', SUPABASE_SERVICE_ROLE_KEY: 'service-key' };
-const world = { user: 'staff-1' as string | null, allowed: true, setVisible: true, rpcs: [] as Array<[string, any]>, opts: null as any, create: null as any };
+const world = { user: 'staff-1' as string | null, allowed: true, setVisible: true, rpcs: [] as Array<[string, any]>, opts: null as any, create: null as any,
+  itemRows: null as null | ((ids: string[]) => Array<{ id: string; set_id: string; ai_status: string }>) };
 let handler: (req: Request) => Promise<Response>;
 (globalThis as any).Deno = { env: { get: (k: string) => env[k] }, serve: (h: typeof handler) => { handler = h; } };
 (globalThis as any).__fakeCreateClient = (_url: string, key: string) => (key === 'service-key'
@@ -136,7 +153,10 @@ let handler: (req: Request) => Promise<Response>;
   : {
     auth: { getUser: async () => ({ data: { user: world.user ? { id: world.user } : null } }) },
     rpc: async (name: string) => (name === 'photo_inbox_ai_allowed' ? { data: world.allowed, error: null } : { data: null, error: null }),
-    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: world.setVisible ? { id: SET } : null, error: null }) }) }) }),
+    from: () => ({ select: () => ({
+      eq: () => ({ maybeSingle: async () => ({ data: world.setVisible ? { id: SET } : null, error: null }) }),
+      in: async (_col: string, ids: string[]) => ({ data: world.itemRows ? world.itemRows(ids) : ids.map((id) => ({ id, set_id: SET, ai_status: 'pending' })), error: null }),
+    }) }),
   });
 (globalThis as any).__fakeAnthropic = world;
 const SDK = `
@@ -165,7 +185,7 @@ async function call(body: unknown) {
   const res = await handler(new Request('http://localhost/functions/v1/photo-ai', { method: 'POST', headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
   return { status: res.status, body: await res.json() as any };
 }
-const reset = (o: Partial<typeof world> = {}) => { Object.assign(world, { user: 'staff-1', allowed: true, setVisible: true, rpcs: [], opts: null, create: null }, o); delete env.ANTHROPIC_API_KEY; };
+const reset = (o: Partial<typeof world> = {}) => { Object.assign(world, { user: 'staff-1', allowed: true, setVisible: true, rpcs: [], opts: null, create: null, itemRows: null }, o); delete env.ANTHROPIC_API_KEY; };
 const logs: string[] = [];
 const origLog = console.log;
 console.log = (...a: unknown[]) => { logs.push(a.map(String).join(' ')); };
@@ -187,7 +207,7 @@ test('handler: analyze without the key says NO_KEY and calls nobody; a bad body 
   reset();
   world.create = async () => { throw new Error('must not be called'); };
   assert.deepEqual((await call({ action: 'analyze', set_id: SET, items })).body, { ok: false, code: 'NO_KEY' });
-  assert.equal((await call({ action: 'analyze', set_id: SET, items: [] })).status, 400);
+  assert.deepEqual(await call({ action: 'analyze', set_id: SET, items: [] }), { status: 400, body: { ok: false, code: 'BAD_BODY' } }, 'its own refusal is BAD_BODY, not an Anthropic 400');
   env.ANTHROPIC_API_KEY = 'k';
   world.setVisible = false;
   assert.equal((await call({ action: 'analyze', set_id: SET, items })).status, 403);
@@ -232,8 +252,32 @@ test('handler: the SDK\'s typed errors become codes the page acts on, and the fa
   assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.code, 'API_DOWN');
   world.create = async () => { throw new (E().BadRequestError)(400, 'bad'); };
   assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.code, 'BAD_REQUEST');
+  assert.equal(world.rpcs.at(-1)![1].p_call.error_code, 'BAD_REQUEST', 'logged with its code (the database counts it as a try)');
+  world.create = async () => { throw new (E().APIError)(402, 'credit balance is too low'); };
+  assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.code, 'BILLING', 'no credit left: the page stops and says so');
+  world.create = async () => { throw new (E().APIError)(404, 'model not found'); };
+  assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.code, 'CONFIG');
+  world.create = async () => { throw new (E().APIError)(413, 'too large'); };
+  assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.code, 'CONFIG');
   world.create = async () => { throw new TypeError('boom'); };
   assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.code, 'SERVER');
+});
+
+test('handler: only photos of the set that still wait for Claude are sent (another page did the others: nothing is paid twice)', async () => {
+  reset();
+  env.ANTHROPIC_API_KEY = 'k';
+  world.itemRows = (ids) => ids.map((id) => ({ id, set_id: SET, ai_status: id === ID1 ? 'done' : 'pending' }));
+  let sent: any = null;
+  world.create = async (p: any) => { sent = p; return answer({ one_sitting: 'yes', photos: [photo(1)] }); };
+  const r = await call({ action: 'analyze', set_id: SET, items });
+  assert.equal(r.body.status, 'ok');
+  assert.equal(sent.messages[0].content.filter((b: any) => b.type === 'image').length, 1, 'only the photo still waiting');
+  assert.deepEqual(r.body.results.map((x: any) => x.item_id), [ID2]);
+  world.itemRows = (ids) => ids.map((id) => ({ id, set_id: SET, ai_status: 'done' }));
+  world.create = async () => { throw new Error('must not be called'); };
+  assert.deepEqual((await call({ action: 'analyze', set_id: SET, items })).body, { ok: true, status: 'skipped', results: [], cost_usd: 0, served_model: null });
+  world.itemRows = (ids) => ids.map((id) => ({ id, set_id: '44444444-4444-4444-8444-444444444444', ai_status: 'pending' }));
+  assert.equal((await call({ action: 'analyze', set_id: SET, items })).body.status, 'skipped', 'photos of another set are never sent');
 });
 
 test('handler: nothing of the images (or the key) reaches the logs', () => {

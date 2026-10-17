@@ -10194,6 +10194,48 @@ await step('Photo inbox without the AI key: "Editing waits for the AI key", and 
   await pboxAi.evaluate(() => localStorage.removeItem('demo-photo-ai'));
 });
 await pboxAi.close();
+const pboxRedo = await newPage();
+await step('Claude refuses (the demo plays it): the photos get a basic edit, the Filed list says so and offers "Try Claude again"; the upload shows each camera\'s last photo time', async () => {
+  await pboxRedo.goto(BASE + '#/login/staff');
+  await pboxRedo.evaluate(() => localStorage.setItem('demo-photo-ai', 'refused'));
+  await loginAs(pboxRedo, 'Assistant');
+  await pboxRedo.goto(BASE + '#/staff/photo-inbox');
+  await pboxRedo.waitForSelector('h1:text-is("Photo inbox")');
+  await inboxInput(pboxRedo).setInputFiles(await makePhotos(pboxRedo, DAY_PHOTOS.slice(0, 3)));
+  await pboxRedo.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxRedo.locator('.inbox-summary').innerText(), /iPhone 13: 3 photos, the last at 6:36 PM \(now /);
+  await pboxRedo.waitForFunction(() => document.querySelector('.inbox-banner')?.textContent.includes('All photos edited.'), null, { timeout: 30000 });
+  await pboxRedo.getByRole('tab', { name: 'Filed' }).click();
+  const filed = pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' });
+  await filed.waitFor();
+  assert.match(await filed.innerText(), /Claude could not edit 3 photos: basic edit made\./);
+});
+await step('"Try Claude again" with Claude back: the three photos are edited by Claude this time (new copies; the basic ones are kept as files)', async () => {
+  await pboxRedo.evaluate(() => localStorage.removeItem('demo-photo-ai'));
+  const filed = pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' });
+  await filed.getByRole('button', { name: 'Try Claude again' }).click();
+  await pboxRedo.waitForSelector('.toast:has-text("3 photos will be edited again by Claude.")');
+  let text = '';
+  for (let i = 0; i < 40; i++) {
+    await pboxRedo.waitForTimeout(750);
+    await pboxRedo.getByRole('tab', { name: 'Filed' }).click();
+    await pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' }).waitFor();
+    text = await pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' }).innerText();
+    if (/Edited\./.test(text) && !/basic edit/.test(text)) break;
+  }
+  assert.match(text, /Edited\./);
+  assert.doesNotMatch(text, /basic edit/);
+  assert.equal(await pboxRedo.locator('.inbox-filed', { hasText: 'Sana Farooq' }).getByRole('button', { name: 'Try Claude again' }).count(), 0);
+});
+await step('No Anthropic credit (the demo plays it): editing stops with a clear message for Dr. Ali instead of making basic edits', async () => {
+  await pboxRedo.evaluate(() => localStorage.setItem('demo-photo-ai', 'BILLING'));
+  await pboxRedo.getByRole('tab', { name: 'Upload' }).click();
+  await inboxInput(pboxRedo).setInputFiles(await makePhotos(pboxRedo, DAY_PHOTOS.slice(3, 5)));
+  await pboxRedo.waitForSelector('.inbox-done', { timeout: 30000 });
+  await pboxRedo.waitForSelector('.inbox-banner:has-text("Editing stopped: the Anthropic account has no credit left.")', { timeout: 30000 });
+  await pboxRedo.evaluate(() => localStorage.removeItem('demo-photo-ai'));
+});
+await pboxRedo.close();
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

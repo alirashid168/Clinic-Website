@@ -7,7 +7,9 @@ import {
   readExif, withExif, parseExifDate, captureTime, fileSeq, cameraKey, sniffType, inboxPaths, citySlug, karachiDate, karachiClock, dayLabel,
   groupItems, visitFacts, scorePair, assignDay, planDay, planUnchanged, waitSentence, WAIT_REASONS,
   VIEW_KEYS, KINDS, viewName, occasionLabel, viewLabel, downloadName, uniqueNames, editPlan, adjustPixels, GAP_SEC, MIN_PAIR,
+  cameraClocks, editTransform, isConnectionProblem,
 } from '../web/js/lib/photo-intake.js';
+import { storageProblem } from '../web/js/data/supabase-inbox.js';
 import { VIEW_KEYS as CORE_VIEWS, KINDS as CORE_KINDS } from '../supabase/functions/photo-ai/core.ts';
 
 const JPEG = new Uint8Array([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xFF, 0xD9]);
@@ -392,4 +394,191 @@ test('adjustPixels: a colour cast is corrected within the caps, levels stretch, 
   const d = adjustPixels(dark, { width: 20, height: 20, gammaFloor: 0.7 });
   assert.ok(d.gamma >= 0.7 && d.gamma <= 1);
   assert.ok(dark[0] >= 40, 'a dark photo gets brighter');
+});
+
+// ---------------------------------------------------------------- review fixes (17 Oct)
+test('review: a photo patient who already has photos still stops an automatic filing (a re-plan right after a one-tap filing)', () => {
+  const s1 = sitting('17:05', 5); const s2 = sitting('17:30', 3);
+  const A = visit('a1', { photo_required: true, braces_month: 6, started_at: at('17:00'), completed_at: at('17:45') });
+  const B = visit('b1', { photo_required: true, braces_month: 4, started_at: at('17:10'), completed_at: at('18:00') });
+  const p0 = planDay(day([A, B], [...s1, ...s2]));
+  assert.equal(groupOf(p0, s1[0]).wait_reason, 'AMBIGUOUS');
+  assert.equal(groupOf(p0, s2[0]).wait_reason, 'AMBIGUOUS');
+  // staff tap set 1 -> A; matching runs again at once: set 2 may be A's too, so it never goes to B by itself
+  const sets = [{ set_id: 'F1', status: 'filed', manual: false, camera: 'apple|iphone 13', branch_hint: 3, visit_id: 'a1' }];
+  const p1 = planDay(day([{ ...A, photos_uploaded: true, filed_set_ids: ['F1'] }, B], [...s1.map((x) => ({ ...x, set_id: 'F1' })), ...s2], sets));
+  const g2 = groupOf(p1, s2[0]);
+  assert.equal(g2.auto, null);
+  assert.equal(g2.wait_reason, 'HAS_PHOTOS');
+  assert.deepEqual(g2.candidates.slice(0, 2).map((c: any) => c.visit_id), ['b1', 'a1'], 'both photo patients on the card, the one with photos marked');
+  assert.ok(g2.candidates[1].reasons.includes('HAS_PHOTOS'));
+  // a second phone later the same day, with another photo month in the chair (spec example 9 with an overlap): waits as well
+  const filedItems = sitting('18:35', 3).map((x) => ({ ...x, set_id: 'SA' }));
+  const vs = [visit('ayesha', { photo_required: true, braces_month: 10, started_at: at('18:31'), completed_at: at('18:59'), photos_uploaded: true, filed_set_ids: ['SA'] }),
+    visit('zara', { photo_required: true, braces_month: 7, started_at: at('18:38'), completed_at: at('19:10') })];
+  const phoneB = sitting('18:40', 2, { camera: 'samsung|a54' });
+  const g = groupOf(planDay(day(vs, [...filedItems, ...phoneB], [{ ...sets[0], set_id: 'SA', visit_id: 'ayesha' }])), phoneB[0]);
+  assert.equal(g.auto, null);
+  assert.equal(g.wait_reason, 'HAS_PHOTOS');
+});
+
+test('review: two phones of the same model (date-named files) uploaded by two people, or one person in two uploads, stay apart', () => {
+  const shot = (hm: string, i: number, o: Item) => item(new Date(Date.parse(at(hm)) + i * 30000).toISOString(), { camera: 'samsung|sm-a145f', branch_hint: 3, file_name: `20261016_17${hm.slice(3)}${i}0.jpg`, ...o });
+  const a = Array.from({ length: 5 }, (_, i) => shot('17:10', i, { uploaded_by: 'u1', upload_batch: 'b1' }));
+  const r = Array.from({ length: 5 }, (_, i) => shot('17:11', i, { uploaded_by: 'u2', upload_batch: 'b2' }));
+  assert.equal(fileSeq(a[0].file_name), null, 'no file counter to tell them apart');
+  const vs = [visit('a2', { photo_required: true, started_at: at('17:00'), completed_at: at('17:30') }), visit('r2', { treatment_label: 'Scaling', started_at: at('17:05'), completed_at: at('17:30') })];
+  const plan = planDay(day(vs, [...a, ...r]));
+  assert.equal(plan.groups.length, 2);
+  assert.deepEqual(groupOf(plan, a[0]).item_ids, a.map((x) => x.item_id));
+  assert.deepEqual(groupOf(plan, r[0]).item_ids, r.map((x) => x.item_id));
+  assert.equal(groupOf(plan, r[0]).auto, null, 'the other person\'s photos never go into the photo month\'s file');
+  const sameUploader = r.map((x) => ({ ...x, uploaded_by: 'u1' }));
+  assert.equal(groupItems([...a, ...sameUploader]).length, 2, 'one person, two uploads: two streams');
+});
+
+test('review: a camera clock is judged over the whole upload: running ahead, or a phone on the wrong time zone', () => {
+  const up = Date.parse(at('21:00'));
+  const t = (hm: string) => captureTime({ exif: { make: 'Samsung', model: 'SM-A145F', dateTimeOriginal: `2026:10:16 ${hm}:00` }, uploadedAt: up, pickedAt: up });
+  const ahead = cameraClocks([{ t: t('18:10'), lastModified: up, pickedAt: up }, { t: t('21:08'), lastModified: up, pickedAt: up }], up);
+  assert.equal(t('21:08').clock_ok, true, 'each photo alone looks fine');
+  assert.deepEqual(ahead.map((c) => [c.camera, c.suspect, c.why]), [['samsung|sm-a145f', true, 'ahead']], 'the newest photo is 8 minutes after the upload: every photo of that camera waits');
+  const zone = cameraClocks(['17:00', '17:20', '17:40'].map((hm) => ({ t: t(hm), lastModified: Date.parse(at(hm)) + 60 * 60 * 1000, pickedAt: up })), up);
+  assert.equal(zone[0].why, 'zone', 'camera times one hour away from the files\' own times on every photo: the time zone is wrong');
+  const fine = cameraClocks(['17:00', '17:20'].map((hm) => ({ t: t(hm), lastModified: Date.parse(at(hm)) + 2000, pickedAt: up })), up);
+  assert.equal(fine[0].suspect, false);
+  const copied = cameraClocks(['17:00', '17:20', '17:40'].map((hm, i) => ({ t: t(hm), lastModified: up - (3 + i * 7) * 60 * 1000 - 37000, pickedAt: up })), up);
+  assert.equal(copied[0].suspect, false, 'files copied later (their own dates have nothing to do with the photo) are not taken for a time zone');
+  assert.equal(fine[0].newest, Date.parse(at('17:20')), 'the newest photo time is shown on the upload screen');
+  // a photo without a camera time keeps the day of its file date (a next-morning upload is shown with that day's list)
+  const next = Date.parse(at('10:00', 0, '2026-10-17'));
+  assert.equal(captureTime({ lastModified: Date.parse(at('17:00')), pickedAt: next, uploadedAt: next }).photo_day, DAY);
+});
+
+test('review: a patient with two rows that day (a Dr. Ali visit and a photo month) stands for the photo month and counts as in the chair', () => {
+  const s = sitting('16:50', 4);
+  const vs = [visit('x-drali', { patient_id: 'p-x', treatment_label: 'Dr. Ali', started_at: at('16:10'), completed_at: at('16:20') }),
+    visit('x-m6', { patient_id: 'p-x', photo_required: true, braces_month: 6, started_at: at('16:40'), completed_at: at('17:10') }),
+    visit('y', { photo_required: true, braces_month: 4, started_at: at('16:45'), completed_at: at('17:20') })];
+  const g = groupOf(planDay(day(vs, s)), s[0]);
+  assert.equal(g.auto, null, 'not filed to Y by itself');
+  assert.equal(g.wait_reason, 'AMBIGUOUS');
+  const ids = g.candidates.map((c: any) => c.visit_id);
+  assert.ok(ids.includes('x-m6') && !ids.includes('x-drali'), 'a tap on X files to the photo-month visit');
+});
+
+test('review: the day\'s order is kept per branch chosen (and per phone without one): one branch\'s set never loses its patient to another branch\'s', () => {
+  const gul = sitting('17:05', 3, { branch_hint: 1 }); const dha = sitting('17:15', 3, { branch_hint: 3 });
+  const vs = [visit('p1', { branch_id: 1, photo_required: true, started_at: at('17:00') }),
+    visit('p2', { branch_id: 3, photo_required: true, started_at: at('16:00'), completed_at: at('17:30') })];
+  const plan = planDay(day(vs, [...gul, ...dha]));
+  assert.equal(groupOf(plan, gul[0]).auto?.visit_id, 'p1');
+  assert.equal(groupOf(plan, dha[0]).auto?.visit_id, 'p2', 'planned together, the DHA set still files (it waited TWO_SETS before)');
+  // without a branch, from two phones: the card never highlights a pairing that scores lower than the top one
+  const g2 = sitting('17:05', 3, { branch_hint: null, uploaded_by: 'u1' }); const d2 = sitting('17:15', 3, { branch_hint: null, camera: 'samsung|a54', uploaded_by: 'u2' });
+  const plan2 = planDay(day(vs, [...g2, ...d2]));
+  const c = groupOf(plan2, g2[0]).candidates;
+  assert.equal(c[0].visit_id, 'p1');
+  assert.ok(c.every((x: any) => !x.proposal || x.score >= c[0].score));
+});
+
+test('review: a plan the server refused before is not sent again (nothing changed); the start the page went by is sent with the filing', () => {
+  const w = sitting('19:10', 2);
+  const vs = [visit('p', { photo_required: true, started_at: at('19:05') })];
+  const p1 = planDay(day(vs, w));
+  assert.ok(p1.groups[0].auto);
+  const refused = day(vs, w.map((x) => ({ ...x, set_id: 'S1' })), [{ set_id: 'S1', status: 'waiting', manual: false, wait_reason: 'SERVER_CHECK', candidates: p1.groups[0].candidates }]);
+  const p2 = planDay(refused);
+  assert.equal(p2.groups[0].auto, null);
+  assert.equal(p2.groups[0].wait_reason, 'SERVER_CHECK');
+  assert.ok(planUnchanged(p2, refused), 'matching every 3 minutes writes nothing');
+  // starts marked in one go (19:00:00, 19:00:30, 19:01:00) with real check-ins: the page goes by the check-in and says so
+  const bulk = [visit('a', { branch_id: 1, photo_required: true, checked_in_at: at('17:20'), started_at: at('19:00', 0) }),
+    visit('b', { branch_id: 1, checked_in_at: at('18:00'), started_at: at('19:00', 30) }), visit('c', { branch_id: 1, checked_in_at: at('18:30'), started_at: at('19:01', 0) })];
+  const s = sitting('17:30', 3, { branch_hint: 1 });
+  const g = groupOf(planDay(day(bulk, s)), s[0]);
+  assert.equal(g.auto?.visit_id, 'a');
+  assert.equal(g.auto.anchor_at, at('17:20'));
+});
+
+test('review: without a chosen branch, a patient in the chair at another branch stops the automatic filing (NO_BRANCH)', () => {
+  const vs = [visit('p1', { branch_id: 3, photo_required: true, started_at: at('17:00') }),
+    visit('g', { branch_id: 1, treatment_label: 'Scaling', started_at: at('16:50'), completed_at: at('17:30') })];
+  const open = sitting('17:05', 3, { branch_hint: null });
+  const g = groupOf(planDay(day(vs, open)), open[0]);
+  assert.equal(g.auto, null);
+  assert.equal(g.wait_reason, 'NO_BRANCH');
+  const dha = sitting('18:05', 3, { branch_hint: 3 });
+  const vs2 = vs.map((v) => ({ ...v, started_at: v.visit_id === 'p1' ? at('18:00') : at('17:50'), completed_at: v.visit_id === 'g' ? at('18:30') : null }));
+  assert.equal(groupOf(planDay(day(vs2, dha)), dha[0]).auto?.visit_id, 'p1', 'with the branch chosen it files');
+  assert.match(waitSentence('NO_BRANCH'), /choose the branch before uploading/);
+});
+
+test('review: joining a filed set: inside its time too (a photo retried), never when two filed sets would fit, never from another person', () => {
+  const f = [item(at('18:30', 0), { set_id: 'F', uploaded_by: 'u1', upload_batch: 'b1' }), item(at('18:31', 0), { set_id: 'F', uploaded_by: 'u1', upload_batch: 'b1' }),
+    item(at('18:32', 0), { set_id: 'F', uploaded_by: 'u1', upload_batch: 'b1' })];
+  const F = { set_id: 'F', status: 'filed', manual: false, items: f };
+  const middle = item(at('18:31', 30), { uploaded_by: 'u1', upload_batch: 'b2' });
+  assert.equal(groupItems([middle], [F])[0].join_set_id, 'F', 'a photo from the middle of the sitting, uploaded again later');
+  assert.equal(groupItems([{ ...middle, uploaded_by: 'u2' }], [F])[0].join_set_id, null, 'another person\'s photo does not join');
+  const fa = [item(at('18:18', 0), { set_id: 'FA' }), item(at('18:20', 0), { set_id: 'FA' })];
+  const fb = [item(at('18:25', 0), { set_id: 'FB' }), item(at('18:26', 0), { set_id: 'FB' })];
+  const between = item(at('18:22', 30));
+  assert.equal(groupItems([between], [{ set_id: 'FA', status: 'filed', manual: false, items: fa }, { set_id: 'FB', status: 'filed', manual: false, items: fb }])[0].join_set_id, null,
+    'within 3 minutes of two filed sets: it waits on "Which patient?"');
+});
+
+test('review: photos without a usable time get no likely patients (the day cannot be trusted); old photos say so', () => {
+  const none = item(null, { item_id: 'nt1', branch_hint: 3 });
+  const vs = [visit('ayesha', { photo_required: true, started_at: at('18:31') })];
+  const g = groupOf(planDay(day(vs, [none])), none);
+  assert.equal(g.wait_reason, 'NO_TIME');
+  assert.deepEqual(g.candidates, [], 'no buttons: the person types the name');
+  const old = item('2026-10-07T13:00:00.000Z', { item_id: 'old1', clock_ok: false, uploaded_at: at('10:00', 0, '2026-10-16') });
+  assert.equal(groupOf(planDay(day(vs, [old])), old).wait_reason, 'OLD');
+  assert.match(waitSentence('OLD', { date: 'Wed 7 Oct, 6:00 PM' }), /^Taken more than a week before it was uploaded/);
+  const fast = item(at('18:40'), { item_id: 'fast1', clock_ok: false, uploaded_at: at('21:00') });
+  assert.equal(groupOf(planDay(day(vs, [fast])), fast).wait_reason, 'CLOCK');
+});
+
+test('review: a photo saved on the profile (no occasion, a braces month) downloads with its Month', () => {
+  assert.equal(downloadName({ full_name: 'Ayesha Khan', mr_number: '50013', braces_month: 6, view_label: 'Front', taken_on: '2026-10-16', kind: 'edited' }),
+    'Ayesha Khan - Mr# 50013 - Month 6 - Front - 16-10-2026.jpg');
+});
+
+test('review: the edit transform levels a tilted photo the way Claude means it, mirrored or not', () => {
+  const ai = (o: Record<string, unknown>) => ({ kind: 'intraoral', rotate: 0, mirror: false, straighten: 0, crop: { left: 0, top: 0, right: 1, bottom: 1 }, exposure: 'ok', color_cast: 'none', ...o });
+  const through = (plan: any, x: number, y: number) => { const m = editTransform(plan); return [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f]; };
+  const rad = (deg: number) => deg * Math.PI / 180;
+  // mirrored: the line is tilted +5 degrees in the photo as taken, -5 after the flip; "straighten 5" (clockwise, after the flip) levels it
+  const mp = editPlan(ai({ mirror: true, straighten: 5 }), 1000, 800);
+  const [, y0] = through(mp, 0, 0);
+  const [x1, y1] = through(mp, 100 * Math.cos(rad(5)), 100 * Math.sin(rad(5)));
+  assert.ok(Math.abs(y1 - y0) < 1e-9, `level after the flip (was ${y1 - y0})`);
+  assert.ok(x1 < mp.outW / 2, 'and flipped left to right');
+  // not mirrored: a line tilted -5 degrees is levelled by turning it 5 degrees clockwise
+  const np = editPlan(ai({ straighten: 5 }), 1000, 800);
+  const [, a0] = through(np, 0, 0);
+  const [, a1] = through(np, 100 * Math.cos(rad(-5)), 100 * Math.sin(rad(-5)));
+  assert.ok(Math.abs(a1 - a0) < 1e-9);
+  // a quarter turn and the flip together: the photo's top edge becomes the right edge, then the left
+  const q = editPlan(ai({ rotate: 90, mirror: true }), 1000, 800);
+  const [tx] = through(q, 0, -100);
+  assert.ok(tx < q.outW / 2, 'turned then flipped');
+});
+
+test('review: connection problems are told apart from refusals, and a rate limit is never "storage full"', () => {
+  assert.equal(isConnectionProblem({ message: 'TypeError: Failed to fetch' }), true);
+  assert.equal(isConnectionProblem({ status: 502, message: 'Bad gateway' }), true);
+  assert.equal(isConnectionProblem({ code: 'TIMEOUT', message: 'Timed out' }), true);
+  assert.equal(isConnectionProblem({ photoCode: 'PHOTO_STALE', message: 'PHOTO_STALE: someone changed these photos' }), false);
+  assert.equal(isConnectionProblem({ message: 'NOT_ALLOWED: no' }), false);
+  assert.equal(storageProblem({ status: 429, message: 'Rate limit exceeded' }), 'NETWORK');
+  assert.equal(storageProblem({ status: 503, message: 'The service quota was exceeded' }), 'NETWORK');
+  assert.equal(storageProblem({ status: 402, message: '' }), 'STORAGE_FULL');
+  assert.equal(storageProblem({ status: 400, message: 'The storage quota exceeded for this project' }), 'STORAGE_FULL');
+  assert.equal(storageProblem({ status: 413, message: 'Payload too large' }), 'TOO_LARGE');
+  assert.equal(storageProblem({ status: 409, message: 'The resource already exists' }), 'ALREADY');
+  assert.equal(storageProblem({ status: 403, message: 'new row violates row-level security policy' }), 'NOT_ALLOWED');
+  assert.equal(storageProblem({ message: 'Failed to fetch' }), 'NETWORK');
 });
