@@ -14,7 +14,9 @@
  *   A row of today deleted in the sheet is removed from the website too (the website refuses when something real hangs on it); a
  *   patient who is done (Completed, Treatment, Cancelled) only goes off the sheet and stays on the website as it is. Every call says
  *   so to the website (keep_rows); a website that does not know it yet answers as before. A done patient's row typed over with another
- *   patient comes back at the bottom ("Put back"), so the assistant still enters that patient in Healthwire.
+ *   patient comes back at the bottom ("Put back"), so the assistant still enters that patient in Healthwire; a kept row typed over (or
+ *   moved off its key) by mistake is the same kept row again after a Ctrl+Z. A patient whose done row was taken off the sheet and who comes
+ *   again the same day is typed in a new row and gets a second visit (the website's side, 20261017000100).
  *   The branch tabs are Google Sheets tables: the Advanced Sheets service ("Sheets", apps-script/appsscript.json) lets Set up widen each
  *   table over the hidden columns, so a sort moves whole rows. Without it the sync still works (the log says what to do by hand).
  *   Setup, step by step: docs/AAJ-SYNC-SETUP.md
@@ -71,7 +73,10 @@ var AAJ = {
   // Kept rows are read every full minute and cost run time: from this many on one tab the heading asks staff to delete the ones that are
   // in Healthwire (nothing stops). Not measured on Google yet: watch Aaj Sync > Status the first week.
   KEPT_WARN: 250,
-  KEPT_UNDO_MS: 600000,        // a kept row whose cells were cleared keeps its hidden key this long (a Ctrl+Z makes it the same kept row)
+  KEPT_UNDO_MS: 600000,        // a kept row whose cells were cleared (or typed over, or moved off its key) is the same kept row again after a Ctrl+Z this long
+  KEPT_PARK_MAX: 60,           // kept rows typed over or moved off their key whose memory is kept for that Ctrl+Z, per tab ("kd:<tab>:<n>")
+  RETYPED_MS: 600000,          // a done patient typed over is put back only when the row was typed in this recently; the key is kept this long at most
+  RETYPED_WAIT_MS: 30000,      // ... and only from the next minute on (a Ctrl+Z in that minute brings the row back itself)
   OFF_KEEP_MAX: 200,           // done patients taken off the sheet whose cells are kept for the night (when the last sync fails), per tab
   HEADER_REFRESH_MS: 300000,
   EMPTY_TICKS: 3,
@@ -504,7 +509,8 @@ function aajPendingMoved(cells, cols, s) {
  * (aajSamePerson), and no other row holds its exact name and phone (aajMovedAway). An Mr# typed with another name is another person. So
  * the assistant may add the Mr# a row needed, or correct a phone or a slip in the name while she enters it in Healthwire: the row stays that
  * day's row and is never sent as a visit of today (RV10-1). A row an older version of this script left behind (no mark) keeps the strict
- * rule: the same Mr#, name and phone. exact = aajScanTab's map of exact names and phones (r = this row). Pure.
+ * rule: the same Mr#, name and phone. exact = the map of exact names and phones of the rows that can say the person moved away
+ * (aajMovedEvidence: never today's row of the same patient, REV2-H), or a function that makes it (r = this row). Pure.
  */
 function aajKeptPerson(cells, cols, base, exact, r) {
   var s = base.s || {}, w = base.w || {};
@@ -512,21 +518,67 @@ function aajKeptPerson(cells, cols, base, exact, r) {
   if (!base.a) return false;
   var nameText = cols.name === undefined ? '' : aajText(cells[cols.name]);
   var phone = cols.phone === undefined ? null : aajFirstPhone(cells[cols.phone]);
-  if (!aajSamePerson(nameText, phone, s, w) || aajMovedAway(nameText, phone, s, w, exact || {}, r)) return false;
+  if (!aajSamePerson(nameText, phone, s, w)) return false;
+  if (aajMovedAway(nameText, phone, s, w, (typeof exact === 'function' ? exact() : exact) || {}, r)) return false;
   var mr = cols.mr === undefined ? null : aajMrOf(aajText(cells[cols.mr])).mr;
   if (mr && mr !== String(s.mr === undefined ? '' : s.mr) && mr !== String(w.mr || '') && !aajSameName(nameText, s, w)) return false;
   return true;
 }
 
-/** Every named row's exact name and phone (aajMovedAway): {key: [row numbers]}. Pure. */
-function aajExactMap(grid, cols) {
+/** Every named row's exact name and phone (aajMovedAway): {key: [row numbers]}; only the rows keep(grid index) says yes to, when given. Pure. */
+function aajExactMap(grid, cols, keep) {
   var exact = {};
   if (cols.name === undefined || cols.phone === undefined) return exact;
   for (var i = 1; i < grid.length; i++) {
+    if (keep && !keep(i)) continue;
     var ks = aajExactKeys(aajText(grid[i][cols.name]), aajFirstPhone(grid[i][cols.phone]));
     for (var j = 0; j < ks.length; j++) (exact[ks[j]] = exact[ks[j]] || []).push(i + 1);
   }
   return exact;
+}
+
+/**
+ * Is a row evidence that a kept row's person moved away (aajKeptPerson)? Not a row of `day` (or later) that shows the person of its own
+ * memory (today's row of the same patient, who came again: it is where it belongs and says nothing about yesterday's row, REV2-H), nor a
+ * row with no memory (typed today). A row of an earlier day is, and so is a row whose memory is of somebody else (a sort or a shift put a
+ * person there). keyText / baseText = the row's key and memory (after the moves of aajFindMoves). Pure.
+ */
+function aajMovedEvidence(cells, cols, keyText, baseText, day) {
+  var b = keyText && AAJ_KEY_RE.test(keyText) ? aajParseBase(baseText) : null;
+  if (!b || !b.s) return false;
+  return !(b.d && b.d >= day && !aajPendingMoved(cells, cols, b.s));
+}
+
+/** Every key's memory on the tab by the person it was written for (Mr#, name and phone as aajIdText reads them): {idText: [keys]}. Pure. */
+function aajIdMemMap(grid, cols, hc) {
+  var out = {};
+  if (hc.key < 0 || hc.base < 0) return out;
+  for (var i = 1; i < grid.length; i++) {
+    var k = aajText(grid[i][hc.key]);
+    if (!k || !AAJ_KEY_RE.test(k)) continue;
+    var b = aajParseBase(aajText(grid[i][hc.base]));
+    if (!b || !b.s) continue;
+    var t = [];
+    for (var j = 0; j < AAJ_ID_FIELDS.length; j++) { var f = AAJ_ID_FIELDS[j]; t.push(cols[f] === undefined ? '' : (b.s[f] === undefined ? '' : String(b.s[f]))); }
+    var id = t.join('\u0001');
+    if (!out[id]) out[id] = [];
+    if (out[id].indexOf(k) < 0) out[id].push(k);
+  }
+  return out;
+}
+
+/**
+ * Was another patient TYPED over this linked row (aajScanTab, RV10-6)? Somebody typed in it a short while ago (its own "Sync edited" stamp:
+ * the stamp belongs to the row's place, "Delete cells, shift up" or a sort does not move it) and the person it shows now is in nobody else's
+ * memory on the tab (a person that a shift, a table's row delete over the visible columns or a sort moved here has a key of their own
+ * somewhere on the tab, REV2-G). idMem = aajIdMemMap of the tab, or a function that makes it. Pure.
+ */
+function aajTypedOver(cells, cols, hc, nowMs, key, idMem) {
+  var ed = hc.edited >= 0 ? (Number(aajText(cells[hc.edited])) || 0) : 0;
+  if (!ed || nowMs - ed >= AAJ.RETYPED_MS) return false;
+  var ks = (typeof idMem === 'function' ? idMem() : idMem)[aajIdText(cells, cols)] || [];
+  for (var i = 0; i < ks.length; i++) if (ks[i] !== key) return false;
+  return true;
 }
 
 /** The Mr#, name and phone a row shows, as aajFieldKey reads them, in one text (two rows that show the same person have the same). Pure. */
@@ -551,8 +603,10 @@ var AAJ_MOVE_FIELDS = ['mr', 'name', 'phone', 'month', 'treatment', 'status'];  
  * Rows that show the same cells (two walk-ins of one name with no phone, a row and its copy) are handed out by position: a sort keeps their
  * order. A key on two rows (a pure copy) is one memory with two places (SB10-1). A memory of an EARLIER day (a kept row, which now
  * stays on the tab for days) goes with its person too, never onto a patient of today (SB10-2); its memory follows its cells once the row
- * is quiet after an edit (aajScanTab), and in the minute before that it goes to the one keyed row that shows its Mr#, name and phone
- * (RV10-3). So does the hidden edit time. A key left
+ * is quiet after an edit (aajScanTab), and in the minute before that it goes to the one row that shows its Mr#, name and phone and carries
+ * another person's memory (RV10-3). Never while that patient's row of TODAY is not settled on a row that shows them (the same patient came
+ * again today, and a shift moved that row too): today's memories are handed out first, and yesterday's waits (REV2-E). So does the hidden
+ * edit time. A key left
  * on a row whose name is blank ("Delete cells, shift up", a cleared row sorted down, a cut and paste) is one more place of its memory
  * (m.lost), never in an exchange (B1/B2).
  * Returns {row number: {key, baseText, from, edited}}. Pure.
@@ -567,7 +621,11 @@ function aajFindMoves(grid, cols, hc, listDate, branch) {
   };
   var memOf = function (key, baseText) {
     var b = aajParseBase(baseText);
-    if (!b || !b.w || !b.s || !(b.v || b.g || b.u) || (b.d && b.d > listDate) || (b.b && branch && b.b !== branch)) return { bad: true, places: [], lost: [] };
+    if (!b || !b.w || !b.s || !(b.v || b.g || b.u) || (b.d && b.d > listDate) || (b.b && branch && b.b !== branch)) {
+      // (a key written before its row's first answer, base.p: not a memory that moves, but the person of today it was written for, REV2-E)
+      var pend = b && b.p && b.s && b.d === listDate ? textOf(AAJ_ID_FIELDS, function (mf) { return b.s[mf] === undefined ? '' : String(b.s[mf]); }) : null;
+      return { key: key, bad: true, pend: pend, places: [], lost: [] };
+    }
     var bs = function (mf) { return b.s[mf] === undefined ? '' : String(b.s[mf]); };
     return { key: key, baseText: baseText, was: textOf(AAJ_MOVE_FIELDS, bs), full: textOf(AAJ_ALL_FIELDS, bs), idWas: textOf(AAJ_ID_FIELDS, bs),
       gone: !!b.g, old: !!(b.d && b.d < listDate), places: [], lost: [] };
@@ -647,23 +705,49 @@ function aajFindMoves(grid, cols, hc, listDate, branch) {
     for (var rk in out) if (Object.prototype.hasOwnProperty.call(out, rk) && out[rk].key === k) return true;
     return false;
   };
-  for (i = 0; i < memList.length; i++) {
-    var gm = memList[i];
+  // Today's memories first: a memory of today whose person a shift moved off its key (onBlank) takes the row that shows that person before
+  // a memory of an earlier day of the same patient could (REV2-E)
+  var order = [];
+  for (i = 0; i < memList.length; i++) if (!memList[i].old) order.push(memList[i]);
+  for (i = 0; i < memList.length; i++) if (memList[i].old) order.push(memList[i]);
+  // A patient who has a row of TODAY (a memory of today, or the key of today's first call) that is not settled on a row showing them (a sort
+  // or a shift moved it, or its key is left on a blank row): any row that shows that patient may be today's row, so no earlier-day memory of
+  // theirs is handed out by person this minute. Yesterday's memory never goes onto today's visit (whose key would leave the sheet and the
+  // visit be removed) (REV2-E).
+  var todayFor = {};
+  for (var mk2 in mems) {
+    if (!Object.prototype.hasOwnProperty.call(mems, mk2)) continue;
+    var tm = mems[mk2], tid = tm.bad ? tm.pend : (tm.old ? null : tm.idWas);
+    if (tid) (todayFor[tid] = todayFor[tid] || []).push(tm);
+  }
+  var unsettled = function (idw) {
+    var tl = todayFor[idw] || [];
+    for (var q = 0; q < tl.length; q++) {
+      if (keyTaken(tl[q].key)) continue;                  // given to the row that shows its person
+      var held = false;
+      for (var pq = 0; pq < tl[q].places.length; pq++) if (!out[tl[q].places[pq]] && idOf(tl[q].places[pq]) === idw) held = true;
+      if (!held) return true;
+    }
+    return false;
+  };
+  for (i = 0; i < order.length; i++) {
+    var gm = order[i];
     var onBlank = !gm.places.length && gm.lost.length === 1;
     if (!(gm.gone || gm.old || onBlank) || gm.places.length + (gm.places.length ? 0 : gm.lost.length) !== 1) continue;
     var gr = gm.places.length ? gm.places[0] : gm.lost[0];
     if ((gm.places.length && idOf(gr) === gm.idWas) || keyTaken(gm.key)) continue;     // (a place given another memory here still hands on its own)
+    if (gm.old && unsettled(gm.idWas)) continue;
     var hits = [];
     for (r in nowOf) if (Object.prototype.hasOwnProperty.call(nowOf, r) && Number(r) !== gr && nowOf[r] === gm.was) hits.push(Number(r));
     // An earlier-day memory whose person was edited in the minute before the move (a Status or Treatment written the next day, before
     // aajScanTab wrote it into the memory) is shown exactly by no row: it goes to the one row that shows its Mr#, name and phone and carries
-    // somebody else's memory (a row a sort or a shift moved), never to a row typed today (no key, or the new key of its own first call)
-    // nor to a row that holds its own person (the same patient typed again today) (RV10-3)
+    // the memory of ANOTHER person (a row a sort or a shift moved), never to a row typed today (no key, or the new key of its own first call)
+    // nor to a row that carries its own person's memory (the same patient typed again today, whose Status was just changed: REV2-F) (RV10-3)
     if (!hits.length && gm.old) {
       for (r in nowOf) {
         if (!Object.prototype.hasOwnProperty.call(nowOf, r) || Number(r) === gr || idOf(Number(r)) !== gm.idWas) continue;
         var hkt = aajText(grid[Number(r) - 1][hc.key]), hm = AAJ_KEY_RE.test(hkt) ? mems[hkt] : null;
-        if (hm && !hm.bad && hm !== gm && nowOf[r] !== hm.was) hits.push(Number(r));
+        if (hm && !hm.bad && hm !== gm && hm.idWas !== gm.idWas && nowOf[r] !== hm.was) hits.push(Number(r));
       }
     }
     if (hits.length !== 1 || out[hits[0]] || mineHolds[hits[0]]) continue;
@@ -702,8 +786,9 @@ function aajLazyRead_(row, cells, cols) {
 /**
  * Reads one tab. grid = getDisplayValues() of rows 1..lastRow (row 1 = header); cols = aajDetectColumns(row 1);
  * hc = aajFindHelpers(row 1). Returns the rows, what to send, and what to write before sending.
- * opts: { newKey: function () -> 'S-...', busyMs, final, branch, setupStamp }  (final = the last flush before the archive: no settle wait;
- *        setupStamp = the edit stamp Set up wrote on the tab's rows that morning)
+ * opts: { newKey: function () -> 'S-...', busyMs, final, branch, setupStamp, parked }  (final = the last flush before the archive: no settle
+ *        wait; setupStamp = the edit stamp Set up wrote on the tab's rows that morning; parked = the memories of kept rows typed over or moved
+ *        off their key in the last KEPT_UNDO_MS, aajParkLoad_: [{k, b, r, at}])
  */
 function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
   opts = opts || {};
@@ -718,7 +803,9 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
     retyped: [],                   // keys of linked rows of today that another patient was typed over (aajReconcileTab puts a done one back)
     doubled: [],                   // keys on two rows that show the same person (the lower row is a pure copy, RV-1 / RV-3)
     unanswered: false,             // a key whose first answer never came back left its person (aajPendingMoved): no removal pass this minute
-    releasedKeys: {}               // the keys of the rows released this minute (aajReconcileTab never adds their record back in the same minute)
+    releasedKeys: {},              // the keys of the rows released this minute (aajReconcileTab never adds their record back in the same minute)
+    park: [],                      // kept memories that leave the tab this minute ({k, b, r}): kept for a Ctrl+Z (aajParkUpdate_, REV2-A/D)
+    unpark: []                     // parked keys a row took back this minute (it shows that kept row again)
   };
   // rows that only changed places in a sort of the visible columns take the key and memory of the person now in them (written before the send)
   var moves = aajFindMoves(grid, cols, hc, listDate, opts.branch || '');
@@ -755,7 +842,83 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
   var seen = {};
   // every named row's exact name and phone (aajMovedAway): a row kept only by its phone and a fitting first name is checked against them
   var exact = aajExactMap(grid, cols);
+  // the same for a kept row (aajKeptPerson), without today's rows that show their own person (aajMovedEvidence, REV2-H); and every
+  // memory's person (aajTypedOver). Both are made only when a row needs them (a kept row edited, a linked row typed over: rare).
+  var exactKept = null, idMem = null;
+  var getExactKept = function () {
+    if (!exactKept) exactKept = aajExactMap(grid, cols, function (gi) {
+      var mv = moves[gi + 1];
+      return aajMovedEvidence(grid[gi], cols, mv ? mv.key : (hc.key >= 0 ? aajText(grid[gi][hc.key]) : ''), mv ? mv.baseText : (hc.base >= 0 ? aajText(grid[gi][hc.base]) : ''), listDate);
+    });
+    return exactKept;
+  };
+  var getIdMem = function () { if (!idMem) idMem = aajIdMemMap(grid, cols, hc); return idMem; };
   var keptByKey = {};                // kept rows by key (a copy of one says so, below)
+  // a kept row of an earlier day (see below): never sent, its Website cell says what it was that night
+  var addKept = function (r, cells, key, base, baseText, edited, swapRec) {
+    var lo = { r: r, key: key, state: 'kept', day: base.d, mem: base, base: null, baseText: baseText, raw: {}, texts: {}, edited: edited, busy: false, bad: null,
+      push: false, held: false, fields: [], stamped: false, rekeyed: false, swapped: false, movedStatus: '', fromSetup: false, tokenDoctor: '',
+      kind: 'ok', refresh: null, moved: !!swapRec };
+    // What it shows now against its memory. Once the row is quiet the memory follows it (a helper write in aajReconcileTab, nothing is
+    // sent): a later sort or "Delete cells, shift up" then finds the person by the cells the row shows (aajFindMoves, RV10-3). The
+    // two-way cells changed since the night are kept in x, so the Website cell keeps saying so.
+    var ks = base.s || {}, ktx = {}, kdiff = false, kx = (base.x || []).slice();
+    for (var kf = 0; kf < AAJ_ALL_FIELDS.length; kf++) {
+      var kfn = AAJ_ALL_FIELDS[kf];
+      if (cols[kfn] === undefined) continue;
+      ktx[kfn] = aajFieldKey(kfn, cells[cols[kfn]]);
+      if (ktx[kfn] === (ks[kfn] === undefined ? '' : String(ks[kfn]))) continue;
+      kdiff = true;
+      if (AAJ_FIELDS.indexOf(kfn) >= 0 && kx.indexOf(kfn) < 0) kx.push(kfn);
+    }
+    if (kdiff && base.a && !(edited > 0 && (nowMs - edited) < busyMs)) {
+      var kb = aajCopyMap(base);
+      kb.s = ktx;
+      if (kx.length) kb.x = kx;
+      lo.refresh = JSON.stringify(kb);
+    }
+    // what the row was that night: deleted (or moved) on the website, the same patient as another row, never placed on the website, or
+    // changed since; the same patient twice that day (t); a copy of another row of that day (c, below)
+    if (base.g) lo.kind = base.mv ? 'moved' : (base.gk ? 'gone_checkup' : 'gone');
+    else if (base.dup) lo.kind = 'dup';
+    else if (!base.v) lo.kind = 'unplaced';
+    else if (kx.length) lo.kind = 'changed';
+    else if (base.t) lo.kind = 'twice';
+    aajLazyRead_(lo, cells, cols);
+    scan.rows.push(lo);
+    scan.kept++;
+    if (!keptByKey[key]) keptByKey[key] = lo;
+    if (swapRec) scan.swaps.push(swapRec);      // moved: its key is written where it is now
+  };
+  // A kept row typed over (or moved off its key by "Delete cells, shift up") in the last KEPT_UNDO_MS lost its key and memory: they were
+  // parked (aajParkUpdate_). A row that would be sent as a new row of today and shows that kept row again, exactly as its memory has it (its
+  // Mr#, name, phone, Month, Treatment and Status; every cell when it is not in the same row), takes them back: a Ctrl+Z (REV2-A/D). Only
+  // while the key is on no row of the tab. A patient typed again today in a new row shows today's Treatment and Status: never taken.
+  var parked = opts.parked || [], parkTaken = {}, onTab = {};
+  if (parked.length && hc.key >= 0) {
+    for (var ti = 1; ti < grid.length; ti++) {
+      var tk = aajText(grid[ti][hc.key]);
+      if (tk) onTab[tk] = true;
+      if (moves[ti + 1]) onTab[moves[ti + 1].key] = true;
+    }
+  }
+  var parkedFor = function (r, cells) {
+    for (var pi = 0; pi < parked.length; pi++) {
+      var p = parked[pi];
+      if (parkTaken[p.k] || onTab[p.k]) continue;
+      var pb = aajParseBase(p.b);
+      if (!pb || !pb.s || !pb.a || !pb.d || pb.d >= listDate || (pb.b && scan.branch && pb.b !== scan.branch)) continue;
+      var same = true, all = true;
+      for (var pf = 0; pf < AAJ_ALL_FIELDS.length; pf++) {
+        var pfn = AAJ_ALL_FIELDS[pf];
+        if (cols[pfn] === undefined || aajFieldKey(pfn, cells[cols[pfn]]) === (pb.s[pfn] === undefined ? '' : String(pb.s[pfn]))) continue;
+        all = false;
+        if (AAJ_MOVE_FIELDS.indexOf(pfn) >= 0) same = false;
+      }
+      if (same && (p.r === r || all)) { parkTaken[p.k] = true; return { k: p.k, b: p.b, base: pb }; }
+    }
+    return null;
+  };
   for (var i = 1; i < grid.length; i++) {
     var cells = grid[i];
     var r = i + 1;
@@ -815,45 +978,10 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
       // today here (SB10-2; aajFindMoves takes the memory to the row that shows its person). So is an unmarked row edited today (typed
       // while the sync was off; the archive left it for today), and a copy of a kept row made today (its hidden key too: a returning
       // patient's row copied to save typing): of the rows that show one kept key, the ones edited today other than the kept one (multi).
-      if (base && base.d && base.d < listDate && (base.a || edited < day0) && aajKeptPerson(cells, cols, base, exact, r)) {
+      if (base && base.d && base.d < listDate && (base.a || edited < day0) && aajKeptPerson(cells, cols, base, getExactKept, r)) {
         var mk = multi[key];
         if (mk && edited >= day0 && mk.keeper !== r) { base = null; key = ''; rekeyed = true; }
-        else {
-          var lo = { r: r, key: key, state: 'kept', day: base.d, mem: base, base: null, baseText: baseText, raw: {}, texts: {}, edited: edited, busy: false, bad: null,
-            push: false, held: false, fields: [], stamped: false, rekeyed: false, swapped: false, movedStatus: '', fromSetup: false, tokenDoctor: '',
-            kind: 'ok', refresh: null, moved: !!swapRec };
-          // What it shows now against its memory. Once the row is quiet the memory follows it (a helper write in aajReconcileTab, nothing is
-          // sent): a later sort or "Delete cells, shift up" then finds the person by the cells the row shows (aajFindMoves, RV10-3). The
-          // two-way cells changed since the night are kept in x, so the Website cell keeps saying so.
-          var ks = base.s || {}, ktx = {}, kdiff = false, kx = (base.x || []).slice();
-          for (var kf = 0; kf < AAJ_ALL_FIELDS.length; kf++) {
-            var kfn = AAJ_ALL_FIELDS[kf];
-            if (cols[kfn] === undefined) continue;
-            ktx[kfn] = aajFieldKey(kfn, cells[cols[kfn]]);
-            if (ktx[kfn] === (ks[kfn] === undefined ? '' : String(ks[kfn]))) continue;
-            kdiff = true;
-            if (AAJ_FIELDS.indexOf(kfn) >= 0 && kx.indexOf(kfn) < 0) kx.push(kfn);
-          }
-          if (kdiff && base.a && !(edited > 0 && (nowMs - edited) < busyMs)) {
-            var kb = aajCopyMap(base);
-            kb.s = ktx;
-            if (kx.length) kb.x = kx;
-            lo.refresh = JSON.stringify(kb);
-          }
-          // what the row was that night: deleted (or moved) on the website, the same patient as another row, never placed on the website, or
-          // changed since; the same patient twice that day (t); a copy of another row of that day (c, below)
-          if (base.g) lo.kind = base.mv ? 'moved' : (base.gk ? 'gone_checkup' : 'gone');
-          else if (base.dup) lo.kind = 'dup';
-          else if (!base.v) lo.kind = 'unplaced';
-          else if (kx.length) lo.kind = 'changed';
-          else if (base.t) lo.kind = 'twice';
-          aajLazyRead_(lo, cells, cols);
-          scan.rows.push(lo);
-          scan.kept++;
-          if (!keptByKey[key]) keptByKey[key] = lo;
-          if (swapRec) scan.swaps.push(swapRec);      // moved: its key is written where it is now
-          continue;
-        }
+        else { addKept(r, cells, key, base, baseText, edited, swapRec); continue; }
       }
       if (base && base.d && base.d !== listDate) { base = null; key = ''; rekeyed = true; }   // belonged to another day
       if (base && base.b && scan.branch && base.b !== scan.branch) { base = null; key = ''; rekeyed = true; }   // copied from another branch's tab
@@ -900,8 +1028,11 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
       }
       else if (mrInfo.mr) changed = mrInfo.mr !== String(base.w.mr || '') && !keepMr;    // another Mr# with another name: a new row
       else changed = !samePerson;              // a visit row whose Mr# cell is empty: the same name (an Mr# cleared by mistake) or phone stays
-      // (the key it had: a patient who is done, typed over by mistake, gets a row of their own back at the bottom, aajReconcileTab, RV10-6)
-      if (changed) { scan.retyped.push(key); key = ''; base = null; rekeyed = true; }
+      // (the key it had: a patient who is done, typed over by mistake, gets a row of their own back at the bottom, aajReconcileTab, RV10-6.
+      // Only when somebody really typed in this row (aajTypedOver): a done row taken off with "Delete cells, shift up", or a table's row
+      // delete over the visible columns, leaves its key under the next person, who is moved, not typed: that patient goes off the sheet as
+      // deleted, REV2-G)
+      if (changed) { if (aajTypedOver(cells, cols, hc, nowMs, key, getIdMem)) scan.retyped.push(key); key = ''; base = null; rekeyed = true; }
     } else if (key && base && base.g && base.s && !bad) {
       // A row the website said "deleted" about (its visit or checkup was deleted on the website, moved to another day, or a Ctrl+Z could not
       // be done) is still the person it was about, nobody else. A new patient typed over it, or another row's person put there by a sort of
@@ -912,6 +1043,14 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
       if ((!!mrInfo.mr && mrInfo.mr !== String(base.s.mr === undefined ? '' : base.s.mr)) || !sameG) { key = ''; base = null; rekeyed = true; }
     }
     var fresh = !key;
+    // a kept row typed over (or moved off its key) a moment ago, back as it was: its parked key and memory come back and it is the same
+    // kept row again, never a new row of today (parkedFor above, REV2-A/D). The key and memory are written where it is (a swap).
+    var pk = fresh && parked.length ? parkedFor(r, cells) : null;
+    if (pk) {
+      scan.unpark.push(pk.k);
+      addKept(r, cells, pk.k, pk.base, pk.b, edited, { r: r, key: pk.k, base: pk.b, edited: undefined });
+      continue;
+    }
     if (swapped && !fresh) scan.swaps.push(swapRec);
     if (!key) { key = newKey(); scan.newKeys.push({ r: r, key: key, rekeyed: rekeyed || !!baseText }); }
     seen[key] = { r: r, id: aajIdText(cells, cols) };
@@ -997,6 +1136,21 @@ function aajScanTab(grid, cols, hc, nowMs, listDate, opts) {
     if (krow.state !== 'kept') continue;
     var orig = krow.mem && krow.mem.c ? keptByKey[krow.mem.c] : null;
     krow.keptText = orig && orig !== krow ? aajKeptText(krow.day, 'copy', orig.r) : aajKeptText(krow.day, krow.kind);
+  }
+  // Kept memories that leave the tab with this minute's writes: a marked kept row typed over (its key goes to the new row's first call) or
+  // moved off its key ("Delete cells, shift up": another memory is written over it) whose person no other row took. They are parked for a
+  // Ctrl+Z (aajParkUpdate_, parkedFor). Keys on blank rows are not: a cleared kept row keeps its key for that (keptBlank), then it is let go.
+  if (hc.key >= 0 && hc.base >= 0 && cols.name !== undefined && !opts.final) {
+    var stays = {};
+    for (var fk = 0; fk < scan.rows.length; fk++) stays[scan.rows[fk].key] = true;
+    for (fk = 0; fk < scan.keptBlank.length; fk++) stays[aajText(grid[scan.keptBlank[fk] - 1][hc.key])] = true;
+    for (var gi2 = 1; gi2 < grid.length; gi2++) {
+      if (!aajText(grid[gi2][cols.name])) continue;
+      var rk2 = aajText(grid[gi2][hc.key]);
+      if (!rk2 || !AAJ_KEY_RE.test(rk2) || stays[rk2]) continue;
+      var rbt2 = aajText(grid[gi2][hc.base]), rb2 = aajParseBase(rbt2);
+      if (rb2 && rb2.a && rb2.d && rb2.d < listDate) { scan.park.push({ k: rk2, b: rbt2, r: gi2 + 1 }); stays[rk2] = true; }
+    }
   }
   if (scan.named - scan.kept > AAJ.MAX_ROWS) scan.tooMany = true;               // today's rows only: kept rows of earlier days do not count
   if (scan.lastNamed > AAJ.MAX_READ_ROWS - AAJ.LIST_ROOM) scan.tooLong = true;   // too close to the last row that is read
@@ -1132,10 +1286,11 @@ function aajLabelOf(scan, f) {
 /**
  * After the website answered: decides, for every row and field, what to write into the sheet and what to remember.
  * scan = aajScanTab result; resp = {visits: [canon]|null, removed: [..]} (visits null = nothing changed on the website);
- * ctx = { nowMs, results: {key: result}, pushed: {key: {field: true}}, extraBusy: {row: true}, listDate, retyped: {key: 1} }.
+ * ctx = { nowMs, results: {key: result}, pushed: {key: {field: true}}, extraBusy: {row: true}, listDate, retyped: {key: first seen (ms)} }.
  * Returns { writes: [{r, f, text}], helper: {r: {key, base}}, status: {r: {text, level}}, appends: [..], log: [..],
  *           deferred, again (a row was let go: read the tab again next minute), attention,
- *           retypedDrop: [keys of ctx.retyped that are settled], putBack: {key: true} (done patients put back after a type-over) }.
+ *           retypedDrop: [keys of ctx.retyped that are settled], putBack: {key: {patient, text}} (done patients put back after a type-over:
+ *           aajSyncTabs_ logs them and drops their keys once aajApply_ wrote their rows, rec.appended) }.
  */
 function aajReconcileTab(scan, resp, ctx) {
   var cols = scan.cols;
@@ -1407,7 +1562,8 @@ function aajReconcileTab(scan, resp, ctx) {
         var shownNow = ckv ? !!showCk[aajNormName(v.name) + '|' + (aajPhoneOf(v.phone) || '')] : !!showMr[String(v.mr)];
         var waitsNow = ckv ? !!waitCk[aajNormName(v.name) + '|' + (aajPhoneOf(v.phone) || '')] : !!waitMr[String(v.mr)];
         if (v.status !== 'Completed' && v.status !== 'Treatment') out.retypedDrop.push(v.key);   // the usual answers decide (removed, kept, released)
-        else if (!shownNow) putBack = true;
+        // put back from the minute after the type-over on: a Ctrl+Z in that minute shows the patient again, and the key is dropped (REV2-J)
+        else if (!shownNow) { if (nowMs - (Number(rt[v.key]) || 0) >= AAJ.RETYPED_WAIT_MS) putBack = true; else out.deferred = true; }
         else if (!waitsNow) out.retypedDrop.push(v.key);   // (a row that waits for its quiet minute adopts it when it is sent: asked again then)
       }
       if (!isRestore && !putBack) {
@@ -1436,7 +1592,7 @@ function aajReconcileTab(scan, resp, ctx) {
       var ab = { v: v.id, d: scan.listDate, b: scan.branch, s: s, w: w };
       if (v.kind === 'checkup') ab.k = 1;
       out.appends.push({ key: v.key, cells: cellsText, base: JSON.stringify(ab), status: stText, level: isRestore || putBack ? 'warn' : 'ok', patient: v.name });
-      if (putBack) { out.log.push({ patient: v.name, text: pbText }); out.putBack[v.key] = true; out.retypedDrop.push(v.key); }
+      if (putBack) out.putBack[v.key] = { patient: v.name, text: pbText };      // logged (and its key dropped) once the row is written (aajSyncTabs_)
       else if (isRestore) out.log.push({ patient: v.name, text: rinfo.message || 'Put back.' });
       out.final['add:' + v.key] = stText;
     }
@@ -1767,13 +1923,16 @@ function aajSetHeaderLight_(ctx, s, text) {
   aajSetHeader_(ctx, s, text);
 }
 
-/** Before the call: new rows get their key (and first-sight stamp) written into the sheet, so a retry can never double them. */
+/**
+ * Before the call: new rows get their key (and first-sight stamp) written into the sheet, so a retry can never double them. Returns false
+ * when nothing could be written (the sheet changed while it was read), true otherwise.
+ */
 function aajPrewrite_(ctx, e) {
   var sc = e.scan, sh = e.sheet, hc = e.hc, i;
   // a kept row whose cells were cleared keeps its hidden key and memory for a Ctrl+Z (aajScanTab): only its Website cell is emptied
   var keptBlank = {}, anyBlank = false;
   for (i = 0; i < sc.keptBlank.length; i++) if ((sc.statusText[sc.keptBlank[i]] || '') !== '') { keptBlank[sc.keptBlank[i]] = ''; anyBlank = true; }
-  if (!sc.newKeys.length && !sc.stamps.length && !sc.releases.length && !sc.swaps.length && !anyBlank) return;
+  if (!sc.newKeys.length && !sc.stamps.length && !sc.releases.length && !sc.swaps.length && !anyBlank) return true;
   var n = sc.grid.length - 1;
   if (n >= 1) {
     var names = sh.getRange(2, e.cols.name + 1, n, 1).getDisplayValues();
@@ -1784,7 +1943,7 @@ function aajPrewrite_(ctx, e) {
     if (moved) {
       for (i = 0; i < sc.rows.length; i++) if (sc.rows[i].state === 'new' || sc.rows[i].swapped) sc.rows[i].push = false;
       aajLog_(ctx, e.cfg.tab, '', 'The sheet changed while it was being read. New rows wait for the next minute.');
-      return;
+      return false;
     }
   }
   var keys = {}, bases = {}, stamps = {}, blank = {}, st = {}, ed = {};
@@ -1812,6 +1971,7 @@ function aajPrewrite_(ctx, e) {
     aajWriteRuns_(sh, hc.edited + 1, blank);
     aajWriteRuns_(sh, hc.status + 1, blank);
   }
+  return true;
 }
 
 /** Sends the rows in batches. Returns what came back, per tab (index in `live`). */
@@ -1972,7 +2132,8 @@ function aajApply_(ctx, e, rec) {
     sh.getRange(minR, hc.status + 1, maxR - minR + 1, 1).setValues(sv);
     sh.getRange(minR, hc.status + 1, maxR - minR + 1, 1).setFontColors(sf);
   }
-  // 4. website-only visits at the bottom
+  // 4. website-only visits at the bottom (rec.appended: the keys of the rows really written; a block whose rows are no longer empty waits)
+  rec.appended = {};
   if (rec.appends.length) {
     var width = sc.grid[0].length;
     var free = aajFreeRows_(sc, rec.appends.length);
@@ -2005,6 +2166,7 @@ function aajApply_(ctx, e, rec) {
       sh.getRange(free[a], 1, b - a + 1, width).setValues(block);
       sh.getRange(free[a], hc.status + 1, b - a + 1, 1).setFontColors(colors);
       ctx.writes += block.length;
+      for (m = a; m <= b; m++) rec.appended[rec.appends[m].key] = true;      // (a done patient's "Put back" is logged only for these, REV2-C)
       a = b + 1;
     }
   }
@@ -2023,12 +2185,71 @@ function aajKeptRefresh_(e) {
   aajWriteRuns_(e.sheet, e.hc.base + 1, by);
 }
 
-/** The keys of rows another patient was typed over that are not settled yet (aajSyncTabs_): {key: 1}, kept per tab in document properties. */
-function aajRetypedLoad_(st, tab) {
+/**
+ * The keys of rows another patient was typed over that are not settled yet (aajSyncTabs_): {key: first seen (ms)}, kept per tab in document
+ * properties under "rtk:<tab>" (not "rt:": the day's run-time counters "rt:<day>" of earlier days are deleted at every tick, REV2-B). A key
+ * older than RETYPED_MS is dropped: no removal pass runs while there are any, and that must not last.
+ */
+function aajRetypedLoad_(st, tab, nowMs) {
+  var out = {};
   try {
-    var o = JSON.parse(st.get('rt:' + tab) || '{}');
-    return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
-  } catch (e) { return {}; }
+    var o = JSON.parse(st.get('rtk:' + tab) || '{}');
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return out;
+    for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k) && nowMs - (Number(o[k]) || 0) < AAJ.RETYPED_MS) out[k] = Number(o[k]);
+  } catch (e) { /* a damaged value is dropped */ }
+  return out;
+}
+
+function aajRetypedSave_(st, tab, rt) {
+  if (Object.keys(rt).length) st.set('rtk:' + tab, JSON.stringify(rt)); else st.del('rtk:' + tab);
+}
+
+/**
+ * The kept rows typed over, or moved off their key by "Delete cells, shift up", in the last KEPT_UNDO_MS: their key and memory, so a Ctrl+Z
+ * makes them the same kept rows again (aajScanTab, REV2-A/D). Per tab in document properties, in chunks under 9 KB ("kd:<tab>:<n>"),
+ * newest first, at most KEPT_PARK_MAX. Each [key, memory, row, when]; read as {k, b, r, at}. Cleared by the archive.
+ */
+function aajParkLoad_(st, tab, nowMs) {
+  var out = [], n = 0;
+  for (var i = 0; i < 10; i++) {
+    var raw = st.get('kd:' + tab + ':' + i);
+    if (raw === null) break;
+    try {
+      var a = JSON.parse(raw);
+      for (var j = 0; j < a.length; j++) {
+        n++;
+        if (!a[j] || typeof a[j][0] !== 'string' || nowMs - (Number(a[j][3]) || 0) >= AAJ.KEPT_UNDO_MS) continue;
+        out.push({ k: a[j][0], b: String(a[j][1] || ''), r: Number(a[j][2]) || 0, at: Number(a[j][3]) });
+      }
+    } catch (e) { /* a damaged chunk is skipped */ }
+  }
+  out.stored = n;            // (expired ones included: aajParkUpdate_ then writes the list again without them)
+  return out;
+}
+
+function aajParkSave_(st, tab, list) {
+  var chunks = [], cur = [], size = 2, i;
+  for (i = 0; i < list.length && i < AAJ.KEPT_PARK_MAX; i++) {
+    var arr = [list[i].k, list[i].b, list[i].r, list[i].at], len = JSON.stringify(arr).length + 1;
+    if (len > 8000) continue;
+    if (cur.length && size + len > 8000) { chunks.push(cur); cur = []; size = 2; }
+    cur.push(arr); size += len;
+  }
+  if (cur.length) chunks.push(cur);
+  try {
+    for (i = 0; i < chunks.length; i++) st.set('kd:' + tab + ':' + i, JSON.stringify(chunks[i]));
+    for (i = chunks.length; i < 10; i++) { if (st.get('kd:' + tab + ':' + i) === null) break; st.del('kd:' + tab + ':' + i); }
+  } catch (e) { /* the document properties are full: a Ctrl+Z of such a row then makes a row of today, as before 17 Oct 2026 */ }
+}
+
+/** After aajPrewrite_ wrote this minute's keys: the kept memories that left the tab are parked, the ones a row took back are not any more. */
+function aajParkUpdate_(st, e, nowMs) {
+  var sc = e.scan, gone = {}, list = [], i;
+  if (!sc.park.length && !sc.unpark.length && (e.parked ? e.parked.stored || 0 : 0) === (e.parked || []).length) return;
+  for (i = 0; i < sc.unpark.length; i++) gone[sc.unpark[i]] = true;
+  for (i = 0; i < sc.park.length; i++) { gone[sc.park[i].k] = true; list.push({ k: sc.park[i].k, b: sc.park[i].b, r: sc.park[i].r, at: nowMs }); }
+  for (i = 0; i < (e.parked || []).length; i++) if (!gone[e.parked[i].k]) list.push(e.parked[i]);
+  aajParkSave_(st, e.cfg.tab, list);
 }
 
 /**
@@ -2101,8 +2322,9 @@ function aajSyncTabs_(ctx, entries, date, opts) {
     if (e.problem) { aajLog_(ctx, e.cfg.tab, '', e.cfg.tab + ': ' + e.problem + '. This tab is skipped.'); st.set('prob:' + e.cfg.tab, '1'); continue; }
     st.del('prob:' + e.cfg.tab);
     if (!opts.final) aajFilterTab_(ctx, e, true);     // the header filter (put back if removed)
+    e.parked = opts.final ? [] : aajParkLoad_(st, e.cfg.tab, nowMs);     // kept rows typed over a moment ago (a Ctrl+Z brings them back)
     e.scan = aajScanTab(e.grid, e.cols, e.hc, nowMs, date, { newKey: aajNewKey_, final: !!opts.final, busyMs: AAJ.BUSY_MS, branch: e.cfg.branch,
-      setupStamp: Number(st.get('setupStamp:' + e.cfg.tab)) || 0 });
+      setupStamp: Number(st.get('setupStamp:' + e.cfg.tab)) || 0, parked: e.parked });
     var emptyKey = 'empty:' + e.cfg.tab;
     if (e.scan.tooMany || e.scan.tooLong) {
       st.set('prob:' + e.cfg.tab, '1');
@@ -2121,24 +2343,26 @@ function aajSyncTabs_(ctx, entries, date, opts) {
       }
     } else st.del(emptyKey);
     e.hash = st.get('hash:' + e.cfg.tab);
-    // keys of rows another patient was typed over (aajScanTab): kept until the website's list has been seen, so a done patient gets a row
-    // back even when this minute brings no list (aajReconcileTab, RV10-6). While there are any, the list is asked for.
-    e.retyped = aajRetypedLoad_(st, e.cfg.tab);
-    var rtNew = false, rq;
-    for (rq = 0; rq < e.scan.retyped.length; rq++) if (!e.retyped[e.scan.retyped[rq]]) { e.retyped[e.scan.retyped[rq]] = 1; rtNew = true; }
-    if (rtNew) st.set('rt:' + e.cfg.tab, JSON.stringify(e.retyped));
+    // keys of rows another patient was typed over (aajScanTab): kept until the website's list has been seen and the done patient's row is
+    // written back, also when this minute brings no list, the website is busy or nothing can be written (aajReconcileTab, RV10-6, REV2-B).
+    // While there are any, the list is asked for and no removal pass runs (below).
+    e.retyped = aajRetypedLoad_(st, e.cfg.tab, nowMs);
+    for (var rq = 0; rq < e.scan.retyped.length; rq++) if (!e.retyped[e.scan.retyped[rq]]) e.retyped[e.scan.retyped[rq]] = nowMs;
+    aajRetypedSave_(st, e.cfg.tab, e.retyped);
     if (Object.keys(e.retyped).length) e.hash = null;
     live.push(e);
   }
   if (!live.length) return { ok: true, pending: pending, lists: {} };
-  for (i = 0; i < live.length; i++) aajPrewrite_(ctx, live[i]);
+  // (the kept memories that leave the tab, or come back, are written down only once this minute's keys are in the sheet)
+  for (i = 0; i < live.length; i++) if (aajPrewrite_(ctx, live[i]) && !opts.final) aajParkUpdate_(st, live[i], nowMs);
   // While a row is still settling (typed or moved a moment ago) or a name was just cleared, the website is not asked to remove the rows that
   // "disappeared": the row may only have been moved or retyped, and the visit must be adopted by it, not deleted (and made again 60 s later).
   var settling = false;
-  // So does a minute in which another patient was typed over a linked row: a done patient there is put back at the bottom by this
-  // minute's answer (aajReconcileTab) before any removal pass sees the row gone, so the website never takes it off the sheet (RV10-6).
+  // So does every minute while a row another patient was typed over is not settled (e.retyped, kept across minutes): a done patient there is
+  // put back at the bottom (aajReconcileTab) before any removal pass sees the row gone, so the website never takes it off the sheet (RV10-6,
+  // REV2-B).
   for (i = 0; i < live.length; i++) {
-    if (live[i].scan.releaseBusy || live[i].scan.unanswered || live[i].scan.retyped.length) settling = true;
+    if (live[i].scan.releaseBusy || live[i].scan.unanswered || live[i].scan.retyped.length || Object.keys(live[i].retyped || {}).length) settling = true;
     for (var sk = 0; sk < live[i].scan.rows.length; sk++) {
       var srw = live[i].scan.rows[sk];
       if (((srw.rekeyed || srw.state === 'new') && !srw.push && !srw.bad) || srw.held) settling = true;
@@ -2199,9 +2423,16 @@ function aajSyncTabs_(ctx, entries, date, opts) {
       if (offV && (offV.status === 'Completed' || offV.status === 'Treatment')) offNow.push(offV);
     }
     if (offNow.length) aajOffAdd_(ctx, e.cfg.tab, offNow);
-    if (applied && !skip && rec.retypedDrop.length) {
+    if (!skip) {
+      // a done patient put back after a type-over: logged, and the key dropped, only when the row was really written (aajApply_ leaves a
+      // block whose rows are no longer empty: someone typed there during the call). Otherwise it is tried again next minute (REV2-C).
+      for (var pbk in rec.putBack) {
+        if (!Object.prototype.hasOwnProperty.call(rec.putBack, pbk)) continue;
+        if (rec.appended && rec.appended[pbk]) { aajLog_(ctx, e.cfg.tab, rec.putBack[pbk].patient, rec.putBack[pbk].text); delete e.retyped[pbk]; }
+        else pending = true;
+      }
       for (var rd = 0; rd < rec.retypedDrop.length; rd++) delete e.retyped[rec.retypedDrop[rd]];
-      if (Object.keys(e.retyped).length) st.set('rt:' + e.cfg.tab, JSON.stringify(e.retyped)); else st.del('rt:' + e.cfg.tab);
+      aajRetypedSave_(st, e.cfg.tab, e.retyped);
     }
     if (applied && !rec.deferred && tr.hash) st.set('hash:' + e.cfg.tab, tr.hash);
     if (!applied || rec.deferred || rec.again || rec.appends.length) pending = true;      // appended rows are claimed by the next call (their key is in "present" then)
@@ -2310,8 +2541,11 @@ function aajQuickCall_(ctx, active) {
 function aajTickWork_(ctx, st, manual, rt) {
   var i, s, k;
   var minute = Number(ctx.hhmm.slice(3));
+  // the day's counters of earlier days go ("rt:<day>", "rte:<day>", "paused:<day>"): only keys whose rest is a date, never a store whose
+  // name starts the same way
   for (k in st.all) if (Object.prototype.hasOwnProperty.call(st.all, k)) {
-    if ((k.indexOf('rt:') === 0 || k.indexOf('rte:') === 0 || k.indexOf('paused:') === 0) && k.slice(k.indexOf(':') + 1) !== ctx.today) st.del(k);
+    var kd = k.slice(k.indexOf(':') + 1);
+    if ((k.indexOf('rt:') === 0 || k.indexOf('rte:') === 0 || k.indexOf('paused:') === 0) && /^\d{4}-\d\d-\d\d$/.test(kd) && kd !== ctx.today) st.del(k);
   }
   var sheets = aajTabSheets_();
   if (!manual && rt > AAJ.RUNTIME_STOP_MS) {
@@ -2470,7 +2704,10 @@ function aajRowFp_(cells, s) {
 function aajArchiveRows_(s, keepFromMs, day) {
   var out = { copy: [], mark: [], today: 0 };
   if (s.cols.name === undefined) return out;
-  var exact = aajExactMap(s.grid, s.cols);
+  // (the rows of the day being archived that show their own person say nothing about a kept row of the same patient: aajMovedEvidence)
+  var exact = aajExactMap(s.grid, s.cols, function (gi) {
+    return aajMovedEvidence(s.grid[gi], s.cols, s.hc.key >= 0 ? aajText(s.grid[gi][s.hc.key]) : '', s.hc.base >= 0 ? aajText(s.grid[gi][s.hc.base]) : '', day);
+  });
   for (var i = 1; i < s.grid.length; i++) {
     var cells = s.grid[i];
     if (aajText(cells[s.cols.name]) === '') continue;
@@ -2985,7 +3222,8 @@ function aajArchiveTab_(ctx, s, opts) {
   st.set('listDate:' + tab, ctx.today);
   aajDeleteMarker_(st, tab);
   aajOffClear_(st, tab);
-  st.del('rt:' + tab);
+  st.del('rtk:' + tab);
+  aajParkSave_(st, tab, []);
   st.del('hash:' + tab);
   st.del('empty:' + tab);
   st.del('setupStamp:' + tab);
@@ -3085,12 +3323,13 @@ function aajHelp() {
     'A patient who is done (Completed, Treatment or Cancelled) can be deleted from the sheet once the treatment is entered in Healthwire, one row or many at once: the website keeps the visit as it is and the row does not come back.\n' +
     'Before you delete a row of today, check that its Status says Completed (or Treatment). A row that still says Waiting or Scheduled is taken as a wrong entry: its visit is removed from the website (or marked Cancelled). Set Completed first.\n' +
     'Type new patients in an empty row. A patient who is done and was typed over by mistake comes back at the bottom ("Put back").\n' +
+    'A patient who comes again the same day after their row was deleted is typed in a new row: the website makes a second visit.\n' +
     'Never delete four or more waiting patients at once: the website puts them back and asks you to look.\n' +
     'A row marked Completed completes the visit on the website.\n' +
     'Never delete or unhide the hidden columns next to Website.\n' +
     'To sort, click the small arrow in a heading of the list (the table\'s menu, or the filter button in row 1) and choose Sort A to Z or Z to A: that moves whole rows, the hidden columns too. Never select only some columns and sort them.\n' +
     'The time in the Website heading should be recent. If it is older than 10 minutes during clinic hours, tell Dr. Ali.\n' +
-    'At night the day is copied to the archive. The rows stay on the tab, marked "kept on the sheet" (grey): delete them when they are entered in Healthwire, whenever you like. Deleting them never changes the website, and nothing you write in them reaches the website. A kept row with a warning or a cross says what it was that night (a duplicate, deleted on the website, never reached the website): do what it says.',
+    'At night the day is copied to the archive. The rows stay on the tab, marked "kept on the sheet" (grey): delete them when they are entered in Healthwire, whenever you like. Deleting them never changes the website, and nothing you write in them reaches the website. One cleared, typed over or shifted away by mistake: Ctrl+Z within ten minutes. A kept row with a warning or a cross says what it was that night (a duplicate, deleted on the website, never reached the website): do what it says.',
     ui.ButtonSet.OK);
 }
 

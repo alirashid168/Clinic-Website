@@ -652,10 +652,15 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       if (vs.length && vs.every((x) => x.branch === tab.branch && x.date === date && x.sheet_key && !present.includes(x.sheet_key))) fp = checkMr(tab.branch, date, mrIn, name, set.phone, fp.patient);
     }
     const who = normName(name) + '|' + (normPhone(set.phone) || '');
+    // keep_rows (20261017000100, private.aaj_sync_row v_keepnew): a new row that is not done (Waiting, Scheduled, no Status) of a patient whose
+    // visit of today (or checkup registered as them) is done and was taken off the sheet is that patient come again: a visit of its own (REV2 R2B)
+    const sv = set.status && set.status.v ? set.status.v : 'waiting';
+    const keepNew = !!S.keepCall && (sv === 'waiting' || sv === 'scheduled');
+    const offDone = (x, kind) => { const st = S.released.get(x.id); const now = kind === 'visit' ? x.status : x.day_status; return (st === 'completed' || st === 'in_treatment') && (now === 'completed' || now === 'in_treatment'); };
     // the day's 200 refused lookups are used up: every row that would make a visit or a patient gets the same answer, fit or not; it counts
     // for the call's five. A patient already on today's list, and a refused row sent again, go on.
-    const onList = fp.outcome === 'mr' && (S.visits.some((x) => x.mr === fp.patient.mr && x.branch === tab.branch && x.date === date)
-      || S.checkups.some((c) => c.patient_mr === fp.patient.mr && c.branch === tab.branch && c.date === date));
+    const onList = fp.outcome === 'mr' && (S.visits.some((x) => x.mr === fp.patient.mr && x.branch === tab.branch && x.date === date && !(keepNew && offDone(x, 'visit')))
+      || S.checkups.some((c) => c.patient_mr === fp.patient.mr && c.branch === tab.branch && c.date === date && !(keepNew && offDone(c, 'checkup'))));
     if (!onList && S.lookups >= 200 && (fp.outcome === 'mr' || fp.outcome === 'mr_new' || !(S.lookupKeys && S.lookupKeys.has(row.key + '|' + fp.outcome + '|' + mrIn + '|' + who)))) {
       S.refusedThisCall = (S.refusedThisCall || 0) + 1;
       res.outcome = 'needs_patient'; res.level = 'error'; res.message = BUDGET_MSG;
@@ -689,7 +694,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       else lookupRefused(res, tab, row.key, mrIn, `Mr# ${mrIn} is not on the website. Check the number.`, `Mr# ${mrIn} is not on the website. Check the number.`, true, null, who);
       return res;
     }
-    const e = S.visits.filter((x) => x.mr === p.mr && x.branch === tab.branch && x.date === date)
+    const e = S.visits.filter((x) => x.mr === p.mr && x.branch === tab.branch && x.date === date && !(keepNew && offDone(x, 'visit')))
       .sort((a, b) => (b.status !== 'cancelled') - (a.status !== 'cancelled') || a.seq - b.seq)[0];
     if (e) {
       const ek = visitKey(e);
@@ -709,9 +714,10 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       // no visit, but a checkup of today registered as this patient whose row is not on the sheet: that checkup (never turned into a visit;
       // a row with a Month is the patient's visit, never a checkup)
       const ck = S.checkups.find((c) => c.patient_mr === p.mr && c.branch === tab.branch && c.date === date && c.source !== 'archive'
-        && checkupKey(c) !== row.key && !present.includes(checkupKey(c)));
+        && checkupKey(c) !== row.key && !present.includes(checkupKey(c)) && !(keepNew && offDone(c, 'checkup')));
       if (ck) return adoptCheckup(ck, tab, set, row, res);
     }
+    const first = keepNew ? S.visits.filter((x) => x.mr === p.mr && x.branch === tab.branch && x.date === date && offDone(x, 'visit')).sort((a, b) => b.seq - a.seq)[0] : null;
     const v2 = createVisit(tab, p, set, res, row.key, date);
     v2.status = 'waiting';
     const { warns } = applyFields(v2, tab, set, null, row.edited_at, res, true);
@@ -720,6 +726,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
       v2.token = (used.length ? Math.max(...used) : 0) + 1;
     }
     res.outcome = 'created'; res.visit_id = v2.id;
+    if (first) warns.push({ ok: `Second visit of this patient today: the first (${(first.treatment_label || '').trim() || 'a visit'}) is done and was taken off the sheet.` });
     return finish(res, warn ? [warn, ...warns] : warns);
   }
 
@@ -863,6 +870,7 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
     if (S.faults.timeoutOverRows && rowCount > S.faults.timeoutOverRows) return fail('57014', 500, 'canceling statement due to statement timeout');
     const out = { ok: true, date: payload.date, server_time: new Date(now()).toISOString(), tabs: [] };
     S.refusedThisCall = 0;                                  // refused lookups in this call: after 5 the call's other new Mr# rows wait
+    S.keepCall = S.keepRows && payload.keep_rows === true;  // (private.aaj_sync_row reads it for a new row too, REV2 R2B)
     for (const t of tabs) {
       const hasPresent = Array.isArray(t.present);
       const present = hasPresent ? t.present : [];

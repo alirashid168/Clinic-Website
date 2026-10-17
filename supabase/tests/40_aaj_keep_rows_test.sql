@@ -44,6 +44,13 @@ create or replace function pg_temp.s40_vis(p_key text) returns public.visits lan
 grant execute on all functions in schema pg_temp to authenticated, anon;
 
 begin;
+-- the bodies are the ones the header of 20261017000100_aaj_keep_rows.sql names (its read-only check on the live database compares these)
+select pg_temp.check((select string_agg(p.proname || '=' || md5(p.prosrc), ' ' order by p.proname) from pg_proc p
+                       where (p.pronamespace = 'public'::regnamespace and p.proname = 'aaj_sync')
+                          or (p.pronamespace = 'private'::regnamespace and p.proname in ('aaj_removals', 'aaj_day_list', 'aaj_sync_row', 'aaj_off_done')))
+                     = 'aaj_day_list=e06e36c82cdb77bc6ff38fca7fc743fb aaj_off_done=95310b9b6af75e99742ed69e03224280 aaj_removals=042ac2530063f70660eec06617abfa3e'
+                       || ' aaj_sync=b36b7678493aa134c9e733b73a3d8005 aaj_sync_row=78060381dae13746fbd739a2fa7b10e3',
+  'the five function bodies have the md5 the migration header gives for the live check');
 create extension if not exists pgcrypto;
 insert into auth.users (id, email) values (:admin, 'ali40@dralirashid.com');
 insert into public.staff (id, full_name, email, role) values (:admin, 'Dr. Ali Rashid', 'ali40@dralirashid.com', 'admin');
@@ -359,6 +366,59 @@ select pg_temp.check((select x->>'action' = 'released' and x->>'message' = 'Take
                      and (select x->>'action' = 'deleted' from (select pg_temp.s40_rm((select resp from s40_resp where n = 'cb3'), pg_temp.s40_k(8)) x) y)
                      and pg_temp.s40_vis(pg_temp.s40_k(8)) is null and (pg_temp.s40_vis(pg_temp.s40_k(440))).status = 'completed',
   'keep_rows: a done row and a wrong Waiting row deleted together one removal below the cap: the done one is taken off, the wrong one removed (the done row does not count toward the cap, RV10-10)');
+
+-- =====================================================================
+-- 10. keep_rows: a patient whose done row was taken off the sheet comes again the same day (REV2 R2B): a new row that is not done gets a
+--     visit of its own and the done one stays as it is; a new row that says Completed is that visit's row back; the old script adopts as before
+-- =====================================================================
+insert into public.patients (mr_number, full_name, phone, first_branch_id)
+  select '4000' || g, 'Keep Patient ' || g, '031400000' || g, pg_temp.s40_bid() from generate_series(71, 74) g;
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, sheet_key)
+  select p.id, pg_temp.s40_bid(), pg_temp.s40_today(), 'completed', 'Consultation', pg_temp.s40_k(450 + g)
+    from generate_series(1, 3) g join public.patients p on p.mr_number = '4000' || (70 + g);
+-- patient 74: a checkup of today registered as them (its row had their Mr#), done
+insert into public.checkups (checkup_date, branch_id, patient_name, phone, source, day_status, patient_id, sheet_key)
+  select pg_temp.s40_today(), pg_temp.s40_bid(), p.full_name, p.phone, 'google_sheet', 'completed', p.id, pg_temp.s40_k(454) from public.patients p where p.mr_number = '400074';
+insert into s40_resp select 'rb0', pg_temp.s40_sync(pg_temp.s40_pl('[]', pg_temp.s40_sheet(array[pg_temp.s40_k(440), pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453), pg_temp.s40_k(454)]), true, true));
+select pg_temp.check((select count(*) = 4 and bool_and(x->>'action' = 'released') from jsonb_array_elements((select resp->'tabs'->0->'removed' from s40_resp where n = 'rb0')) x
+                        where x->>'key' = any (array[pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453), pg_temp.s40_k(454)])),
+  'setup: three done visits and a done registered checkup taken off the sheet (entered in Healthwire)');
+create temp table s40_rb as select v.* from public.visits v where v.sheet_key in (pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453));
+-- patient 71 comes again for a filling: a new row, Waiting
+insert into s40_resp select 'rb1', pg_temp.s40_sync(pg_temp.s40_pl(jsonb_build_array(
+  pg_temp.s40_row(pg_temp.s40_k(461), '{"mr":"400071","name":"Keep Patient 71","treatment":"Filling","status":{"t":"Waiting","v":"waiting"}}')),
+  pg_temp.s40_sheet(array[pg_temp.s40_k(440), pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453), pg_temp.s40_k(454)]) || pg_temp.s40_k(461), false, true));
+select pg_temp.check((select r->>'outcome' = 'created' and r->>'level' = 'ok'
+                             and r->>'message' = 'Second visit of this patient today: the first (Consultation) is done and was taken off the sheet.'
+                        from jsonb_array_elements((select resp->'tabs'->0->'results' from s40_resp where n = 'rb1')) r where r->>'key' = pg_temp.s40_k(461))
+                     and (select v.status = 'waiting' and v.treatment_label = 'Filling' and v.id <> (select id from s40_rb where sheet_key = pg_temp.s40_k(451))
+                            from public.visits v where v.sheet_key = pg_temp.s40_k(461))
+                     and (select to_jsonb(v) = to_jsonb(s) from public.visits v join s40_rb s on s.id = v.id where s.sheet_key = pg_temp.s40_k(451))
+                     and exists (select 1 from private.aaj_released rl join s40_rb s on s.id = rl.visit_id where s.sheet_key = pg_temp.s40_k(451)),
+  'keep_rows: a new Waiting row of a patient whose done visit was taken off the sheet makes a second visit (a tick that says so); the first stays exactly as it was, off the sheet');
+-- patient 72's cleared row comes back with Ctrl+Z after its hidden key was let go: it says Completed, so it is that visit's row
+insert into s40_resp select 'rb2', pg_temp.s40_sync(pg_temp.s40_pl(jsonb_build_array(
+  pg_temp.s40_row(pg_temp.s40_k(462), '{"mr":"400072","name":"Keep Patient 72","treatment":"Consultation","status":{"t":"Completed","v":"completed"}}')),
+  pg_temp.s40_sheet(array[pg_temp.s40_k(440), pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453), pg_temp.s40_k(454)]) || pg_temp.s40_k(461) || pg_temp.s40_k(462), false, true));
+select pg_temp.check((select r->>'outcome' = 'linked' from jsonb_array_elements((select resp->'tabs'->0->'results' from s40_resp where n = 'rb2')) r where r->>'key' = pg_temp.s40_k(462))
+                     and (select count(*) = 1 and bool_and(v.id = (select id from s40_rb where sheet_key = pg_temp.s40_k(452)) and v.status = 'completed')
+                            from public.visits v join public.patients p on p.id = v.patient_id where p.mr_number = '400072' and v.visit_date = pg_temp.s40_today()),
+  'keep_rows: a new row that says Completed is the done visit''s own row back (a Ctrl+Z): it is linked to it again, nothing is made twice');
+-- the old script (no keep_rows) adopts the done visit as before
+insert into s40_resp select 'rb3', pg_temp.s40_sync(pg_temp.s40_pl(jsonb_build_array(
+  pg_temp.s40_row(pg_temp.s40_k(463), '{"mr":"400073","name":"Keep Patient 73","treatment":"Filling","status":{"t":"Waiting","v":"waiting"}}')),
+  pg_temp.s40_sheet(array[pg_temp.s40_k(440), pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453), pg_temp.s40_k(454)]) || pg_temp.s40_k(461) || pg_temp.s40_k(462) || pg_temp.s40_k(463), false, false));
+select pg_temp.check((select r->>'outcome' = 'linked' from jsonb_array_elements((select resp->'tabs'->0->'results' from s40_resp where n = 'rb3')) r where r->>'key' = pg_temp.s40_k(463))
+                     and (select count(*) = 1 from public.visits v join public.patients p on p.id = v.patient_id where p.mr_number = '400073' and v.visit_date = pg_temp.s40_today()),
+  'old script: the same new row adopts the done visit, as before (one visit)');
+-- patient 74 (a done registered checkup taken off the sheet) comes again for treatment with their Mr#: a visit, not the checkup
+insert into s40_resp select 'rb4', pg_temp.s40_sync(pg_temp.s40_pl(jsonb_build_array(
+  pg_temp.s40_row(pg_temp.s40_k(464), '{"mr":"400074","name":"Keep Patient 74","treatment":"Bracket repair"}')),
+  pg_temp.s40_sheet(array[pg_temp.s40_k(440), pg_temp.s40_k(451), pg_temp.s40_k(452), pg_temp.s40_k(453), pg_temp.s40_k(454)]) || pg_temp.s40_k(461) || pg_temp.s40_k(462) || pg_temp.s40_k(463) || pg_temp.s40_k(464), false, true));
+select pg_temp.check((select r->>'outcome' = 'created' from jsonb_array_elements((select resp->'tabs'->0->'results' from s40_resp where n = 'rb4')) r where r->>'key' = pg_temp.s40_k(464))
+                     and (select v.status = 'waiting' and v.treatment_label = 'Bracket repair' from public.visits v where v.sheet_key = pg_temp.s40_k(464))
+                     and (select c.day_status = 'completed' and c.sheet_key = pg_temp.s40_k(454) from public.checkups c where c.sheet_key = pg_temp.s40_k(454)),
+  'keep_rows: a patient whose done checkup was taken off the sheet, typed again with their Mr# and no Status, gets a visit; the checkup stays as it is');
 
 update private.aaj_sync_config set value = '20' where key = 'calls_per_minute';
 rollback;

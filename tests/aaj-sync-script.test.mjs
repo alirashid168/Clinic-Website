@@ -6535,7 +6535,7 @@ test('RV10-6: a done patient\'s row typed over with a new walk-in by mistake com
     assert.equal(rowsNamed(env, GUL, 'Keep One').length, 1, tag + ': once on the sheet');
     assert.equal(server.state.released.size, 0, tag + ': linked again');
     assert.equal(server.state.offLog.length, 0, tag + ': never taken off the sheet on the website (the minute of the type-over asks for no removal pass)');
-    assert.ok(env.props.document.get('rt:' + GUL) == null, tag + ': nothing left to put back');
+    assert.ok(env.props.document.get('rtk:' + GUL) == null, tag + ': nothing left to put back');
     // deleted now (entered in Healthwire): it goes off the sheet (new website) and stays off
     env.deleteRows(GUL, one);
     env.ticks(3);
@@ -6672,6 +6672,261 @@ test('RV10-3 (a tab of kept rows only, early morning): a Treatment written in a 
   assert.deepEqual(server.visitsOf('GUL', NEXT), [], 'no visit of today (before: a Completed visit of today for Keep One)');
   assert.equal(statusOf(env, GUL, 10), CHANGED('09-10-2026'));
   assert.equal(statusOf(env, GUL, 3), KEPT('09-10-2026'));
+});
+
+// ------------------------------------------------------------------------------------------------ second review of the kept rows (REV2, 17 Oct 2026)
+/** the visible cells of rows from..to, to put back as a Ctrl+Z does (the script's own writes to the hidden cells are not undone) */
+function saveVisible(env, tab, from, to) {
+  const sh = env.tab(tab), W = colOf(env, tab, 'website') - 1, out = [];
+  for (let r = from; r <= to; r++) { const row = []; for (let c = 1; c <= W; c++) row.push(sh._get(r, c)); out.push(row); }
+  return out;
+}
+function undoVisible(env, tab, from, saved, { edit = true } = {}) {
+  const sh = env.tab(tab);
+  saved.forEach((row, i) => row.forEach((cell, j) => sh._set(from + i, j + 1, cell || null)));
+  if (edit) env.ctx.aajOnEdit({ range: sh.getRange(from, 1, saved.length, saved[0].length), source: env.book });
+  else env.touch();
+}
+/** day 1: Keep One, Two, Three Completed; day 2 (08:00): kept rows 2-4, today's Keep Six, Keep Two (came again), Keep Seven below them */
+function keptWithReturning() {
+  const w = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1, 'Completed'), kp(2, 'Completed')] }, patients: K_P });
+  settle(w.env, 3);
+  nightOf(w.env, TODAY, NEXT);
+  w.env.at(NEXT, '08:00');
+  w.env.typeRow(GUL, 5, kp(5));
+  w.env.typeRow(GUL, 6, kp(1, 'Waiting', 'Bracket repair'));
+  w.env.typeRow(GUL, 7, kp(6));
+  settle(w.env, 4);
+  assert.deepEqual(w.server.visitsOf('GUL', NEXT).map((v) => v.mr), [K_P[5].mr, K_P[1].mr, K_P[6].mr], 'setup: today\'s three visits');
+  assert.equal(statusOf(w.env, GUL, 6), '✓ On website', 'setup');
+  return w;
+}
+
+test('REV2-E/F: yesterday\'s row of a patient who came again today, taken off with "Delete cells, shift up" or cleared while today\'s row is edited: today\'s visit is never removed, today\'s row never becomes yesterday\'s', () => {
+  for (const variant of ['shift up', 'shift up, today\'s row edited in that minute', 'cleared, today\'s row set to Treatment', 'shift up, Keep Six edited in that minute']) {
+    const { env, server } = keptWithReturning();
+    const todays = server.visitsOf('GUL', NEXT).map((v) => v.id);
+    const W = colOf(env, GUL, 'website') - 1;
+    if (variant.startsWith('cleared')) env.clearRow(GUL, 3, 1, W);
+    else shiftUpVisible(env, GUL, 3);
+    const two = exactRow(env, GUL, 'Keep Two');
+    if (variant.includes('edited in that minute') && variant.includes('today\'s row')) setCell(env, GUL, two, 'waiting', 'Treatment');
+    if (variant.includes('Keep Six edited')) setCell(env, GUL, rowOf(env, GUL, 'Keep Six'), 'waiting', 'Treatment');
+    if (variant.startsWith('cleared')) { env.advance(61000); env.ticks(1); setCell(env, GUL, rowOf(env, GUL, 'Keep Two'), 'waiting', 'Treatment'); }
+    env.advance(61000);
+    env.ticks(5);
+    assert.deepEqual(server.visitsOf('GUL', NEXT).map((v) => v.id), todays, variant + ': today\'s visits are all still there');
+    assert.equal(server.state.removedLog.length, 0, variant + ': nothing removed');
+    const r2 = rowsNamed(env, GUL, 'Keep Two');
+    assert.equal(r2.length, 1, variant + ': one Keep Two row (today\'s)');
+    assert.ok(/^✓ On website|^$/.test(statusOf(env, GUL, r2[0])), variant + ': today\'s row is today\'s: ' + statusOf(env, GUL, r2[0]));
+    const v2 = server.visitsOf('GUL', NEXT).find((v) => v.mr === K_P[1].mr);
+    assert.equal(cellOf(env, GUL, r2[0], 'sync key'), v2.sheet_key, variant + ': today\'s row keeps its visit\'s key');
+    if (variant.includes('Treatment')) assert.equal(v2.status, 'in_treatment', variant + ': the Treatment reaches the website');
+    for (const n of ['Keep One', 'Keep Three']) assert.equal(statusOf(env, GUL, rowOf(env, GUL, n)), KEPT('09-10-2026'), variant + ': ' + n + ' stays kept');
+    nightOf(env, NEXT, NEXT2);
+    assert.deepEqual(archNames(env, NEXT), ['Keep Seven', 'Keep Six', 'Keep Two'], variant + ': today\'s rows are in the archive of the day');
+  }
+});
+
+test('REV2-E: the same with the returning patient\'s row added from the website (front desk added the visit): yesterday\'s row taken off with "Delete cells, shift up" while that row is edited never removes today\'s visit', () => {
+  const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1, 'Completed'), kp(2, 'Completed')] }, patients: K_P });
+  settle(env, 3);
+  nightOf(env, TODAY, NEXT);
+  env.at(NEXT, '08:00');
+  env.typeRow(GUL, 5, kp(5));
+  settle(env, 3);
+  server.addVisit({ branch: 'GUL', date: NEXT, mr: K_P[1].mr, status: 'waiting', treatment: 'Bracket repair' });
+  env.ticks(3);
+  const web = server.visitsOf('GUL', NEXT).find((v) => v.mr === K_P[1].mr);
+  assert.equal(rowsNamed(env, GUL, 'Keep Two').length, 2, 'setup: yesterday\'s row and the website\'s row of today');
+  shiftUpVisible(env, GUL, 3);
+  setCell(env, GUL, rowsNamed(env, GUL, 'Keep Two')[0], 'waiting', 'Treatment');
+  env.advance(61000);
+  env.ticks(5);
+  assert.ok(server.visitById(web.id), 'today\'s visit is not removed');
+  assert.equal(server.visitById(web.id).status, 'in_treatment', 'and the Treatment reaches it');
+  assert.equal(server.state.removedLog.length, 0);
+  const r2 = rowsNamed(env, GUL, 'Keep Two');
+  assert.equal(r2.length, 1);
+  assert.equal(cellOf(env, GUL, r2[0], 'sync key'), server.visitById(web.id).sheet_key, 'today\'s row keeps today\'s visit');
+});
+
+test('REV2-A/D: a kept row typed over by mistake (or taken off with "Delete cells, shift up"), a minute passes, then Ctrl+Z: it is the same kept row again; no visit of today is made for yesterday\'s patient', () => {
+  for (const variant of ['typed over', 'name typed over', 'shift up']) {
+    const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1, 'Completed'), kp(2, 'Completed')] }, patients: K_P });
+    settle(env, 3);
+    nightOf(env, TODAY, NEXT);
+    env.at(NEXT, '08:30');
+    env.typeRow(GUL, 5, kp(5));
+    settle(env, 3);
+    env.at(NEXT, '09:00');
+    const saved = saveVisible(env, GUL, 2, 6);
+    const keys = [2, 3, 4].map((r) => cellOf(env, GUL, r, 'sync key'));
+    if (variant === 'typed over') env.typeRow(GUL, variant === 'typed over' ? 2 : 3, ['', 'Walkin Wrongrow', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03009119876', '']);
+    else if (variant === 'name typed over') setCell(env, GUL, 2, 'patient', 'Walkin Wrongrow');
+    else shiftUpVisible(env, GUL, 3);
+    env.tickAfter(20000);                                  // a tick about 20 s later
+    if (variant !== 'shift up') assert.notEqual(cellOf(env, GUL, 2, 'sync key'), keys[0], variant + ': setup: the row got a key of today');
+    undoVisible(env, GUL, 2, saved, { edit: variant !== 'shift up' });
+    env.advance(61000);
+    env.ticks(4);
+    assert.deepEqual(server.visitsOf('GUL', NEXT).map((v) => v.mr), [K_P[5].mr], variant + ': only today\'s visit (before: a Completed visit of today for yesterday\'s patient)');
+    assert.deepEqual(server.checkupsOf('GUL', NEXT), [], variant + ': no checkup of today');
+    for (const r of [2, 3, 4]) assert.equal(statusOf(env, GUL, r), KEPT('09-10-2026'), variant + ': row ' + r + ' is a kept row again');
+    assert.deepEqual([2, 3, 4].map((r) => cellOf(env, GUL, r, 'sync key')), keys, variant + ': with their own keys');
+    nightOf(env, NEXT, NEXT2);
+    assert.deepEqual(archByDate(env), { [TODAY]: 3, [NEXT]: 1 }, variant + ': yesterday\'s rows are not archived again');
+    assert.equal(server.state.removedLog.length, 0, variant);
+  }
+});
+
+test('REV2-A: a kept row typed over and LEFT typed over is a row of today; Keep One typed again in a new row the same minute is today\'s visit (the parked memory never goes to a row that only shows the same person)', () => {
+  const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1, 'Completed')] }, patients: K_P });
+  settle(env, 3);
+  nightOf(env, TODAY, NEXT);
+  env.at(NEXT, '09:00');
+  env.typeRow(GUL, 2, ['', 'Walkin Wrongrow', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03009119876', '']);
+  env.tickAfter(20000);
+  env.typeRow(GUL, 4, kp(0, 'Waiting', 'Bracket repair'));      // Keep One came again today
+  env.advance(61000);
+  env.ticks(4);
+  assert.deepEqual(server.visitsOf('GUL', NEXT).map((v) => [v.mr, v.status]), [[K_P[0].mr, 'waiting']], 'Keep One\'s visit of today, Waiting');
+  assert.equal(server.checkupsOf('GUL', NEXT).length, 1, 'the walk-in is a checkup of today');
+  assert.equal(statusOf(env, GUL, 4), '✓ On website');
+});
+
+test('REV2-B/C: a done patient typed over while the website is busy, or while the row it goes back to is being typed in: still put back (once), and never taken off the sheet on the website in between', () => {
+  for (const variant of ['busy', 'free row typed in during the call', 'sheet changed while answering']) {
+    const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1), kp(2), kp(3)] }, patients: K_P });
+    settle(env, 3);
+    env.at(TODAY, '15:00');
+    env.typeRow(GUL, 2, kp(8));                                 // Keep Nine typed over Keep One
+    env.advance(61000);
+    if (variant === 'busy') { server.faults.busy = true; env.ticks(1); server.faults.busy = false; }
+    else {
+      const orig = env.fetchHandler;
+      let armed = variant === 'free row typed in during the call' ? 2 : 1, fired = false;
+      env.fetchHandler = (req) => {
+        const r = orig(req);
+        const p = JSON.parse(req.body).p_payload;
+        if (!fired && p.tabs.length && 'present' in p.tabs[0] && --armed === 0) {
+          fired = true;
+          if (variant === 'free row typed in during the call') env.typeRow(GUL, 6, kp(9));
+          else setCell(env, GUL, 3, 'treatment details', 'note typed during the call');
+        }
+        return r;
+      };
+    }
+    env.ticks(6);
+    const ones = rowsNamed(env, GUL, 'Keep One');
+    assert.equal(ones.length, 1, variant + ': Keep One is back on the sheet once');
+    assert.match(statusOf(env, GUL, ones[0]), /^⚠ Put back: another patient was typed over this row/, variant);
+    assert.equal(server.state.offLog.length, 0, variant + ': never taken off the sheet on the website');
+    assert.equal(server.state.released.size, 0, variant);
+    assert.equal((logText(env).match(/Keep One Put back/g) || []).length, 1, variant + ': one "Put back" line, written when the row was really put back');
+    assert.ok(!logText(env).includes('Keep One Taken off the sheet'), variant);
+    assert.ok(env.props.document.get('rtk:' + GUL) == null, variant + ': nothing left to put back');
+  }
+});
+
+test('REV2-G: a done row of today taken off with "Delete cells, shift up" (or a table row delete over the visible columns only): it goes off the sheet and stays off; nobody is "put back"', () => {
+  for (const variant of ['shift up', 'table delete', 'shift up, Status of the next row typed just before']) {
+    const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1, 'Completed'), kp(2), kp(3)] }, patients: K_P });
+    if (variant === 'table delete') env.addTable(GUL, { nr: 6, nc: colOf(env, GUL, 'website') - 1 });
+    settle(env, 3);
+    env.at(TODAY, '21:00');
+    if (variant.includes('Status of the next row')) { setCell(env, GUL, 2, 'waiting', 'Completed'); env.advance(20000); }
+    if (variant === 'table delete') env.deleteTableRow(GUL, 2);
+    else shiftUpVisible(env, GUL, 2);
+    env.advance(61000);
+    env.ticks(5);
+    assert.equal(rowOf(env, GUL, 'Keep One'), null, variant + ': Keep One stays off the sheet');
+    assert.ok(!logText(env).includes('Put back'), variant + ': nobody is put back');
+    assert.ok(logText(env).includes('Keep One Taken off the sheet; kept on the website (Completed).'), variant);
+    assert.equal(server.state.visits.length, 4, variant + ': every visit kept');
+    for (const n of ['Keep Two', 'Keep Three', 'Keep Four']) assert.equal(rowsNamed(env, GUL, n).length, 1, variant + ': ' + n + ' once');
+    assert.match(headerOf(env, GUL), /^Website · \d\d:\d\d ✓$/, variant + ': nothing needs attention');
+  }
+});
+
+test('REV2-J: a done patient typed over, then Ctrl+Z before the next minute is over: one row, nothing put back, nothing refused', () => {
+  const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed'), kp(1), kp(2), kp(3)] }, patients: K_P });
+  settle(env, 3);
+  env.at(TODAY, '15:00');
+  const saved = saveVisible(env, GUL, 2, 2);
+  env.typeRow(GUL, 2, ['', 'Walkin Wrongrow', '', 'Checkup', '', 'Waiting', '', '', '', '', '', '03009119876', '']);
+  env.advance(61000);
+  env.ticks(1);
+  undoVisible(env, GUL, 2, saved);
+  env.advance(61000);
+  env.ticks(5);
+  assert.equal(rowsNamed(env, GUL, 'Keep One').length, 1, 'Keep One once on the sheet');
+  assert.ok(!logText(env).includes('Put back'), 'nobody put back');
+  assert.ok(!/Already on this list/.test(statusOf(env, GUL, 2)), statusOf(env, GUL, 2));
+  assert.equal(visitOfMr(server, K_P[0].mr).length, 1);
+  assert.equal(visitOfMr(server, K_P[0].mr)[0].status, 'completed');
+  assert.equal(cellOf(env, GUL, 2, 'sync key'), visitOfMr(server, K_P[0].mr)[0].sheet_key, 'the row is linked to Keep One\'s visit');
+  assert.equal(server.state.offLog.length, 0);
+});
+
+test('REV2-H: a kept row\'s surname completed for Healthwire while the same patient also has a row of today: it stays yesterday\'s (not refused, archived once); deleting today\'s row later never moves today\'s visit onto it', () => {
+  const { env, server } = keptWithReturning();
+  setCell(env, GUL, 3, 'patient', 'Keep Two Khan');
+  env.advance(61000);
+  env.ticks(4);
+  assert.equal(statusOf(env, GUL, 3), CHANGED('09-10-2026'), 'still yesterday\'s row: ' + statusOf(env, GUL, 3));
+  assert.doesNotMatch(headerOf(env, GUL), /need attention/);
+  env.at(NEXT, '21:00');
+  setCell(env, GUL, 6, 'waiting', 'Completed');
+  setCell(env, GUL, 6, 'treatment details', 'today work');
+  settle(env, 3);
+  const v2 = server.visitsOf('GUL', NEXT).find((v) => v.mr === K_P[1].mr);
+  const key = v2.sheet_key;
+  env.deleteRows(GUL, 6);
+  env.ticks(4);
+  assert.equal(server.visitById(v2.id).sheet_key, key, 'today\'s visit keeps its own key');
+  assert.equal(cellOf(env, GUL, 3, 'treatment'), 'Scaling', 'yesterday\'s row keeps its own cells');
+  assert.equal(statusOf(env, GUL, 3), CHANGED('09-10-2026'));
+  nightOf(env, NEXT, NEXT2);
+  assert.deepEqual(archByDate(env), { [TODAY]: 3, [NEXT]: 3 }, 'yesterday\'s row is not archived again under today');
+});
+
+test('REV2-R2B: a done patient whose row was taken off the sheet comes again the same day (a new row, Waiting / Filling): a second visit is made, the first stays as it is; the row is not overwritten. A Ctrl+Z of the cleared row links the first visit again', () => {
+  const { env, server } = world({ rows: { [GUL]: [kp(0, 'Completed', 'Consultation'), kp(1), kp(2), kp(3)] }, patients: K_P });
+  settle(env, 3);
+  const first = visitOfMr(server, K_P[0].mr)[0];
+  env.at(TODAY, '12:00');
+  env.deleteRows(GUL, 2);
+  env.ticks(3);
+  assert.equal(server.state.released.size, 1, 'setup: taken off the sheet');
+  env.at(TODAY, '16:00');
+  env.typeRow(GUL, 5, kp(0, 'Waiting', 'Filling'));
+  settle(env, 4);
+  const vs = visitOfMr(server, K_P[0].mr);
+  assert.equal(vs.length, 2, 'a second visit for the filling');
+  assert.deepEqual([server.visitById(first.id).status, server.visitById(first.id).treatment_label], ['completed', 'Consultation'], 'the first visit stays as it is');
+  const second = vs.find((v) => v.id !== first.id);
+  assert.deepEqual([second.status, second.treatment_label], ['waiting', 'Filling']);
+  const r = rowOf(env, GUL, 'Keep One');
+  assert.deepEqual([cellOf(env, GUL, r, 'waiting'), cellOf(env, GUL, r, 'treatment')], ['Waiting', 'Filling'], 'the row is not overwritten');
+  assert.equal(cellOf(env, GUL, r, 'sync key'), second.sheet_key);
+  assert.equal(statusOf(env, GUL, r), '✓ Second visit of this patient today: the first (Consultation) is done and was taken off the sheet.', 'a tick that says so');
+  // a done row's visible cells cleared, taken off the sheet, then Ctrl+Z (its hidden key was let go): it links the same visit, nothing is made twice
+  const w = world({ rows: { [GUL]: [kp(0, 'Completed', 'Consultation'), kp(1), kp(2), kp(3)] }, patients: K_P });
+  settle(w.env, 3);
+  w.env.at(TODAY, '21:00');
+  const saved = saveVisible(w.env, GUL, 2, 2);
+  w.env.clearRow(GUL, 2, 1, colOf(w.env, GUL, 'website') - 1);
+  w.env.advance(61000);
+  w.env.ticks(3);
+  assert.equal(w.server.state.released.size, 1, 'setup: taken off the sheet');
+  undoVisible(w.env, GUL, 2, saved);
+  w.env.advance(61000);
+  w.env.ticks(4);
+  assert.equal(visitOfMr(w.server, K_P[0].mr).length, 1, 'no second visit');
+  assert.equal(cellOf(w.env, GUL, 2, 'sync key'), visitOfMr(w.server, K_P[0].mr)[0].sheet_key, 'the row is linked to her visit again');
+  assert.equal(w.server.state.released.size, 0);
 });
 
 console.log(`${passed} passed, ${failed} failed`);
