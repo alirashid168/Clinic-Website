@@ -10427,7 +10427,8 @@ await step('Upload list: every photo has its small picture and its own text box;
   await card.waitFor();
   assert.deepEqual(await card.locator('.inbox-thumb-note').allInnerTexts(), ['Fatima front view'], 'the note is under its picture');
   const cands = await card.locator('.inbox-candidate').allInnerTexts();
-  assert.match(cands[0], /^Fatima Noor · Mr# 9815 .*name in the note/, 'the patient a photo\'s note names comes first');
+  assert.match(cands[0], /^Fatima Noor · Mr# 9815 /, 'the patient a photo\'s note names comes first');
+  assert.match(cands[0], /name in the note/);
   await shot(pboxItem, '70-photo-inbox-photo-note-card');
 });
 await pboxItem.close();
@@ -10442,12 +10443,15 @@ await step('A photo note "Mr# 9815" typed after the upload files the set to Fati
   await itemNoteOf(pboxItem2, 'IMG_0111.JPG').fill('Mr# 9815');
   await pboxItem2.waitForFunction(() => [...document.querySelectorAll('.inbox-file')].find((li) => li.textContent.includes('IMG_0111.JPG'))?.querySelector('.inbox-file-note-state')?.textContent === 'Saved', null, { timeout: 15000 });
   // (the day is matched again a moment after the note is saved)
-  await pboxItem2.waitForFunction(async () => {
+  const filedNow = () => pboxItem2.evaluate(async () => {
     const { state } = await import('/js/state.js');
     const karachi = (await state.data.photoInboxCities()).find((c) => c.name === 'Karachi');
     const lib = await import('/js/lib/photo-intake.js');
     return (await state.data.photoInboxDay(karachi.id, lib.karachiDate(Date.now() - 86400000))).sets.some((s) => s.status === 'filed' && s.mr_number === '9815');
-  }, null, { timeout: 20000, polling: 500 });
+  });
+  let done = false;
+  for (let i = 0; i < 40 && !done; i++) { await pboxItem2.waitForTimeout(500); done = await filedNow(); }
+  assert.ok(done, 'filed by the photo\'s note within 20 s');
   await pboxItem2.getByRole('tab', { name: 'Filed' }).click();
   const filed = pboxItem2.locator('.inbox-filed', { hasText: 'Fatima Noor' });
   await filed.waitFor();
