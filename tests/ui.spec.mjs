@@ -10004,7 +10004,7 @@ async function makePhotos(pg, specs) {
       g.fillStyle = '#fafafa'; g.fillRect(120 + (s.hue % 150), 140, 260, 150);
       const blob = await new Promise((r) => c.toBlob(r, s.png ? 'image/png' : 'image/jpeg', 0.9));
       let bytes = new Uint8Array(await blob.arrayBuffer());
-      if (!s.png) bytes = lib.withExif(bytes, { make: 'Apple', model: 'iPhone 13', dateTimeOriginal: `${y} ${s.time}` });
+      if (!s.png) bytes = lib.withExif(bytes, { make: 'Apple', model: 'iPhone 13', dateTimeOriginal: `${s.date || y} ${s.time}` });
       let bin = '';
       for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
       out.push({ name: s.name, mimeType: s.png ? 'image/png' : 'image/jpeg', b64: btoa(bin) });
@@ -10255,6 +10255,85 @@ await step('No Anthropic credit (the demo plays it): editing stops with a clear 
   await pboxRedo.evaluate(() => localStorage.removeItem('demo-photo-ai'));
 });
 await pboxRedo.close();
+
+// ------------------------------------------------------------- the note box and old photos (owner, 17 Oct 2026)
+// "give a small text box for the staff to enter details about the patient ... we have about 2000 photos of already edited patients ...
+// tell in the text box details about the patient. so you can find them and put those photos in their patient profile".
+const pboxNote = await newPage();
+const noteBoxOf = (pg) => pg.getByLabel('Details about these photos (optional): patient name, Mr#, month...');
+await step('Note box: today\'s photos with "Fatima Noor 9815" in the note file straight away to her visit (by time alone two photo months were in the chair); the note shows on Filed', async () => {
+  await loginAs(pboxNote, 'Assistant');
+  await pboxNote.goto(BASE + '#/staff/photo-inbox');
+  await pboxNote.waitForSelector('h1:text-is("Photo inbox")');
+  assert.equal(await pboxNote.getByLabel('Today\'s photos').isChecked(), true, '"Today\'s photos" is the default');
+  await noteBoxOf(pboxNote).fill('Fatima Noor 9815');
+  await inboxInput(pboxNote).setInputFiles(await makePhotos(pboxNote, DAY_PHOTOS.slice(3, 5)));
+  await pboxNote.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxNote.locator('.inbox-done').innerText(), /^2 photos uploaded\. 1 set filed automatically\. 0 sets wait on "Which patient\?"\./);
+  assert.match(await pboxNote.locator('.inbox-summary').innerText(), /Note: "Fatima Noor 9815"/);
+  assert.equal(await noteBoxOf(pboxNote).inputValue(), '', 'the box is empty for the next upload');
+  await pboxNote.getByRole('tab', { name: 'Filed' }).click();
+  const filed = pboxNote.locator('.inbox-filed', { hasText: 'Fatima Noor' });
+  await filed.waitFor();
+  const text = await filed.innerText();
+  assert.match(text, /Automatic: the note with these photos names Mr# 9815, on the DHA list that day/);
+  assert.doesNotMatch(text, /note_mr/, 'the rule code is not shown to staff');
+  assert.match(text, /Note: .?Fatima Noor 9815/);
+  await shot(pboxNote, '66-photo-inbox-note');
+});
+await step('Old photos (already edited) with "Sana Farooq Mr# 9820 Month 6": filed to her file as they are, on the photos\' own date, as Month 6, without Claude', async () => {
+  await pboxNote.getByRole('tab', { name: 'Upload' }).click();
+  await pboxNote.getByLabel('Old photos (already edited)').check();
+  await pboxNote.waitForSelector('.inbox-old-hint:has-text("One patient per upload works best: choose that patient\'s photos, type the Mr# in the box, upload. Then the next patient.")');
+  assert.equal(await pboxNote.getByLabel('Which branch were these taken at?').isVisible(), false, 'no branch for old photos');
+  await noteBoxOf(pboxNote).fill('Sana Farooq Mr# 9820 Month 6');
+  await inboxInput(pboxNote).setInputFiles(await makePhotos(pboxNote, [
+    { hue: 40, date: '2025:03:10', time: '11:00:00', name: 'old_front.jpg' }, { hue: 80, date: '2025:03:10', time: '11:01:00', name: 'old_left.jpg' }]));
+  await pboxNote.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxNote.locator('.inbox-done').innerText(), /^2 old photos uploaded\. 1 set filed automatically\. 0 sets wait on "Which patient\?"\./);
+  assert.match(await pboxNote.locator('.inbox-summary').innerText(), /^2 old photos \(already edited: filed as they are, no Claude\) · days: Mon 10 Mar 2025 \(2\)/);
+  await pboxNote.getByRole('tab', { name: 'Filed' }).click();
+  await pboxNote.getByLabel('Day').selectOption('2025-03-10');
+  const filed = pboxNote.locator('.inbox-filed', { hasText: 'Sana Farooq' });
+  await filed.waitFor();
+  const text = await filed.innerText();
+  assert.match(text, /Sana Farooq · Mr# 9820/);
+  assert.match(text, /Month 6/);
+  assert.match(text, /Automatic: old photos; the note with them names Mr# 9820/);
+  assert.match(text, /Old photos, edited already: filed as they are \(Claude does not edit them\)\./);
+  assert.match(text, /Note: .?Sana Farooq Mr# 9820 Month 6/);
+  const sent = await pboxNote.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const karachi = (await state.data.photoInboxCities()).find((c) => c.name === 'Karachi');
+    return (await state.data.photoInboxDay(karachi.id, '2025-03-10')).items.map((i) => `${i.ai_status}/${i.edit_status}`);
+  });
+  assert.deepEqual(sent, ['skipped/done', 'skipped/done'], 'never sent to Claude; registered edited (the as-it-is copy)');
+  await filed.locator('a[href^="#/staff/patient/"]').click();
+  await pboxNote.waitForSelector('h2:has-text("Photos and X-rays")');
+  const caps = await pboxNote.locator('.photos-panel figcaption').allInnerTexts();
+  assert.ok(caps.some((t) => t.includes('Month 6 · Photo 1')), `the edited copy is in her file as "Month 6 · Photo 1" (${caps.join(' | ')})`);
+});
+await step('Old photos whose note names two Mr#s ("9815 9818"): "Which patient?" offers both (the patient of this city first); one tap files them', async () => {
+  await pboxNote.goto(BASE + '#/staff/photo-inbox');
+  await pboxNote.waitForSelector('h1:text-is("Photo inbox")');
+  await pboxNote.getByLabel('Old photos (already edited)').check();
+  await noteBoxOf(pboxNote).fill('9815 9818');
+  await inboxInput(pboxNote).setInputFiles(await makePhotos(pboxNote, [{ hue: 150, date: '2025:04:01', time: '10:00:00', name: 'old_two.jpg' }]));
+  await pboxNote.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxNote.locator('.inbox-done').innerText(), /^1 old photo uploaded\. 0 sets filed automatically\. 1 set waits on "Which patient\?"\./);
+  await pboxNote.getByRole('tab', { name: /Which patient/ }).click();
+  const card = pboxNote.locator('.inbox-card-old', { hasText: '1 Apr 2025' });
+  await card.waitFor();
+  assert.match(await card.locator('.inbox-reason').innerText(), /^The note names more than one patient: tap the right one for these photos\./);
+  const cands = await card.locator('.inbox-candidate').allInnerTexts();
+  assert.match(cands[0], /^Ayesha Kamal · Mr# 9818/, "a patient of this city folder first");
+  assert.match(cands[1], /^Fatima Noor · Mr# 9815/, "then a patient of another city (Islamabad)");
+  assert.match(await card.innerText(), /Note: .?9815 9818/);
+  await shot(pboxNote, '67-photo-inbox-old-two');
+  await card.getByRole('button', { name: /File these old photos in Ayesha Kamal's file, Mr# 9818/ }).click();
+  await pboxNote.waitForSelector('.toast:has-text("Filed in Ayesha Kamal\'s file (Mr# 9818).")');
+});
+await pboxNote.close();
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

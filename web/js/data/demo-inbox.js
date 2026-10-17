@@ -7,7 +7,10 @@
 // 'off' (no key), 'refused', 'invalid', and the error codes 'RATE_LIMIT', 'API_DOWN', 'BAD_REQUEST', 'BILLING', 'BAD_KEY', 'CONFIG'.
 // The demo's day of the Photo inbox (made-up visits of YESTERDAY at DHA, Gulshan and North Nazimabad; none in Lahore) is added the first
 // time the Photo inbox is opened on a page, so no other screen's sample numbers change. Made-up people only.
-import { inboxPaths, citySlug, karachiDate, viewName, MAX_AUTO_PHOTOS, EDIT_VERSION } from '../lib/photo-intake.js';
+// The note box and old photos (20261017000600_photo_inbox_notes.sql): uploads (batches) with their kind and note, old photos stored with an
+// as-it-is copy and never sent to the stand-in Claude, the note's Mr# filing by itself (note_mr / old_note_mr), checked like the database.
+import { inboxPaths, citySlug, karachiDate, viewName, MAX_AUTO_PHOTOS, EDIT_VERSION, NOTE_MAX, ONE_VISIT_SEC, noteMrs, noteMonth, noteWords } from '../lib/photo-intake.js';
+import { nameNorm, nameSpelling } from '../lib/checkups.js';
 import { todayISO } from '../ui/dom.js';
 
 const MIN = 60 * 1000;
@@ -43,7 +46,7 @@ function seedInboxDay(db, uid) {
 
 export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   const store = () => { const D = db(); if (!files.has(D)) files.set(D, new Map()); return files.get(D); };
-  const inbox = () => { const D = db(); if (!D.inbox) D.inbox = { items: [], sets: [], calls: [] }; return D.inbox; };
+  const inbox = () => { const D = db(); if (!D.inbox) D.inbox = { items: [], sets: [], calls: [], batches: [] }; if (!D.inbox.batches) D.inbox.batches = []; return D.inbox; };
   // The demo's day of the Photo inbox comes with the Photo inbox page itself (its city list, overview, day, uploads), never with the
   // badge every page asks for, so no other screen's sample numbers change.
   const openInbox = () => { seedInboxDay(db(), uid); return inbox(); };
@@ -59,6 +62,22 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   const require = (cityId) => { if (!allowed() || (cityId != null && (!city(cityId) || !cityOk(cityId)))) fail(NOT_ALLOWED); };
   const requireDelete = () => { if (!can('photos.delete')) fail('NOT_ALLOWED: moving or undoing a filing needs "Delete clinic photos and X-rays" in the access list.'); };
   const setById = (id) => inbox().sets.find((s) => s.id === id);
+  const batchOf = (id) => (id ? inbox().batches.find((b) => b.id === id) || null : null);
+  const monthOf = (occasion) => { const m = /^Month ([0-9]{1,2})$/.exec(String(occasion || '')); return m ? Number(m[1]) : null; };
+  /** The occasion of a set of old photos (private.photo_inbox_set_occasion): the month its note names, else "Old photo". */
+  const setOccasion = (s) => {
+    const bs = [...new Set(itemsOf(s.id).map((i) => i.upload_batch).filter(Boolean))].map(batchOf).filter(Boolean);
+    const m = bs.length === 1 ? noteMonth(bs[0].note) : null;
+    return m ? `Month ${m}` : 'Old photo';
+  };
+  /** Where a set of old photos is filed (private.photo_inbox_old_target): the patient, no visit, their first branch, the note's occasion. */
+  const oldTarget = (s, visitId, patientId) => {
+    const pid = (visitId && db().visits.find((x) => x.id === visitId)?.patient_id) || patientId;
+    if (!pid) fail('PHOTO_BAD_INPUT: choose the patient.');
+    const p = patient(pid);
+    if (!p) fail('PHOTO_BAD_INPUT: no such patient.');
+    return { visit: null, patientId: pid, branchId: p.first_branch_id ?? null, occasion: setOccasion(s) };
+  };
   const itemsOf = (setId) => inbox().items.filter((i) => i.set_id === setId);
   const urlOf = (path) => store().get(path)?.url || null;
   const timeOk = (i) => i.time_source === 'exif' && i.clock_ok && !!i.taken_at;
@@ -72,14 +91,14 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     const s = { id: uid(), city_id: Number(cityId), photo_day: day, status: 'waiting', manual: false, first_at: null, last_at: null, photo_count: 0, time_ok: false,
       camera: null, branch_hint: null, candidates: [], wait_reason: null, matched_at: null, patient_id: null, visit_id: null, branch_id: null, occasion: null,
       filed_how: null, filed_rule: null, filed_by: null, filed_at: null, release_after: null, hidden: false, ai_flag: null, set_aside_reason: null, version: 0,
-      created_at: nowIso(), ...o };
+      kind: 'day', created_at: nowIso(), ...o };
     inbox().sets.push(s);
     audit('photo_inbox_sets', 'INSERT', s);
     return s;
   };
   /** A set's times, count, camera, hint and numbering again; answers whether the set changed. */
   const refresh = (s) => {
-    const before = JSON.stringify([s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint]);
+    const before = JSON.stringify([s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint, s.kind]);
     const its = itemsOf(s.id).sort((a, b) => ((a.taken_at ? Date.parse(a.taken_at) : Infinity) - (b.taken_at ? Date.parse(b.taken_at) : Infinity))
       || ((a.file_seq ?? Infinity) - (b.file_seq ?? Infinity)) || String(a.file_name).localeCompare(String(b.file_name)) || a.sha256.localeCompare(b.sha256));
     its.forEach((it, i) => { it.position = i + 1; });
@@ -92,7 +111,8 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     s.camera = cams.length === 1 ? cams[0] : its.length ? 'mixed' : null;
     const hints = [...new Set(its.map((i) => i.branch_hint ?? null))];
     s.branch_hint = hints.length === 1 ? hints[0] : null;
-    return before !== JSON.stringify([s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint]);
+    s.kind = its.length && its.every((i) => batchOf(i.upload_batch)?.kind === 'old') ? 'old' : 'day';
+    return before !== JSON.stringify([s.first_at, s.last_at, s.photo_count, s.time_ok, s.camera, s.branch_hint, s.kind]);
   };
   // Whether a visit's patient may have been in the chair between two moments (private.photo_inbox_was_there).
   const wasThere = (u, first, last, tight) => {
@@ -125,7 +145,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     for (const it of itemsOf(s.id).sort((a, b) => a.position - b.position)) {
       const key = viewKeyOf(it);
       const base = { patient_id: s.patient_id, visit_id: s.visit_id, branch_id: s.branch_id, taken_on: takenOn(it, v?.visit_date), view_key: key,
-        view_label: label(s.occasion, key, it.position), braces_month: v?.braces_month ?? null, occasion: s.occasion, public_ok: false, uploaded_by: me()?.id || null,
+        view_label: label(s.occasion, key, it.position), braces_month: v?.braces_month ?? monthOf(s.occasion), occasion: s.occasion, public_ok: false, uploaded_by: me()?.id || null,
         intake_item_id: it.id, intake_set_id: s.id, created_at: nowIso() };
       if (!it.raw_photo_id) {
         const raw = { id: uid(), ...base, kind: 'raw', storage_path: it.storage_path, thumb_path: it.thumb_path, edited_from: null,
@@ -203,7 +223,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       return { set_id: s.id, status: s.status, manual: s.manual, first_at: s.first_at, last_at: s.last_at, photo_count: s.photo_count, time_ok: s.time_ok, camera: s.camera,
         branch_hint: s.branch_hint, candidates: clone(s.candidates), wait_reason: s.wait_reason, patient_id: s.patient_id, visit_id: s.visit_id, branch_id: s.branch_id,
         occasion: s.occasion, filed_how: s.filed_how, filed_rule: s.filed_rule, filed_by_name: db().staff.find((x) => x.id === s.filed_by)?.full_name || null,
-        filed_at: s.filed_at, hidden: s.hidden, ai_flag: s.ai_flag, set_aside_reason: s.set_aside_reason, version: s.version,
+        filed_at: s.filed_at, hidden: s.hidden, ai_flag: s.ai_flag, set_aside_reason: s.set_aside_reason, version: s.version, kind: s.kind || 'day',
         release_after: [s.release_after, ...db().photos.filter((ph) => ph.intake_set_id === s.id && ph.kind === 'edited').map((ph) => ph.release_after)].filter(Boolean).sort().pop() || null,
         full_name: p?.full_name || null, mr_number: p?.mr_number || null };
     });
@@ -215,8 +235,26 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       ai_issues: i.ai_result?.issues || [], edit_status: i.edit_status, edit_basic: i.edit_basic, raw_photo_id: i.raw_photo_id, edited_photo_id: i.edited_photo_id,
     }));
     const c = city(cityId);
+    // the uploads of the day's photos: kind, note, the Mr#s it names and their patients; for old photos also the patients whose first name is
+    // in the note (the most name words first, this city's first, at most 20)
+    const pRow = (p, extra = {}) => ({ patient_id: p.id, full_name: p.full_name, mr_number: p.mr_number, branch_id: p.first_branch_id ?? null,
+      city_id: branch(p.first_branch_id)?.city_id ?? null, ...extra });
+    const words = (t) => nameNorm(t).split(' ').filter((w) => w && !['m', 'mr', 'mrs', 'ms', 'miss', 'dr', 'md', 'muhammad', 'mohammad', 'muhammed', 'mohammed', 'mohd', 'syed', 'syeda', 'sayed', 'hafiz', 'haji', 'baby', 'master', 'kid'].includes(w));
+    const batchIds = [...new Set(items.map((i) => i.upload_batch).filter(Boolean))];
+    const batches = batchIds.map(batchOf).filter(Boolean).sort((a, b) => a.created_at.localeCompare(b.created_at)).map((b) => {
+      const mrs = noteMrs(b.note);
+      const nw = new Set(noteWords(b.note));
+      const named = b.kind === 'old' && nw.size ? db().patients.map((p) => {
+        const ws = words(p.full_name).map(nameSpelling);
+        return { p, first: ws.length && nw.has(ws[0]), hits: ws.filter((w) => nw.has(w)).length };
+      }).filter((x) => x.first).sort((x, y) => (y.hits - x.hits) || (Number(branch(y.p.first_branch_id)?.city_id === Number(cityId)) - Number(branch(x.p.first_branch_id)?.city_id === Number(cityId)))
+        || x.p.mr_number.localeCompare(y.p.mr_number)).slice(0, 20).map((x) => pRow(x.p, { hits: x.hits })) : [];
+      return { batch_id: b.id, kind: b.kind, note: b.note, created_at: b.created_at, created_by_name: db().staff.find((x) => x.id === b.created_by)?.full_name || null,
+        mrs: [...mrs].sort(), mr_patients: db().patients.filter((p) => mrs.includes(String(p.mr_number).toLowerCase())).sort((x, y) => x.mr_number.localeCompare(y.mr_number)).map((p) => pRow(p)),
+        name_patients: named };
+    });
     return { city: { id: c.id, name: c.name, slug: citySlug(c.name) }, day, hold_hours: hold() / (60 * MIN), branches: branches.map((b) => ({ id: b.id, code: b.code, name: b.name })),
-      visits, sets, items };
+      visits, sets, items, batches };
   };
   const claimable = (i, canHeic, lease) => (i.edit_status === 'pending' || (i.edit_status === 'failed' && i.edit_attempts < 3) || (canHeic && i.edit_status === 'needs_safari' && i.edit_attempts < 3))
     && (!i.edit_lease_until || Date.parse(i.edit_lease_until) < Date.now() || i.edit_lease_by === lease);
@@ -286,6 +324,18 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       if (thumb) putFile(p.thumb, thumb);
       return { path: p.path, thumbPath: thumb ? p.thumb : null, already };
     },
+    /** An upload starts (public.photo_inbox_start_batch): its folder, kind and note; the same upload again answers the stored one. */
+    async photoInboxStartBatch({ batchId, cityId, kind = 'day', note = null }) {
+      require(cityId);
+      openInbox();
+      if (!batchId || !['day', 'old'].includes(kind)) fail('PHOTO_BAD_INPUT: an upload needs its id and its kind (today\'s photos or old photos).');
+      const text = String(note ?? '').replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim() || null;
+      if (text && text.length > NOTE_MAX) fail('PHOTO_BAD_INPUT: the note is longer than 500 characters.');
+      let b = batchOf(batchId);
+      if (!b) { b = { id: batchId, city_id: Number(cityId), kind, note: text, created_by: me().id, created_at: nowIso() }; inbox().batches.push(b); }
+      if (b.city_id !== Number(cityId) || b.kind !== kind || b.created_by !== me().id) fail('PHOTO_BAD_INPUT: that upload was started in another way. Choose the photos again.');
+      return { batch_id: b.id, kind: b.kind, note: b.note };
+    },
     async photoInboxAddItems(list) {
       require(null);
       openInbox();
@@ -302,20 +352,37 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
           fail('PHOTO_BAD_INPUT: only JPEG, PNG, HEIC and WebP photos go into the Photo inbox.');
         }
         if (x.branch_hint != null && branch(x.branch_hint)?.city_id !== Number(x.city_id)) fail('PHOTO_BAD_INPUT: that branch is not in this city.');
-        const clockOk = !!x.clock_ok && !!x.taken_at;
-        if (!x.photo_day || dayNum(x.photo_day) < dayNum(today) - 8 || dayNum(x.photo_day) > dayNum(today) + 1) fail('PHOTO_BAD_INPUT: a photo\'s day must be within the last week.');
-        if (x.time_source === 'exif' && clockOk && karachiDate(x.taken_at) !== x.photo_day) fail('PHOTO_BAD_INPUT: a photo\'s day is not the day its camera time says.');
-        const path = inboxPaths({ citySlug: citySlug(city(x.city_id).name), day: x.photo_day, sha, ext: x.ext }).path;
+        let clockOk = !!x.clock_ok && !!x.taken_at;
+        // (the upload: today's photos, or old photos started by the same person in the same folder)
+        const bt = batchOf(x.upload_batch);
+        if (bt && (bt.city_id !== Number(x.city_id) || bt.created_by !== me().id)) fail('PHOTO_BAD_INPUT: these photos belong to another upload. Choose them again.');
+        const old = bt?.kind === 'old';
+        if (old) {
+          clockOk = false;
+          const own = ['exif', 'exif_modified'].includes(x.time_source) && x.taken_at ? karachiDate(x.taken_at) : null;
+          if (own && own >= '1990-01-01' && dayNum(own) <= dayNum(today) + 1) {
+            if (x.photo_day !== own) fail('PHOTO_BAD_INPUT: an old photo\'s day is the day its own time says.');
+          } else if (!x.photo_day || Math.abs(dayNum(x.photo_day) - dayNum(today)) > 1) fail('PHOTO_BAD_INPUT: an old photo without its own date goes to the day it is uploaded.');
+        } else {
+          if (!x.photo_day || dayNum(x.photo_day) < dayNum(today) - 8 || dayNum(x.photo_day) > dayNum(today) + 1) fail('PHOTO_BAD_INPUT: a photo\'s day must be within the last week.');
+          if (x.time_source === 'exif' && clockOk && karachiDate(x.taken_at) !== x.photo_day) fail('PHOTO_BAD_INPUT: a photo\'s day is not the day its camera time says.');
+        }
+        const paths = inboxPaths({ citySlug: citySlug(city(x.city_id).name), day: x.photo_day, sha, ext: x.ext });
+        const path = paths.path;
         const f = store().get(path);
         if (!f || (f.blob?.size && Number(x.byte_size) !== f.blob.size)) fail('PHOTO_FILE_MISSING: the photo did not finish uploading. Choose it again.');
-        const thumbPath = inboxPaths({ citySlug: citySlug(city(x.city_id).name), day: x.photo_day, sha, ext: x.ext }).thumb;
+        const thumbPath = paths.thumb;
+        // (an old photo's as-it-is copy, next to it at edited/<sha>.jpg)
+        const edited = old && x.edited ? paths.edited : null;
+        if (edited && !store().has(edited)) fail('PHOTO_FILE_MISSING: the copy of an old photo did not finish uploading. Choose it again.');
         const it = { id: uid(), sha256: sha, city_id: Number(x.city_id), photo_day: x.photo_day, storage_path: path, thumb_path: x.thumb && store().has(thumbPath) ? thumbPath : null,
-          edited_path: null, edited_thumb_path: null, file_name: String(x.file_name || 'photo').slice(0, 200), mime_type: x.mime_type, byte_size: Number(x.byte_size),
+          file_name: String(x.file_name || 'photo').slice(0, 200), mime_type: x.mime_type, byte_size: Number(x.byte_size),
           width: x.width || null, height: x.height || null, taken_at: x.taken_at || null, time_source: x.time_source || 'none', clock_ok: clockOk,
           camera: String(x.camera || 'unknown').slice(0, 120), orientation: x.orientation || null, file_seq_prefix: x.file_seq_prefix || null, file_seq: x.file_seq ?? null,
           branch_hint: x.branch_hint ?? null, uploaded_by: me().id, uploaded_at: nowIso(), upload_batch: x.upload_batch || null, set_id: null, position: null,
-          raw_photo_id: null, edited_photo_id: null, ai_status: 'pending', ai_result: null, ai_attempts: 0, ai_call_id: null, edit_status: 'pending', edit_basic: false,
-          edit_version: null, edit_attempts: 0, edit_round: 1, edit_lease_until: null, edit_lease_by: null };
+          raw_photo_id: null, edited_photo_id: null, ai_status: old ? 'skipped' : 'pending', ai_result: null, ai_attempts: 0, ai_call_id: null,
+          edit_status: edited ? 'done' : 'pending', edit_basic: false, edit_version: edited ? EDIT_VERSION : null, edit_attempts: 0, edit_round: 1,
+          edit_lease_until: null, edit_lease_by: null, edited_path: edited, edited_thumb_path: edited && store().has(paths.editedThumb) ? paths.editedThumb : null };
         inbox().items.push(it);
         out.push({ sha256: sha, item_id: it.id, state: 'added', city_id: it.city_id, photo_day: it.photo_day });
       }
@@ -363,7 +430,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         const its = ids.map((id) => inbox().items.find((i) => i.id === id));
         const join = g.join_set_id ? setById(g.join_set_id) : null;
         let ok = false;
-        if (join && join.status === 'filed' && !join.manual && join.city_id === Number(cityId) && join.photo_day === day) {
+        if (join && join.status === 'filed' && !join.manual && join.city_id === Number(cityId) && join.photo_day === day && (join.kind || 'day') === 'day') {
           const fits = itemsOf(join.id);
           const ft = fits.filter((i) => i.time_source === 'exif' && i.taken_at).map((i) => Date.parse(i.taken_at));
           const gt = its.filter((i) => i.taken_at).map((i) => Date.parse(i.taken_at));
@@ -403,7 +470,40 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         }
         const cands = Array.isArray(g.candidates) ? g.candidates : [];
         let reason = g.wait_reason ? String(g.wait_reason).slice(0, 40) : null;
-        if (g.auto && Number(plan.matcher_version) >= 1) {
+        const ruleKind = g.auto?.rule_kind || 'time';
+        if (g.auto && Number(plan.matcher_version) >= 1 && ruleKind !== 'time') {
+          // (filed by the note: one upload of that kind with a note naming exactly one Mr# of exactly one patient; checked like the database)
+          const v = g.auto.visit_id ? db().visits.find((x) => x.id === g.auto.visit_id) : null;
+          const its = itemsOf(s.id);
+          const bIds = [...new Set(its.map((i) => i.upload_batch || '-'))];
+          const bt = bIds.length === 1 ? batchOf(bIds[0]) : null;
+          const keys = noteMrs(bt?.note);
+          const pats = db().patients.filter((p) => keys.includes(String(p.mr_number).toLowerCase()));
+          const timed = inbox().items.filter((i) => bt && i.upload_batch === bt.id && i.photo_day === day && i.time_source === 'exif' && i.taken_at).map((i) => Date.parse(i.taken_at));
+          const why = s.manual || s.ai_flag ? 'the photos are not clear enough'
+            : !bt || !bt.note ? 'the photos are not of one upload with a note'
+              : bt.kind !== (ruleKind === 'note_mr' ? 'day' : 'old') ? 'the upload is not of that kind'
+                : keys.length !== 1 ? 'the note does not name exactly one Mr#'
+                  : pats.length !== 1 ? 'no single patient has the Mr# of the note'
+                    : g.auto.patient_id !== pats[0].id ? 'the patient is not the one the note names'
+                      : ruleKind === 'note_mr' && (!v || v.patient_id !== pats[0].id || !inCity(v)) ? 'the note\'s patient has no visit that day in this city'
+                        : ruleKind === 'note_mr' && s.branch_hint && v.branch_id !== s.branch_hint ? 'the visit is at another branch'
+                          : ruleKind === 'note_mr' && timed.length && Math.max(...timed) - Math.min(...timed) > ONE_VISIT_SEC * 1000 ? 'the upload is more than one visit'
+                            : ruleKind === 'old_note_mr' && s.kind !== 'old' ? 'the photos are not old photos'
+                              : !['note_mr', 'old_note_mr'].includes(ruleKind) ? 'unknown rule' : null;
+          if (!why) {
+            const t = ruleKind === 'note_mr' ? { visit: v, patientId: v.patient_id, branchId: v.branch_id, occasion: occasionOf(v) } : oldTarget(s, null, pats[0].id);
+            const rule = ruleKind === 'note_mr' ? `Automatic (note_mr): the note with these photos names Mr# ${keys[0]}, on the ${branch(v.branch_id)?.code || ''} list that day`
+              : `Automatic (old_note_mr): old photos; the note with them names Mr# ${keys[0]}`;
+            doFile(s, t, 'auto', rule);
+            Object.assign(s, { candidates: clone(cands), matched_at: nowIso() });
+            out.filed++;
+            out.sets.push({ set_id: s.id, item_ids: ids, status: 'filed' });
+            continue;
+          }
+          reason = 'SERVER_CHECK';
+          out.server_refused.push({ set_id: s.id, why });
+        } else if (g.auto && Number(plan.matcher_version) >= 1) {
           const v = db().visits.find((x) => x.id === g.auto.visit_id);
           const at = (x) => (x ? Date.parse(x) : null);
           const given = g.auto.anchor_at ? Date.parse(g.auto.anchor_at) : null;
@@ -460,7 +560,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       const s = getSet(setId);
       if (s.status !== 'waiting') fail('PHOTO_SET_STATE: these photos were already filed or set aside. The list is reloaded.');
       stale(s, version);
-      return doFile(s, target(s, visitId, patientId), 'confirmed', null);
+      return doFile(s, s.kind === 'old' ? oldTarget(s, visitId, patientId) : target(s, visitId, patientId), 'confirmed', null);
     },
     async photoInboxSetAside(setId, version) {
       const s = getSet(setId);
@@ -517,12 +617,12 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
       const s = getSet(setId);
       requireDelete();
       if (s.status !== 'filed') fail('PHOTO_SET_STATE: these photos are not filed. The list is reloaded.');
-      const t = target(s, visitId, patientId);
+      const t = s.kind === 'old' ? oldTarget(s, visitId, patientId) : target(s, visitId, patientId);
       const release = new Date(Date.now() + hold()).toISOString();
       let n = 0;
       for (const p of db().photos.filter((x) => x.intake_set_id === s.id)) {
         const it = inbox().items.find((i) => i.id === p.intake_item_id);
-        Object.assign(p, { patient_id: t.patientId, visit_id: t.visit?.id || null, branch_id: t.branchId ?? s.branch_hint, braces_month: t.visit?.braces_month ?? null,
+        Object.assign(p, { patient_id: t.patientId, visit_id: t.visit?.id || null, branch_id: t.branchId ?? s.branch_hint, braces_month: t.visit?.braces_month ?? monthOf(t.occasion),
           occasion: t.occasion, view_label: label(t.occasion, p.view_key, it?.position), taken_on: it ? takenOn(it, t.visit?.visit_date) : p.taken_on,
           release_after: p.kind === 'edited' ? release : p.release_after });
         audit('photos', 'UPDATE', p);

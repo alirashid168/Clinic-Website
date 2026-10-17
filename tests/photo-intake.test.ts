@@ -7,7 +7,7 @@ import {
   readExif, withExif, parseExifDate, captureTime, fileSeq, cameraKey, sniffType, inboxPaths, citySlug, karachiDate, karachiClock, dayLabel,
   groupItems, visitFacts, scorePair, assignDay, planDay, planUnchanged, waitSentence, WAIT_REASONS,
   VIEW_KEYS, KINDS, viewName, occasionLabel, viewLabel, downloadName, uniqueNames, editPlan, adjustPixels, GAP_SEC, MIN_PAIR,
-  cameraClocks, editTransform, isConnectionProblem,
+  cameraClocks, editTransform, isConnectionProblem, noteMrs, noteMonth, noteWords, noteNameFit, oldPhotoTime, groupOld, ONE_VISIT_SEC,
 } from '../web/js/lib/photo-intake.js';
 import { storageProblem } from '../web/js/data/supabase-inbox.js';
 import { VIEW_KEYS as CORE_VIEWS, KINDS as CORE_KINDS } from '../supabase/functions/photo-ai/core.ts';
@@ -581,4 +581,138 @@ test('review: connection problems are told apart from refusals, and a rate limit
   assert.equal(storageProblem({ status: 409, message: 'The resource already exists' }), 'ALREADY');
   assert.equal(storageProblem({ status: 403, message: 'new row violates row-level security policy' }), 'NOT_ALLOWED');
   assert.equal(storageProblem({ message: 'Failed to fetch' }), 'NETWORK');
+});
+
+// ---------------------------------------------------------------- the note box and old photos (owner, 17 Oct 2026)
+// The same notes are read by the database in supabase/tests/43_photo_inbox_notes_test.sql (private.photo_inbox_note_mrs / _note_month).
+test('notes: the Mr#s (3-6 digits, old ones with a dash), never a phone number, a date or a year', () => {
+  assert.deepEqual(noteMrs('Ayesha Khan Mr# 50013, month 6, phone 0300-5551234, 17-10-2026, Oct 2025'), ['50013']);
+  assert.deepEqual(noteMrs('347-1 and 9815'), ['347-1', '9815']);
+  assert.deepEqual(noteMrs('#025 mr50013 +92 300 5551234'), ['025', '50013']);
+  assert.deepEqual(noteMrs('50013-50014 then 9815, 9815 again'), ['50013', '50014', '9815']);
+  assert.deepEqual(noteMrs('12 1234567 2026/10/17 1999 M6'), []);
+  assert.deepEqual(noteMrs(''), []);
+  assert.deepEqual(noteMrs(null), []);
+});
+test('notes: the braces month ("Month 6", "M6", "6th month"), not an Mr# or a room', () => {
+  assert.equal(noteMonth('Ayesha month 6'), 6);
+  assert.equal(noteMonth('M6 front'), 6);
+  assert.equal(noteMonth('m 12'), 12);
+  assert.equal(noteMonth('Month: 14'), 14);
+  assert.equal(noteMonth('her 6th month'), 6);
+  assert.equal(noteMonth('Mr 50013'), null);
+  assert.equal(noteMonth('room 12'), null);
+  assert.equal(noteMonth('month 0'), null);
+  assert.equal(noteMonth(''), null);
+});
+test('notes: name words in their everyday spelling; a whole name or a first name fits, never a surname alone', () => {
+  const w = noteWords('Aisha Khan photos Month 6 Mr# 50013 front');
+  assert.equal(w.length, 2, `two name words (${w.join(', ')})`);
+  assert.ok(!w.includes('photos') && !w.includes('month') && !w.includes('front'), 'note words are not names');
+  assert.equal(noteNameFit(w, 'Ayesha Khan'), 'full');
+  assert.equal(noteNameFit(w, 'Muhammad Ayesha Khan'), 'full', 'titles left out');
+  assert.equal(noteNameFit(w, 'Ayesha Rajpoot'), 'first');
+  assert.equal(noteNameFit(w, 'Bilal Khan'), null, 'a surname alone does not fit');
+  assert.equal(noteNameFit([], 'Ayesha Khan'), null);
+});
+test('old photos: the day of their own date (camera or app), else the upload day; never a usable time', () => {
+  const upload = Date.parse(at('22:00'));
+  const t = oldPhotoTime(captureTime({ exif: { dateTimeOriginal: '2024:03:10 11:00:00' }, uploadedAt: upload, pickedAt: upload }), upload);
+  assert.equal(t.photo_day, '2024-03-10');
+  assert.equal(t.time_ok, false);
+  assert.equal(t.clock_ok, false);
+  const app = oldPhotoTime(captureTime({ exif: { dateTime: '2023:12:01 09:00:00' }, uploadedAt: upload }), upload);
+  assert.equal(app.photo_day, '2023-12-01', 'the time an app saved it counts for old photos');
+  const none = oldPhotoTime(captureTime({ exif: null, lastModified: upload - 3 * 86400000, uploadedAt: upload, pickedAt: upload }), upload);
+  assert.equal(none.photo_day, DAY, 'no date of its own: the upload day');
+});
+
+const NOTE_BATCH = (id: string, note: string | null, kind = 'day', extra: V = {}) => ({ batch_id: id, kind, note, mr_patients: [], name_patients: [], ...extra });
+test('note_mr: an upload of one visit whose note names one Mr# on the list files by itself, even when the time alone waits', () => {
+  const s1 = sitting('18:28', 3, { branch_hint: 2, upload_batch: 'b1' }); const s2 = sitting('18:36', 4, { branch_hint: 2, upload_batch: 'b2' });
+  const vs = [visit('danish', { branch_id: 2, photo_required: true, braces_month: 4, started_at: at('18:25'), mr_number: '50004', full_name: 'Danish Sample' }),
+    visit('esha', { branch_id: 2, photo_required: true, braces_month: 7, started_at: at('18:31'), mr_number: '50007', full_name: 'Esha Sample' })];
+  const plan = planDay({ ...day(vs, [...s1, ...s2]), batches: [NOTE_BATCH('b1', null), NOTE_BATCH('b2', 'Esha Mr# 50007 month 7')] });
+  const g1 = groupOf(plan, s1[0]); const g2 = groupOf(plan, s2[0]);
+  assert.equal(g2.auto?.rule_kind, 'note_mr');
+  assert.equal(g2.auto.visit_id, 'esha');
+  assert.match(g2.auto.rule, /^Automatic \(note_mr\): the note with these photos names Mr# 50007, on the NN list that day$/);
+  assert.equal(g2.candidates[0].visit_id, 'esha');
+  assert.ok(g2.candidates[0].reasons.includes('NOTE_MR'));
+  assert.equal(g1.auto, null, 'the other upload (no note) still waits');
+  assert.equal(g1.wait_reason, 'AMBIGUOUS');
+});
+test('note: a name alone never files; it only comes first on the card', () => {
+  const s2 = sitting('18:36', 4, { branch_hint: 2, upload_batch: 'b2' });
+  const vs = [visit('danish', { branch_id: 2, photo_required: true, braces_month: 4, started_at: at('18:25'), full_name: 'Danish Sample' }),
+    visit('esha', { branch_id: 2, photo_required: true, braces_month: 7, started_at: at('18:31'), full_name: 'Esha Sample' })];
+  const g = groupOf(planDay({ ...day(vs, s2), batches: [NOTE_BATCH('b2', 'Danish, month 4')] }), s2[0]);
+  assert.equal(g.auto, null);
+  assert.equal(g.candidates[0].visit_id, 'danish', 'the name in the note comes first (an upload of one visit)');
+  assert.ok(g.candidates[0].reasons.includes('NOTE_NAME'));
+});
+test('note_mr guards: not on the list (NOTE_NO_VISIT), a whole day of photos, a time match to someone else (NOTE_OTHER), photos without a time', () => {
+  const vs = [visit('ayesha', { photo_required: true, braces_month: 10, started_at: at('18:31'), completed_at: at('18:49'), mr_number: '50010' }),
+    visit('bilal', { braces_month: 5, started_at: at('18:13'), completed_at: at('18:23'), mr_number: '50005' })];
+  const a = sitting('18:35', 3, { upload_batch: 'b1' });
+  assert.equal(groupOf(planDay({ ...day(vs, a), batches: [NOTE_BATCH('b1', 'Mr# 77777')] }), a[0]).wait_reason, 'NOTE_NO_VISIT');
+  // a whole day of photos in one upload (18:35 and 21:30): the note is not about every set, so it files nothing by itself
+  const b = [...sitting('18:35', 2, { upload_batch: 'b2' }), ...sitting('21:30', 2, { upload_batch: 'b2' })];
+  const pb = planDay({ ...day(vs, b), batches: [NOTE_BATCH('b2', 'Bilal 50005')] });
+  assert.ok(pb.groups.every((g: any) => g.auto?.rule_kind !== 'note_mr'));
+  assert.ok((21.5 - 18.5) * 3600 > ONE_VISIT_SEC);
+  // one visit, the time says Ayesha (the clear case), the note names Bilal: a person looks
+  const c = sitting('18:35', 3, { upload_batch: 'b3' });
+  const gc = groupOf(planDay({ ...day(vs, c), batches: [NOTE_BATCH('b3', 'Bilal 50005')] }), c[0]);
+  assert.equal(gc.auto, null);
+  assert.equal(gc.wait_reason, 'NOTE_OTHER');
+  // the note agrees with the time: filed by the time rule
+  const ga = groupOf(planDay({ ...day(vs, c), batches: [NOTE_BATCH('b3', 'Ayesha 50010')] }), c[0]);
+  assert.equal(ga.auto?.visit_id, 'ayesha');
+  assert.equal(ga.auto.rule_kind, undefined);
+  // photos without a camera time (WhatsApp) of an upload naming one Mr#: one set, filed to that patient
+  const x = [item(null, { upload_batch: 'b4' }), item(null, { upload_batch: 'b4' }), item(null, { upload_batch: 'b4' })];
+  const px = planDay({ ...day(vs, x), batches: [NOTE_BATCH('b4', 'Bilal Mr# 50005')] });
+  assert.equal(px.groups.length, 1);
+  assert.equal(px.groups[0].auto?.rule_kind, 'note_mr');
+  assert.equal(px.groups[0].auto.visit_id, 'bilal');
+});
+test('old photos: one set per upload (pauses split timed ones), filed by a single Mr# (old_note_mr), else the note\'s patients to tap', () => {
+  const p = (id: string, mr: string, name: string, city = 1) => ({ patient_id: id, mr_number: mr, full_name: name, branch_id: 1, city_id: city });
+  const old = (b: string, k = 3) => Array.from({ length: k }, (_, i) => item(null, { upload_batch: b, time_source: 'exif_modified', taken_at: '2024-03-10T06:00:00.000Z', clock_ok: false, file_name: `old${i}.jpg` }));
+  const timed = [item('2024-03-10T06:00:00.000Z', { upload_batch: 'g', clock_ok: false }), item('2024-03-10T06:01:00.000Z', { upload_batch: 'g', clock_ok: false }),
+    item('2024-03-10T07:00:00.000Z', { upload_batch: 'g', clock_ok: false })];
+  assert.deepEqual(groupOld([...old('h', 2), ...timed]).map((g) => g.item_ids.length).sort(), [1, 2, 2]);
+  const a = old('o1');
+  const vs = [visit('ayesha', { photo_required: true, braces_month: 10, started_at: at('18:31'), mr_number: '9820' })];
+  const pa = planDay({ ...day(vs, a), batches: [NOTE_BATCH('o1', 'Sana Farooq 9820 M6', 'old', { mr_patients: [p('p-sana', '9820', 'Sana Farooq')] })] });
+  assert.equal(pa.groups.length, 1);
+  assert.equal(pa.groups[0].auto.visit_id, null);
+  assert.equal(pa.groups[0].auto.patient_id, 'p-sana');
+  assert.equal(pa.groups[0].auto.rule_kind, 'old_note_mr');
+  assert.match(pa.groups[0].auto.rule, /^Automatic \(old_note_mr\): old photos; the note with them names Mr# 9820$/);
+  const b = old('o2');
+  const pb = planDay({ ...day([], b), batches: [NOTE_BATCH('o2', '9815 9818', 'old', { mr_patients: [p('p-f', '9815', 'Fatima Noor'), p('p-a', '9818', 'Ayesha Kamal', 2)] })] });
+  assert.equal(pb.groups[0].auto, null);
+  assert.equal(pb.groups[0].wait_reason, 'OLD_SEVERAL');
+  assert.deepEqual(pb.groups[0].candidates.map((c: any) => c.patient_id), ['p-f', 'p-a']);
+  assert.ok(pb.groups[0].candidates.every((c: any) => c.visit_id === null && c.reasons[0] === 'NOTE_MR'));
+  const c = old('o3');
+  const pc = planDay({ ...day([], c), batches: [NOTE_BATCH('o3', 'Aisha Khan month 3', 'old', { name_patients: [{ ...p('p-r', '9001', 'Ayesha Rajpoot'), hits: 1 }, { ...p('p-k', '9002', 'Ayesha Khan'), hits: 2 }] })] });
+  assert.equal(pc.groups[0].auto, null);
+  assert.equal(pc.groups[0].wait_reason, 'OLD_NAME');
+  assert.deepEqual(pc.groups[0].candidates.map((x: any) => [x.patient_id, x.reasons[0]]), [['p-k', 'NOTE_NAME_FULL'], ['p-r', 'NOTE_NAME']]);
+  const dd = old('o4');
+  assert.equal(planDay({ ...day([], dd), batches: [NOTE_BATCH('o4', null, 'old')] }).groups[0].wait_reason, 'OLD_NO_NOTE');
+  const e = old('o5');
+  assert.equal(planDay({ ...day([], e), batches: [NOTE_BATCH('o5', 'Mr 4444', 'old')] }).groups[0].wait_reason, 'OLD_NOT_FOUND');
+});
+test('old photos are never matched by time, even at a photo-month patient\'s time', () => {
+  const s = sitting('18:35', 4, { upload_batch: 'o9', clock_ok: false, branch_hint: null });
+  const vs = [visit('ayesha', { photo_required: true, braces_month: 10, started_at: at('18:31'), completed_at: at('18:49') })];
+  const plan = planDay({ ...day(vs, s), batches: [NOTE_BATCH('o9', null, 'old')] });
+  assert.equal(plan.groups.length, 1);
+  assert.equal(plan.groups[0].auto, null);
+  assert.equal(plan.groups[0].wait_reason, 'OLD_NO_NOTE');
+  assert.deepEqual(plan.groups[0].candidates, []);
 });

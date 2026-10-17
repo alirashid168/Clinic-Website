@@ -2,7 +2,7 @@
 // about 1 s, so every pixel is handled here): the photo's fingerprint (SHA-256), its first bytes (for the EXIF), the small copy, the
 // 1024 px copy Claude sees, and the edited copy (turn, flip, straighten, crop, gentle levels and colour, at most 2048 px). The maths is
 // in lib/photo-intake.js (editPlan, adjustPixels); this file only draws. Never more than one decoded photo at a time.
-import { THUMB_EDGE, THUMB_QUALITY, AI_EDGE, AI_QUALITY, EDIT_QUALITY, editPlan, editTransform, adjustPixels } from '../lib/photo-intake.js';
+import { THUMB_EDGE, THUMB_QUALITY, AI_EDGE, AI_QUALITY, EDIT_EDGE, EDIT_QUALITY, editPlan, editTransform, adjustPixels } from '../lib/photo-intake.js';
 
 /** SHA-256 of a file, lower-case hex. */
 export async function sha256Hex(blob) {
@@ -97,6 +97,16 @@ export async function renderEdit(bmp, ai) {
     const small = await scaled(c, THUMB_EDGE, THUMB_QUALITY);
     return { blob, thumb: small.blob, width: c.width, height: c.height };
   } finally { release(c); }
+}
+/**
+ * The copy of an old photo that was edited already (the Photo inbox's "Old photos"): upright, at most 2048 px, JPEG like the other edited
+ * copies, and nothing else changed (no crop, turn, colour or levels): { blob, thumb, width, height }.
+ */
+export async function renderAsIs(bmp) {
+  const big = await scaled(bmp, EDIT_EDGE, EDIT_QUALITY);
+  if (!big.blob) throw Object.assign(new Error('CANVAS: the copy could not be made just now.'), { code: 'CANVAS' });
+  const small = await scaled(bmp, THUMB_EDGE, THUMB_QUALITY);
+  return { blob: big.blob, thumb: small.blob, width: big.width, height: big.height };
 }
 /** Safari (iPhone, iPad, Mac) decodes HEIC; other browsers do not. */
 export function canHeic(ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '')) {

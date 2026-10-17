@@ -5,10 +5,14 @@
 // Claude (photo-ai Edge Function for the numbers, the canvas here for the pixels); without the AI key the photos wait, already filed.
 // Tabs: Upload · Which patient? · Filed · Set aside. Who may: "Use the Photo inbox" and "View raw clinic photos folder" (shell.js);
 // moving and undoing a filing: "Delete clinic photos and X-rays". docs/PHOTO-INTAKE.md explains it to staff.
+// The note box (optional, with each upload) helps the matching: the Mr#s and names in it come first on "Which patient?", and a single Mr#
+// files the photos by itself. "Old photos (already edited)": any past date, not matched by time, not sent to Claude (an as-it-is copy is
+// the edited photo), filed to the patient of the note's Mr# or chosen on "Which patient?" (search all patients).
 import { h, mount, toast, friendlyError, modal, field, select, empty, tabs, announce, busy, todayISO } from '../../ui/dom.js';
 import { state, can, isAdmin } from '../../state.js';
-import { readExif, captureTime, cameraClocks, fileSeq, sniffType, planDay, planUnchanged, waitSentence, karachiClock, dayLabel, karachiDate, isConnectionProblem, EDIT_VERSION } from '../../lib/photo-intake.js';
-import { sha256Hex, readHead, makeThumb, decode, aiCopy, renderEdit, canHeic } from '../../ui/photo-edit.js';
+import { readExif, captureTime, cameraClocks, fileSeq, sniffType, planDay, planUnchanged, waitSentence, karachiClock, dayLabel, karachiDate, isConnectionProblem, EDIT_VERSION,
+  oldPhotoTime, noteMrs, inboxPaths, NOTE_MAX, OLD_CANDIDATES } from '../../lib/photo-intake.js';
+import { sha256Hex, readHead, makeThumb, decode, aiCopy, renderEdit, renderAsIs, canHeic } from '../../ui/photo-edit.js';
 import { STATUS_LABELS } from './common.js';
 
 const AI_CHUNK = 8; // photos per Claude call (supabase/functions/photo-ai/core.ts MAX_PHOTOS_PER_CALL)
@@ -45,6 +49,12 @@ const cameraName = (key) => {
 };
 const clockRange = (a, b) => (a ? (b && karachiClock(b) !== karachiClock(a) ? `${karachiClock(a)}-${karachiClock(b)}` : karachiClock(a)) : 'No camera time');
 const dateTimeText = (iso) => `${dayLabel(karachiDate(iso))}, ${karachiClock(iso)}`;
+/** "Thu 16 Oct", with the year when it is not this year (old photos). */
+const dayText = (day) => (String(day || '').slice(0, 4) && String(day).slice(0, 4) !== todayISO().slice(0, 4) ? `${dayLabel(day)} ${String(day).slice(0, 4)}` : dayLabel(day));
+/** The notes typed with the uploads of these photos (photo_inbox_day.batches): [{ kind, note }]. */
+const notesOf = (data, items) => [...new Set(items.map((i) => i.upload_batch).filter(Boolean))]
+  .map((id) => (data.batches || []).find((b) => b.batch_id === id)).filter((b) => b && b.note);
+const noteLine = (data, items) => notesOf(data, items).map((b) => h('p', { class: 'inbox-note-line' }, h('span', { class: 'muted' }, 'Note: '), h('q', {}, b.note)));
 
 export async function renderPhotoInbox(root, params = new URLSearchParams(), signal) {
   document.title = 'Photo inbox | Clinic system';
@@ -192,9 +202,23 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     const input = h('input', { type: 'file', multiple: true, accept: 'image/*', class: 'sr-only', 'aria-label': 'Choose photos', tabindex: '-1',
       onchange: () => { const list = [...input.files]; input.value = ''; if (list.length) uploadBatch(list); } });
     const choose = h('button', { type: 'button', class: 'btn btn-primary inbox-choose', onclick: () => input.click() }, 'Choose photos');
+    // Today's photos (matched by time) or old photos (already edited: filed by the note or a tap, not matched by time, not sent to Claude).
+    const tipBox = h('div', { class: 'inbox-tip' });
+    const drawTip = () => mount(tipBox, uploadKind === 'old'
+      ? [h('p', { class: 'inbox-old-hint' }, h('strong', {}, 'One patient per upload works best: choose that patient\'s photos, type the Mr# in the box, upload. Then the next patient.')),
+        h('p', {}, 'Old photos are filed as they are (they are edited already: Claude does not edit them again), on the date the photo has (else today), and are not matched by time. A note with several Mr#s offers those patients to tap; without an Mr#, search the patient on "Which patient?".')]
+      : [h('p', {}, 'Choose all of the day\'s photos at once (30, 50 or 100 is fine), from the phone\'s gallery (Photos / Gallery app), not from WhatsApp. On a laptop you can also drop them here.')]);
+    const kindChoice = (value, text) => h('label', { class: 'inbox-kind-choice' },
+      h('input', { type: 'radio', name: 'inbox-kind', value, checked: uploadKind === value, onchange: () => { uploadKind = value; branchRow.hidden = value === 'old'; drawTip(); } }), ' ', text);
+    const kinds = h('fieldset', { class: 'inbox-kind' }, h('legend', {}, 'What are you uploading?'),
+      kindChoice('day', 'Today\'s photos'), kindChoice('old', 'Old photos (already edited)'));
+    drawTip();
     const drop = h('div', { class: 'inbox-drop' },
       h('p', {}, h('strong', {}, `Folder: ${city.name}`)),
-      h('p', {}, 'Choose all of the day\'s photos at once, from the phone\'s gallery (Photos / Gallery app), not from WhatsApp. On a laptop you can also drop them here.'),
+      kinds,
+      field('Details about these photos (optional): patient name, Mr#, month...', noteBox,
+        'Type it before choosing the photos. An Mr# (one patient) files them straight away; names and several Mr#s come first on "Which patient?".'),
+      tipBox,
       choose, input);
     drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('over'));
@@ -202,12 +226,19 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     mount(panel, drop, uploadArea);
   }
   const uploadArea = h('div', { class: 'inbox-upload' });
+  // The note and the kind are kept while the page is open (several patients' old photos one after the other); the note is emptied after
+  // each upload.
+  let uploadKind = 'day';
+  const noteBox = h('textarea', { class: 'inbox-note', rows: '2', maxlength: String(NOTE_MAX), placeholder: 'e.g. Ayesha Khan, Mr# 50013, Month 6' });
 
   async function uploadBatch(files) {
     if (uploading) { toast('Photos are still uploading. Wait for them to finish.'); return; }
     uploading = true;
     const cityNow = city;
-    const hint = branchHint;
+    const kind = uploadKind;
+    const old = kind === 'old';
+    const hint = old ? null : branchHint; // (the branch is not used for old photos)
+    const note = noteBox.value.replace(/\s+/g, ' ').trim().slice(0, NOTE_MAX) || null;
     const batch = crypto.randomUUID();
     const pickedAt = Date.now();
     const summary = h('p', { class: 'inbox-summary', 'aria-live': 'polite' }, `Reading ${plural(files.length, 'photo')}…`);
@@ -228,32 +259,43 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
       r.li.className = `inbox-file inbox-file-${stateName}`;
     };
     try {
+      // 0. the upload, its kind and its note (before the update of the notes: today's photos without a note upload as before)
+      try {
+        await withRetry(() => d.photoInboxStartBatch({ batchId: batch, cityId: cityNow.id, kind, note }), signal);
+      } catch (e) {
+        if (!(isCode(e, 'PHOTO_NOTES_MISSING') && !old && !note)) throw e;
+      }
       // 1. read: type, camera time, fingerprint, small copy (one photo at a time)
       const seen = new Map();
-      for (const r of rows) {
+      for (const [n, r] of rows.entries()) {
         if (signal?.aborted) return;
+        status.textContent = `Reading photo ${n + 1} of ${rows.length}…`;
+        if (n % 10 === 0) announce(status.textContent);
         const head = await readHead(r.file);
         const sn = sniffType(head.subarray(0, 12), r.file.name, r.file.size, r.file.type);
         if (!sn.ok) { setRow(r, 'rejected', sn.reason); continue; }
         const exif = readExif(head);
-        const t = captureTime({ exif, lastModified: r.file.lastModified, pickedAt, uploadedAt: Date.now() });
+        let t = captureTime({ exif, lastModified: r.file.lastModified, pickedAt, uploadedAt: Date.now() });
+        if (old) t = oldPhotoTime(t, Date.now());
         const sha = await sha256Hex(r.file);
         if (seen.has(sha)) { setRow(r, 'already', 'The same photo was chosen twice'); continue; }
         seen.set(sha, r);
         const th = await makeThumb(r.file);
         const seq = fileSeq(r.file.name);
         r.meta = { sha, ext: sn.ext, mime: sn.mime, t, thumb: th.blob, width: th.width, height: th.height, seq };
-        let note = 'Ready';
-        if (!th.blob && /hei[cf]/.test(sn.ext)) note = HEIC_NOTE;
-        if (!t.time_ok) note = t.time_source === 'exif' && !t.clock_ok ? `The camera's date is wrong (it says ${t.taken_at ? dateTimeText(t.taken_at) : 'no date'}). Set the phone to automatic date and time. It waits on "Which patient?".` : NO_TIME_NOTE;
-        setRow(r, 'ready', note);
+        let rowNote = 'Ready';
+        if (!th.blob && /hei[cf]/.test(sn.ext)) rowNote = HEIC_NOTE;
+        if (old) rowNote = `Old photo of ${dayText(t.photo_day)}`;
+        else if (!t.time_ok) rowNote = t.time_source === 'exif' && !t.clock_ok ? `The camera's date is wrong (it says ${t.taken_at ? dateTimeText(t.taken_at) : 'no date'}). Set the phone to automatic date and time. It waits on "Which patient?".` : NO_TIME_NOTE;
+        setRow(r, 'ready', rowNote);
       }
+      status.textContent = '';
       const ready = rows.filter((r) => r.state === 'ready');
       // Each camera's clock judged over all its photos of this upload: a clock that runs ahead, or a phone on the wrong time zone, makes
       // every photo of that camera wait on "Which patient?" (they would be matched at the wrong time). Each camera's newest photo time
       // is shown, so staff see a wrong clock themselves.
       const uploadedAt = Date.now();
-      const clocks = cameraClocks(ready.map((r) => ({ t: r.meta.t, lastModified: r.file.lastModified, pickedAt })), uploadedAt);
+      const clocks = old ? [] : cameraClocks(ready.map((r) => ({ t: r.meta.t, lastModified: r.file.lastModified, pickedAt })), uploadedAt);
       const suspect = new Map(clocks.filter((c) => c.suspect).map((c) => [c.camera, c]));
       for (const r of ready) {
         const c = suspect.get(r.meta.t.camera);
@@ -267,8 +309,10 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
       const withTime = ready.filter((r) => r.meta.t.time_ok).length;
       const days = new Map();
       for (const r of ready) days.set(r.meta.t.photo_day, (days.get(r.meta.t.photo_day) || 0) + 1);
-      summary.textContent = `${plural(ready.length, 'photo')} · ${withTime} with camera time${ready.length - withTime ? ` · ${ready.length - withTime} without (sent through WhatsApp or screenshots: upload from the phone's gallery next time)` : ''}`
-        + (days.size ? ` · days: ${[...days].sort().map(([day, n]) => `${dayLabel(day)} (${n})`).join(', ')}` : '') + cameraLine;
+      const daysText = days.size ? ` · days: ${[...days].sort().map(([day, n]) => `${dayText(day)} (${n})`).join(', ')}` : '';
+      summary.textContent = (old ? `${plural(ready.length, 'old photo')} (already edited: filed as they are, no Claude)${daysText}`
+        : `${plural(ready.length, 'photo')} · ${withTime} with camera time${ready.length - withTime ? ` · ${ready.length - withTime} without (sent through WhatsApp or screenshots: upload from the phone's gallery next time)` : ''}`
+        + daysText + cameraLine) + (note ? ` · Note: "${note}"` : '');
       // 2. already uploaded?
       const known = ready.length ? await withRetry(() => d.photoInboxKnown(ready.map((r) => r.meta.sha)), signal) : [];
       const knownBy = new Map(known.map((k) => [k.sha256, k]));
@@ -302,15 +346,40 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
             byte_size: r.file.size, width: r.meta.width, height: r.meta.height, taken_at: r.meta.t.taken_at, time_source: r.meta.t.time_source, clock_ok: r.meta.t.clock_ok,
             camera: r.meta.t.camera, orientation: r.meta.t.orientation, file_seq_prefix: r.meta.seq?.prefix ?? null, file_seq: r.meta.seq?.seq ?? null,
             branch_hint: hint, upload_batch: batch, thumb: !!r.thumbPath,
+            edited: !!r.edited, edited_thumb: !!r.editedThumb, edit_version: r.edited ? EDIT_VERSION : null,
             }))), signal);
           } catch (e) { toRegister.unshift(...part); throw e; }
           for (const x of res) {
             const r = part.find((p) => p.meta.sha === x.sha256);
             if (!r) continue;
-            if (x.state === 'added') { added.push(r); setRow(r, 'uploaded', r.meta.t.time_ok ? 'Uploaded' : 'Uploaded (no camera time: it waits on "Which patient?")'); }
+            if (x.state === 'added') { added.push(r); setRow(r, 'uploaded', old || r.meta.t.time_ok ? 'Uploaded' : 'Uploaded (no camera time: it waits on "Which patient?")'); }
             else setRow(r, 'already', `Already uploaded (${cities.find((c) => c.id === x.city_id)?.name || ''}, ${dayLabel(x.photo_day)})`);
           }
         }
+      };
+      // An old photo's as-it-is copy (its edited photo: upright, at most 2048 px, nothing else changed), made one photo at a time (a phone
+      // has little memory for pictures) right after its original is stored. When it cannot be made here (HEIC outside Safari, the
+      // connection), the photo is registered without it and the editing worker makes it later (never Claude).
+      let copyChain = Promise.resolve();
+      const asIsCopy = (r) => {
+        const run = copyChain.then(async () => {
+          const bmp = await decode(r.file);
+          if (!bmp) return false;
+          let out;
+          try { out = await renderAsIs(bmp); } catch { return false; } finally { bmp.close?.(); }
+          const p = inboxPaths({ citySlug: cityNow.slug, day: r.meta.t.photo_day, sha: r.meta.sha, ext: r.meta.ext });
+          try {
+            const up = await withRetry(() => d.photoInboxUploadEdit({ path: p.edited, thumbPath: p.editedThumb, blob: out.blob, thumb: out.thumb }), signal);
+            r.edited = true;
+            r.editedThumb = !!up.thumbPath;
+            return true;
+          } catch (e) {
+            if (e.code === 'STORAGE_FULL') throw e;
+            return false;
+          }
+        });
+        copyChain = run.catch(() => {});
+        return run;
       };
       const queue = [...todo];
       const worker = async () => {
@@ -321,6 +390,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
             try {
               const up = await d.photoInboxUpload({ citySlug: cityNow.slug, day: r.meta.t.photo_day, sha: r.meta.sha, ext: r.meta.ext, file: r.file, thumb: r.meta.thumb, mime: r.meta.mime });
               r.thumbPath = up.thumbPath;
+              if (old) { setRow(r, 'uploading', 'Making its copy'); await asIsCopy(r); }
               setRow(r, 'stored', 'Stored');
               toRegister.push(r);
               break;
@@ -361,10 +431,10 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
         } catch { unmatched.push(day); }
       }
       const already = rows.filter((r) => r.state === 'already').length;
-      const noTime = added.filter((r) => !r.meta.t.time_ok).length;
+      const noTime = old ? 0 : added.filter((r) => !r.meta.t.time_ok).length;
       const failed = rows.filter((r) => r.state === 'failed').length;
       const lines = [];
-      if (added.length) lines.push(`${plural(added.length, 'photo')} uploaded${already ? ` (${already} ${already === 1 ? 'was' : 'were'} already there)` : ''}.`);
+      if (added.length) lines.push(`${plural(added.length, old ? 'old photo' : 'photo')} uploaded${already ? ` (${already} ${already === 1 ? 'was' : 'were'} already there)` : ''}.`);
       else if (already) lines.push(`Nothing new: ${already} ${already === 1 ? 'photo was' : 'photos were'} already uploaded.`);
       if (touched.length) lines.push(`${plural(filed, 'set')} filed automatically. ${plural(waitingSets.size, 'set')} ${waitingSets.size === 1 ? 'waits' : 'wait'} on "Which patient?".`);
       if (noTime) lines.push(`${plural(noTime, 'photo')} ${noTime === 1 ? 'has' : 'have'} no camera time.`);
@@ -377,6 +447,8 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
         h('div', { class: 'alert alert-info inbox-done', role: 'status' }, lines.join(' '),
           waitingSets.size ? [' ', h('button', { type: 'button', class: 'btn btn-small', onclick: () => { strip.setCurrent('which'); showTab('which'); } }, 'Go to Which patient?')] : null));
       announce(lines.join(' '));
+      // (the note was for these photos: the box is empty for the next upload, e.g. the next patient's old photos)
+      if (added.length || already) noteBox.value = '';
       refreshCounts();
       loadOverview().catch(() => {});
     } catch (e) {
@@ -425,18 +497,39 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     mount(box, q, results, h('div', { class: 'inline' }, searchAll, h('span', { class: 'muted' }, 'for a patient who is not on this day\'s list')), all);
     return box;
   }
+  /** "Search all patients" by name or Mr# (old photos have no day list to choose from). */
+  function patientSearch({ label, onPatient }) {
+    const q = h('input', { type: 'search', placeholder: 'Name or Mr#', 'aria-label': 'Search all patients by name or Mr#' });
+    const results = h('div', { class: 'inbox-chooser-all' });
+    const go = busy(async () => {
+      const t = q.value.trim();
+      if (!t) { toast('Type a name or Mr# first.'); return; }
+      const found = (await d.searchPatients(t)).slice(0, 10);
+      mount(results, found.length ? found.map((p) => h('button', { type: 'button', class: 'btn inbox-candidate', 'aria-label': `${label}: ${p.full_name}, Mr# ${p.mr_number}`, onclick: () => onPatient(p) },
+        `${p.full_name} · Mr# ${p.mr_number}`)) : h('p', { class: 'muted' }, 'No patient matches.'));
+    });
+    q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go({}); } });
+    return h('div', { class: 'inbox-chooser' }, h('div', { class: 'inline' }, q, h('button', { type: 'button', class: 'btn btn-small', onclick: go }, 'Search all patients')), results);
+  }
+  /** The patients the notes of a day name (photo_inbox_day.batches: by Mr#, and by name for old photos), by patient id. */
+  const notedPatients = (data) => new Map((data.batches || []).flatMap((b) => [...(b.name_patients || []), ...(b.mr_patients || [])]).map((p) => [p.patient_id, p]));
   function waitCard(data, s, links, { flagged = false } = {}) {
     const items = data.items.filter((i) => i.set_id === s.set_id).sort((a, b) => a.position - b.position);
+    const oldSet = s.kind === 'old';
+    const firstMr = notesOf(data, items).map((b) => noteMrs(b.note)[0]).find(Boolean) || '';
     const range = clockRange(s.first_at, s.last_at);
     const wrongClock = items.find((i) => i.time_source === 'exif' && !i.clock_ok && i.taken_at);
     const orphan = flagged && !s.patient_id; // filed to a patient record that was removed
     const reason = orphan ? 'The patient record these photos were filed to is not there any more (removed). Move them to the right patient.'
       : flagged ? (s.ai_flag === 'mixed_people' ? 'Claude thinks these photos show more than one patient. They are held back from the patient until you check them.' : 'Claude thinks a photo here is not a patient photo (floor, ceiling, an accidental shot). Take it out, or press "It\'s fine".')
-        : waitSentence(s.wait_reason, { city: data.city.name, day: dayLabel(data.day), date: wrongClock ? dateTimeText(wrongClock.taken_at) : '' });
-    const card = h('article', { class: ['inbox-card', flagged ? 'inbox-card-flagged' : ''], 'aria-label': `Photos of ${dayLabel(data.day)}, ${range}` });
+        : waitSentence(s.wait_reason, { city: data.city.name, day: dayLabel(data.day), date: wrongClock ? dateTimeText(wrongClock.taken_at) : '', mr: firstMr });
+    const card = h('article', { class: ['inbox-card', flagged ? 'inbox-card-flagged' : '', oldSet ? 'inbox-card-old' : ''], 'aria-label': `${oldSet ? 'Old photos' : 'Photos'} of ${dayText(data.day)}, ${range}` });
     let splitMode = false;
     const draw = () => {
-      const cands = (s.candidates || []).slice(0, 3).map((c) => ({ c, v: data.visits.find((x) => x.visit_id === c.visit_id) })).filter((x) => x.v);
+      const cands = oldSet ? [] : (s.candidates || []).slice(0, 3).map((c) => ({ c, v: data.visits.find((x) => x.visit_id === c.visit_id) })).filter((x) => x.v);
+      // old photos: the patients the note names (by Mr#, then by name), one tap each
+      const pmap = oldSet ? notedPatients(data) : null;
+      const oldCands = oldSet ? (s.candidates || []).slice(0, OLD_CANDIDATES).map((c) => ({ c, p: pmap.get(c.patient_id) })).filter((x) => x.p) : [];
       const fileTo = async (opts, who) => {
         try {
           await d.photoInboxFileSet(s.set_id, { ...opts, version: s.version });
@@ -448,12 +541,14 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
         } catch (e) { reloadAfter(e); }
       };
       // No likely patients (no usable camera time): the search is open at once.
-      const someone = h('div', { class: 'inbox-someone', hidden: cands.length > 0 });
+      const someone = h('div', { class: 'inbox-someone', hidden: cands.length + oldCands.length > 0 });
       mount(card,
         h('div', { class: 'inbox-card-head' },
-          h('strong', {}, `${dayLabel(data.day)} · ${range} · ${plural(s.photo_count, 'photo')}${cameraName(s.camera) ? ` · ${cameraName(s.camera)}` : ''}`),
+          h('strong', {}, oldSet ? `${dayText(data.day)}${s.first_at ? ` · ${range}` : ''} · ${plural(s.photo_count, 'old photo')} (already edited)`
+            : `${dayLabel(data.day)} · ${range} · ${plural(s.photo_count, 'photo')}${cameraName(s.camera) ? ` · ${cameraName(s.camera)}` : ''}`),
           flagged && s.full_name ? h('span', {}, ` · filed in ${s.full_name}'s file (Mr# ${s.mr_number})`) : null),
         h('p', { class: 'inbox-reason' }, reason),
+        noteLine(data, items),
         strip_(items, links, s, { split: splitMode ? async (i) => {
           try { await d.photoInboxSplitSet(s.set_id, i.item_id, s.version); toast('Split into two sets: choose the patient for each.', 'ok'); dayCache.delete(data.day); showTab('which'); } catch (e) { reloadAfter(e); }
         } : null }),
@@ -466,7 +561,13 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
               type: 'button', class: ['btn', 'inbox-candidate', c.proposal ? 'inbox-candidate-first' : ''],
               'aria-label': `File the photos of ${range} in ${v.full_name}'s file, Mr# ${v.mr_number}`,
               onclick: busy(() => fileTo({ visitId: v.visit_id }, v)),
-            }, visitLine(data, v), (c.reasons || []).includes('HAS_PHOTOS') ? h('span', { class: 'badge badge-warn' }, 'already has photos') : null))) : null,
+            }, visitLine(data, v), (c.reasons || []).includes('NOTE_MR') ? h('span', { class: 'badge' }, 'Mr# in the note') : (c.reasons || []).includes('NOTE_NAME') ? h('span', { class: 'badge' }, 'name in the note') : null,
+            (c.reasons || []).includes('HAS_PHOTOS') ? h('span', { class: 'badge badge-warn' }, 'already has photos') : null))) : null,
+            oldCands.length ? h('div', { class: 'inbox-candidates', role: 'group', 'aria-label': 'Patients the note names' }, oldCands.map(({ c, p }) => h('button', {
+              type: 'button', class: ['btn', 'inbox-candidate', c.proposal ? 'inbox-candidate-first' : ''],
+              'aria-label': `File these old photos in ${p.full_name}'s file, Mr# ${p.mr_number}`,
+              onclick: busy(() => fileTo({ patientId: p.patient_id }, p)),
+            }, `${p.full_name} · Mr# ${p.mr_number}`, h('span', { class: 'badge' }, (c.reasons || []).includes('NOTE_MR') ? 'Mr# in the note' : 'name in the note')))) : null,
             h('div', { class: 'inline inbox-actions' },
               h('button', { type: 'button', class: 'btn', 'aria-expanded': String(!cands.length), onclick: (e) => { someone.hidden = !someone.hidden; e.currentTarget.setAttribute('aria-expanded', String(!someone.hidden)); if (!someone.hidden) someone.querySelector('input')?.focus(); } }, 'Someone else…'),
               h('button', { type: 'button', class: 'btn', onclick: busy(async () => { try { await d.photoInboxSetAside(s.set_id, s.version); toast('Set aside (the photos are kept).', 'ok'); dayCache.delete(data.day); refreshCounts(); showTab('which'); } catch (e) { reloadAfter(e); } }) }, 'Not a patient photo'),
@@ -480,7 +581,8 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
               })() : null),
             someone,
           ]);
-      if (!flagged) mount(someone, chooser(data, { label: 'File the photos in this patient\'s file', listAll: cands.length > 0, onVisit: (v) => fileTo({ visitId: v.visit_id }, v), onPatient: (p) => fileTo({ patientId: p.id }, p) }));
+      if (!flagged && oldSet) mount(someone, patientSearch({ label: 'File the photos in this patient\'s file', onPatient: (p) => fileTo({ patientId: p.id }, p) }));
+      else if (!flagged) mount(someone, chooser(data, { label: 'File the photos in this patient\'s file', listAll: cands.length > 0, onVisit: (v) => fileTo({ visitId: v.visit_id }, v), onPatient: (p) => fileTo({ patientId: p.id }, p) }));
     };
     draw();
     return card;
@@ -531,10 +633,12 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     const basic = items.filter((i) => i.edit_status === 'done' && i.edit_basic).length;
     const heic = items.filter((i) => i.edit_status === 'needs_safari').length;
     const failed = items.filter((i) => i.edit_status === 'failed').length;
-    const editing = edited === items.length ? (basic ? `Edited. Claude could not edit ${plural(basic, 'photo')}: basic edit made.` : 'Edited.')
+    const asIs = items.length > 0 && items.every((i) => i.ai_status === 'skipped');
+    const editing = asIs ? (edited === items.length ? 'Old photos, edited already: filed as they are (Claude does not edit them).' : `Old photos: copies made for ${edited} of ${items.length}.`)
+      : edited === items.length ? (basic ? `Edited. Claude could not edit ${plural(basic, 'photo')}: basic edit made.` : 'Edited.')
       : heic ? `${plural(heic, 'iPhone HEIC photo')}: edit from Safari (iPhone or Mac).` : aiKey === false ? 'Editing waits for the AI key.' : `Editing: ${edited} of ${items.length} done.`;
     // "Try Claude again": basic edits (Claude refused, or could not be reached for these photos) and photos whose editing failed.
-    const redo = (basic || failed || heic) && aiKey ? h('button', { type: 'button', class: 'btn', onclick: busy(async () => {
+    const redo = (basic || failed || heic) && (aiKey || asIs) ? h('button', { type: 'button', class: 'btn', onclick: busy(async () => {
       try {
         const r = await d.photoInboxRedoEdits(s.set_id);
         toast(`${plural(Number(r?.photos || 0), 'photo')} will be edited again by Claude.`, 'ok');
@@ -542,16 +646,19 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
         if (workerRunning) poke?.(); else startWorker();
         showTab('filed');
       } catch (e) { reloadAfter(e); }
-    }) }, 'Try Claude again') : null;
+    }) }, asIs ? 'Try again' : 'Try Claude again') : null;
     const release = s.release_after ? Date.parse(s.release_after) : 0;
     const seen = s.hidden ? 'Hidden from the patient.' : s.ai_flag === 'mixed_people' ? 'Held back from the patient: Claude thinks these show more than one patient.'
       : release > Date.now() ? `The patient sees these from ${dateTimeText(s.release_after)}.` : 'Visible to the patient.';
-    const how = s.filed_how === 'auto' ? s.filed_rule || 'Automatic' : `Confirmed by ${s.filed_by_name || 'staff'}`;
+    // (the rule code of a filing by the note, note_mr / old_note_mr, is kept in filed_rule; staff read the sentence)
+    const how = s.filed_how === 'auto' ? String(s.filed_rule || 'Automatic').replace(/ \((?:old_)?note_mr\)/, '') : `Confirmed by ${s.filed_by_name || 'staff'}`;
     return h('article', { class: 'inbox-card inbox-filed', 'aria-label': `Filed: ${s.full_name || 'patient'}, ${clockRange(s.first_at, s.last_at)}` },
       h('div', { class: 'inbox-card-head' },
         s.patient_id ? h('a', { href: `#/staff/patient/${s.patient_id}` }, `${s.full_name} · Mr# ${s.mr_number}`) : h('strong', {}, 'Patient'),
-        h('span', {}, [s.branch_id ? data.branches.find((b) => b.id === s.branch_id)?.code : null, s.occasion, clockRange(s.first_at, s.last_at), plural(s.photo_count, 'photo')].filter(Boolean).map((x) => ` · ${x}`).join(''))),
+        h('span', {}, [s.branch_id ? data.branches.find((b) => b.id === s.branch_id)?.code : null, s.occasion,
+          s.kind === 'old' ? `old photos of ${dayText(data.day)}` : clockRange(s.first_at, s.last_at), plural(s.photo_count, 'photo')].filter(Boolean).map((x) => ` · ${x}`).join(''))),
       h('p', { class: 'muted' }, how),
+      noteLine(data, items),
       strip_(items, links, s),
       h('p', {}, editing, ' ', seen),
       h('div', { class: 'inline inbox-actions' },
@@ -576,7 +683,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     const data = await dayData(filedDay, { fresh: true });
     const sets = data.sets.filter((s) => s.status === 'filed');
     const links = await thumbLinks(data.items.filter((i) => sets.some((s) => s.set_id === i.set_id)));
-    const daySel = select(days.map((day) => ({ value: day, label: dayLabel(day) })), filedDay, { onchange: (e) => { filedDay = e.target.value; renderFiled(); } });
+    const daySel = select(days.map((day) => ({ value: day, label: dayText(day) })), filedDay, { onchange: (e) => { filedDay = e.target.value; renderFiled(); } });
     mount(panel, h('div', { class: 'inline inbox-panel-head' }, h('h2', {}, 'Filed'), field('Day', daySel)),
       sets.length ? sets.map((s) => filedCard(data, s, links)) : empty('Nothing filed that day.'));
   }
@@ -684,8 +791,9 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     const bmp = await decode(blob);
     if (!bmp) { await cannotDecode(it); return false; }
     const ai = !basic && it.ai_status === 'done' ? it.ai_result : null;
+    const asIs = it.ai_status === 'skipped'; // an old photo, edited already: its copy as it is (never Claude)
     let out;
-    try { out = await renderEdit(bmp, ai); } catch (e) {
+    try { out = asIs ? await renderAsIs(bmp) : await renderEdit(bmp, ai); } catch (e) {
       if (e.code === 'CANVAS') throw e; // short of picture memory: the worker pauses, nothing is counted
       await withRetry(() => d.photoInboxEditFailed(it.item_id, 'DECODE', lease), signal).catch(() => {});
       return false;
@@ -696,7 +804,7 @@ export async function renderPhotoInbox(root, params = new URLSearchParams(), sig
     const thumbPath = `${dir}edited/thumbs/${it.sha256}${round}.jpg`;
     try {
       const up = await withRetry(() => d.photoInboxUploadEdit({ path, thumbPath, blob: out.blob, thumb: out.thumb }), signal);
-      await withRetry(() => d.photoInboxSaveEdit({ itemId: it.item_id, editedPath: path, editedThumbPath: up.thumbPath, editVersion: EDIT_VERSION, basic: !ai, lease }), signal);
+      await withRetry(() => d.photoInboxSaveEdit({ itemId: it.item_id, editedPath: path, editedThumbPath: up.thumbPath, editVersion: EDIT_VERSION, basic: !asIs && !ai, lease }), signal);
       editedNow++;
       return true;
     } catch (e) {

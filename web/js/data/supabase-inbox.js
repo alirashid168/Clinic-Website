@@ -10,6 +10,8 @@ import { inboxPaths } from '../lib/photo-intake.js';
 
 const MISSING_CODES = new Set(['PGRST202', '42883', 'PGRST205', '42P01']);
 export const PHOTO_INBOX_MISSING_TEXT = 'PHOTO_INBOX_MISSING: The Photo inbox needs the database update of 17 Oct (20261017000200_photo_intake.sql). Ask Dr. Ali to apply it.';
+/** The note box and old photos (20261017000600_photo_inbox_notes.sql) before that update is applied. */
+export const PHOTO_NOTES_MISSING_TEXT = 'PHOTO_NOTES_MISSING: The note box and old photos need the database update of 17 Oct (20261017000600_photo_inbox_notes.sql). Ask Dr. Ali to apply it.';
 const CODE_WORD = /^(PHOTO_[A-Z_]+|NOT_ALLOWED|STORAGE_FULL|TOO_LARGE|NETWORK):/;
 
 /**
@@ -90,6 +92,19 @@ export function inboxLive({ sb, callRpc, check, plainError, signedUrls }) {
         try { await put(p.thumb, thumb, 'image/jpeg'); thumbPath = p.thumb; } catch (e) { if (e.code === 'STORAGE_FULL') throw e; }
       }
       return { path: p.path, thumbPath, already };
+    },
+    /**
+     * An upload starts (before its photos are registered): its city folder, kind ('day': today's photos; 'old': old photos, already edited)
+     * and the note typed with it. Before the update of the notes: PHOTO_NOTES_MISSING (the page then uploads today's photos without a note
+     * as before).
+     */
+    async photoInboxStartBatch({ batchId, cityId, kind = 'day', note = null }) {
+      try {
+        return await rpc('photo_inbox_start_batch', { p_batch: batchId, p_city: Number(cityId), p_kind: kind, p_note: note || null });
+      } catch (e) {
+        if (e.code === 'PHOTO_INBOX_MISSING') throw plainError(PHOTO_NOTES_MISSING_TEXT, 'PHOTO_NOTES_MISSING');
+        throw e;
+      }
     },
     async photoInboxAddItems(items) {
       const out = [];

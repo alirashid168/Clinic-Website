@@ -8,6 +8,10 @@
 //   - names and labels (viewName, viewLabel, downloadName, uniqueNames) and the edit geometry and pixel maths (editPlan, adjustPixels).
 // The browser glue is web/js/ui/photo-edit.js; the pages are web/js/views/staff/photo-inbox.js and photo-library.js. The rules are in
 // .omc/handoffs/photo-intake-time-spec.md (sections 5-10) and docs/PHOTO-INTAKE.md. Times are Asia/Karachi (+05:00, no summer time).
+// The note box (owner, 17 Oct 2026) and old photos (already edited): noteMrs, noteMonth, noteWords, noteNameFit, oldPhotoTime, and in
+// planDay the note's Mr#s and names first on "Which patient?", a single Mr# filing by itself (rules note_mr / old_note_mr; the database
+// reads the note the same way and checks again: supabase/migrations/20261017000600_photo_inbox_notes.sql).
+import { nameNorm, nameSpelling } from './checkups.js';
 
 // ---------------------------------------------------------------- constants (first guesses: tune after the first real days)
 export const GAP_SEC = 180; // a pause longer than this starts a new set (a sitting's shots are seconds to 2 minutes apart)
@@ -17,6 +21,9 @@ export const MAX_AUTO_PHOTOS = 20; // more photos than this in one set is never 
 export const MIN_PAIR = 60; // a set and a patient are paired by the day's assignment only from this score up
 export const CLOCK_AHEAD_SEC = 300; // a camera whose newest photo is later than this after the upload has a clock that runs ahead
 export const MATCHER_VERSION = 1;
+export const NOTE_MAX = 500; // characters of the note typed with an upload (the database refuses more)
+export const ONE_VISIT_SEC = 2 * 60 * 60; // an upload whose photos with a camera time lie within this is one visit (a note's Mr# may file it)
+export const OLD_CANDIDATES = 10; // one-tap choices on a card of old photos (the note's Mr#s, then names)
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const THUMB_EDGE = 320; // px, long edge of every small copy
 export const THUMB_QUALITY = 0.8;
@@ -365,6 +372,72 @@ export function inboxPaths({ citySlug, day, sha, ext }) {
 /** The city's folder name: lower case, anything else than letters and digits a dash (karachi, lahore, islamabad). Same as the database. */
 export const citySlug = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
+// ---------------------------------------------------------------- the note typed with an upload
+// Read the same way as the database (private.photo_inbox_note_mrs, _note_month, _note_words): change one, change both (a Node test and
+// an SQL test check the same notes).
+const PHONE_RE = /([+]?92[ -]?|0)3[0-9]{2}[ -]?[0-9]{7}/g;
+const DATE_RE = /[0-9]{1,4}[-/.][0-9]{1,2}[-/.][0-9]{1,4}/g;
+const DASH_MR_RE = /(?<![0-9])([0-9]{1,6}-[0-9]{1,3})(?![0-9])/g;
+const PLAIN_MR_RE = /(?<![0-9])([0-9]{3,6})(?![0-9])/g;
+/**
+ * The Mr#s a note names, as written and in the order they come: a number of 3 to 6 digits ('50013', '9815', '025') or an old one with a
+ * dash ('347-1'). Phone numbers (0300-5551234, +92 300 5551234) and dates (17-10-2026, 2026/10/17) are not Mr#s, and neither is a year
+ * (1900-2099: the clinic's 4-digit Mr#s start at 4012).
+ */
+export function noteMrs(note) {
+  const t = String(note || '').toLowerCase().replace(PHONE_RE, ' ').replace(DATE_RE, ' ');
+  const out = [];
+  const add = (k) => { if (!out.includes(k)) out.push(k); };
+  const found = [];
+  for (const m of t.matchAll(DASH_MR_RE)) found.push([m.index, m[1]]);
+  for (const m of t.replace(DASH_MR_RE, (x) => ' '.repeat(x.length)).matchAll(PLAIN_MR_RE)) if (!/^(19|20)[0-9]{2}$/.test(m[1])) found.push([m.index, m[1]]);
+  found.sort((a, b) => a[0] - b[0]).forEach(([, k]) => add(k));
+  return out;
+}
+/** The braces month a note names: "Month 6", "month: 6", "M6", "m 12", "6th month" (1 to 60), else null. */
+export function noteMonth(note) {
+  const t = String(note || '').toLowerCase();
+  const m = /(?<![a-z])(?:month|mon|m)[ #.:-]*([0-9]{1,2})(?![0-9])/.exec(t) || /(?<![0-9])([0-9]{1,2})(?:st|nd|rd|th)? *month/.exec(t);
+  const n = m ? Number(m[1]) : NaN;
+  return n >= 1 && n <= 60 ? n : null;
+}
+const NOTE_STOP = new Set(('m mr mrs ms miss dr md muhammad mohammad muhammed mohammed mohd syed syeda sayed hafiz haji baby master kid mrno no number '
+  + 'month months mon old new photo photos pic pics picture pictures image images edited edit patient patients the and of for with before after '
+  + 'braces front side left right upper lower face smile profile xray opg visit date from to in on at is was an this these his her done case '
+  + 'follow up jan feb mar apr may jun jul aug sep sept oct nov dec january february march april june july august september october november '
+  + 'december karachi lahore islamabad branch').split(' '));
+/** The name words of a note, as their everyday spelling ("Aisha" = "Ayesha"): letters only, 2 or more, without titles and note words. */
+export function noteWords(note) {
+  const out = new Set();
+  for (const w of nameNorm(note).split(' ')) {
+    if (!/^[a-z]{2,}$/.test(w) || NOTE_STOP.has(w)) continue;
+    const s = nameSpelling(w);
+    if (s) out.add(s);
+  }
+  return [...out].sort();
+}
+const NAME_TITLES = new Set('m mr mrs ms miss dr md muhammad mohammad muhammed mohammed mohd syed syeda sayed hafiz haji baby master kid'.split(' '));
+/**
+ * How a patient's name fits a note's words (noteWords): 'full' (every word of the name is in the note), 'first' (the first name is), or
+ * null. Only ever a hint on "Which patient?": a name alone never files photos.
+ */
+export function noteNameFit(words, fullName) {
+  const set = new Set(words || []);
+  const pw = nameNorm(fullName).split(' ').filter((w) => w && !NAME_TITLES.has(w)).map(nameSpelling).filter(Boolean);
+  if (!pw.length || !set.size) return null;
+  if (pw.every((w) => set.has(w))) return 'full';
+  return set.has(pw[0]) ? 'first' : null;
+}
+/**
+ * An old photo (already edited, uploaded with "Old photos"): its day is its own date (camera time, or the time an app saved it) when it has
+ * a real past one, else the upload day; its time is never used to match (clock_ok and time_ok false). t: captureTime()'s answer.
+ */
+export function oldPhotoTime(t, uploadedAt = Date.now()) {
+  const own = (t.time_source === 'exif' || t.time_source === 'exif_modified') && t.taken_at ? karachiDate(t.taken_at) : null;
+  const ok = own && own >= '1990-01-01' && own <= karachiDate(uploadedAt + 24 * 60 * MIN);
+  return { ...t, clock_ok: false, time_ok: false, photo_day: ok ? own : karachiDate(uploadedAt) };
+}
+
 // ---------------------------------------------------------------- grouping
 const ms = (t) => (t ? Date.parse(t) : NaN);
 const usableTime = (it) => it.time_source === 'exif' && Number.isFinite(ms(it.taken_at)); // clock right or wrong: consistent within one camera
@@ -390,12 +463,21 @@ const joinKey = (it) => `${it.camera || 'unknown'}|${it.branch_hint ?? 'any'}|${
  *     time; never a set a person changed (manual); the joined set stays within SPAN_SEC and MAX_AUTO_PHOTOS; and when two filed sets
  *     would fit, it joins neither (it waits on "Which patient?").
  * filedSets: [{ set_id, camera, branch_hint, manual, status, items: [...] }].
+ * oneSetBatches: uploads whose note names exactly one patient (an Mr#): their photos without a usable time are one set together (one
+ * patient), not a set each.
  */
-export function groupItems(items, filedSets = []) {
+export function groupItems(items, filedSets = [], { oneSetBatches = new Set() } = {}) {
   const groups = [];
   const streams = new Map();
+  const noTimeOf = new Map();
   for (const it of items) {
-    if (!usableTime(it)) { groups.push([it]); continue; }
+    if (!usableTime(it)) {
+      if (it.upload_batch && oneSetBatches.has(it.upload_batch)) {
+        if (!noTimeOf.has(it.upload_batch)) { noTimeOf.set(it.upload_batch, []); groups.push(noTimeOf.get(it.upload_batch)); }
+        noTimeOf.get(it.upload_batch).push(it);
+      } else groups.push([it]);
+      continue;
+    }
     const k = streamKey(it);
     if (!streams.has(k)) streams.set(k, []);
     streams.get(k).push(it);
@@ -441,6 +523,40 @@ export function groupItems(items, filedSets = []) {
   });
   out.sort((a, b) => (a.first - b.first) || a.name.localeCompare(b.name) || String(a.item_ids[0]).localeCompare(String(b.item_ids[0])));
   return out.map(({ item_ids, join_set_id }) => ({ item_ids, join_set_id }));
+}
+
+/**
+ * Old photos (already edited) as sets: never by the clinic's list, never joined to a filed set. Per upload: its photos with a camera time
+ * (the clock does not matter here) split by pauses like a sitting (one phone, GAP_SEC, SPAN_SEC: several patients in one upload come
+ * apart), and its photos without one (edited in an app, sent through WhatsApp) together as one set.
+ */
+export function groupOld(items) {
+  const groups = [];
+  const byBatch = new Map();
+  for (const it of items) {
+    const k = it.upload_batch || `-${it.uploaded_by || ''}`;
+    if (!byBatch.has(k)) byBatch.set(k, []);
+    byBatch.get(k).push(it);
+  }
+  for (const list of byBatch.values()) {
+    const untimed = list.filter((it) => !usableTime(it));
+    const cams = new Map();
+    for (const it of list.filter(usableTime)) { const c = it.camera || 'unknown'; if (!cams.has(c)) cams.set(c, []); cams.get(c).push(it); }
+    for (const timed of cams.values()) {
+      timed.sort(byPhotoOrder);
+      let cur = null;
+      for (const it of timed) {
+        const t = ms(it.taken_at);
+        if (cur && (t - ms(cur[cur.length - 1].taken_at) > GAP_SEC * 1000 || t - ms(cur[0].taken_at) > SPAN_SEC * 1000)) cur = null;
+        if (!cur) { cur = []; groups.push(cur); }
+        cur.push(it);
+      }
+    }
+    if (untimed.length) groups.push(untimed.sort((a, b) => String(a.file_name || '').localeCompare(String(b.file_name || '')) || String(a.sha256).localeCompare(String(b.sha256))));
+  }
+  const first = (g) => (usableTime(g[0]) ? ms(g[0].taken_at) : Infinity);
+  return groups.sort((a, b) => (first(a) - first(b)) || String(a[0].file_name || '').localeCompare(String(b[0].file_name || '')) || String(a[0].item_id).localeCompare(String(b[0].item_id)))
+    .map((g) => ({ item_ids: g.map((it) => it.item_id), join_set_id: null }));
 }
 
 // ---------------------------------------------------------------- matching
@@ -627,6 +743,13 @@ const WAIT_SENTENCES = {
   OTHER_BRANCH: () => 'The likely patient was at another branch than the one chosen.',
   NO_BRANCH: () => 'Patients were in the chair at more than one branch then, and the branch of these photos was not chosen. Choose the patient (next time, choose the branch before uploading).',
   SERVER_CHECK: () => 'The automatic filing was stopped by a final check: choose the patient.',
+  NOTE_OTHER: () => 'The note with these photos names another patient than the one the photo time fits: check, then choose the patient.',
+  NOTE_NO_VISIT: (c) => `The note names Mr# ${c.mr || ''}, but that patient is not on the ${c.city || ''} Aaj ki List for ${c.day || 'that day'}. Add them there and press Check again, or choose them with "Search all patients".`.replace('the  Aaj', 'the Aaj'),
+  OLD_NO_NOTE: () => 'Old photos without a note: search the patient by name or Mr# below.',
+  OLD_NOT_FOUND: (c) => `No patient has the Mr# in the note (${c.mr || 'the number typed'}): check the number, or search the patient below.`,
+  OLD_SEVERAL: () => 'The note names more than one patient: tap the right one for these photos.',
+  OLD_NAME: () => 'The note names a patient by name only (photos are never filed by a name alone): tap the right patient, or search.',
+  OLD_NO_MATCH: () => 'No patient fits the note: search the patient by name or Mr# below.',
 };
 export const WAIT_REASONS = Object.keys(WAIT_SENTENCES);
 export function waitSentence(code, ctx = {}) {
@@ -693,28 +816,43 @@ export function planDay(day) {
   const sets = day.sets || [];
   const setById = new Map(sets.map((s) => [s.set_id, s]));
   const itemById = new Map(items.map((it) => [it.item_id, it]));
+  // The uploads of the day's photos (photo_inbox_day.batches): today's photos or old photos, and the note typed with them.
+  const batches = new Map((day.batches || []).map((b) => [b.batch_id, b]));
+  const keysOf = new Map([...batches.values()].map((b) => [b.batch_id, noteMrs(b.note)]));
+  const isOld = (it) => batches.get(it.upload_batch)?.kind === 'old';
+  // An upload of today's photos is one visit when its photos with a camera time lie within ONE_VISIT_SEC: its note is about these photos.
+  const oneVisit = (batchId) => {
+    if (!batchId || !batches.has(batchId)) return false;
+    const t = items.filter((it) => it.upload_batch === batchId && usableTime(it)).map((it) => ms(it.taken_at));
+    return !t.length || Math.max(...t) - Math.min(...t) <= ONE_VISIT_SEC * 1000;
+  };
+  const batchOf = (its) => { const ids = [...new Set(its.map((it) => it.upload_batch || null))]; return ids.length === 1 ? ids[0] : null; };
   const isRegroupable = (it) => !it.set_id || (setById.get(it.set_id)?.status === 'waiting' && !setById.get(it.set_id)?.manual);
   const regItems = items.filter(isRegroupable);
-  const filedSets = sets.filter((s) => s.status === 'filed').map((s) => ({ ...s, items: items.filter((it) => it.set_id === s.set_id) }));
-  const groups = groupItems(regItems, filedSets);
+  const filedSets = sets.filter((s) => s.status === 'filed' && s.kind !== 'old').map((s) => ({ ...s, items: items.filter((it) => it.set_id === s.set_id) }));
+  const oneSetBatches = new Set([...batches.values()].filter((b) => b.kind !== 'old' && keysOf.get(b.batch_id).length === 1).map((b) => b.batch_id));
+  const groups = [...groupItems(regItems.filter((it) => !isOld(it)), filedSets, { oneSetBatches }),
+    ...groupOld(regItems.filter(isOld)).map((g) => ({ ...g, old: true }))];
   const reused = new Set();
   for (const g of groups) {
     if (g.join_set_id) continue;
     const old = setById.get(itemById.get(g.item_ids[0])?.set_id);
     if (old && old.status === 'waiting' && !old.manual && !reused.has(old.set_id)) { g.reuse_set_id = old.set_id; reused.add(old.set_id); }
   }
-  const units = groups.map((g, i) => unitFacts(`g${i}`, g.item_ids.map((id) => itemById.get(id)), {
-    ai_flag: setById.get(g.reuse_set_id)?.ai_flag ?? null, join: g.join_set_id, group: g,
-  }));
+  const units = groups.map((g, i) => {
+    const its = g.item_ids.map((id) => itemById.get(id));
+    return unitFacts(`g${i}`, its, { ai_flag: setById.get(g.reuse_set_id)?.ai_flag ?? null, join: g.join_set_id, group: g, oldKind: !!g.old, batch: batchOf(its) });
+  });
   const manualSets = sets.filter((s) => s.status === 'waiting' && s.manual);
   for (const s of manualSets) {
     const its = items.filter((it) => it.set_id === s.set_id).sort(byPhotoOrder);
-    units.push(unitFacts(`s${s.set_id}`, its, { manual: true, ai_flag: s.ai_flag ?? null, prev_reason: s.wait_reason, set: s }));
+    units.push(unitFacts(`s${s.set_id}`, its, { manual: true, ai_flag: s.ai_flag ?? null, prev_reason: s.wait_reason, set: s,
+      oldKind: s.kind === 'old' || (its.length > 0 && its.every(isOld)), batch: batchOf(its) }));
   }
   const cands = dayCandidates(day.visits || []);
   const multiBranch = (day.branches || []).length > 1;
   const branchCode = (id) => (day.branches || []).find((b) => b.id === id)?.code || '';
-  const open = units.filter((u) => !u.join);
+  const open = units.filter((u) => !u.join && !u.oldKind);
   // The assignment: per chosen branch (against that branch's patients), and per phone (stream) for photos without a chosen branch.
   const assigned = new Map();
   const buckets = new Map();
@@ -731,8 +869,9 @@ export function planDay(day) {
   const byScore = (a, b) => (b.score - a.score) || (Math.abs(a.d ?? Infinity) - Math.abs(b.d ?? Infinity))
     || ((a.c.anchor ?? a.c.created ?? Infinity) - (b.c.anchor ?? b.c.created ?? Infinity))
     || String(a.c.full_name || '').localeCompare(String(b.c.full_name || '')) || String(a.c.visit_id).localeCompare(String(b.c.visit_id));
-  const reasonsFor = (u, c, proposal) => {
+  const reasonsFor = (u, c, proposal, noted) => {
     const r = [];
+    if (noted) r.push(noted);
     if (c.anchor_kind === 'start') r.push('IN_CHAIR'); else if (c.anchor_kind === 'checkin') r.push('CHECKED_IN');
     else if (c.quality === 'late_entry') r.push('LATE_ENTRY'); else r.push('NO_TIMES');
     if (c.occasion === 'photo_month') r.push('PHOTO_MONTH'); else if (c.occasion === 'photo_likely') r.push('PHOTO_LIKELY');
@@ -745,8 +884,19 @@ export function planDay(day) {
     return r;
   };
   const twoSets = (u, v) => open.some((w) => w !== u && ((!w.manual && passesAuto(w, v, cands, multiBranch)) || (w.manual && w.time_ok && fitsTightly(w, v))));
+  const mrOf = (x) => String(x?.mr_number ?? '').toLowerCase();
 
+  // Today's photos: by time (section 7), with the note's Mr#s and names first on the card, and a single Mr# filing by itself (note_mr).
   const decide = (u) => {
+    const note = u.batch ? batches.get(u.batch) : null;
+    const keys = note ? keysOf.get(note.batch_id) : [];
+    const words = note?.note ? noteWords(note.note) : [];
+    const byMr = keys.length ? cands.filter((c) => keys.includes(mrOf(c))).sort((a, b) => keys.indexOf(mrOf(a)) - keys.indexOf(mrOf(b))) : [];
+    const fits = words.length ? cands.filter((c) => !byMr.includes(c)).map((c) => ({ c, fit: noteNameFit(words, c.full_name) })).filter((x) => x.fit) : [];
+    const byName = fits.sort((a, b) => Number(b.fit === 'full') - Number(a.fit === 'full')).map((x) => x.c);
+    const notedHow = (c) => (byMr.includes(c) ? 'NOTE_MR' : byName.includes(c) ? 'NOTE_NAME' : null);
+    const single = oneVisit(u.batch);
+
     const proposalId = u.join ? null : assigned.get(u.key) ?? null;
     const scored = cands.map((c) => ({ c, ...scorePair(u, c) })).sort(byScore);
     // The day's order puts its pairing first only when no other patient scores higher (a pairing that scores lower is never highlighted).
@@ -755,20 +905,35 @@ export function planDay(day) {
     const v = lead ? lead.c : null;
     const f = v || scored[0]?.c || null;
     const blockers = u.time_ok && f ? photoBlockers(u, f, cands) : [];
-    // The card: the pairing, then the other photo patients who were in the chair (also those who already have photos), then by score.
+    // The card: the patients the note names (first when the upload is one visit, else after the day's pairing), the pairing, then the
+    // other photo patients who were in the chair (also those who already have photos), then by score.
     const pinned = new Set(blockers.map((c) => c.visit_id));
-    const ordered = [lead, ...scored.filter((x) => x !== lead && pinned.has(x.c.visit_id)), ...scored.filter((x) => x !== lead && !pinned.has(x.c.visit_id))].filter(Boolean);
-    // A set without a usable camera time gets no likely patients: the day cannot be trusted, so the person types the name.
-    const candidates = !u.time_ok ? [] : ordered.slice(0, 5).map((x, i) => ({
+    const noted = [...byMr, ...byName].map((c) => scored.find((x) => x.c === c)).filter(Boolean);
+    const front = single ? [...noted, lead] : [lead, ...noted];
+    const seen = new Set();
+    const ordered = [...front, ...scored.filter((x) => pinned.has(x.c.visit_id)), ...scored].filter((x) => x && !seen.has(x) && seen.add(x));
+    // A set without a usable camera time gets no likely patients from the time (the day cannot be trusted): only the note's.
+    const candidates = (!u.time_ok ? noted : ordered).slice(0, 5).map((x, i) => ({
       visit_id: x.c.visit_id, patient_id: x.c.patient_id, rank: i + 1, score: x.score, d: x.d,
-      proposal: x === lead, reasons: reasonsFor(u, x.c, x === lead),
+      proposal: x === lead, reasons: reasonsFor(u, x.c, x === lead, notedHow(x.c)),
     }));
     if (v && passesAuto(u, v, cands, multiBranch) && !twoSets(u, v)) {
+      // (an upload of one visit whose note names other patients, or an Mr# that is not on the list, than the one the time fits: a person looks)
+      if (single && (noted.length || keys.length) && !noted.some((x) => x.c.patient_id === v.patient_id)) {
+        return { candidates, wait_reason: keys.length === 1 && !byMr.length ? 'NOTE_NO_VISIT' : 'NOTE_OTHER', auto: null };
+      }
       return { candidates, wait_reason: null, auto: { visit_id: v.visit_id, patient_id: v.patient_id, anchor_at: new Date(v.anchor).toISOString(),
         rule: `Automatic: the only photo-month patient in the chair at ${karachiClock(u.first)} (${branchCode(v.branch_id)})` } };
     }
+    // The note names exactly one Mr#, that patient is on the list that day, and the upload is one visit: filed to that patient.
+    if (!u.manual && !u.ai_flag && single && keys.length === 1 && byMr.length === 1) {
+      const c = byMr[0];
+      return { candidates, wait_reason: null, auto: { visit_id: c.visit_id, patient_id: c.patient_id, rule_kind: 'note_mr',
+        rule: `Automatic (note_mr): the note with these photos names Mr# ${keys[0]}, on the ${branchCode(c.branch_id)} list that day` } };
+    }
     let reason;
-    if (!u.time_ok) reason = u.no_time ? 'NO_TIME' : u.old ? 'OLD' : 'CLOCK';
+    if (!u.manual && single && keys.length === 1 && !byMr.length) reason = 'NOTE_NO_VISIT';
+    else if (!u.time_ok) reason = u.no_time ? 'NO_TIME' : u.old ? 'OLD' : 'CLOCK';
     else if (!cands.length) reason = 'NO_VISIT_DAY';
     else if (u.manual) reason = u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL';
     else if (u.ai_flag === 'mixed_people') reason = 'MIXED';
@@ -787,9 +952,34 @@ export function planDay(day) {
     return { candidates, wait_reason: reason, auto: null };
   };
 
+  // Old photos: never by time. The patients the note names: by Mr# (this city's first, then any city), then by name (the whole name before
+  // the first name alone; at most 5). A note with a single Mr# that one patient has files the photos to that patient (old_note_mr).
+  const decideOld = (u) => {
+    const note = u.batch ? batches.get(u.batch) : null;
+    const keys = note ? keysOf.get(note.batch_id) : [];
+    const words = note?.note ? noteWords(note.note) : [];
+    const here = (p) => Number(p.city_id === day.city?.id);
+    const mrHits = keys.flatMap((k) => (note?.mr_patients || []).filter((p) => mrOf(p) === k)).sort((a, b) => here(b) - here(a));
+    const nameHits = (note?.name_patients || []).filter((p) => !mrHits.some((m) => m.patient_id === p.patient_id))
+      .map((p) => ({ p, fit: noteNameFit(words, p.full_name) })).filter((x) => x.fit)
+      .sort((a, b) => (Number(b.fit === 'full') - Number(a.fit === 'full')) || ((b.p.hits || 0) - (a.p.hits || 0)) || (here(b.p) - here(a.p))
+        || String(a.p.mr_number).localeCompare(String(b.p.mr_number)))
+      .slice(0, 5);
+    const list = [...mrHits.map((p) => ({ p, how: 'NOTE_MR' })), ...nameHits.map((x) => ({ p: x.p, how: x.fit === 'full' ? 'NOTE_NAME_FULL' : 'NOTE_NAME' }))].slice(0, OLD_CANDIDATES);
+    const one = keys.length === 1 && mrHits.length === 1;
+    const candidates = list.map((x, i) => ({ visit_id: null, patient_id: x.p.patient_id, rank: i + 1, score: null, d: null, proposal: one && i === 0, reasons: [x.how] }));
+    if (!u.manual && one) {
+      return { candidates, wait_reason: null, auto: { visit_id: null, patient_id: mrHits[0].patient_id, rule_kind: 'old_note_mr',
+        rule: `Automatic (old_note_mr): old photos; the note with them names Mr# ${keys[0]}` } };
+    }
+    const reason = u.manual ? (u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL') : !note?.note ? 'OLD_NO_NOTE'
+      : keys.length === 1 && !mrHits.length ? 'OLD_NOT_FOUND' : keys.length > 1 ? 'OLD_SEVERAL' : nameHits.length ? 'OLD_NAME' : 'OLD_NO_MATCH';
+    return { candidates, wait_reason: reason, auto: null };
+  };
+
   const plan = { matcher_version: MATCHER_VERSION, regroup_item_ids: regItems.map((it) => it.item_id).sort(), groups: [], fixed_updates: [] };
   for (const u of units) {
-    const r = decide(u);
+    const r = u.oldKind ? decideOld(u) : decide(u);
     if (u.manual) { plan.fixed_updates.push({ set_id: u.set.set_id, wait_reason: r.wait_reason, candidates: r.candidates }); continue; }
     let auto = u.join ? null : r.auto;
     let reason = r.auto ? null : r.wait_reason;
