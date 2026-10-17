@@ -676,15 +676,16 @@ begin
     'hold_hours', extract(epoch from private.photo_inbox_hold()) / 3600,
     'days', coalesce((
       select jsonb_agg(jsonb_build_object('day', d.photo_day, 'items', d.items, 'waiting', d.waiting, 'filed', d.filed, 'set_aside', d.set_aside,
-                                          'unedited', d.unedited) order by d.photo_day desc)
+                                          'flagged', d.flagged, 'unedited', d.unedited) order by d.photo_day desc)
         from (select i.photo_day, count(*) as items,
                      (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'waiting') as waiting,
                      (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'filed') as filed,
                      (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'set_aside') as set_aside,
+                     (select count(*) from public.photo_inbox_sets s where s.city_id = p_city and s.photo_day = i.photo_day and s.status = 'filed' and s.ai_flag is not null) as flagged,
                      count(*) filter (where i.edit_status not in ('done', 'skipped')) as unedited,
                      bool_or(i.set_id is null) as unset
                 from public.photo_inbox_items i where i.city_id = p_city group by i.photo_day) d
-       where d.photo_day >= v_today - 30 or d.waiting > 0 or d.unset), '[]'::jsonb),
+       where d.photo_day >= v_today - 30 or d.waiting > 0 or d.flagged > 0 or d.set_aside > 0 or d.unset), '[]'::jsonb),
     'ai', (select jsonb_build_object('pending', count(*) filter (where ai_status = 'pending'), 'done', count(*) filter (where ai_status = 'done'),
                                      'refused', count(*) filter (where ai_status = 'refused'), 'failed', count(*) filter (where ai_status = 'failed'),
                                      'needs_safari', count(*) filter (where edit_status = 'needs_safari'),
@@ -693,7 +694,9 @@ begin
     'waiting_days', coalesce((
       select jsonb_agg(x.d order by x.d) from (
         select distinct s.photo_day as d from public.photo_inbox_sets s where s.city_id = p_city and s.status = 'waiting'
-        union select distinct i.photo_day from public.photo_inbox_items i where i.city_id = p_city and i.set_id is null) x), '[]'::jsonb));
+        union select distinct i.photo_day from public.photo_inbox_items i where i.city_id = p_city and i.set_id is null) x), '[]'::jsonb),
+    'check_days', coalesce((select jsonb_agg(distinct s.photo_day order by s.photo_day) from public.photo_inbox_sets s
+                             where s.city_id = p_city and s.status = 'filed' and s.ai_flag is not null), '[]'::jsonb));
 end $$;
 revoke all on function public.photo_inbox_overview(smallint) from public, anon;
 grant execute on function public.photo_inbox_overview(smallint) to authenticated;

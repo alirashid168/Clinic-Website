@@ -24,7 +24,7 @@ export async function renderDashboard(root) {
   const s = state.session.staff;
   const day = todayISO();
   if (can('jobs.view')) cvSweep ??= import('./jobs.js').then((m) => m.removeUnsentCvs()).catch(() => 0);
-  const [rows, totalDues, review, complaints, newJobs, todaysCheckups, dayPayments] = await Promise.all([
+  const [rows, totalDues, review, complaints, newJobs, todaysCheckups, dayPayments, inbox] = await Promise.all([
     d.dashboard(day).catch(() => []),
     can('finance.view') ? d.totalDues().catch(() => null) : null,
     isAdmin() || can('complaints.view') ? d.reviewList().catch(() => []) : [],
@@ -35,7 +35,10 @@ export async function renderDashboard(root) {
     can('sheet.edit') && d.listDayCheckups ? d.listDayCheckups({ branchId: null, date: day }).catch(() => null) : Object.assign([], { missing: true }),
     // today's payments one by one, for whoever may see them without seeing invoices and payments (the front desk)
     dayPaymentsShown() ? loadDayPayments() : null,
+    // the Photo inbox's sets waiting on "Which patient?" (and filed sets Claude flagged), for whoever uses the inbox
+    can('photos.intake') && can('photos.view_raw') && d.photoInboxCounts ? d.photoInboxCounts().catch(() => null) : null,
   ]);
+  const inboxWaiting = inbox ? Number(inbox.waiting || 0) + Number(inbox.check || 0) : 0;
   let checkupCount = Array.isArray(todaysCheckups) ? todaysCheckups.length : null;
   const countText = () => (checkupCount === null ? '' : ` ${checkupCount} checkup patient${checkupCount === 1 ? '' : 's'} on today's lists so far.`);
   const countEl = h('span', {}, countText());
@@ -70,6 +73,9 @@ export async function renderDashboard(root) {
     : Number(c.difference) === 0 ? h('span', { class: 'badge badge-ok' }, 'Closed, matches') : h('span', { class: 'badge badge-dues' }, `Closed, off by ${rupees(c.difference)}`));
   mount(root,
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, `Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}${greet ? `, ${greet}` : ''}`), h('p', {}, shortDate(day)))),
+    inboxWaiting ? h('div', { class: 'alert alert-warning inline today-inbox' },
+      h('span', {}, `${inboxWaiting} photo set${inboxWaiting === 1 ? '' : 's'} ${inboxWaiting === 1 ? 'waits' : 'wait'} for "Which patient?".`),
+      h('a', { href: '#/staff/photo-inbox?tab=which' }, 'Open the Photo inbox')) : null,
     checkupPanel,
     h('div', { class: 'stat-row' },
       h('div', { class: 'stat' }, h('strong', {}, sum('patients')), h('span', {}, 'Patients on today\'s lists')),

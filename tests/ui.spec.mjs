@@ -5501,8 +5501,10 @@ await step('on a phone the drawer keeps "Change password" and "Log out" on scree
 
 // ------------------------------------------------------------- Arrange my menu (owner's request, 12 Oct 2026)
 // One page for the whole story: its localStorage is "this computer" (the copy that draws the menu at once), and the demo data in
-// it plays the database (reset by a reload, like a new computer that has the copy but not the row).
-const pn = await newPage();
+// it plays the database (reset by a reload, like a new computer that has the copy but not the row). 1600 px wide: since the Photos
+// drop-down (17 Oct 2026) Dr. Ali's bar with one page pinned no longer fits 1366 px and its last entry would go under More by itself
+// (that is tested on its own below, on a 1366 x 768 laptop).
+const pn = await newPage({ width: 1600, height: 860 });
 const barLabels = (pg) => pg.locator('.topnav > a, .topnav > .menu > button').evaluateAll((els) => els.map((el) => {
   const c = el.cloneNode(true);
   c.querySelectorAll('.sr-only, .caret').forEach((x) => x.remove());
@@ -5532,13 +5534,14 @@ const saveArrange = async (pg, expectBar) => {
     const c = el.cloneNode(true); c.querySelectorAll('.sr-only, .caret').forEach((x) => x.remove()); return c.textContent.trim();
   }).join('|') === want, expectBar.join('|'));
 };
-const ADMIN_BAR = ['Today', 'Aaj ki List', 'Patients', 'Billing', 'Reports', 'Coordinator', 'More'];
-const ADMIN_TOP_ROWS = ['Today', 'Aaj ki List drop-down', 'Patients', 'Billing', 'Reports drop-down', 'Coordinator drop-down'];
+// (the Photos drop-down, after Patients: the Photo inbox and the Photo library, 17 Oct 2026)
+const ADMIN_BAR = ['Today', 'Aaj ki List', 'Patients', 'Photos', 'Billing', 'Reports', 'Coordinator', 'More'];
+const ADMIN_TOP_ROWS = ['Today', 'Aaj ki List drop-down', 'Patients', 'Photos drop-down', 'Billing', 'Reports drop-down', 'Coordinator drop-down'];
 let fdDefault = [];
 await step('Arrange my menu: the front desk\'s menu before anyone arranges anything (its own default)', async () => {
   await loginAs(pn, 'Front desk \\(Gulshan\\)');
   fdDefault = await barLabels(pn);
-  assert.deepEqual(fdDefault, ['Today', 'Aaj ki List', 'Patients', 'Billing', 'Reports', 'Coordinator']);
+  assert.deepEqual(fdDefault, ['Today', 'Aaj ki List', 'Patients', 'Photos', 'Billing', 'Reports', 'Coordinator']);
   await tryAnotherRole(pn);
 });
 await step('Arrange my menu: in the name menu above "Change password"; the dialog shows the top bar in order and every other page Dr. Ali may open', async () => {
@@ -5569,16 +5572,16 @@ await step('Arrange my menu: a double-click on "Move up" moves the page one plac
   // Many people double-click every button. After the first click the next page's button is under the pointer: the second click
   // must not move that one (which put both pages back where they were).
   await d.getByRole('button', { name: 'Move up: Patients', exact: true }).dblclick();
-  assert.deepEqual(await topRows(pn), ['Today', 'Patients', 'Aaj ki List drop-down', 'Billing', 'Reports drop-down', 'Coordinator drop-down']);
+  assert.deepEqual(await topRows(pn), ['Today', 'Patients', 'Aaj ki List drop-down', 'Photos drop-down', 'Billing', 'Reports drop-down', 'Coordinator drop-down']);
   assert.deepEqual(await movedRows(pn), ['Patients']);
   assert.equal(await focusedName(pn), 'Move up: Patients', 'focus stays on the moved page, not on the button the second click landed on');
-  await saidInDialog(pn, 'Patients: number 2 of 6 on the top bar.');
+  await saidInDialog(pn, 'Patients: number 2 of 7 on the top bar.');
   await d.getByRole('button', { name: 'Move down: Patients', exact: true }).dblclick();
   assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
   assert.deepEqual(await movedRows(pn), ['Patients']);
   assert.equal(await focusedName(pn), 'Move down: Patients');
   await d.getByRole('button', { name: 'Move up: Billing', exact: true }).dblclick();
-  assert.deepEqual(await topRows(pn), ['Today', 'Aaj ki List drop-down', 'Billing', 'Patients', 'Reports drop-down', 'Coordinator drop-down']);
+  assert.deepEqual(await topRows(pn), ['Today', 'Aaj ki List drop-down', 'Patients', 'Billing', 'Photos drop-down', 'Reports drop-down', 'Coordinator drop-down']);
   // Single clicks at one spot: the dialog scrolls with the moved page, so its button stays under the pointer.
   const clicksAt = async (name, times) => {
     const box = await d.getByRole('button', { name, exact: true }).boundingBox();
@@ -5588,10 +5591,10 @@ await step('Arrange my menu: a double-click on "Move up" moves the page one plac
     assert.ok(Math.abs(now.y - box.y) <= 2, `${name} is still under the pointer (moved ${Math.round(now.y - box.y)} px)`);
   };
   await clicksAt('Move down: Today', 2);
-  assert.deepEqual((await topRows(pn)).slice(0, 4), ['Aaj ki List drop-down', 'Billing', 'Today', 'Patients']);
+  assert.deepEqual((await topRows(pn)).slice(0, 4), ['Aaj ki List drop-down', 'Patients', 'Today', 'Billing']);
   assert.deepEqual(await movedRows(pn), ['Today']);
   await clicksAt('Move up: Today', 2);
-  assert.deepEqual((await topRows(pn)).slice(0, 4), ['Today', 'Aaj ki List drop-down', 'Billing', 'Patients']);
+  assert.deepEqual((await topRows(pn)).slice(0, 4), ['Today', 'Aaj ki List drop-down', 'Patients', 'Billing']);
   await d.getByRole('button', { name: 'Move down: Billing', exact: true }).dblclick();
   assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS, 'back to the clinic\'s order');
   await d.locator('.modal-body').evaluate((el) => { el.scrollTop = 0; });
@@ -5606,13 +5609,13 @@ await step('Arrange my menu: clicks at one spot take the same page all the way t
   const where = async () => (await topRows(pn)).indexOf('Coordinator drop-down');
   assert.equal(await body.evaluate((el) => el.scrollTop), 0);
   const up = await spot('Move up: Coordinator drop-down');
-  for (let n = 1; n <= 5; n++) {
+  for (let n = 1; n <= 6; n++) {
     await pn.mouse.click(...up);
-    assert.equal(await where(), 5 - n, `click ${n} moved it one more place up`);
+    assert.equal(await where(), 6 - n, `click ${n} moved it one more place up`);
     assert.equal(await under(up), 'Move up: Coordinator drop-down', `after click ${n} its own button is still under the pointer`);
     assert.deepEqual(await movedRows(pn), ['Coordinator drop-down']);
   }
-  assert.deepEqual(await topRows(pn), ['Coordinator drop-down', ...ADMIN_TOP_ROWS.slice(0, 5)]);
+  assert.deepEqual(await topRows(pn), ['Coordinator drop-down', ...ADMIN_TOP_ROWS.slice(0, 6)]);
   assert.equal(await focusedName(pn), 'Move up: Coordinator drop-down', 'focus stays on the pressed button');
   assert.equal(await body.evaluate((el) => el.scrollTop), 0, 'the dialog could not scroll up: space above the list took its place');
   assert.ok((await lift()) > 0);
@@ -5622,7 +5625,7 @@ await step('Arrange my menu: clicks at one spot take the same page all the way t
   await shot(pn, '19b-clicks-at-one-spot');
   // Back down the same way: the space above the list shrinks again and is gone at the last place.
   const down = await spot('Move down: Coordinator drop-down');
-  for (let n = 1; n <= 5; n++) {
+  for (let n = 1; n <= 6; n++) {
     await pn.mouse.click(...down);
     assert.equal(await where(), n, `click ${n} moved it one more place down`);
     assert.equal(await under(down), 'Move down: Coordinator drop-down', `after click ${n} its own button is still under the pointer`);
@@ -5633,7 +5636,7 @@ await step('Arrange my menu: clicks at one spot take the same page all the way t
   // alone; the ones after it go on moving the same page.
   const fast = await spot('Move up: Coordinator drop-down');
   await pn.mouse.click(...fast, { clickCount: 4 });
-  assert.equal(await where(), 2, 'four quick clicks: three places up');
+  assert.equal(await where(), 3, 'four quick clicks: three places up');
   assert.equal(await under(fast), 'Move up: Coordinator drop-down');
   // The keyboard afterwards: focus stays on the pressed button, also at the first place, and the space above the list goes.
   assert.ok((await lift()) > 0);
@@ -5645,7 +5648,7 @@ await step('Arrange my menu: clicks at one spot take the same page all the way t
   assert.equal(await lift(), 0, 'a change made with the keyboard takes the space away');
   const toLast = async () => {
     await d.getByRole('button', { name: 'Move down: Coordinator drop-down', exact: true }).focus();
-    for (let n = 0; n < 6; n++) await pn.keyboard.press('Enter');
+    for (let n = 0; n < 7; n++) await pn.keyboard.press('Enter');
     assert.deepEqual(await topRows(pn), ADMIN_TOP_ROWS);
     assert.equal(await focusedName(pn), 'Move down: Coordinator drop-down', 'at the last place focus stays on its row');
   };
@@ -5697,15 +5700,15 @@ await step('Arrange my menu: a page from More goes on the top bar (last), a whol
   assert.equal(await focusedName(pn), 'Put on the top bar: Complaints');
   assert.ok(Math.abs((await pn.evaluate(() => document.activeElement.getBoundingClientRect().top)) - was) <= 2, 'Complaints took the place of Stock');
   assert.ok((await body.evaluate((el) => el.scrollTop)) >= scrolled, 'the dialog did not jump up');
-  await saidInDialog(pn, 'Stock is now last on the top bar, number 7.');
+  await saidInDialog(pn, 'Stock is now last on the top bar, number 8.');
   const coordinator = d.getByRole('button', { name: 'Put in More: Coordinator drop-down', exact: true });
   await coordinator.focus();
   await pn.keyboard.press('Enter');
-  assert.deepEqual(await topRows(pn), ['Patients', 'Today', 'Aaj ki List drop-down', 'Billing', 'Reports drop-down', 'Stock']);
+  assert.deepEqual(await topRows(pn), ['Patients', 'Today', 'Aaj ki List drop-down', 'Photos drop-down', 'Billing', 'Reports drop-down', 'Stock']);
   assert.equal(await focusedName(pn), 'Put on the top bar: Coordinator drop-down', 'with the keyboard focus follows the page');
   assert.match(await d.locator('.arrange-rest').innerText(), /Coordinator · under More/);
 });
-const ARRANGED = ['Patients', 'Today', 'Aaj ki List', 'Billing', 'Reports', 'Stock', 'More'];
+const ARRANGED = ['Patients', 'Today', 'Aaj ki List', 'Photos', 'Billing', 'Reports', 'Stock', 'More'];
 await step('Arrange my menu: Save changes the top bar at once, More keeps the Coordinator pages under their name, and a reload keeps it', async () => {
   await saveArrange(pn, ARRANGED);
   await pn.locator('.topnav .menu:has(> button:has-text("More")) > button').click();
@@ -5813,7 +5816,7 @@ await step('Arrange my menu: another role sees its own default, not Dr. Ali\'s a
 });
 await step('Arrange my menu: a page the person may not open never appears, even when their saved list names it', async () => {
   // A copy on this computer naming pages the front desk may not open (as if written by hand, or saved before access was taken away).
-  await pn.evaluate(() => localStorage.setItem('staff-menu:s-fd-gul', JSON.stringify(['admin?tab=staff', 'complaints', 'patients', 'stock', 'today', 'menu:sheet', 'billing', 'menu:reports', 'menu:coordinator', 'admin?tab=audit'])));
+  await pn.evaluate(() => localStorage.setItem('staff-menu:s-fd-gul', JSON.stringify(['admin?tab=staff', 'complaints', 'patients', 'stock', 'today', 'menu:sheet', 'menu:photos', 'billing', 'menu:reports', 'menu:coordinator', 'admin?tab=audit'])));
   await pn.goto(BASE + '#/staff/patients');
   await pn.waitForSelector('h1:has-text("Patients")');
   assert.deepEqual(await barLabels(pn), ['Patients', ...fdDefault.filter((l) => l !== 'Patients')], 'only the page it may open moved');
@@ -5878,7 +5881,8 @@ await step('Arrange my menu on a phone: the drawer follows the arrangement and h
   const first = async () => (await pnPhone.locator('#staff-drawer .drawer-links > a.nav-link').allTextContents()).map((t) => t.trim());
   assert.deepEqual(await first(), ['Patients', 'Stock', 'Today', 'Billing']);
   const groups = (await pnPhone.locator('#staff-drawer .drawer-group > .nav-group:not(.nav-subgroup)').allTextContents()).map((t) => t.trim());
-  assert.deepEqual(groups, ['Aaj ki List', 'Reports', 'More']);
+  // (the Photos drop-down, which the saved list does not name, is put back next to Patients, the entry before it)
+  assert.deepEqual(groups, ['Photos', 'Aaj ki List', 'Reports', 'More']);
   assert.equal(await pnPhone.locator('#staff-drawer .nav-subgroup:text-is("Coordinator")').count(), 1, 'More names the Coordinator pages');
   await shot(pnPhone, '22-drawer-arranged');
   // Below the last link, not in the foot that stays on screen (that one keeps Change password and Log out).
@@ -6156,14 +6160,14 @@ await step('Arrange my menu on a touch screen: quick taps at one spot all count;
   await pnTouch.locator('#staff-drawer > button:text-is("Arrange my menu")').click();
   await arrangeOpened(pnTouch);
   const where = async () => (await topRows(pnTouch)).indexOf('Coordinator drop-down');
-  assert.equal(await where(), 5);
+  assert.equal(await where(), 6);
   // Real taps, quick and at one spot: the moved page's button stays under the finger, and each tap moves it one more place.
   const up = arrangeDialog(pnTouch).getByRole('button', { name: 'Move up: Coordinator drop-down', exact: true });
   await up.scrollIntoViewIfNeeded();
   const box = await up.boundingBox();
   for (let n = 0; n < 4; n++) await pnTouch.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
-  await pnTouch.waitForFunction(() => document.querySelectorAll('.modal ol.arrange-list > li')[1]?.textContent.includes('Coordinator drop-down'), null, { timeout: 3000 })
-    .catch(async () => assert.fail(`four taps: Coordinator is at row ${(await where()) + 1}, not 2`));
+  await pnTouch.waitForFunction(() => document.querySelectorAll('.modal ol.arrange-list > li')[2]?.textContent.includes('Coordinator drop-down'), null, { timeout: 3000 })
+    .catch(async () => assert.fail(`four taps: Coordinator is at row ${(await where()) + 1}, not 3`));
   // Taps carrying the counts 1, 2, 3, 1, 2 and 3 (as the browser sends a tap: pointerdown, mousedown and a click with the count),
   // each on the button under the finger by then: every tap moves the page one place.
   const tap = (label, count) => pnTouch.evaluate(([name, n]) => {
@@ -6173,12 +6177,12 @@ await step('Arrange my menu on a touch screen: quick taps at one spot all count;
     b.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, detail: n, pointerType: 'touch' }));
   }, [label, count]);
   for (const n of [1, 2, 3, 1]) await tap('Move down: Coordinator drop-down', n);
-  assert.equal(await where(), 5, 'taps counted 1, 2, 3, 1: four places down');
+  assert.equal(await where(), 6, 'taps counted 1, 2, 3, 1: four places down');
   for (const n of [2, 3]) await tap('Move up: Coordinator drop-down', n);
-  assert.equal(await where(), 3, 'and 2, 3: two places up');
+  assert.equal(await where(), 4, 'and 2, 3: two places up');
   // A mouse double-click (the clicks counted 1 and 2) moves it once.
   await arrangeDialog(pnTouch).getByRole('button', { name: 'Move up: Coordinator drop-down', exact: true }).dblclick();
-  assert.equal(await where(), 2, 'a mouse double-click: one place');
+  assert.equal(await where(), 3, 'a mouse double-click: one place');
   await pnTouch.keyboard.press('Escape');
   await arrangeDialog(pnTouch).waitFor({ state: 'detached' });
 });
@@ -9962,6 +9966,234 @@ await step('No activity with Never (0, or no value): days later still signed in,
   assert.equal(await pnever.locator('.topbar').count(), 1, '"Stay signed in" keeps the login');
 });
 await pnever.close();
+
+// ------------------------------------------------------------- the Photo inbox and the Photo library (owner, 17 Oct 2026)
+// The demo's day (data/demo-inbox.js): yesterday at DHA, Sana Farooq (photo month 10, in chair 6:31 PM), Fatima Noor (photo month 7, 7:10 PM),
+// Ayesha Kamal (photo month 4, 7:12 PM) and Hira Javed (Month 5, not a photo month, 6:10 PM); Gulshan and North Nazimabad without a photo
+// month in the chair; nobody in Lahore. The photos are made in the page: JPEGs with a real EXIF block (camera time yesterday, Apple
+// iPhone 13), and a PNG screenshot without one.
+const yesterdayIn = (pg) => pg.evaluate(async () => (await import('/js/lib/photo-intake.js')).karachiDate(Date.now() - 86400000));
+async function makePhotos(pg, specs) {
+  const files = await pg.evaluate(async (list) => {
+    const lib = await import('/js/lib/photo-intake.js');
+    const y = lib.karachiDate(Date.now() - 86400000).replace(/-/g, ':');
+    const out = [];
+    for (const s of list) {
+      const c = document.createElement('canvas');
+      c.width = 640; c.height = 480;
+      const g = c.getContext('2d');
+      g.fillStyle = `hsl(${s.hue},45%,55%)`; g.fillRect(0, 0, 640, 480);
+      g.fillStyle = '#fafafa'; g.fillRect(120 + (s.hue % 150), 140, 260, 150);
+      const blob = await new Promise((r) => c.toBlob(r, s.png ? 'image/png' : 'image/jpeg', 0.9));
+      let bytes = new Uint8Array(await blob.arrayBuffer());
+      if (!s.png) bytes = lib.withExif(bytes, { make: 'Apple', model: 'iPhone 13', dateTimeOriginal: `${y} ${s.time}` });
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      out.push({ name: s.name, mimeType: s.png ? 'image/png' : 'image/jpeg', b64: btoa(bin) });
+    }
+    return out;
+  }, specs);
+  return files.map((f) => ({ name: f.name, mimeType: f.mimeType, buffer: Buffer.from(f.b64, 'base64') }));
+}
+const inboxInput = (pg) => pg.locator('input[type="file"][aria-label="Choose photos"]');
+const navBadge = (pg) => pg.evaluate(() => document.querySelector('.topnav .menu > button .photo-inbox-count')?.firstChild?.textContent || '');
+const DAY_PHOTOS = [
+  { hue: 10, time: '18:35:00', name: 'IMG_0101.JPG' }, { hue: 22, time: '18:35:40', name: 'IMG_0102.JPG' }, { hue: 34, time: '18:36:30', name: 'IMG_0103.JPG' },
+  { hue: 200, time: '19:15:00', name: 'IMG_0110.JPG' }, { hue: 212, time: '19:15:50', name: 'IMG_0111.JPG' }, { hue: 300, png: true, name: 'Screenshot.png' },
+];
+const pbox = await newPage();
+let dayFiles = [];
+let yday = '';
+await step('Photos menu: the front desk has the Photo library but no Photo inbox; the assistant and the coordinator have both; the doctor the library only', async () => {
+  const photosMenu = async (who) => {
+    await loginAs(pbox, who);
+    await pbox.locator('.topnav .menu:has(> button:has-text("Photos")) > button').click();
+    const links = (await pbox.locator('.topnav .menu.open .menu-list a').allTextContents()).map((t) => t.replace(/\d+ photo sets? waits? for Which patient\?/, '').trim());
+    await pbox.keyboard.press('Escape');
+    await tryAnotherRole(pbox);
+    return links;
+  };
+  assert.deepEqual(await photosMenu('Front desk \\(Gulshan\\)'), ['Photo library']);
+  assert.deepEqual(await photosMenu('Dr\\. Bushra'), ['Photo library']);
+  assert.deepEqual(await photosMenu('Clinic coordinator'), ['Photo inbox', 'Photo library']);
+  assert.deepEqual(await photosMenu('Assistant'), ['Photo inbox', 'Photo library']);
+  // The page itself is closed to the front desk too.
+  await loginAs(pbox, 'Front desk \\(Gulshan\\)');
+  await pbox.goto(BASE + '#/staff/photo-inbox');
+  await pbox.waitForSelector('h1:text-is("Page not available")');
+  await tryAnotherRole(pbox);
+});
+await step('Photo inbox: the assistant chooses the day\'s photos at once in the Karachi folder; the clear set files by itself, two sets wait, the badge says 2', async () => {
+  await loginAs(pbox, 'Assistant');
+  await pbox.locator('.topnav .menu:has(> button:has-text("Photos")) > button').click();
+  await pbox.locator('.topnav .menu.open .menu-list a:has-text("Photo inbox")').click();
+  await pbox.waitForSelector('h1:text-is("Photo inbox")');
+  assert.deepEqual((await pbox.locator('.inbox-folders button').allTextContents()).map((t) => t.replace(/[^A-Za-z]/g, '')), ['Karachi', 'Lahore', 'Islamabad']);
+  assert.equal(await pbox.locator('.inbox-folders button[aria-pressed="true"]').innerText().then((t) => t.includes('Karachi')), true);
+  assert.equal(await pbox.getByLabel('Which branch were these taken at?').inputValue(), '', '"All Karachi branches" for an assistant who is not tied to one branch');
+  await shot(pbox, '60-photo-inbox');
+  yday = await yesterdayIn(pbox);
+  dayFiles = await makePhotos(pbox, DAY_PHOTOS);
+  await inboxInput(pbox).setInputFiles(dayFiles);
+  await pbox.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pbox.locator('.inbox-summary').innerText(), /^6 photos · 5 with camera time · 1 without/);
+  assert.equal(await pbox.locator('.inbox-done').innerText().then((t) => t.replace(/\s*Go to Which patient\?$/, '')),
+    '6 photos uploaded. 1 set filed automatically. 2 sets wait on "Which patient?". 1 photo has no camera time.');
+  assert.match(await pbox.locator('.inbox-file', { hasText: 'Screenshot.png' }).innerText(), /no camera time/);
+  await pbox.waitForFunction(() => document.querySelector('.topnav .menu > button .photo-inbox-count')?.firstChild?.textContent === '2');
+  assert.equal(await pbox.locator('[role="tab"]').nth(1).innerText(), 'Which patient? (2)');
+  await shot(pbox, '61-photo-inbox-uploaded');
+});
+await step('Photo inbox: the same photos again upload nothing ("already uploaded"); nothing new to match', async () => {
+  await inboxInput(pbox).setInputFiles(dayFiles);
+  await pbox.waitForFunction(() => /^Nothing new: 6 photos were already uploaded\./.test(document.querySelector('.inbox-done')?.textContent || ''), null, { timeout: 30000 });
+  assert.match(await pbox.locator('.inbox-file').first().innerText(), /Already uploaded \(Karachi, /);
+  assert.equal(await navBadge(pbox), '2');
+});
+await step('"Which patient?": the 7:15 PM set shows the closer start first (Ayesha Kamal, in chair 7:12 PM, then Fatima Noor); one tap files it; the screenshot says it has no camera time and can be set aside and put back', async () => {
+  await pbox.goto(BASE + '#/staff/today');
+  await pbox.waitForSelector('.today-inbox');
+  assert.match(await pbox.locator('.today-inbox').innerText(), /2 photo sets wait for "Which patient\?"\./);
+  await pbox.locator('.today-inbox a').click();
+  await pbox.waitForSelector('.inbox-card');
+  const b = pbox.locator('.inbox-card', { hasText: '7:15 PM' });
+  const cands = await b.locator('.inbox-candidate').allInnerTexts();
+  assert.match(cands[0], /^Ayesha Kamal · Mr# 9818 · DHA · Month 4 \(photo month\) · in chair 7:12 PM/);
+  assert.match(cands[1], /^Fatima Noor · Mr# 9815 · DHA · Month 7 \(photo month\) · in chair 7:10 PM/);
+  assert.match(await b.locator('.inbox-reason').innerText(), /More than one photo-month/);
+  await shot(pbox, '62-which-patient');
+  await b.getByRole('button', { name: /File the photos of 7:15 PM in Fatima Noor's file/ }).click();
+  await pbox.waitForSelector('.toast:has-text("Filed in Fatima Noor\'s file (Mr# 9815).")');
+  await pbox.waitForFunction(() => document.querySelector('.topnav .menu > button .photo-inbox-count')?.firstChild?.textContent === '1');
+  const shotCard = pbox.locator('.inbox-card', { hasText: 'No camera time' });
+  assert.match(await shotCard.locator('.inbox-reason').innerText(), /^No camera time \(WhatsApp, edited in an app, or a screenshot\)/);
+  await shotCard.getByRole('button', { name: 'Not a patient photo' }).click();
+  await pbox.waitForSelector('.toast:has-text("Set aside")');
+  await pbox.waitForSelector('.inbox-card', { state: 'detached' });
+  await pbox.getByRole('tab', { name: 'Set aside' }).click();
+  const aside = pbox.locator('.inbox-card', { hasText: 'Not a patient photo' });
+  await aside.getByRole('button', { name: 'Put back' }).click();
+  await pbox.waitForSelector('.toast:has-text("Put back")');
+  await pbox.getByRole('tab', { name: /Which patient/ }).click();
+  // Back on "Which patient?", still without a camera time (that reason comes first).
+  await pbox.waitForFunction(() => [...document.querySelectorAll('.inbox-card .inbox-reason')].some((el) => el.textContent.startsWith('No camera time (WhatsApp')));
+});
+await step('Claude edits the photos (the demo\'s stand-in): the patient\'s profile shows the edited photos "Month 10 · Front" ..., not yet visible to the patient, with the original one click away; "View as patient" does not show them yet', async () => {
+  await pbox.waitForFunction(() => document.querySelector('.inbox-banner')?.textContent.includes('All photos edited.'), null, { timeout: 30000 });
+  await pbox.getByRole('tab', { name: 'Filed' }).click();
+  const filed = pbox.locator('.inbox-filed', { hasText: 'Sana Farooq' });
+  await filed.waitFor();
+  assert.match(await filed.innerText(), /Automatic: the only photo-month patient in the chair at 6:35 PM \(DHA\)/);
+  assert.match(await filed.innerText(), /Edited\. The patient sees these from /);
+  await shot(pbox, '63-filed');
+  await filed.locator('a[href^="#/staff/patient/"]').click();
+  await pbox.waitForSelector('h2:has-text("Photos and X-rays")');
+  const caps = await pbox.locator('.photos-panel figcaption').allInnerTexts();
+  const front = caps.find((t) => t.includes('Month 10 · Front'));
+  assert.ok(front, `an edited photo "Month 10 · Front" (${caps.join(' | ')})`);
+  assert.match(front, /Photo inbox · Patient sees it from /);
+  assert.ok(caps.some((t) => t.includes('Month 10 · Left side')) && caps.some((t) => t.includes('Month 10 · Right side')));
+  assert.equal(caps.filter((t) => t.includes('Month 10') && t.includes('raw (staff only)')).length, 0, 'the originals are not tiles of their own');
+  assert.ok(await pbox.locator('.photos-panel figure', { hasText: 'Month 10 · Front' }).getByRole('link', { name: /^Original of Month 10 · Front/ }).count(), 'the original one click away');
+  await pbox.getByRole('link', { name: 'View as patient' }).click();
+  await pbox.waitForSelector('.photo-grid, .empty');
+  assert.equal((await pbox.locator('.photo-grid figcaption').allInnerTexts()).filter((t) => t.includes('Month 10')).length, 0, 'not in the patient\'s view during the 24 hours');
+});
+await step('Filed (coordinator): "Move to another patient" puts the set in Hira Javed\'s file; "Undo filing" sends it back to "Which patient?"', async () => {
+  await tryAnotherRole(pbox);
+  await loginAs(pbox, 'Clinic coordinator');
+  await pbox.goto(BASE + '#/staff/photo-inbox?tab=filed');
+  const filed = pbox.locator('.inbox-filed', { hasText: 'Sana Farooq' });
+  await filed.waitFor();
+  await filed.getByRole('button', { name: 'Move to another patient…' }).click();
+  const dlg = pbox.locator('.modal:has(h2:text-is("Move to another patient"))');
+  await dlg.getByRole('searchbox').fill('Hira');
+  await dlg.getByRole('button', { name: /Hira Javed · Mr# 9821 · DHA · Month 5/ }).click();
+  await pbox.waitForSelector('.toast:has-text("Moved to Hira Javed\'s file (Mr# 9821).")');
+  const moved = pbox.locator('.inbox-filed', { hasText: 'Hira Javed' });
+  await moved.waitFor();
+  await moved.locator('a[href^="#/staff/patient/"]').click();
+  await pbox.waitForSelector('h2:has-text("Photos and X-rays")');
+  assert.ok((await pbox.locator('.photos-panel figcaption').allInnerTexts()).some((t) => t.includes('Month 5 · Front')), 'the photos are in Hira Javed\'s file, as Month 5');
+  await pbox.goto(BASE + '#/staff/photo-inbox?tab=filed');
+  const again = pbox.locator('.inbox-filed', { hasText: 'Hira Javed' });
+  await again.getByRole('button', { name: 'Undo filing' }).click();
+  await pbox.locator('.modal').getByRole('button', { name: 'Undo filing' }).click();
+  await pbox.waitForSelector('.toast:has-text("The filing was undone")');
+  await pbox.getByRole('tab', { name: /Which patient/ }).click();
+  await pbox.waitForSelector('.inbox-card:has-text("The filing was undone: choose the patient.")');
+});
+await step('Photo library (front desk): Fatima Noor\'s edited photos by Mr#, no originals; the photo downloads under its proper name; the zip holds those names', async () => {
+  await tryAnotherRole(pbox);
+  await loginAs(pbox, 'Front desk \\(Gulshan\\)');
+  await pbox.goto(BASE + '#/staff/photo-library');
+  await pbox.waitForSelector('h1:text-is("Photo library")');
+  assert.equal(await pbox.getByLabel('Show').count(), 0, 'no "Originals" choice without "View raw clinic photos folder"');
+  await pbox.getByLabel('Search by name or Mr#').fill('9815');
+  await pbox.getByRole('button', { name: 'Search', exact: true }).click();
+  await pbox.waitForFunction(() => /^2 photos\.$/.test(document.querySelector('.photo-library [role="status"]')?.textContent || ''));
+  await shot(pbox, '64-photo-library');
+  const dmy = yday.split('-').reverse().join('-');
+  const front = `Fatima Noor - Mr# 9815 - Month 7 - Front - ${dmy}.jpg`;
+  await pbox.getByRole('button', { name: `Open ${front}` }).click();
+  const dl = pbox.locator('.modal a.library-download');
+  await dl.waitFor();
+  assert.equal(await dl.getAttribute('download'), front);
+  await pbox.locator('.modal').getByRole('button', { name: 'Close' }).first().click();
+  await pbox.getByRole('checkbox', { name: /^Select all 2 photos of Fatima Noor/ }).check();
+  const [download] = await Promise.all([pbox.waitForEvent('download'), pbox.getByRole('button', { name: 'Download selected (zip, 2)' }).click()]);
+  assert.equal(download.suggestedFilename(), 'Fatima Noor - Mr# 9815 - photos.zip');
+  const zip = fs.readFileSync(await download.path());
+  const end = zip.length - 22;
+  assert.equal(zip.readUInt32LE(end), 0x06054b50);
+  const names = [];
+  for (let c = zip.readUInt32LE(end + 16), n = 0; n < zip.readUInt16LE(end + 10); n++) {
+    const len = zip.readUInt16LE(c + 28);
+    names.push(zip.subarray(c + 46, c + 46 + len).toString('utf8'));
+    c += 46 + len;
+  }
+  assert.deepEqual(names.sort(), [front, `Fatima Noor - Mr# 9815 - Month 7 - Right side - ${dmy}.jpg`]);
+});
+await step('Photo inbox, Lahore folder: a photo of a day nobody was on the Lahore list waits, saying so', async () => {
+  await tryAnotherRole(pbox);
+  await loginAs(pbox, 'Assistant');
+  await pbox.goto(BASE + '#/staff/photo-inbox');
+  await pbox.locator('.inbox-folders button', { hasText: 'Lahore' }).click();
+  await pbox.waitForSelector('.inbox-folders button[aria-pressed="true"]:has-text("Lahore")');
+  await inboxInput(pbox).setInputFiles(await makePhotos(pbox, [{ hue: 120, time: '17:00:00', name: 'IMG_0500.JPG' }]));
+  await pbox.waitForSelector('.inbox-done', { timeout: 30000 });
+  await pbox.getByRole('tab', { name: /Which patient/ }).click();
+  const card = pbox.locator('.inbox-card', { hasText: '5:00 PM' });
+  await card.waitFor();
+  assert.match(await card.locator('.inbox-reason').innerText(), /^Nobody is on the Lahore Aaj ki List for .+\. Add the patient there and press Check again, or choose the patient with "Search all patients"\./);
+});
+await step('Photo inbox and Photo library at 375 px: no sideways page scroll', async () => {
+  await pbox.setViewportSize({ width: 375, height: 812 });
+  for (const [hash, h1] of [['#/staff/photo-inbox?tab=which', 'Photo inbox'], ['#/staff/photo-library', 'Photo library']]) {
+    await pbox.goto(BASE + hash);
+    await pbox.waitForSelector(`h1:text-is("${h1}")`);
+    await pbox.waitForTimeout(500);
+    const over = await pbox.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    assert.ok(over <= 0, `${h1}: the page scrolls sideways by ${over}px`);
+  }
+  await shot(pbox, '65-photo-inbox-phone');
+});
+await pbox.close();
+const pboxAi = await newPage();
+await step('Photo inbox without the AI key: "Editing waits for the AI key", and the photos are uploaded and filed all the same', async () => {
+  await pboxAi.goto(BASE + '#/login/staff');
+  await pboxAi.evaluate(() => localStorage.setItem('demo-photo-ai', 'off'));
+  await loginAs(pboxAi, 'Assistant');
+  await pboxAi.goto(BASE + '#/staff/photo-inbox');
+  await pboxAi.waitForSelector('.inbox-banner:has-text("Editing waits for the AI key.")');
+  await inboxInput(pboxAi).setInputFiles(await makePhotos(pboxAi, DAY_PHOTOS.slice(0, 3)));
+  await pboxAi.waitForSelector('.inbox-done', { timeout: 30000 });
+  assert.match(await pboxAi.locator('.inbox-done').innerText(), /^3 photos uploaded\. 1 set filed automatically\. 0 sets wait/);
+  await pboxAi.getByRole('tab', { name: 'Filed' }).click();
+  assert.match(await pboxAi.locator('.inbox-filed', { hasText: 'Sana Farooq' }).innerText(), /Editing waits for the AI key\./);
+  await pboxAi.evaluate(() => localStorage.removeItem('demo-photo-ai'));
+});
+await pboxAi.close();
 
 await browser.close();
 if (errors.length) { console.log('Browser errors:\n  ' + [...new Set(errors)].join('\n  ')); process.exitCode = 1; }

@@ -19,6 +19,7 @@ import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLogi
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel, nameFits, nameNorm, dayListCheckups } from '../lib/checkups.js';
 import { seedRecords, recordsDemo } from './demo-records.js';
+import { inboxDemo } from './demo-inbox.js';
 import { orderDayList, countDayList, FIRST_DAY } from '../lib/day-list.js';
 import { checkJobApplication, checkFeedback, cvFileInfo, cleanLine, cleanBlock, feedbackSubject, JOB_STATUS_LABELS, LIMITS, CV_UPLOAD_LIMITS, HONEYPOT } from '../lib/public-forms.js';
 
@@ -548,6 +549,9 @@ export function createDemoAdapter() {
     }
   }
 
+  // The Photo inbox and the Photo library (data/demo-inbox.js): its methods are spread into the adapter below; signedUrls and deletePhoto use two helpers.
+  const inboxApi = inboxDemo({ db: () => db, me, can, fail, uid, clone, audit, patient });
+
   return {
     mode: 'demo',
 
@@ -692,7 +696,9 @@ export function createDemoAdapter() {
         const small = path && db.photos.find((x) => x.thumb_path === path);
         const row = small ? { url: small.thumb_url } : db.photos.find((x) => x.storage_path === path) || db.documents.find((x) => x.storage_path === path)
           || (db.xrays || []).find((x) => x.storage_path === path);
-        if (row?.url) out.set(path, row.url);
+        // (a Photo inbox file: the original, an edited copy or a small copy, from the demo's file store)
+        const url = row?.url || (path ? inboxApi.inboxUrl(path) : null);
+        if (url) out.set(path, url);
       }
       return out;
     },
@@ -798,7 +804,9 @@ export function createDemoAdapter() {
         // Photos: as the photo policies (seesPhoto); a patient sees the edited ones.
         invoices: clone(db.invoices.filter((i) => i.patient_id === id && (s?.kind !== 'staff' ? i.status === 'issued' : can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(i.branch_id))))),
         payments: clone(db.payments.filter((x) => x.patient_id === id && (s?.kind !== 'staff' || can('billing.view') || ((can('billing.create') || can('billing.edit')) && branchOk(x.branch_id))))),
-        photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' ? seesPhoto(x) : x.kind === 'edited'))),
+        // (a patient: a Photo inbox photo only after its 24-hour window and while it is not held back, 20261017000200)
+        photos: clone(db.photos.filter((x) => x.patient_id === id && (s?.kind === 'staff' ? seesPhoto(x)
+          : x.kind === 'edited' && !x.held_back && (!x.release_after || Date.parse(x.release_after) <= Date.now())))),
         documents: clone(db.documents.filter((x) => x.patient_id === id)),
         plans: (db.payment_plans || []).filter((x) => x.patient_id === id && (s?.kind !== 'staff' || seesPlan(x))).map(withPaid),
         retainers: clone(db.retainer_cases.filter((r) => r.patient_id === id)),
@@ -1317,7 +1325,10 @@ export function createDemoAdapter() {
       const row = db.photos.find((x) => x.id === photo.id);
       if (!row) return { deleted: false, edited_copies: 0, visit_unticked: false, visit_asks_photos: false };
       if (!seesPhoto(row)) fail('NOT_ALLOWED: you may not delete this picture: it is a raw picture, and raw pictures need "View raw clinic photos folder" in the access list.');
-      audit('photos', 'DELETE_FILES', { id: row.id, files: [row.storage_path, row.thumb_path].filter(Boolean).map((name) => ({ bucket: 'clinic-photos', name })) }, { viaFunction: true, before: row });
+      // (a Photo inbox photo names no file: its original and edited copy stay in the inbox, private.photo_files)
+      const inboxFile = String(row.storage_path || '').startsWith('inbox/');
+      audit('photos', 'DELETE_FILES', { id: row.id, files: inboxFile ? [] : [row.storage_path, row.thumb_path].filter(Boolean).map((name) => ({ bucket: 'clinic-photos', name })) }, { viaFunction: true, before: row });
+      if (row.intake_item_id) inboxApi.inboxPhotoDeleted(row);
       const copies = db.photos.filter((x) => x.edited_from === row.id);
       for (const c of copies) { const before = clone(c); c.edited_from = null; audit('photos', 'UPDATE', c, { before }); }
       db.photos = db.photos.filter((x) => x !== row);
@@ -1604,6 +1615,9 @@ export function createDemoAdapter() {
 
     // ------------------------------------------------------------ Retainer Record and Lab Work (data/demo-records.js)
     ...recordsDemo({ db: () => db, me, can, need, branchOk, clone, fail, uid, audit, patient }),
+
+    // ------------------------------------------------------------ the Photo inbox and the Photo library (data/demo-inbox.js)
+    ...inboxApi,
 
     // ------------------------------------------------------------ the homepage forms (visitors, no login)
     // The same rules as the database functions (submit_job_application, submit_feedback): every field checked again, the honeypot

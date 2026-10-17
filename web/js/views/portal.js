@@ -139,8 +139,10 @@ export async function renderPortalDemo(root) {
 export async function renderPortalPreview(root, patientId) {
   const d = state.data;
   const p = await d.getPatient(patientId);
-  // Patients only ever see edited photos and non-internal replies; the staff view carries more.
-  p.photos = (p.photos || []).filter((ph) => ph.kind === 'edited');
+  // Patients only ever see edited photos and non-internal replies; the staff view carries more. A Photo inbox photo reaches the patient
+  // only after its check window (release_after) and never while it is held back (hidden, or Claude saw more than one patient): the
+  // patient's own login gets that from the database's photo rules (20261017000200).
+  p.photos = (p.photos || []).filter((ph) => ph.kind === 'edited' && !ph.held_back && (!ph.release_after || Date.parse(ph.release_after) <= Date.now()));
   p.complaints = (p.complaints || []).map((c) => ({ ...c, messages: (c.messages || []).filter((m) => !m.internal_note) }));
   p.invoices = (p.invoices || []).filter((i) => i.status === 'issued');
   return portalPage(root, { d, p, ratings: [], signOut: null, preview: true });

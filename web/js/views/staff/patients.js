@@ -6,6 +6,7 @@ import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal
 import { xrayUploadModal, deleteDocumentModal, deletePhotoModal, deleteXrayModal } from './common.js';
 import { portalLoginModal } from './portal-login.js';
 import { retainerStatuses, checkOverdue } from '../../lib/records.js';
+import { karachiClock, karachiDate, dayLabel } from '../../lib/photo-intake.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt, editInvoiceModal, editPaymentModal } from './invoice.js';
 
 export const MEDICAL_CONDITIONS = ['Diabetes', 'High blood pressure', 'Heart condition', 'Bleeding disorder', 'Pregnancy', 'Asthma', 'Epilepsy', 'Thyroid', 'Hepatitis / HIV', 'Kidney disease'];
@@ -257,7 +258,11 @@ export async function renderPatient(root, id) {
   // url, url_expires_at), so the grid shows at once. A signed link expires after an hour: an image that fails to load is signed again once,
   // and a full-size link clicked near its expiry is signed again first (freshLinkOnClick).
   const signedAt = Date.now();
-  const photoItems = p.photos.map((ph) => {
+  // A Photo inbox photo (20261017000200) has its raw original and, once Claude has edited it, the edited copy: the copy is the tile, with
+  // an "Original" link for whoever sees raw photos; the original alone is a tile until its edited copy exists.
+  const editedOf = new Set(p.photos.filter((ph) => ph.kind === 'edited' && ph.edited_from && ph.intake_item_id).map((ph) => ph.edited_from));
+  const originalOf = (ph) => (ph.kind === 'edited' && ph.intake_item_id && ph.edited_from ? p.photos.find((r) => r.id === ph.edited_from) || null : null);
+  const photoItems = p.photos.filter((ph) => !(ph.kind === 'raw' && ph.intake_item_id && editedOf.has(ph.id))).map((ph) => {
     const img = h('img', { alt: ph.view_label || 'Photo', loading: 'lazy', decoding: 'async', src: ph.thumb_url || ph.url || null });
     const link = h('a', { href: ph.url || null, target: '_blank', rel: 'noopener' }, img);
     freshLinkOnClick(link, ph);
@@ -474,7 +479,11 @@ export async function renderPatient(root, id) {
       xrays === null ? h('p', { class: 'muted' }, 'The X-rays could not be loaded just now. Reload the page to try again.') : null,
       photoItems.length || xrayTiles.length ? h('div', { class: 'photo-grid' }, [...photoItems.map(({ ph, link }) => ({ day: ph.taken_on, at: ph.created_at, el: h('figure', {},
         link,
-        h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label, ph.kind === 'raw' ? 'raw (staff only)' : 'edited (patient sees it)', ph.public_ok ? 'website ok' : null].filter(Boolean).join(' · '),
+        h('figcaption', {}, [shortDate(ph.taken_on), ph.view_label, ph.intake_item_id ? 'Photo inbox' : null, ph.kind === 'raw' ? 'raw (staff only)'
+          : ph.held_back ? 'Hidden from the patient' : ph.release_after && Date.parse(ph.release_after) > Date.now()
+            ? `Patient sees it from ${dayLabel(karachiDate(ph.release_after))}, ${karachiClock(ph.release_after)}` : 'edited (patient sees it)',
+        ph.public_ok ? 'website ok' : null].filter(Boolean).join(' · '),
+          can('photos.view_raw') && originalOf(ph)?.url ? h('div', {}, h('a', { href: originalOf(ph).url, target: '_blank', rel: 'noopener', 'aria-label': `Original of ${ph.view_label || 'this photo'} (opens in a new tab)` }, 'Original')) : null,
           isAdmin() && ph.kind === 'edited' && ph.public_ok ? h('div', {}, h('button', { class: 'link-btn', style: { fontSize: '12px' }, onclick: busy(async () => {
             await d.publishPhoto(ph); toast('Added to the website gallery.', 'ok');
           }) }, 'Publish on website')) : null),

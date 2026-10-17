@@ -34,6 +34,10 @@ const PAGES = {
   queue: { render: lazy(pagesModule, 'renderQueue'), show: () => can('sheet.view') },
   checkups: { render: lazy(() => import('./checkups.js'), 'renderCheckups'), show: () => can('sheet.view') },
   patients: { render: lazy(patientsModule, 'renderPatients'), show: () => can('patients.view') },
+  // The Photo inbox (owner, 17 Oct 2026: assistants, the coordinator and Dr. Ali upload the day's photos; 20261017000200_photo_intake.sql)
+  // and the Photo library (every patient's edited photos, for whoever opens patient profiles).
+  'photo-inbox': { render: lazy(() => import('./photo-inbox.js'), 'renderPhotoInbox'), show: () => can('photos.intake') && can('photos.view_raw') },
+  'photo-library': { render: lazy(() => import('./photo-library.js'), 'renderPhotoLibrary'), show: () => can('patients.view') },
   billing: { render: lazy(pagesModule, 'renderBilling'), show: () => can('billing.view') || can('discount.approve') },
   accounts: { render: lazy(() => import('./accounts.js'), 'renderAccounts'), show: () => can('finance.view') || can('cash.close') || can('cash.verify') },
   reports: { render: lazy(() => import('./reports.js'), 'renderReports'), show: () => can('finance.view') || can('billing.view') || can('patients.view') || can('sheet.view') },
@@ -57,6 +61,7 @@ function menu() {
     link('Today', 'today'),
     { label: 'Aaj ki List', key: 'sheet', show: () => show('sheet'), items: [link('Aaj ki List', 'sheet'), link('History of Aaj ki List', 'day-history'), link('Queue board', 'queue'), link('Checkups', 'checkups')] },
     link('Patients', 'patients'),
+    { label: 'Photos', key: 'photos', show: () => show('photo-inbox') || show('photo-library'), items: [link('Photo inbox', 'photo-inbox'), link('Photo library', 'photo-library')] },
     link('Billing', 'billing'),
     { label: 'Reports', key: 'reports', show: () => show('reports') || show('accounts'), items: [
       { ...link('Financial', 'reports?group=financial'), show: () => can('finance.view') },
@@ -125,6 +130,19 @@ function markCurrent(container) {
 const hoverMenus = matchMedia('(hover: hover) and (min-width: 73.75em)');
 const wideScreen = matchMedia('(min-width: 73.75em)');
 let refSession = null; // the session the clinician, treatment and settings lists were loaded for
+// The Photo inbox's "Which patient?" count shown on the menu (see inboxBadge in renderStaff). Kept between pages, so a menu drawn again
+// (Arrange my menu, a narrower window) shows it at once; the Photo inbox page sends a fresh count after each change.
+let inboxCount = 0;
+function paintInboxBadge(el) {
+  el.hidden = !inboxCount;
+  el.replaceChildren(...(inboxCount ? [h('span', { 'aria-hidden': 'true' }, String(inboxCount)),
+    srOnly(` ${inboxCount} photo set${inboxCount === 1 ? '' : 's'} ${inboxCount === 1 ? 'waits' : 'wait'} for Which patient?`)] : []));
+}
+function setInboxCount(n) {
+  inboxCount = Number(n) || 0;
+  document.querySelectorAll('.photo-inbox-count').forEach(paintInboxBadge);
+}
+window.addEventListener('photo-inbox-count', (e) => setInboxCount(e.detail));
 let renderCtl = null;
 // Another tab of this browser took a new name for the same shared login (the next person at this computer chose "Change name"
 // there): this tab stops the old name too, and asks. deskTab is the shared login of the page on screen, with its "Change name".
@@ -150,7 +168,17 @@ export async function renderStaff(root, path, params, signOut) {
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
-  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || ((section === 'retainers' || section === 'lab') && key === 'coordinator') || (section === 'day-history' && key === 'sheet');
+  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || ((section === 'retainers' || section === 'lab') && key === 'coordinator') || (section === 'day-history' && key === 'sheet')
+    || ((section === 'photo-inbox' || section === 'photo-library') && key === 'photos');
+  // The "Which patient?" count (sets waiting, and filed sets Claude flagged) on the Photos drop-down, the Photo inbox link (top bar and
+  // drawer) and More when they are arranged under it. Asked once per page (never blocking it); the Photo inbox page sends fresh counts.
+  const showsInboxCount = can('photos.intake') && can('photos.view_raw') && !!state.data.photoInboxCounts;
+  const inboxBadge = () => {
+    const el = h('span', { class: 'badge badge-warn nav-count photo-inbox-count', hidden: !inboxCount });
+    paintInboxBadge(el);
+    return el;
+  };
+  const leadsToInbox = (m) => (m.href === '#/staff/photo-inbox') || (m.items || []).some((i) => leadsToInbox(i));
   const items = menu();
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
@@ -181,13 +209,13 @@ export async function renderStaff(root, path, params, signOut) {
   const dropdown = (m) => {
     const listId = `menu-list-${m.key}`;
     const btn = h('button', { type: 'button', class: ['nav-link', current(m.key) ? 'current' : ''], 'aria-expanded': 'false', 'aria-controls': listId },
-      m.label, current(m.key) ? srOnly(' (current section)') : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
+      m.label, current(m.key) ? srOnly(' (current section)') : null, showsInboxCount && leadsToInbox(m) ? inboxBadge() : null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'));
     const item = (i) => (i.divider ? h('hr', {}) : h('a', { href: i.href, onclick: () => {
       // Choosing the page already on screen fires no hashchange, so give focus back to the menu button.
       const same = i.href === location.hash;
       closeAll();
       if (same) btn.focus();
-    } }, i.label));
+    } }, i.label, showsInboxCount && i.href === '#/staff/photo-inbox' ? inboxBadge() : null));
     // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): one group named after it, with
     // all its pages and a line inside it (Reports: the reports, then the Accounts tabs) indented under its name.
     const section = (i, n) => h('div', { class: 'menu-section', role: 'group', 'aria-labelledby': `${listId}-${n}` },
@@ -197,7 +225,8 @@ export async function renderStaff(root, path, params, signOut) {
     return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
   };
   const navEntry = (m) => (m.items ? dropdown(m)
-    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label));
+    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label,
+      showsInboxCount && m.href === '#/staff/photo-inbox' ? inboxBadge() : null));
   const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }); // its entries: arrangeNav, below the drawer
 
   // ---- "Create ▾" beside the search (owner, 15 Oct 2026, as on Healthwire): a new patient, an invoice, a health record
@@ -322,7 +351,8 @@ export async function renderStaff(root, path, params, signOut) {
   // expanded as groups). It closes on the scrim, on Escape, on its close button and on navigation, gives
   // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
-  const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label);
+  const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label,
+    showsInboxCount && i.href === '#/staff/photo-inbox' ? inboxBadge() : null);
   // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): a group of its own, named after
   // it, with all its pages (the drawer draws no lines inside a group). The pages after it are More's own, not that drop-down's,
   // to the eye (they are not indented under it) and to a screen reader.
@@ -406,6 +436,7 @@ export async function renderStaff(root, path, params, signOut) {
     topbar,
     h('div', { class: 'app topnav-layout' }, drawer, content),
     scrim);
+  if (showsInboxCount) state.data.photoInboxCounts().then((c) => setInboxCount(c.waiting + c.check)).catch(() => {});
   // Before the person can use anything: a shared login says who is at the desk, and only then is the page drawn (and its data read).
   if (needsDeskName(s) && !(await askName())) return;
   if (signal.aborted) return;

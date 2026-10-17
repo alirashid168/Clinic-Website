@@ -289,6 +289,15 @@ export function friendlyError(err, { audience = 'staff' } = {}) {
     ['CHECK_REQUIRED', 'This visit must be checked by the checker group before it can be completed.'],
     ['GROUP_NOT_ALLOWED', null],
     ['CHECKER_NOT_ALLOWED', null],
+    // The Photo inbox (20261017000200_photo_intake.sql, web/js/data/supabase-inbox.js)
+    ['PHOTO_INBOX_MISSING', 'The Photo inbox needs the database update of 17 Oct (20261017000200_photo_intake.sql). Ask Dr. Ali to apply it.'],
+    ['PHOTO_STALE_PLAN', 'The photos changed while matching; it is tried again.'],
+    ['PHOTO_STALE', 'Someone changed these photos a moment ago. The list is reloaded.'],
+    ['PHOTO_FILE_MISSING', 'The photo did not finish uploading. Choose it again.'],
+    ['PHOTO_VISIT_INVALID', 'That visit is not on this city\'s list for that day.'],
+    ['PHOTO_SET_STATE', 'These photos were already filed or set aside. The list is reloaded.'],
+    ['PHOTO_BAD_INPUT', null],
+    ['STORAGE_FULL', null],
     ['row-level security', 'You do not have permission to do this. Ask Dr. Ali to tick it in the access list.'],
   ];
   for (const [needle, text] of known) {

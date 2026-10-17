@@ -15,6 +15,7 @@ import { passwordProblems, passwordError } from '../password-rules.js';
 import { isPatientLoginName } from '../lib/portal-login.js';
 import { checkupPhone } from '../lib/checkups.js';
 import { recordsLive } from './supabase-records.js';
+import { inboxLive } from './supabase-inbox.js';
 import { cvFileInfo } from '../lib/public-forms.js';
 
 // supabase-js pinned to one exact release (bump on purpose, after testing). Only cdn.jsdelivr.net
@@ -1924,6 +1925,8 @@ export async function createSupabaseAdapter() {
 
     // ------------------------------------------------------------ Retainer Record and Lab Work (data/supabase-records.js)
     ...recordsLive({ sb, check, fetchPaged, attachPatients, plainError }),
+    // The Photo inbox and the Photo library (20261017000200_photo_intake.sql, the photo-ai Edge Function): data/supabase-inbox.js.
+    ...inboxLive({ sb, callRpc, check, plainError, signedUrls }),
 
     // ------------------------------------------------------------ the homepage forms (visitors, no login: role anon)
     /** Uploads the CV as a new file incoming/<random uuid>.<ext> of the private bucket job-cvs; resolves its path. Never overwrites. */
