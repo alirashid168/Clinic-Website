@@ -809,7 +809,8 @@ export async function renderSheet(root, params, signal) {
   }
 
   const ROLE_WORDS = { doctor: 'Doctor', assistant: 'Assistant', checker: 'Checked by' };
-  const removeLabel = (s, who) => `Remove ${s.name || 'Unknown'}${s.role === 'doctor' ? '' : ` (${s.role})`} from ${who}`;
+  // An assistant or hygienist is shown by name alone (owner, 17 Oct 2026: "remove assistant from their names .. then don't write anything").
+  const removeLabel = (s, who) => `Remove ${s.name || 'Unknown'}${s.role === 'checker' ? ' (checker)' : ''} from ${who}`;
   const ADD_PEOPLE = 'Add or remove a doctor, assistant or checker';
   function peopleCell(row) {
     const who = row.patient.full_name;
@@ -826,11 +827,10 @@ export async function renderSheet(root, params, signal) {
       const dr = /^dr\b\.?\s*(?=\S)/i.exec(name)?.[0] || '';
       return h('span', {
         class: ['person', s.role, `gs-${doctorTone(s.clinician_id, s.name)}`],
-        title: `${name}${s.role === 'checker' ? ' (checked)' : s.role === 'assistant' ? ' (assistant)' : ''}`,
+        title: `${name}${s.role === 'checker' ? ' (checked)' : ''}`,
       },
       s.role === 'checker' ? h('span', { class: 'person-mark', 'aria-hidden': 'true' }, '✓') : null,
-      h('span', { class: 'person-name' }, s.role === 'checker' ? srOnly('Checked by ') : null, dr ? srOnly(dr) : null, name.slice(dr.length),
-        s.role === 'assistant' ? [h('span', { 'aria-hidden': 'true' }, ' (asst.)'), srOnly(' (assistant)')] : null),
+      h('span', { class: 'person-name' }, s.role === 'checker' ? srOnly('Checked by ') : null, dr ? srOnly(dr) : null, name.slice(dr.length)),
       canTreatment ? h('button', {
         type: 'button', class: 'chip-remove', dataset: { focus: `remove-${s.clinician_id}-${s.role}` },
         // (the second click of a double click removes nobody: the next chip of the cell can have come under the mouse)
@@ -875,7 +875,7 @@ export async function renderSheet(root, params, signal) {
       mount(onHost,
         h('div', { class: 'field-label' }, 'On this visit'),
         row.staff.length ? h('ul', { class: 'people-on-list' }, row.staff.map((s) => h('li', {},
-          h('span', {}, `${ROLE_WORDS[s.role] || s.role}: ${s.name || 'Unknown'}`),
+          h('span', {}, `${s.role === 'assistant' ? '' : `${ROLE_WORDS[s.role] || s.role}: `}${s.name || 'Unknown'}`),
           h('button', { type: 'button', class: 'btn btn-small', 'aria-label': removeLabel(s, who), dataset: { key: `${s.clinician_id}-${s.role}` }, onclick: () => removePerson(row, s, inDialog) }, 'Remove'))))
           : h('p', { class: 'muted' }, 'Nobody yet.'),
         removed ? h('p', { class: 'people-on-undo' }, `${removed} removed. `, h('button', { type: 'button', class: 'btn btn-small', dataset: { key: 'undo' }, onclick: runUndo }, 'Undo')) : null);

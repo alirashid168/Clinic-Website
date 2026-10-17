@@ -223,7 +223,7 @@ export async function renderSetup(root) {
       onSave: save('clinicians'),
       columns: [
         { key: 'display_name', label: 'Name as shown', required: true, placeholder: 'Dr. First Last' },
-        { key: 'is_doctor', label: 'Doctor (untick for assistant / hygienist)', type: 'check', show: (r) => (r.is_doctor ? 'Doctor' : 'Assistant') },
+        { key: 'is_doctor', label: 'Doctor (untick for assistant / hygienist)', type: 'check', show: (r) => (r.is_doctor ? 'Doctor' : '') },
         { key: 'doctor_group_id', label: 'Braces group', type: 'select', options: () => [{ value: '', label: 'No group (general / Dr. Ali)' }, ...lists.groups.map((g) => ({ value: g.id, label: g.name }))], show: (r) => groupName(r.doctor_group_id) },
         { key: 'region', label: 'City', type: 'select', options: () => REGIONS, show: (r) => REGIONS.find((x) => x.value === (r.region || ''))?.label || r.region },
         { key: 'staff_id', label: 'Login', type: 'select', options: doctorStaff, show: (r) => staffName(r.staff_id) || h('span', { class: 'muted' }, 'No login') },
