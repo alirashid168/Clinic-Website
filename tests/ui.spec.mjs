@@ -158,14 +158,14 @@ await step('front desk cannot see accounts or admin', async () => {
   assert.ok(!nav.includes('Complaints'));
   assert.ok(!nav.includes('Financial'));
 });
-await step('front desk may make a patient portal login (owner decision, 9 Oct 2026): the button shows on the patient just registered and the username carries Mr# 50000', async () => {
+await step('front desk may make a patient login (owner decisions, 9 and 17 Oct 2026): the button shows on the patient just registered and the login name is Mr# 50000', async () => {
   await page.goto(BASE + '#/staff/patients?q=Komal%20Test');
   await page.locator('table.list tbody tr', { hasText: 'Komal Test' }).locator('a').first().click();
   await page.waitForSelector('h1:has-text("Komal Test")');
-  await page.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor();
-  await page.getByRole('button', { name: 'Create portal login' }).click();
+  await page.locator('.portal-login-line', { hasText: 'Login: none yet' }).waitFor();
+  await page.getByRole('button', { name: 'Create login' }).click();
   const m = page.locator('.modal');
-  assert.equal(await m.locator('input[readonly]').inputValue(), 'komaltest-50000@dralirashid.com');
+  assert.match(await m.innerText(), /Mr# 50000/, 'the login name is the Mr# (owner, 17 Oct 2026)');
   await m.getByRole('button', { name: 'Cancel' }).click();
   await m.waitFor({ state: 'detached' });
 });
@@ -2154,10 +2154,11 @@ await step('A Delete that fails after the server switched the account off: the m
   expectErrors(/could not be counted/);
 });
 
-// ------------------------------------------------------------- portal login made at the clinic
+// ------------------------------------------------------------- patient logins made at the clinic (owner, 17 Oct 2026: one button, login name = Mr#, password = the phone on file)
 // The demo keeps its "login server" in the page's memory, so the staff member and the patient share one page (hash changes only).
 const pl = await newPage();
-let slip = {};
+// Hamza Qureshi: Mr# 9812, mobile 03010734521 (the demo's made-up number), no email.
+const HAMZA = { mr: '9812', phone: '03010734521' };
 // Logging out finishes by sending the page to the home page: wait for that, or it lands on top of whatever the test opened next.
 const logOut = async ({ staff = false } = {}) => {
   if (staff) await pl.getByRole('button', { name: /^Account menu/ }).click();
@@ -2170,227 +2171,239 @@ const openPatient = async (name) => {
   await pl.locator('table.list tbody tr', { hasText: name }).locator('a').first().click();
   await pl.waitForSelector(`h1:has-text("${name}")`);
 };
-await step('portal login buttons: "Create portal login" for a patient with none, the email invitation only when there is an email', async () => {
-  await loginAs(pl, 'Dr. Ali Rashid');
-  await openPatient('Hamza Qureshi'); // no email on file
-  await pl.getByRole('button', { name: 'Create portal login' }).waitFor();
-  assert.equal(await pl.getByRole('button', { name: 'Invite to patient portal' }).count(), 0, 'no email: nothing to invite');
-  await pl.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor();
-  await openPatient('Zainab Rizvi'); // has an email
-  await pl.getByRole('button', { name: 'Create portal login' }).waitFor();
-  await pl.getByRole('button', { name: 'Invite to patient portal' }).waitFor();
-  await pl.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor();
-  await openPatient('Areeba Siddiqui'); // already has a login with her own email
-  await pl.waitForSelector('h1:has-text("Areeba Siddiqui")');
-  assert.equal(await pl.getByRole('button', { name: 'Create portal login' }).count(), 0);
-  await pl.locator('.portal-login-line', { hasText: 'Portal login: own email (invited)' }).waitFor();
-  assert.equal(await pl.getByRole('button', { name: 'Reset portal password' }).count(), 0, 'a login with the patient\'s own email is reset by email, not here');
-});
-await step('staff create a portal login: the username, an easy password, and a login slip that prints on one small page', async () => {
-  await openPatient('Hamza Qureshi');
-  await pl.getByRole('button', { name: 'Create portal login' }).click();
-  const m = pl.locator('.modal');
-  assert.equal(await m.locator('input[readonly]').inputValue(), 'hamzaqureshi-9812@dralirashid.com');
-  const generated = await m.getByLabel('Password').inputValue();
-  assert.match(generated, /^[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[2-9]{4}$/, 'three short words and four digits, nothing that can be misread');
-  await m.getByRole('button', { name: 'New one' }).click();
-  assert.notEqual(await m.getByLabel('Password').inputValue(), generated, '"New one" gives another');
-  // Copy is for the username only: the slip is how the password is handed over (a copied password stays in the clipboard history of the front desk).
-  assert.equal(await m.getByRole('button', { name: 'Copy' }).count(), 1, 'one Copy button');
-  assert.equal(await m.locator('.inline:has(input[readonly]) button', { hasText: 'Copy' }).count(), 1, 'and it is the username\'s');
-  assert.deepEqual(await m.locator('.inline:has(input[autocomplete=off]) button').allInnerTexts(), ['New one'], 'the password box has only "New one"');
-  await m.getByLabel('Password').fill('short');
-  await m.getByRole('button', { name: 'Create login' }).click();
-  await m.locator('.field-error', { hasText: 'at least 10 characters' }).waitFor();
-  await m.getByLabel('Password').fill('0300123456789');
-  await m.getByRole('button', { name: 'Create login' }).click();
-  await m.locator('.field-error', { hasText: 'only digits' }).waitFor();
-  slip = { username: 'hamzaqureshi-9812@dralirashid.com', password: 'sunny-grape-4827' };
-  await m.getByLabel('Password').fill(slip.password);
-  await m.getByRole('button', { name: 'Create login' }).click();
-  await pl.waitForSelector('.login-slip');
-  const text = await pl.locator('.login-slip').innerText();
-  for (const part of ['Dr. Ali Rashid\'s Dental Clinic', 'www.dralirashid.com', slip.username, slip.password, 'Hamza Qureshi', 'Mr# 9812', 'You will be asked to choose your own password the first time you log in']) assert.ok(text.includes(part), `slip shows "${part}"`);
-  assert.equal(await pl.locator('.modal').count(), 1, 'only the slip dialog is open');
-  await shot(pl, '15-login-slip');
-  // Print: the slip is the only thing on the paper, and it is one page.
+const staffLogin = async (label) => {
+  await pl.setViewportSize({ width: 1366, height: 860 });
+  await pl.goto(BASE + '#/login/staff');
+  await pl.getByRole('button', { name: new RegExp(label) }).click();
+  await pl.waitForSelector('.topbar');
+};
+const patientLogin = async (name, password) => {
+  await pl.goto(BASE + '#/login/patient');
+  const form = pl.locator('form');
+  await form.locator('input[name=username]').fill(name);
+  await form.locator('input[type=password]').fill(password);
+  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+};
+// The card prints alone, on one A6 page.
+const printsOneA6 = async (buttonName) => {
   await pl.evaluate(() => { window.__print = []; window.print = () => { window.__print.push({ printing: document.body.classList.contains('printing'), areas: [...document.querySelectorAll('.print-area')].map((a) => a.className) }); window.dispatchEvent(new Event('afterprint')); }; });
-  await pl.getByRole('button', { name: 'Print login slip' }).click();
+  await pl.getByRole('button', { name: buttonName }).click();
   const printed = await pl.evaluate(() => ({ calls: window.__print, still: document.body.classList.contains('printing') }));
   assert.equal(printed.calls.length, 1);
-  assert.equal(printed.calls[0].printing, true, 'the print rules were switched on for the slip');
-  assert.deepEqual(printed.calls[0].areas, ['login-slip print-area'], 'only the slip is a print area');
+  assert.equal(printed.calls[0].printing, true, 'the print rules were switched on for the card');
+  assert.deepEqual(printed.calls[0].areas, ['login-slip print-area'], 'only the card is a print area');
   assert.equal(printed.still, false, 'and switched off again afterwards');
   const pdf = await pl.pdf({ preferCSSPageSize: true, printBackground: true });
-  const pages = (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
-  assert.equal(pages, 1, 'the slip prints on one page');
+  assert.equal((pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length, 1, 'the card prints on one page');
   const box = pdf.toString('latin1').match(/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/);
   assert.ok(box && Math.abs(Number(box[1]) - 297.6) < 3 && Math.abs(Number(box[2]) - 419.5) < 3, `the page is A6 (105 x 148 mm), not ${box?.slice(1, 3).join(' x ')}`);
+};
+await step('login buttons: "Create login" for a patient with none, the email invitation only when there is an email', async () => {
+  await loginAs(pl, 'Dr. Ali Rashid');
+  await openPatient('Hamza Qureshi'); // no email on file
+  await pl.getByRole('button', { name: 'Create login' }).waitFor();
+  assert.equal(await pl.getByRole('button', { name: 'Invite to patient portal' }).count(), 0, 'no email: nothing to invite');
+  await pl.locator('.portal-login-line', { hasText: 'Login: none yet' }).waitFor();
+  await openPatient('Zainab Rizvi'); // has an email
+  await pl.getByRole('button', { name: 'Create login' }).waitFor();
+  await pl.getByRole('button', { name: 'Invite to patient portal' }).waitFor();
+  await openPatient('Areeba Siddiqui'); // already has a login with her own email
+  assert.equal(await pl.getByRole('button', { name: 'Create login' }).count(), 0);
+  await pl.locator('.portal-login-line', { hasText: 'Login: own email (invited)' }).waitFor();
+  assert.equal(await pl.getByRole('button', { name: 'Reset password' }).count(), 0, 'a login with the patient\'s own email is reset by email, not here');
+  // A patient whose number on file is too short to be a password (7 digits, an old landline), for a step below (assistants do not register patients).
+  await pl.evaluate(async () => { const { state } = await import('/js/state.js'); await state.data.createPatient({ full_name: 'Short Phone Sample', phone: '021 3456', first_branch_id: 1 }); });
+});
+await step('an assistant creates a login from the profile in one press: login name = Mr#, password = the mobile number on file, a card to print or copy (the number is never shown as a password)', async () => {
+  await logOut({ staff: true });
+  await staffLogin('Assistant');
+  await openPatient('Hamza Qureshi');
+  await pl.getByRole('button', { name: 'Create login' }).click();
+  const m = pl.locator('.modal');
+  const said = await m.innerText();
+  assert.match(said, /Mr# 9812/, 'the login name is the Mr#');
+  assert.match(said, /mobile number on file \(ends with 4521\)/, 'which phone, for families that share one');
+  assert.ok(!said.includes(HAMZA.phone), 'the whole number is not shown as a password');
+  assert.equal(await m.getByLabel('Use another password').inputValue(), '', 'optional, empty by default');
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await pl.waitForSelector('.login-slip');
+  const card = await pl.locator('.login-slip').innerText();
+  for (const part of ['Dr. Ali Rashid\'s Dental Clinic', 'www.dralirashid.com', 'Patient login', 'Mr# 9812', 'your mobile number (ends with 4521)', 'change the password from the menu']) assert.ok(card.includes(part), `the card says "${part}"`);
+  assert.ok(!card.includes(HAMZA.phone), 'the number itself is not on the card');
+  assert.equal(await pl.getByRole('button', { name: 'Copy' }).count(), 1, 'a Copy button for a WhatsApp message');
+  await shot(pl, '15-login-card');
+  await printsOneA6('Print card');
   await pl.getByRole('button', { name: 'Close' }).first().click();
   await pl.waitForSelector('h1:has-text("Hamza Qureshi")');
-  await pl.getByRole('button', { name: 'Reset portal password' }).waitFor();
-  assert.equal(await pl.getByRole('button', { name: 'Create portal login' }).count(), 0, 'the login exists now');
-  // The password was shown only in the dialog and on the slip: it is not left anywhere on the page.
-  assert.equal((await pl.locator('main, #app').first().innerText()).includes(slip.password), false);
-  // The patient record now says which login it is (and the username to tell the patient again without a reset).
-  await pl.locator('.portal-login-line', { hasText: 'Portal login: ' + slip.username }).waitFor();
+  await pl.locator('.portal-login-line', { hasText: 'Login: Mr# 9812 · password = the phone number on file' }).waitFor();
+  await pl.getByRole('button', { name: 'Reset password' }).waitFor();
+  assert.equal(await pl.getByRole('button', { name: 'Create login' }).count(), 0, 'the login exists now');
+  assert.ok(!(await pl.locator('.portal-login-line').innerText()).includes(HAMZA.phone), 'the login line names the phone, never the number as a password');
 });
-await step('the Portal login line says "could not check" with a retry when the function cannot be asked, and "Update the admin-users function first." when it is old', async () => {
-  const stub = (message) => pl.evaluate(async (m) => {
-    const { state } = await import('/js/state.js');
-    window.__realInfo ||= state.data.portalLoginInfo;
-    state.data.portalLoginInfo = m === null ? window.__realInfo : async () => { throw new Error(m); };
-  }, message);
-  await stub('Update the admin-users function first.'); // what the website says when the function does not know the action yet
-  await openPatient('Hamza Qureshi');
-  const line = pl.locator('.portal-login-line');
-  await line.getByText('could not check').waitFor();
-  assert.match(await line.innerText(), /Update the admin-users function first\./);
-  assert.equal(await pl.getByRole('button', { name: 'Reset portal password' }).count(), 0, 'no reset button on a login that could not be checked');
-  await stub(null); // the function answers again
-  await line.getByRole('button', { name: 'Try again' }).click();
-  await line.getByText(slip.username).waitFor();
-  await pl.getByRole('button', { name: 'Reset portal password' }).waitFor();
-  expectErrors(/Update the admin-users function first/);
+await step('a patient with no usable mobile number: the dialog asks for the phone first, or a typed password', async () => {
+  await openPatient('Short Phone Sample');
+  await pl.getByRole('button', { name: 'Create login' }).click();
+  const m = pl.locator('.modal');
+  assert.match(await m.innerText(), /no mobile number on file with at least 8 digits\. Add the phone number first/);
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await m.locator('.field-error', { hasText: 'no mobile number on file' }).waitFor();
+  await m.getByLabel('Use another password').fill('short');
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await m.locator('.field-error', { hasText: 'at least 8 characters' }).waitFor();
+  await m.getByLabel('Use another password').fill('typed-pass-11');
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await pl.waitForSelector('.login-slip');
+  const card = await pl.locator('.login-slip').innerText();
+  assert.match(card, /the password the clinic typed for you/, 'a typed password is not written on the card either');
+  assert.ok(!card.includes('typed-pass-11'));
+  await pl.getByRole('button', { name: 'Close' }).first().click();
 });
-await step('the patient logs in with just the short username, must choose their own password first, then lands in the portal', async () => {
+await step('Create ▾ → Patient login: find the patient, one press, the card; a patient who has one gets Reset instead', async () => {
+  await pl.locator('.create-btn').click();
+  await pl.locator('#create-menu-list button', { hasText: 'Patient login' }).click();
+  const pick = pl.locator('.modal', { has: pl.locator('h2', { hasText: /^Patient login$/ }) });
+  await pick.getByLabel('Search patients by name, Mr# or phone').fill('Fatima');
+  await pick.locator('[role=option]', { hasText: 'Fatima Noor' }).click();
+  const m = pl.locator('.modal', { has: pl.locator('h2', { hasText: 'Create login · Fatima Noor' }) });
+  await m.waitFor();
+  await m.getByRole('button', { name: 'Create login' }).click();
+  await pl.waitForSelector('.login-slip');
+  assert.match(await pl.locator('.login-slip').innerText(), /Fatima Noor · Mr# 9815/);
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+  await pl.locator('.create-btn').click();
+  await pl.locator('#create-menu-list button', { hasText: 'Patient login' }).click();
+  await pl.locator('.modal').getByLabel('Search patients by name, Mr# or phone').fill('Hamza');
+  await pl.locator('.modal [role=option]', { hasText: 'Hamza Qureshi' }).click();
+  const has = pl.locator('.modal', { has: pl.locator('h2', { hasText: 'Patient login · Hamza Qureshi' }) });
+  await has.waitFor();
+  assert.match(await has.innerText(), /already has a login/);
+  await has.getByRole('button', { name: 'Show the card' }).click();
+  await pl.waitForSelector('.login-slip');
+  assert.match(await pl.locator('.login-slip').innerText(), /Mr# 9812/);
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+  await pl.locator('.modal').waitFor({ state: 'detached' });
+});
+await step('the patient logs in with the Mr# and the mobile number: straight into the portal (no "choose a password" screen), with invoices, photos, documents, Change password and "Please upload my photos"', async () => {
   await logOut({ staff: true });
   await pl.setViewportSize({ width: 390, height: 844 });
   await pl.goto(BASE + '#/login/patient');
   const form = pl.locator('form');
-  await form.locator('input[name=username]').waitFor();
-  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
-  await form.locator('input[type=password]').fill('not-the-password-1');
-  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  assert.equal(await form.locator('input[name=username]').getAttribute('placeholder'), 'For example 50013');
+  assert.match(await form.innerText(), /Your Mr# is your patient number/);
+  assert.equal(await pl.getByRole('link', { name: /Register with your Mr# and mobile number/ }).count(), 1, 'the way to register');
+  await patientLogin(HAMZA.mr, 'not-the-password-1');
   await pl.locator('.field-error', { hasText: 'username (or email) and password do not match' }).waitFor();
-  await form.locator('input[name=username]').fill('  HamzaQureshi-9812 ');
-  await form.locator('input[type=password]').fill(slip.password);
-  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
-  await pl.waitForSelector('h1:has-text("Choose your own password")');
-  assert.equal(await pl.locator('h1:has-text("Hello")').count(), 0, 'nothing of the portal before the new password');
-  assert.equal(await pl.locator('.photo-grid, .stat-row').count(), 0);
-  await shot(pl, '16-choose-password');
-  const next = pl.locator('input[autocomplete=new-password]');
-  const save = pl.getByRole('button', { name: 'Save my password' });
-  await next.nth(0).fill('abc');
-  await next.nth(1).fill('abc');
-  await save.click();
-  await pl.locator('.field-error', { hasText: 'at least 8 characters' }).waitFor();
-  await next.nth(0).fill('my-own-pass-77');
-  await next.nth(1).fill('my-own-pass-78');
-  await save.click();
-  await pl.locator('.field-error', { hasText: 'two passwords are different' }).waitFor();
-  await next.nth(0).fill(slip.password);
-  await next.nth(1).fill(slip.password);
-  await save.click();
-  await pl.locator('[role=alert]', { hasText: 'different from your current one' }).first().waitFor();
-  await next.nth(0).fill('my-own-pass-77');
-  await next.nth(1).fill('my-own-pass-77');
-  await save.click();
+  await patientLogin(' Mr# 9812 ', HAMZA.phone); // the Mr# written any way, the phone as on file
   await pl.waitForSelector('h1:has-text("Hello, Hamza")');
+  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0, 'no forced password change');
   await pl.getByRole('button', { name: 'Change password' }).waitFor();
-  await shot(pl, '17-portal-after-first-login');
+  for (const heading of ['Your visits', 'Invoices and payments', 'Photos and X-rays', 'Your documents']) assert.equal(await pl.locator('h2', { hasText: heading }).count(), 1, heading);
+  await pl.getByRole('button', { name: 'Please upload my photos' }).waitFor();
+  await shot(pl, '16-portal-mr-login');
 });
-await step('the patient can change the password later from the portal menu, and the old one stops working', async () => {
+await step('"Please upload my photos": one request at a time with Cancel; the staff see it on the Photo inbox with Done; a photo saved for the patient closes it by itself', async () => {
+  await pl.getByRole('button', { name: 'Please upload my photos' }).click();
+  await pl.waitForSelector('.toast:has-text("The clinic has been asked to upload your photos")');
+  await pl.locator('.photo-request-state', { hasText: 'Requested on' }).waitFor();
+  await pl.getByRole('button', { name: 'Cancel request' }).click();
+  await pl.getByRole('button', { name: 'Please upload my photos' }).waitFor();
+  await pl.getByRole('button', { name: 'Please upload my photos' }).click();
+  await pl.locator('.photo-request-state', { hasText: 'Requested on' }).waitFor();
+  await logOut();
+  await staffLogin('Assistant');
+  await pl.goto(BASE + '#/staff/photo-inbox');
+  const panel = pl.locator('.photo-requests');
+  await panel.locator('tr', { hasText: 'Hamza Qureshi' }).waitFor();
+  assert.match(await panel.innerText(), /Photo requests \(1\)/);
+  assert.match(await panel.locator('tr', { hasText: 'Hamza Qureshi' }).innerText(), /Mr# 9812/);
+  assert.equal(await panel.locator('tr', { hasText: 'Hamza Qureshi' }).getByRole('link', { name: 'Open patient' }).count(), 1);
+  await panel.locator('tr', { hasText: 'Hamza Qureshi' }).getByRole('button', { name: 'Done' }).click();
+  await pl.waitForSelector('.toast:has-text("Marked done")');
+  await panel.locator('p', { hasText: 'No patient is asking for photos' }).waitFor();
+  // The patient asks again; this time a picture saved on the profile closes the request without anyone pressing Done.
+  await logOut({ staff: true });
+  await pl.setViewportSize({ width: 390, height: 844 });
+  await patientLogin(HAMZA.mr, HAMZA.phone);
+  await pl.waitForSelector('h1:has-text("Hello, Hamza")');
+  await pl.getByRole('button', { name: 'Please upload my photos' }).click();
+  await pl.locator('.photo-request-state', { hasText: 'Requested on' }).waitFor();
+  await logOut();
+  await staffLogin('Assistant');
+  await pl.goto(BASE + '#/staff/photo-inbox');
+  await panel.locator('tr', { hasText: 'Hamza Qureshi' }).waitFor();
+  await pl.evaluate(async (mr) => {
+    const { state } = await import('/js/state.js');
+    const p = (await state.data.searchPatients(mr)).find((x) => x.mr_number === mr);
+    await state.data.uploadPhoto({ patientId: p.id, file: new Blob(['x'], { type: 'image/png' }), viewLabel: 'Front', branchId: 1 });
+  }, HAMZA.mr);
+  await pl.goto(BASE + '#/staff/today'); // the same hash again would not redraw the page (and a reload would wipe the demo's memory)
+  await pl.waitForSelector('h1');
+  await pl.goto(BASE + '#/staff/photo-inbox');
+  await panel.locator('p', { hasText: 'No patient is asking for photos' }).waitFor();
+});
+await step('the patient can change the password later from the portal menu, and the mobile number then stops working as the password', async () => {
+  await logOut({ staff: true });
+  await pl.setViewportSize({ width: 390, height: 844 });
+  await patientLogin(HAMZA.mr, HAMZA.phone);
+  await pl.waitForSelector('h1:has-text("Hello, Hamza")');
   await pl.getByRole('button', { name: 'Change password' }).click();
   const dlg = pl.locator('.modal');
   await dlg.getByLabel('New password').fill('later-pass-4455');
   await dlg.getByLabel('Type it again').fill('later-pass-9999');
   await dlg.getByRole('button', { name: 'Save password' }).click();
   await dlg.locator('.field-error', { hasText: 'two passwords are different' }).waitFor();
-  await dlg.getByLabel('New password').fill('later-pass-4455');
   await dlg.getByLabel('Type it again').fill('later-pass-4455');
   await dlg.getByRole('button', { name: 'Save password' }).click();
   await pl.waitForSelector('.toast:has-text("Your password has been changed")');
   await logOut();
-  await pl.goto(BASE + '#/login/patient');
-  const form = pl.locator('form');
-  await form.locator('input[name=username]').fill(slip.username); // the whole address works too
-  await form.locator('input[type=password]').fill('my-own-pass-77');
-  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
+  await patientLogin(HAMZA.mr, HAMZA.phone);
   await pl.locator('.field-error', { hasText: 'do not match' }).waitFor();
-  await form.locator('input[type=password]').fill('later-pass-4455');
-  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
-  await pl.waitForSelector('h1:has-text("Hello, Hamza")'); // no "choose a password" screen again
-  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0);
+  await patientLogin('mr-9812@dralirashid.com', 'later-pass-4455'); // the whole address works too
+  await pl.waitForSelector('h1:has-text("Hello, Hamza")');
 });
-await step('"Forgot password" for a clinic username says to ask the clinic (no email); a staff address is told the staff way', async () => {
+await step('staff set the password back to the mobile number in one press (or type another), and the patient is in again with the phone', async () => {
   await logOut();
+  await staffLogin('Front desk \\(Gulshan\\)');
+  await openPatient('Hamza Qureshi');
+  await pl.getByRole('button', { name: 'Reset password' }).click();
+  const m = pl.locator('.modal');
+  const said = await m.innerText();
+  assert.match(said, /goes back to their mobile number on file/);
+  assert.match(said, /Saving signs the patient out everywhere: the old password stops working at once/);
+  await m.getByRole('button', { name: 'Reset password' }).click();
+  await pl.waitForSelector('.login-slip');
+  assert.match(await pl.locator('.login-slip').innerText(), /your mobile number \(ends with 4521\)/);
+  await pl.getByRole('button', { name: 'Close' }).first().click();
+  await logOut({ staff: true });
+  await patientLogin(HAMZA.mr, 'later-pass-4455'); // the old password no longer works
+  await pl.locator('.field-error', { hasText: 'do not match' }).waitFor();
+  await patientLogin(HAMZA.mr, HAMZA.phone);
+  await pl.waitForSelector('h1:has-text("Hello, Hamza")');
+  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0, 'still no forced change');
+  await logOut();
+});
+await step('"Forgot password" for a Mr# says to ask the clinic (no email, WhatsApp link included); a staff address is told the staff way', async () => {
   await pl.goto(BASE + '#/login/patient');
   const form = pl.locator('form');
   await form.getByRole('button', { name: 'Forgot password?' }).click();
   await pl.locator('.field-error', { hasText: 'Type your username or email address first' }).waitFor();
-  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
-  await form.getByRole('button', { name: 'Forgot password?' }).click();
-  await pl.locator('p.muted', { hasText: 'Ask the clinic to reset your password' }).waitFor();
-  await form.locator('input[name=username]').fill('someone@example.com');
-  await form.getByRole('button', { name: 'Forgot password?' }).click();
-  await pl.locator('.field-error', { hasText: 'Something went wrong' }).waitFor(); // a real email goes to the email reset (the demo has none, so it fails the way any failed reset does)
-});
-await step('the patient login page points to the slip and to the clinic, for the hint and for "Forgot password" (WhatsApp link included)', async () => {
-  await pl.goto(BASE + '#/login/patient');
-  const form = pl.locator('form');
-  await form.locator('input[name=username]').waitFor();
-  const text = await form.innerText();
-  assert.match(text, /Use the username on the slip the clinic gave you\. Patients who were invited by email use that email address\./);
-  assert.doesNotMatch(text, /If you gave the clinic your email address/, 'no longer sends a clinic-made login to the real email');
-  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
+  await form.locator('input[name=username]').fill('9812');
   await form.getByRole('button', { name: 'Forgot password?' }).click();
   const note = form.locator('p.muted', { hasText: 'Ask the clinic to reset your password' });
   await note.waitFor();
   const wa = note.getByRole('link', { name: /message the clinic on WhatsApp/ });
   assert.match(await wa.getAttribute('href'), /^https:\/\/wa\.me\/92\d{10}\?text=/, 'the clinic\'s WhatsApp chat');
-  assert.equal(await wa.getAttribute('target'), '_blank');
-  assert.match(await wa.getAttribute('rel'), /noopener/);
-  // A real email: the reset email goes out (stand-in here), and the note says what to do if the login came from the clinic.
-  await pl.evaluate(async () => { const { state } = await import('/js/state.js'); state.data.sendPasswordReset = async () => {}; });
-  await form.locator('input[name=username]').fill('hamza@example.com');
+  await form.locator('input[name=username]').fill('someone@example.com');
   await form.getByRole('button', { name: 'Forgot password?' }).click();
-  const emailNote = form.locator('p.muted', { hasText: 'a link to set a new password is on its way' });
-  await emailNote.waitFor();
-  assert.match(await emailNote.innerText(), /If the clinic gave you a username on a slip, no link will come: use that username here instead, or message the clinic on WhatsApp/);
-  assert.equal(await emailNote.getByRole('link', { name: /WhatsApp/ }).count(), 1);
-});
-await step('staff reset the password of a login made at the clinic: same username, a new slip, and the patient must choose again', async () => {
-  await pl.setViewportSize({ width: 1366, height: 860 });
-  await pl.goto(BASE + '#/login/staff');
-  await pl.getByRole('button', { name: /Dr. Ali Rashid/ }).click();
-  await pl.waitForSelector('.topbar');
-  await openPatient('Hamza Qureshi');
-  await pl.getByRole('button', { name: 'Reset portal password' }).click();
-  const m = pl.locator('.modal');
-  assert.equal(await m.locator('input[readonly]').inputValue(), slip.username);
-  // Honest about what a reset does: it does not end a session that is already open.
-  const said = await m.innerText();
-  assert.match(said, /Saving signs the patient out everywhere: the old password stops working at once/);
-  assert.doesNotMatch(said, /stops working as soon as you save/);
-  slip.password = 'peach-zebra-5936';
-  await m.getByLabel('Password').fill(slip.password);
-  await m.getByRole('button', { name: 'Reset password' }).click();
-  await pl.waitForSelector('.login-slip');
-  assert.ok((await pl.locator('.login-slip').innerText()).includes(slip.password));
-  await pl.getByRole('button', { name: 'Close' }).first().click();
-  await logOut({ staff: true });
-  await pl.goto(BASE + '#/login/patient');
-  const form = pl.locator('form');
-  await form.locator('input[name=username]').fill('hamzaqureshi-9812');
-  await form.locator('input[type=password]').fill('later-pass-4455'); // the old password no longer works
-  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
-  await pl.locator('.field-error', { hasText: 'do not match' }).waitFor();
-  await form.locator('input[type=password]').fill(slip.password);
-  await form.locator('input[type=password]').press('Enter'); // the card re-centres when a message goes away, so a click can miss the moving button
-  await pl.waitForSelector('h1:has-text("Choose your own password")');
+  await pl.locator('.field-error', { hasText: 'Something went wrong' }).waitFor(); // a real email goes to the email reset (the demo has none, so it fails the way any failed reset does)
 });
 await step('a staff login cannot be given a name that looks like a patient login', async () => {
-  await logOut();
-  await pl.goto(BASE + '#/login/staff');
-  await pl.getByRole('button', { name: /Dr. Ali Rashid/ }).click();
-  await pl.waitForSelector('.topbar');
+  await staffLogin('Dr. Ali Rashid');
   await pl.goto(BASE + '#/staff/admin?tab=staff');
   await pl.getByRole('button', { name: 'New staff account' }).click();
   const m = pl.locator('.modal');
   await m.getByPlaceholder('Full name').fill('Patient Lookalike');
-  await m.locator('input[type=email]').fill('lookalike-1705@dralirashid.com');
+  await m.locator('input[type=email]').fill('mr-1705@dralirashid.com');
   await m.getByRole('button', { name: 'Create account' }).click();
   await pl.locator('.toast', { hasText: 'shape of a patient login' }).waitFor();
 });
@@ -2406,139 +2419,107 @@ await step('the invitation by email is refused for an address at the clinic doma
   await pl.waitForSelector('h1:has-text("Planted Address")');
   await pl.getByRole('button', { name: 'Invite to patient portal' }).click();
   await pl.locator('.toast', { hasText: 'Use Create portal login for clinic usernames.' }).waitFor();
-  await pl.locator('.portal-login-line', { hasText: 'Portal login: none yet' }).waitFor(); // nothing was linked
+  await pl.locator('.portal-login-line', { hasText: 'Login: none yet' }).waitFor(); // nothing was linked
   await pl.goto(BASE + `#/staff/patient/${ids.real}`);
   await pl.waitForSelector('h1:has-text("Real Address")');
   await pl.getByRole('button', { name: 'Invite to patient portal' }).click();
   await pl.locator('.toast', { hasText: 'Invitation sent to real.address@example.com' }).waitFor();
-  await pl.locator('.portal-login-line', { hasText: 'Portal login: own email (invited)' }).waitFor();
+  await pl.locator('.portal-login-line', { hasText: 'Login: own email (invited)' }).waitFor();
   expectErrors(/Use Create portal login for clinic usernames/);
 });
 
-await step('the login slip keeps the username in one piece before the @, sets a long one smaller, and even the longest username prints on one A6 page', async () => {
-  const name = 'Muhammad Abdul Rehman Siddiqui Al Hashmi'; // the name part is cut to 24 letters
-  const cases = [['Ali Rashid', '1705'], [name, '1705'], [name, '9'.repeat(10)], [name, '9'.repeat(30)]]; // 14, 29, 35 and 55 characters before the @
-  const measured = await pl.evaluate(async ({ cases }) => {
-    const { loginSlip } = await import('/js/views/staff/portal-login.js');
-    const holder = document.createElement('div');
-    holder.style.cssText = 'position:fixed;left:0;top:0;width:351px;background:#fff;z-index:99999'; // an A6 page between its 6 mm margins, on screen
-    document.body.append(holder);
-    const rows = [];
-    for (const [fullName, mr] of cases) {
-      const username = fullName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 24) + '-' + mr + '@dralirashid.com';
-      const slip = loginSlip({ full_name: fullName, mr_number: mr }, username, 'queen-sheep-zebra-9876');
-      holder.replaceChildren(slip);
-      const user = slip.querySelector('.slip-user');
-      const parts = [...user.querySelectorAll('.slip-nowrap')];
-      const edge = slip.getBoundingClientRect().right - parseFloat(getComputedStyle(slip).paddingRight);
-      const pw = [...slip.querySelectorAll('.slip-value')].at(-1);
-      rows.push({
-        username, text: user.textContent, font: parseFloat(getComputedStyle(user).fontSize), lines: parts.map((s) => s.getClientRects().length),
-        inside: parts.every((s) => s.getBoundingClientRect().right <= edge + 0.5), passwordFits: pw.scrollWidth <= pw.clientWidth + 0.5,
-        domainBelow: parts.length === 2 ? parts[1].getBoundingClientRect().top >= parts[0].getBoundingClientRect().bottom - 1 : null,
-      });
-    }
-    holder.remove();
-    return rows;
-  }, { cases });
-  for (const r of measured) {
-    assert.equal(r.text, r.username, 'the markup does not change the text');
-    assert.deepEqual(r.lines, [1, 1], `${r.username}: the name, dash and Mr# never split over two lines (and the domain stays whole)`);
-    assert.ok(r.inside, `${r.username} fits inside the slip`);
-    assert.ok(r.passwordFits, `the password of a slip with ${r.username} fits too`);
-  }
-  const sizes = measured.map((r) => r.font);
-  assert.ok(sizes[0] > sizes[1] && sizes[1] > sizes[2] && sizes[2] > sizes[3], `a longer username is set smaller: ${sizes.join(' > ')}`);
-  assert.ok(measured[3].domainBelow || measured[3].domainBelow === false, 'the longest wraps (or not) only between the name part and the @');
-  // The longest one on the real slip dialog prints on one A6 page.
-  await pl.evaluate(async ({ username }) => {
-    const { showLoginSlip } = await import('/js/views/staff/portal-login.js');
-    showLoginSlip({ full_name: 'Muhammad Abdul Rehman Siddiqui Al Hashmi', mr_number: '9'.repeat(30) }, username, 'queen-sheep-zebra-9876');
-  }, { username: measured[3].username });
-  await pl.waitForSelector('.login-slip');
-  const pdf = await pl.pdf({ preferCSSPageSize: true, printBackground: true });
-  const pages = (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
-  assert.equal(pages, 1, 'the longest username still prints on one page');
-  const box = pdf.toString('latin1').match(/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/);
-  assert.ok(box && Math.abs(Number(box[1]) - 297.6) < 3 && Math.abs(Number(box[2]) - 419.5) < 3, 'and it is A6');
-  await pl.getByRole('button', { name: 'Close' }).first().click();
-});
-
-// Makes a portal login for a new patient the way the front desk does, and returns what is on the slip.
-const makeLoginFor = async (fullName) => {
-  await pl.evaluate(async (n) => { const { state } = await import('/js/state.js'); await state.data.createPatient({ full_name: n, phone: '0300 1112223', first_branch_id: 1 }); }, fullName);
-  await openPatient(fullName);
-  await pl.getByRole('button', { name: 'Create portal login' }).click();
-  const m = pl.locator('.modal');
-  const made = { username: await m.locator('input[readonly]').inputValue(), password: await m.getByLabel('Password').inputValue() };
-  await m.getByRole('button', { name: 'Create login' }).click();
-  await pl.waitForSelector('.login-slip');
-  await pl.getByRole('button', { name: 'Close' }).first().click();
-  return made;
-};
-// Logs a patient in with the slip and fills the "Choose your own password" screen (with the stand-in for getPatient already in place when asked).
-const firstLogin = async (made, { failPortal = false, next = 'my-own-pass-88' } = {}) => {
+// ------------------------------------------------------------- patients who register themselves (owner, 17 Oct 2026)
+// Mahnoor Iqbal: Mr# 9813, mobile 03011469042; Usman Tariq: Mr# 9816, mobile 03013672605 (the demo's made-up numbers).
+await step('register: name, Mr#, mobile and a password; the same answer whether or not the details match; until approved the login opens only a waiting screen', async () => {
   await logOut({ staff: true });
+  await pl.setViewportSize({ width: 390, height: 844 });
   await pl.goto(BASE + '#/login/patient');
-  const form = pl.locator('form');
-  await form.locator('input[name=username]').fill(made.username.split('@')[0]);
-  await form.locator('input[type=password]').fill(made.password);
-  await form.locator('input[type=password]').press('Enter');
-  await pl.waitForSelector('h1:has-text("Choose your own password")');
-  if (failPortal) {
-    await pl.evaluate(async () => {
-      const { state } = await import('/js/state.js');
-      window.__realGetPatient ||= state.data.getPatient;
-      state.data.getPatient = async () => { throw new Error('Failed to fetch'); }; // the connection drops right after the password is saved
-    });
-  }
-  const fields = pl.locator('input[autocomplete=new-password]');
-  await fields.nth(0).fill(next);
-  await fields.nth(1).fill(next);
-  await pl.getByRole('button', { name: 'Save my password' }).click();
-};
-const restorePortal = () => pl.evaluate(async () => { const { state } = await import('/js/state.js'); if (window.__realGetPatient) state.data.getPatient = window.__realGetPatient; });
-
-await step('after the forced new password, a portal that cannot load shows a card with "Try again" instead of a "Loading your account…" that never ends', async () => {
-  const made = await makeLoginFor('Retry Card');
-  await firstLogin(made, { failPortal: true });
-  await pl.getByRole('heading', { name: 'We could not open your account' }).waitFor();
-  const card = await pl.locator('.login-card').innerText();
-  assert.match(card, /Your new password is saved\./);
-  assert.match(card, /We could not reach the clinic system/, 'in the patient\'s words, no database text');
-  assert.equal(await pl.getByText('Loading your account').count(), 0, 'not a stuck loading screen');
-  assert.equal(await pl.getByRole('button', { name: 'Try again' }).count(), 1);
-  assert.equal(await pl.getByRole('button', { name: 'Log out' }).count(), 1);
-  assert.ok(await pl.evaluate(() => document.activeElement?.tagName === 'H1'), 'the heading has the focus');
-  await shot(pl, '18-portal-could-not-open');
-  await pl.getByRole('button', { name: 'Try again' }).click(); // still failing: the card comes back
-  await pl.getByRole('heading', { name: 'We could not open your account' }).waitFor();
-  await restorePortal();
-  await pl.getByRole('button', { name: 'Try again' }).click(); // the connection is back
-  await pl.waitForSelector('h1:has-text("Hello, Retry")');
-  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0);
-  expectErrors(/Failed to fetch/);
-});
-await step('the same card has a Log out button that leaves the account', async () => {
-  await logOut();
-  await pl.goto(BASE + '#/login/staff');
-  await pl.getByRole('button', { name: /Dr. Ali Rashid/ }).click();
-  await pl.waitForSelector('.topbar');
-  const made = await makeLoginFor('Logout Card');
-  await firstLogin(made, { failPortal: true });
-  await pl.getByRole('heading', { name: 'We could not open your account' }).waitFor();
+  await pl.getByRole('link', { name: /Register with your Mr# and mobile number/ }).click();
+  await pl.waitForSelector('h1:has-text("Register for your patient account")');
+  const fill = async ({ name, mr, phone, password }) => {
+    await pl.getByLabel('Your name').fill(name);
+    await pl.getByLabel('Mr# (patient number)').fill(mr);
+    await pl.getByLabel('Mobile number').fill(phone);
+    await pl.getByLabel(/^Password/).fill(password);
+    await pl.getByLabel('Type it again').fill(password);
+    await pl.getByRole('button', { name: 'Register' }).click();
+  };
+  // The form checks what it can; the match is never shown.
+  await pl.getByRole('button', { name: 'Register' }).click();
+  await pl.locator('.field-error', { hasText: 'Write your name' }).waitFor();
+  // A wrong number: the same sentence as a right one.
+  await fill({ name: 'Mahnoor Iqbal', mr: '9813', phone: '0300 0000000', password: 'my-new-pass-9' });
+  await pl.waitForSelector('h1:has-text("Request sent")');
+  const wrong = await pl.locator('.alert-info').innerText();
+  assert.match(wrong, /Your request has been sent to the clinic/);
+  await pl.getByRole('link', { name: 'Go to the patient login' }).click();
+  await pl.waitForSelector('input[name=username]');
+  await pl.goto(BASE + '#/register');
+  await pl.waitForSelector('h1:has-text("Register for your patient account")');
+  await fill({ name: 'Mahnoor Iqbal', mr: '9813', phone: '0301 1469042', password: 'my-new-pass-9' });
+  await pl.waitForSelector('h1:has-text("Request sent")');
+  assert.equal(await pl.locator('.alert-info').innerText(), wrong, 'matched or not, the visitor is told the same thing');
+  await shot(pl, '18-register-sent');
+  // The wrong number made no login: that Mr# with the chosen password is the one made by the matching try.
+  await patientLogin('9813', 'my-new-pass-9');
+  await pl.waitForSelector('h1:has-text("waiting for the clinic")');
+  assert.equal(await pl.locator('h1:has-text("Hello")').count(), 0, 'nothing of the record');
+  assert.equal(await pl.locator('.stat-row, .photo-grid, h2').count(), 0, 'no invoices, photos, documents or messages');
+  await shot(pl, '19-register-waiting');
   await pl.getByRole('button', { name: 'Log out' }).click();
   await pl.waitForFunction(() => location.hash === '#/');
   await pl.waitForSelector('.door');
-  await restorePortal();
-  // The password was saved before the connection dropped: the new one works and opens the portal directly.
-  await pl.goto(BASE + '#/login/patient');
-  const form = pl.locator('form');
-  await form.locator('input[name=username]').fill(made.username);
-  await form.locator('input[type=password]').fill('my-own-pass-88');
-  await form.locator('input[type=password]').press('Enter');
-  await pl.waitForSelector('h1:has-text("Hello, Logout")');
-  expectErrors(/Failed to fetch/);
+});
+await step('staff: a count on Patients, the New registrations list with what was typed beside the matched file, Approve opens the account', async () => {
+  await staffLogin('Front desk \\(Gulshan\\)');
+  await pl.locator('.topnav a:has-text("Patients") .registrations-count', { hasText: '1' }).waitFor();
+  await pl.locator('.topnav a:has-text("Patients")').click();
+  await pl.getByRole('link', { name: 'New registrations' }).click();
+  await pl.waitForSelector('h1:has-text("New registrations")');
+  const row = pl.locator('table.registrations-list tbody tr', { hasText: 'Mahnoor Iqbal' });
+  await row.waitFor();
+  assert.equal(await pl.locator('table.registrations-list tbody tr').count(), 1, 'only the matching try is on the list');
+  const text = await row.innerText();
+  assert.match(text, /Mobile 03011469042/, 'what was typed');
+  assert.match(text, /Mr# 9813/, 'the file it matched');
+  await shot(pl, '20-new-registrations');
+  await row.getByRole('button', { name: 'Approve' }).click();
+  await pl.waitForSelector('.toast:has-text("Mahnoor Iqbal can log in now.")');
+  await pl.locator('.empty, p', { hasText: 'Nobody is waiting' }).first().waitFor();
+  assert.equal(await pl.locator('.topnav a:has-text("Patients") .registrations-count:visible').count(), 0, 'the count is gone');
+  await logOut({ staff: true });
+  await pl.setViewportSize({ width: 390, height: 844 });
+  await patientLogin('9813', 'my-new-pass-9');
+  await pl.waitForSelector('h1:has-text("Hello, Mahnoor")');
+  assert.equal(await pl.locator('h1:has-text("Choose your own password")').count(), 0, 'the password is the one they chose: no forced change');
+  await logOut();
+});
+await step('Reject removes the login again (with a reason for the audit log)', async () => {
+  await pl.goto(BASE + '#/register');
+  await pl.waitForSelector('h1:has-text("Register for your patient account")');
+  await pl.getByLabel('Your name').fill('Usman Tariq');
+  await pl.getByLabel('Mr# (patient number)').fill('9816');
+  await pl.getByLabel('Mobile number').fill('03013672605');
+  await pl.getByLabel(/^Password/).fill('usman-pass-77');
+  await pl.getByLabel('Type it again').fill('usman-pass-77');
+  await pl.getByRole('button', { name: 'Register' }).click();
+  await pl.waitForSelector('h1:has-text("Request sent")');
+  await staffLogin('Assistant');
+  await pl.goto(BASE + '#/staff/registrations');
+  const row = pl.locator('table.registrations-list tbody tr', { hasText: 'Usman Tariq' });
+  await row.getByRole('button', { name: 'Reject' }).click();
+  const m = pl.locator('.modal');
+  await m.getByLabel('Reason (optional, for the audit log)').fill('Came to the desk: not his number');
+  await m.getByRole('button', { name: 'Reject' }).click();
+  await pl.waitForSelector('.toast:has-text("Registration rejected.")');
+  await pl.locator('.empty, p', { hasText: 'Nobody is waiting' }).first().waitFor();
+  await openPatient('Usman Tariq');
+  await pl.locator('.portal-login-line', { hasText: 'Login: none yet' }).waitFor();
+  await logOut({ staff: true });
+  await pl.setViewportSize({ width: 390, height: 844 });
+  await patientLogin('9816', 'usman-pass-77');
+  await pl.locator('.field-error', { hasText: 'do not match' }).waitFor();
+  await pl.setViewportSize({ width: 1366, height: 860 });
 });
 
 await step('Dr. Ali imports a Healthwire transactions export on the Import page', async () => {
@@ -9022,9 +9003,77 @@ await step('Bill: Save pressed twice quickly makes one invoice and one payment; 
   await bill2.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
   await pbill.waitForSelector('.modal', { state: 'detached' });
 });
+// Owner, 17 Oct 2026: "some times patient pays half in cash and half by card or smthng, there should be a add payment too so multiple
+// payment forms could be entered".
+await step('Bill: half in cash, half by card: Rs 35,000 paid as Cash 20,000 + Card 15,000 with "+ Add payment"; Paid in full; the bill and the receipt show both payments with their methods, and the patient\'s payments list has two rows', async () => {
+  await pbill.goto(BASE + '#/staff/sheet');
+  const before = await billingOf(pbill, '9811');
+  const row = pbill.locator('table.sheet tbody tr', { hasText: 'Areeba Siddiqui' });
+  await row.getByRole('button', { name: 'Bill Areeba Siddiqui' }).click();
+  const m = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New invoice · Areeba Siddiqui' }) });
+  await m.getByLabel('Treatment, line 1').fill('Sample treatment');
+  await m.getByLabel('Rate (Rs), line 1').fill('35000');
+  const first = m.getByLabel('Payment (Rs)', { exact: true });
+  assert.equal(await first.inputValue(), '35000', 'one payment, as before, starting at the total');
+  assert.equal(await m.getByRole('button', { name: 'Remove payment 1' }).count(), 0, 'the first payment stays');
+  await first.fill('20000');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Due Rs 15,000');
+  await m.getByRole('button', { name: '+ Add payment' }).click();
+  const second = m.getByLabel('Payment (Rs), payment 2', { exact: true });
+  assert.ok(await second.evaluate((el) => el === document.activeElement), 'the new payment\'s amount has the focus');
+  assert.equal(await second.inputValue(), '15000', 'the new payment starts with what is still due');
+  assert.equal(await m.getByLabel('Payment method, payment 2', { exact: true }).inputValue(), 'card', 'and with a method not used yet');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Paid in full', 'what stays due counts both payments');
+  // A third one left empty, then removed: not a payment.
+  await m.getByRole('button', { name: '+ Add payment' }).click();
+  assert.equal(await m.getByLabel('Payment (Rs), payment 3', { exact: true }).inputValue(), '', 'nothing left to pay: the third starts empty');
+  await m.getByRole('button', { name: 'Remove payment 3' }).click();
+  assert.equal(await m.getByLabel('Payment (Rs), payment 3').count(), 0);
+  await m.getByRole('button', { name: 'Save & Print' }).click();
+  const bill = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  const invoiceNo = (await bill.locator('h2').innerText()).replace('Invoice ', '');
+  assert.match(await bill.locator('.alert-info').innerText(), /Payments saved: Cash Rs 20,000 and Card Rs 15,000\./);
+  const paper = await bill.locator('.bill-sheet').innerText();
+  for (const re of [/Payment Mode: Cash Rs\. 20,000, Card Rs\. 15,000/, /Grand Total\s+Rs\. 35,000/, /Paid Amount\s+Rs\. 35,000/, /Due Amount\s+Rs\. 0/]) assert.match(paper, re);
+  await bill.getByRole('button', { name: 'Print receipt' }).click();
+  const receipt = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'Payment receipt' }) });
+  const text = await receipt.innerText();
+  for (const re of [/Received by Cash\s+Rs 20,000/, /Received by Card\s+Rs 15,000/, /Total received\s+Rs 35,000/]) assert.match(text, re);
+  await receipt.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await pbill.waitForSelector('.modal', { state: 'detached' });
+  const after = await billingOf(pbill, '9811');
+  const saved = after.invoices.find((i) => i.invoice_no === invoiceNo);
+  assert.deepEqual(after.payments.filter((p) => p.invoice_id === saved.id).map((p) => [p.method, p.amount]), [['cash', 20000], ['card', 15000]], 'two payments on the invoice');
+  assert.equal(after.payments.length, before.payments.length + 2);
+  // The patient's page: the invoice paid, and two rows in the payments list, each with its method.
+  await pbill.goto(BASE + '#/staff/patients?q=9811');
+  await pbill.locator('table.list tbody tr', { hasText: 'Areeba Siddiqui' }).locator('a').first().click();
+  await pbill.waitForSelector('h1:has-text("Areeba Siddiqui")');
+  const money = pbill.locator('section.panel', { has: pbill.locator('h2', { hasText: 'Money' }) });
+  assert.match(await money.locator('table.list').first().locator('tbody tr', { hasText: invoiceNo }).innerText(), /Paid[\s\S]*Rs 35,000/);
+  await money.locator('details summary').click();
+  const lines = money.locator('details table.list tbody tr', { hasText: invoiceNo });
+  assert.equal(await lines.count(), 2, 'two rows in the payments list');
+  const said = (await lines.allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+  assert.ok(said.some((t) => /cash .*Rs 20,000/.test(t)) && said.some((t) => /card .*Rs 15,000/.test(t)), JSON.stringify(said));
+  // Take payment has "+ Add payment" too.
+  await pbill.getByRole('button', { name: 'Take payment', exact: true }).click();
+  const take = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'Take payment · Areeba Siddiqui' }) });
+  await take.getByLabel('Amount (Rs)').fill('1000'); // (the first payment's label: "Amount (Rs) (required)")
+  await take.getByRole('button', { name: '+ Add payment' }).click();
+  await take.getByLabel('Amount (Rs), payment 2', { exact: true }).fill('500');
+  assert.equal(await take.getByLabel('Method, payment 2', { exact: true }).inputValue(), 'card');
+  await take.getByRole('button', { name: 'Save payment' }).click();
+  await pbill.waitForSelector('.toast:has-text("Payments saved: Cash Rs 1,000 and Card Rs 500.")');
+  const taken = await billingOf(pbill, '9811');
+  assert.deepEqual(taken.payments.slice(-2).map((p) => [p.method, p.amount]), [['cash', 1000], ['card', 500]], 'two payments from Take payment');
+  await pbill.goto(BASE + '#/staff/sheet');
+  await row.waitFor();
+});
 await step('Create ▾ (front desk): Invoice finds the patient by name, then the invoice form for them at the front desk\'s branch, for their visit on today\'s list; Patient opens the new-patient registration', async () => {
   await pbill.locator('.create-btn').click();
-  assert.deepEqual(await pbill.locator('#create-menu-list button').allInnerTexts(), ['Patient', 'Invoice', 'Health record'], 'front desk: patients.create, billing.create and patients.edit');
+  assert.deepEqual(await pbill.locator('#create-menu-list button').allInnerTexts(), ['Patient', 'Invoice', 'Health record', 'Patient login'], 'front desk: patients.create, billing.create, patients.edit and portal.invite');
   await pbill.locator('#create-menu-list button', { hasText: 'Invoice' }).click();
   const pick = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^New invoice$/ }) });
   await pick.getByLabel('Search patients by name, Mr# or phone').fill('Hamza');
@@ -9046,7 +9095,7 @@ await step('Create ▾ (front desk): Invoice finds the patient by name, then the
   await m.getByRole('button', { name: 'Cancel' }).click();
   await pbill.waitForSelector('.modal', { state: 'detached' });
   await pbill.locator('.create-btn').click();
-  await pbill.locator('#create-menu-list button', { hasText: 'Patient' }).click();
+  await pbill.locator('#create-menu-list button', { hasText: /^Patient$/ }).click(); // not "Patient login"
   const reg = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New patient' }) });
   await reg.waitFor();
   await reg.getByRole('button', { name: 'Cancel' }).click();
@@ -9055,11 +9104,11 @@ await step('Create ▾ (front desk): Invoice finds the patient by name, then the
   assert.equal(await pbill.locator('.topnav .create-menu').count(), 0);
 });
 await pbill.close();
-await step('Create ▾ per role: the assistant gets Health record only (and writes today\'s treatment details with it; the medical history is read-only for them), the accountant Invoice only, Dr. Ali all three', async () => {
+await step('Create ▾ per role: the assistant gets Health record and Patient login (and writes today\'s treatment details with it; the medical history is read-only for them), the accountant Invoice only, Dr. Ali all of them (Patient login since 17 Oct 2026 for the four login makers)', async () => {
   const pr = await newPage();
   const items = async () => { await pr.locator('.create-btn').click(); const t = await pr.locator('#create-menu-list button').allInnerTexts(); await pr.keyboard.press('Escape'); return t; };
   await loginAs(pr, 'Assistant');
-  assert.deepEqual(await items(), ['Health record']);
+  assert.deepEqual(await items(), ['Health record', 'Patient login']); // Patient login: assistants create patient logins since 17 Oct 2026
   await pr.locator('.create-btn').click();
   await pr.locator('#create-menu-list button', { hasText: 'Health record' }).click();
   const pick = pr.locator('.modal', { has: pr.locator('h2', { hasText: /^Health record$/ }) });
@@ -9082,7 +9131,7 @@ await step('Create ▾ per role: the assistant gets Health record only (and writ
   assert.deepEqual(await items(), ['Invoice']);
   await tryAnotherRole(pr);
   await loginAs(pr, 'Dr. Ali Rashid');
-  assert.deepEqual(await items(), ['Patient', 'Invoice', 'Health record']);
+  assert.deepEqual(await items(), ['Patient', 'Invoice', 'Health record', 'Patient login']);
   await pr.close();
 });
 await step('Bill and Create on a phone: the Bill button is in sight beside the name without scrolling sideways, "Create" is a "+" in the top bar, and the page does not scroll sideways', async () => {

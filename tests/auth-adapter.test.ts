@@ -966,14 +966,18 @@ test('a clinic username has no inbox: it is not a staff address, and password re
 test('the staff calls for patient logins go to the admin-users function and resolve only what the screen needs (never the password)', async () => {
   fresh();
   const { f, data } = await openTab();
-  f.invokeAnswer = { data: { ok: true, username: 'alirashid-1705@dralirashid.com' }, error: null };
-  assert.deepEqual(await data.createPatientLogin('pat-1', 'sunny-grape-4827'), { username: 'alirashid-1705@dralirashid.com' });
-  assert.deepEqual(await data.resetPatientPassword('pat-1', 'peach-zebra-5936'), { username: 'alirashid-1705@dralirashid.com' });
-  f.invokeAnswer = { data: { ok: true, has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' }, error: null };
-  assert.deepEqual(await data.portalLoginInfo('pat-1'), { has_login: true, clinic_login: true, username: 'alirashid-1705@dralirashid.com' });
+  // The password is the phone on file unless staff typed one: without one, no password travels at all (the function reads the phone itself).
+  f.invokeAnswer = { data: { ok: true, username: 'mr-1705@dralirashid.com', password_kind: 'phone' }, error: null };
+  assert.deepEqual(await data.createPatientLogin('pat-1'), { username: 'mr-1705@dralirashid.com', password_kind: 'phone' });
+  assert.deepEqual(await data.resetPatientPassword('pat-1', null), { username: 'mr-1705@dralirashid.com', password_kind: 'phone' });
+  f.invokeAnswer = { data: { ok: true, username: 'mr-1705@dralirashid.com', password_kind: 'typed' }, error: null };
+  assert.deepEqual(await data.createPatientLogin('pat-1', 'sunny-grape-4827'), { username: 'mr-1705@dralirashid.com', password_kind: 'typed' });
+  f.invokeAnswer = { data: { ok: true, has_login: true, clinic_login: true, username: 'mr-1705@dralirashid.com' }, error: null };
+  assert.deepEqual(await data.portalLoginInfo('pat-1'), { has_login: true, clinic_login: true, username: 'mr-1705@dralirashid.com', pending: false });
   assert.deepEqual(f.invokes, [
+    ['admin-users', { action: 'create_patient_login', patient_id: 'pat-1' }],
+    ['admin-users', { action: 'reset_patient_password', patient_id: 'pat-1' }],
     ['admin-users', { action: 'create_patient_login', patient_id: 'pat-1', password: 'sunny-grape-4827' }],
-    ['admin-users', { action: 'reset_patient_password', patient_id: 'pat-1', password: 'peach-zebra-5936' }],
     ['admin-users', { action: 'portal_login_info', patient_id: 'pat-1' }],
   ]);
 });

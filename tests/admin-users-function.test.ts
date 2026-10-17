@@ -193,13 +193,14 @@ test('invite_patient: a real email is invited and linked; no permission is 403',
 });
 
 // ---------------------------------------------------------------- the patient login actions through the handler
-test('create_patient_login and reset_patient_password through the handler: the login is marked in app_metadata, and a reset of a staff login is refused', async () => {
-  reset({ perms: ['portal.invite'], patients: [{ id: 'pat-1', full_name: 'Ali Rashid', mr_number: '1705', email: null, portal_user_id: null }] });
-  const made = await call({ action: 'create_patient_login', patient_id: 'pat-1', password: 'sunny-grape-zebra-4827' });
-  assert.deepEqual(made.body, { ok: true, username: 'alirashid-1705@dralirashid.com' });
+test('create_patient_login and reset_patient_password through the handler: the login name is the Mr#, the password the phone on file (or the typed one), the login is marked in app_metadata, and a reset of a staff login is refused', async () => {
+  reset({ perms: ['portal.invite'], patients: [{ id: 'pat-1', full_name: 'Ali Rashid', mr_number: '1705', email: null, phone: '0300 555 1234', portal_user_id: null }] });
+  const made = await call({ action: 'create_patient_login', patient_id: 'pat-1' });
+  assert.deepEqual(made.body, { ok: true, username: 'mr-1705@dralirashid.com', password_kind: 'phone' });
+  assert.equal(world.calls.find(([k]) => k === 'createUser')![1].password, '03005551234');
   assert.deepEqual(world.users.get('user-1')!.app_metadata, { kind: 'patient', clinic_login: true });
   const again = await call({ action: 'reset_patient_password', patient_id: 'pat-1', password: 'peach-zebra-berry-5936' });
-  assert.equal(again.body.ok, true);
+  assert.deepEqual(again.body, { ok: true, username: 'mr-1705@dralirashid.com', password_kind: 'typed' });
 
   reset({
     perms: ['portal.invite'],

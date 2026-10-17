@@ -15,7 +15,7 @@ import { cleanDeskName, withDeskName } from '../lib/desk-name.js';
 import { todayISO, localISO } from '../ui/dom.js';
 import { CONFIG } from '../config.js';
 import { passwordProblems, passwordError } from '../password-rules.js';
-import { checkPortalPassword, checkSlipPassword, portalLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
+import { checkPortalPassword, checkPhonePassword, phonePassword, mrLoginEmail, normalizeLoginInput, isPatientLoginName, NO_USERNAME_MESSAGE } from '../lib/portal-login.js';
 import { summarizePayments, summarizeVisits, thumbPathFor, checkupPatch } from './supabase.js';
 import { FOLLOW_UP_STATUSES, DAY_STATUSES, PRICING_LABELS, checkupKey, checkupPhone, cleanText, monthLabel, nameFits, nameNorm, dayListCheckups } from '../lib/checkups.js';
 import { seedRecords, recordsDemo } from './demo-records.js';
@@ -379,9 +379,12 @@ function seed() {
       day_status: 'waiting', source: 'website', created_at: at(3),
       ali_recommended: false, pricing_understood: 'yes', wants_treatment: false, treatment_plan: 'Wants to compare prices first' }));
   db.audit = [];
-  // The demo's stand-in for the login server: logins the clinic made for patients ({ patient_id, email, password, must_change }).
+  // The demo's stand-in for the login server: logins the clinic made for patients ({ patient_id, email, password, must_change, pending }).
   // Kept apart from every patient row, and never returned by any method, like the real login server's passwords.
   db.portal_logins = [];
+  // Patients who registered themselves (public.patient_registrations) and "Please upload my photos" (public.photo_requests).
+  db.registrations = [];
+  db.photo_requests = [];
   return db;
 }
 
@@ -550,7 +553,15 @@ export function createDemoAdapter() {
   }
 
   // The Photo inbox and the Photo library (data/demo-inbox.js): its methods are spread into the adapter below; signedUrls and deletePhoto use two helpers.
-  const inboxApi = inboxDemo({ db: () => db, me, can, fail, uid, clone, audit, patient });
+  // A photo saved for a patient closes their open "Please upload my photos" request, as the database's trigger does (photos_close_request).
+  const closePhotoRequests = (patientId) => {
+    for (const q of db.photo_requests) if (q.patient_id === patientId && q.status === 'open') { q.status = 'done'; q.done_by = me()?.id || null; q.done_at = new Date().toISOString(); audit('photo_requests', 'UPDATE', q); }
+  };
+  const inboxApi = inboxDemo({ db: () => db, me, can, fail, uid, clone, patient,
+    audit: (table, action, row, opts) => { audit(table, action, row, opts); if (table === 'photos' && action === 'INSERT' && row?.patient_id) closePhotoRequests(row.patient_id); } });
+  // What a self-registering visitor is told, whether or not anything matched (the live function says the same).
+  const REGISTERED_MESSAGE = 'Thank you. Your request has been sent to the clinic. Once the clinic approves it, log in here with your Mr# and the password you chose.';
+  const todayKey = () => todayISO();
 
   return {
     mode: 'demo',
@@ -625,7 +636,11 @@ export function createDemoAdapter() {
     onAuthChange() { return () => {}; },
     async getSession() {
       if (!session) return null;
-      if (session.patient) return { kind: 'patient', patient: clone(session.patient), perms: new Set(), mustChangePassword: !!session.login?.must_change };
+      if (session.patient) {
+        // Registered themselves, not approved yet: a login with no record behind it (the live current_patient_id() answers nothing).
+        if (session.login?.pending) return { kind: 'patient', patient: null, pending: true, perms: new Set() };
+        return { kind: 'patient', patient: clone(session.patient), perms: new Set(), mustChangePassword: !!session.login?.must_change };
+      }
       const s = db.staff.find((x) => x.id === session.staff.id);
       if (!s?.active) { session = null; return null; }
       return { kind: 'staff', staff: clone(s), perms: permsFor(s) };
@@ -746,48 +761,142 @@ export function createDemoAdapter() {
       if (String(p.email).trim().toLowerCase().endsWith('@' + CONFIG.STAFF_EMAIL_DOMAIN)) fail('Use Create portal login for clinic usernames.');
       p.portal_user_id = 'p-' + id;
     },
-    /** Staff make the patient's portal login at the clinic. Resolves { username }. */
-    async createPatientLogin(id, password) {
+    /**
+     * Staff make the patient's portal login at the clinic (owner, 17 Oct 2026): the login name is the Mr#, the password the mobile number on
+     * file (or the one typed), no forced change. Resolves { username, password_kind }. The same rules and words as the live function.
+     */
+    async createPatientLogin(id, password = null) {
       need('portal.invite');
+      const typed = password == null ? '' : String(password);
+      if (typed) { const problem = checkPortalPassword(typed); if (problem) fail(problem); }
       const p = patient(id);
       if (!p) fail('Patient not found.');
       if (p.portal_user_id) fail('This patient already has a portal login.');
-      const problem = checkSlipPassword(password);
-      if (problem) fail(problem);
-      const email = portalLoginEmail(p.full_name, p.mr_number, CONFIG.STAFF_EMAIL_DOMAIN);
+      if (!typed) { const problem = checkPhonePassword(p.phone); if (problem) fail(problem); }
+      const email = mrLoginEmail(p.mr_number, CONFIG.STAFF_EMAIL_DOMAIN);
       if (!email || !isPatientLoginName(email, CONFIG.STAFF_EMAIL_DOMAIN)) fail(NO_USERNAME_MESSAGE);
       if (db.portal_logins.some((l) => l.email === email) || db.staff.some((x) => x.email === email)) fail('That username is already used by another login.');
-      db.portal_logins.push({ patient_id: id, email, password: String(password), must_change: true });
+      db.portal_logins.push({ patient_id: id, email, password: typed || phonePassword(p.phone), must_change: false });
       p.portal_user_id = 'p-' + id;
       audit('patients', 'PORTAL_LOGIN_CREATED', p, { viaFunction: true });
-      return { username: email };
+      return { username: email, password_kind: typed ? 'typed' : 'phone' };
     },
-    /** Staff set a new password for a login made that way; the patient must choose their own again. Resolves { username }. */
-    async resetPatientPassword(id, password) {
+    /** Staff set the password of a login made that way back to the phone number on file (or to the one typed). Resolves { username, password_kind }. */
+    async resetPatientPassword(id, password = null) {
       need('portal.invite');
+      const typed = password == null ? '' : String(password);
+      if (typed) { const problem = checkPortalPassword(typed); if (problem) fail(problem); }
       const p = patient(id);
       if (!p) fail('Patient not found.');
       if (!p.portal_user_id) fail('This patient has no portal login yet. Create one first.');
-      const problem = checkSlipPassword(password);
-      if (problem) fail(problem);
+      if (!typed) { const problem = checkPhonePassword(p.phone); if (problem) fail(problem); }
       const login = db.portal_logins.find((l) => l.patient_id === id);
       if (!login) fail('This patient logs in with their own email address. They can set a new password with "Forgot password" on the login page.');
-      login.password = String(password);
-      login.must_change = true;
+      login.password = typed || phonePassword(p.phone);
+      login.must_change = false;
       audit('patients', 'PORTAL_PASSWORD_RESET', p, { viaFunction: true });
-      return { username: login.email };
+      return { username: login.email, password_kind: typed ? 'typed' : 'phone' };
     },
-    /** { has_login, clinic_login, username } */
+    /** { has_login, clinic_login, username, pending } */
     async portalLoginInfo(id) {
       need('portal.invite');
       const p = patient(id);
       if (!p) fail('Patient not found.');
       const login = db.portal_logins.find((l) => l.patient_id === id);
-      return { has_login: !!p.portal_user_id, clinic_login: !!login, username: login?.email || null };
+      return { has_login: !!p.portal_user_id, clinic_login: !!login, username: login?.email || null, pending: !!login?.pending };
+    },
+
+    // ------------------------------------------------------------ patients who register themselves (the live admin-users function + 20261017000300)
+    /**
+     * A visitor registers with name, Mr#, mobile and a password. The login is made, pending, only when the Mr# and the digits of the
+     * mobile number match the patient's file and the first name fits; the answer is the same sentence either way. At most 3 tries per
+     * mobile number a day (the live function also caps per address and per day). Bad input is the one thing said plainly.
+     */
+    async selfRegister({ full_name, mr, phone, password }) {
+      const name = String(full_name || '').trim();
+      const typedMr = String(mr || '').trim();
+      const digits = phonePassword(phone);
+      if (name.length < 2) fail('Write your name as the clinic has it.');
+      if (!typedMr) fail('Type your Mr# (patient number).');
+      if (digits.length < 8) fail('Type your mobile number, for example 0300 5551234.');
+      const problem = checkPortalPassword(password);
+      if (problem) fail(problem);
+      db.registration_tries ||= [];
+      const tries = db.registration_tries.filter((t) => t.phone === digits && t.day === todayKey()).length;
+      db.registration_tries.push({ phone: digits, day: todayKey() });
+      audit('patients', 'SELF_REGISTER', null, { viaFunction: true });
+      if (tries >= 3) return REGISTERED_MESSAGE;
+      const p = db.patients.find((x) => x.mr_number === typedMr);
+      const first = (t) => String(t || '').toLowerCase().replace(/[^a-z ]/g, '').trim().split(/\s+/)[0] || '';
+      if (!p || phonePassword(p.phone) !== digits || !first(p.full_name) || first(p.full_name) !== first(name)) return REGISTERED_MESSAGE;
+      if (p.portal_user_id) return REGISTERED_MESSAGE;
+      const email = mrLoginEmail(p.mr_number, CONFIG.STAFF_EMAIL_DOMAIN);
+      db.portal_logins.push({ patient_id: p.id, email, password: String(password), must_change: false, pending: true });
+      p.portal_user_id = 'p-' + p.id;
+      db.registrations.push({ id: uid(), patient_id: p.id, typed_name: name, typed_phone: digits, status: 'pending', created_at: new Date().toISOString(), decided_by: null, decided_at: null, reason: null });
+      return REGISTERED_MESSAGE;
+    },
+    async pendingRegistrations() {
+      need('portal.invite');
+      return db.registrations.filter((r) => r.status === 'pending').map((r) => { const p = patient(r.patient_id); return { ...clone(r), full_name: p?.full_name, mr_number: p?.mr_number, phone: p?.phone, first_branch_id: p?.first_branch_id }; });
+    },
+    async approveRegistration(patientId) {
+      need('portal.invite');
+      const r = db.registrations.find((x) => x.patient_id === patientId && x.status === 'pending');
+      if (!r) fail('This registration was already decided. Reload the list.');
+      Object.assign(r, { status: 'approved', decided_by: me()?.id || null, decided_at: new Date().toISOString() });
+      const login = db.portal_logins.find((l) => l.patient_id === patientId);
+      if (login) login.pending = false;
+      audit('patients', 'REGISTRATION_APPROVED', patient(patientId));
+    },
+    async rejectRegistration(patientId, reason = '') {
+      need('portal.invite');
+      const r = db.registrations.find((x) => x.patient_id === patientId && x.status === 'pending');
+      if (!r) fail('This registration was already decided. Reload the list.');
+      Object.assign(r, { status: 'rejected', decided_by: me()?.id || null, decided_at: new Date().toISOString(), reason: String(reason || '').trim() || null });
+      const p = patient(patientId);
+      if (p) p.portal_user_id = null;
+      db.portal_logins = db.portal_logins.filter((l) => l.patient_id !== patientId); // the function removes the login
+      audit('patients', 'REGISTRATION_REJECTED', p, { viaFunction: true });
+    },
+
+    // ------------------------------------------------------------ "Please upload my photos" (photo_requests)
+    async myPhotoRequest() {
+      const s = await this.getSession();
+      if (s?.kind !== 'patient' || !s.patient) return null;
+      return clone(db.photo_requests.find((q) => q.patient_id === s.patient.id && q.status === 'open') || null);
+    },
+    async requestPhotos() {
+      const s = await this.getSession();
+      if (s?.kind !== 'patient' || !s.patient) fail('Please log in again.');
+      if (db.photo_requests.some((q) => q.patient_id === s.patient.id && q.status === 'open')) fail('duplicate key value violates unique constraint "photo_requests_one_open"');
+      const q = { id: uid(), patient_id: s.patient.id, requested_at: new Date().toISOString(), note: null, status: 'open', done_by: null, done_at: null };
+      db.photo_requests.push(q); audit('photo_requests', 'INSERT', q);
+      return clone(q);
+    },
+    async cancelPhotoRequest(id) {
+      const s = await this.getSession();
+      const q = db.photo_requests.find((x) => x.id === id && x.status === 'open' && x.patient_id === s?.patient?.id);
+      if (q) { q.status = 'cancelled'; audit('photo_requests', 'UPDATE', q); }
+    },
+    async photoRequestsOpen() {
+      if (!can('photos.intake') && !can('photos.upload')) return [];
+      return db.photo_requests.filter((q) => q.status === 'open').sort((a, b) => a.requested_at.localeCompare(b.requested_at)).map((q) => {
+        const p = patient(q.patient_id);
+        const last = db.visits.filter((v) => v.patient_id === q.patient_id && v.status === 'completed').map((v) => v.visit_date).sort().at(-1) || null;
+        return { ...clone(q), full_name: p?.full_name, mr_number: p?.mr_number, first_branch_id: p?.first_branch_id, last_visit: last };
+      });
+    },
+    async photoRequestDone(id) {
+      if (!can('photos.intake') && !can('photos.upload')) fail('not allowed');
+      const q = db.photo_requests.find((x) => x.id === id && x.status === 'open');
+      if (!q) fail('This request was already closed. Reload the list.');
+      Object.assign(q, { status: 'done', done_by: me()?.id || null, done_at: new Date().toISOString() });
+      audit('photo_requests', 'UPDATE', q);
     },
     async getPatient(id) {
       const s = await this.getSession();
-      if (s?.kind === 'patient' && s.patient.id !== id) fail('not allowed');
+      if (s?.kind === 'patient' && (!s.patient || s.patient.id !== id)) fail('not allowed');
       if (s?.kind === 'staff') need('patients.view');
       const p = patient(id);
       if (!p) fail('Patient not found');
@@ -1279,6 +1388,7 @@ export function createDemoAdapter() {
         view_label: viewLabel || null, url: dataUrl, storage_path: storagePath, thumb_path: thumbUrl ? thumbPathFor(storagePath) : null, thumb_url: thumbUrl,
         public_ok: kind === 'edited' && !!publicOk, uploaded_by: me()?.id || null, created_at: new Date().toISOString() };
       db.photos.push(ph);
+      closePhotoRequests(patientId);
       if (key) saved.set('photo:' + key, ph.id);
       if (visitId) { const v = db.visits.find((x) => x.id === visitId); if (v) v.photos_uploaded = true; }
       return clone(ph);
@@ -1398,12 +1508,17 @@ export function createDemoAdapter() {
       if (pending) db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: inv.discount_amount, reason: discount_reason, status: 'pending', created_at: new Date().toISOString() });
       return clone(inv);
     },
-    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null }) {
+    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
       if (Number(amount) < 0) need('billing.refund');
       if (!branchOk(branch_id)) fail('new row violates row-level security policy (branch)');
+      // As the live data layer: the key is the payment's id, so the same payment sent again is the one saved the first time.
+      const key = opts.idempotencyKey || idempotencyKey;
+      const prior = key && db.payments.find((x) => x.id === saved.get('payment:' + key));
+      if (prior) return clone(prior);
       const pay = { id: uid(), patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_at: new Date().toISOString(), received_by: me().full_name };
       db.payments.push(pay); audit('payments', 'INSERT', pay);
+      if (key) saved.set('payment:' + key, pay.id);
       return clone(pay);
     },
     async patientBilling(patientId) {

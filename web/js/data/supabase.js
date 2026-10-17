@@ -1045,7 +1045,15 @@ export async function createSupabaseAdapter() {
       return { kind: 'staff', staff, perms };
     }
     const patient = check(await as(sb.from('patients').select('*').eq('portal_user_id', uid)).maybeSingle());
-    return patient ? { kind: 'patient', patient, perms: new Set() } : null;
+    if (patient) return { kind: 'patient', patient, perms: new Set() };
+    // No record answers to this login. A patient who registered themselves and waits for the clinic's approval is one such login
+    // (current_patient_id() gives them nothing until staff approve): the portal shows them the waiting screen and nothing else.
+    // my_portal_status() names only that standing. A database without it yet (20261017000300 not applied) answers an error: then no.
+    try {
+      const { data: status } = await as(sb.rpc('my_portal_status'));
+      if (status === 'pending') return { kind: 'patient', patient: null, pending: true, perms: new Set() };
+    } catch { /* not linked */ }
+    return null;
   }
 
   return {
@@ -1315,21 +1323,63 @@ export async function createSupabaseAdapter() {
       if (error) throw new Error(error.message);
       if (data?.error) throw new Error(data.error);
     },
-    /** Staff make the patient's portal login at the clinic. Resolves { username } (the full address); the password is not kept anywhere here. */
-    async createPatientLogin(id, password) {
-      const { username } = await adminUsers({ action: 'create_patient_login', patient_id: id, password });
-      return { username };
+    /**
+     * Staff make the patient's portal login at the clinic (owner, 17 Oct 2026): the login name is the Mr# (mr-50013@<domain>), the
+     * password the patient's mobile number on file, or `password` when staff typed one. Resolves { username, password_kind: 'phone' | 'typed' }.
+     * No password is kept anywhere here; the function reads the phone from the patient's record itself.
+     */
+    async createPatientLogin(id, password = null) {
+      const { username, password_kind } = await adminUsers({ action: 'create_patient_login', patient_id: id, ...(password ? { password } : {}) });
+      return { username, password_kind: password_kind || (password ? 'typed' : 'phone') };
     },
-    /** Staff set a new password for a login made that way; the patient is asked to choose their own again. Resolves { username }. */
-    async resetPatientPassword(id, password) {
-      const { username } = await adminUsers({ action: 'reset_patient_password', patient_id: id, password });
-      return { username };
+    /** Staff set the password of a login made that way back to the phone number on file (or to `password`). Resolves { username, password_kind }. */
+    async resetPatientPassword(id, password = null) {
+      const { username, password_kind } = await adminUsers({ action: 'reset_patient_password', patient_id: id, ...(password ? { password } : {}) });
+      return { username, password_kind: password_kind || (password ? 'typed' : 'phone') };
     },
-    /** { has_login, clinic_login, username }: whether the patient has a portal login, and (for a clinic one) its username. */
+    /** { has_login, clinic_login, username, pending }: whether the patient has a portal login, (for a clinic one) its username, and whether it waits for approval. */
     async portalLoginInfo(id) {
-      const { has_login, clinic_login, username } = await adminUsers({ action: 'portal_login_info', patient_id: id });
-      return { has_login: !!has_login, clinic_login: !!clinic_login, username: username || null };
+      const { has_login, clinic_login, username, pending } = await adminUsers({ action: 'portal_login_info', patient_id: id });
+      return { has_login: !!has_login, clinic_login: !!clinic_login, username: username || null, pending: !!pending };
     },
+
+    // ------------------------------------------------------------ patients who register themselves (20261017000300_patient_login_simple.sql)
+    /**
+     * A visitor registers with their name, Mr#, mobile number and a password of their choice. The admin-users function (no login needed)
+     * makes the login only when the Mr# and the mobile number match the patient's file and the name fits, marks it pending, and answers
+     * the same sentence either way (so nobody can learn which Mr# or numbers exist). Resolves that sentence; throws only for bad input
+     * or a connection problem.
+     */
+    async selfRegister({ full_name, mr, phone, password }) {
+      const { message } = await adminUsers({ action: 'self_register', full_name, mr, phone, password });
+      return message;
+    },
+    /** The "New registrations" list (portal.invite): what was typed beside the patient it matched, oldest first. */
+    async pendingRegistrations() { return check(await callRpc('pending_registrations', {})) || []; },
+    async approveRegistration(patientId) { check(await sb.rpc('approve_registration', { p_patient: patientId })); },
+    /** Rejecting unlinks the patient and removes the login the registration made (the function does the removal). */
+    async rejectRegistration(patientId, reason = '') { await adminUsers({ action: 'reject_registration', patient_id: patientId, reason }); },
+
+    // ------------------------------------------------------------ "Please upload my photos" (photo_requests, 20261017000300)
+    /** The logged-in patient's open request, or null. */
+    async myPhotoRequest() {
+      const me = state.session?.patient;
+      if (!me) return null;
+      return check(await sb.from('photo_requests').select('*').eq('patient_id', me.id).eq('status', 'open').maybeSingle());
+    },
+    async requestPhotos() {
+      const me = state.session?.patient;
+      if (!me) throw new Error('Please log in again.');
+      return check(await sb.from('photo_requests').insert({ patient_id: me.id }).select().single());
+    },
+    async cancelPhotoRequest(id) { check(await sb.from('photo_requests').update({ status: 'cancelled' }).eq('id', id).eq('status', 'open')); },
+    /** The staff list (photos.intake or photos.upload): who asked, when, their branch and last visit; [] when the database update is missing. */
+    async photoRequestsOpen() {
+      const { data, error } = await callRpc('photo_requests_open', {});
+      if (error && /PGRST202|42883|PGRST205|42P01/.test(String(error.code || ''))) return [];
+      return check({ data, error }) || [];
+    },
+    async photoRequestDone(id) { check(await sb.rpc('photo_request_done', { p_id: id })); },
     /**
      * Everything on a patient's record, fetched in parallel. Photos carry url (original), thumb_url (the stored thumbnail
      * thumb_path when the photo has one, else 240px when IMAGE_TRANSFORMS is on, else the original) and url_expires_at (ms);
@@ -1771,8 +1821,20 @@ export async function createSupabaseAdapter() {
       if (status === 'draft') check(await sb.from('invoices').update({ status: 'issued' }).eq('id', inv.id));
       return full(inv.id);
     },
-    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null }) {
-      return check(await sb.from('payments').insert({ patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() }).select().single());
+    /**
+     * One payment. Pass { idempotencyKey } (a crypto.randomUUID() per payment, kept across retries): it becomes the payment's id, so a
+     * payment sent again after a lost answer is not saved twice. The database refuses a second row with that id (23505), and the one
+     * saved the first time is read back instead (or, when it cannot be read, answered as it was sent: it is saved either way).
+     */
+    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null, idempotencyKey = null }, opts = {}) {
+      const key = opts.idempotencyKey || idempotencyKey || null;
+      const row = { ...(key ? { id: key } : {}), patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() };
+      const res = await sb.from('payments').insert(row).select().single();
+      if (key && res.error?.code === '23505') {
+        const { data } = await sb.from('payments').select('*').eq('id', key).maybeSingle();
+        return data || { ...row, received_at: new Date().toISOString() };
+      }
+      return check(res);
     },
     async voidInvoice(id, reason) {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").

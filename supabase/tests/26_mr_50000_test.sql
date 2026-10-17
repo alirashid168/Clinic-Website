@@ -131,13 +131,14 @@ select pg_temp.check((select count(*) from public.role_permissions) = (select co
 -- The database was built with this migration already applied, so "before" cannot be compared; the audit log remembers every change
 -- ever made to the grid instead: the only cells ever changed are the front desk's portal.invite and, since 20261015000500 (front desk makes
 -- invoices and takes payments), the front desk's billing.create, and since 20261015000900 (the billing desk) the coordinator's
--- billing.edit, and since 20261016000100 (the front desk uploads pictures and X-rays) the front desk's photos.upload; no cell was ever
--- removed.
+-- billing.edit, and since 20261016000100 (the front desk uploads pictures and X-rays) the front desk's photos.upload, and since
+-- 20261017000300 (patient logins made simple: "give button for assistant, admin, coordinator and front desk") the assistant's
+-- portal.invite; no cell was ever removed.
 select pg_temp.check(not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'UPDATE'
                                   and (new_data ->> 'role', new_data ->> 'permission_key') not in (('front_desk', 'portal.invite'), ('front_desk', 'billing.create'), ('coordinator', 'billing.edit'),
-                                                                                              ('front_desk', 'photos.upload')))
+                                                                                              ('front_desk', 'photos.upload'), ('assistant', 'portal.invite')))
                      and not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'DELETE'),
-  'the audit log shows no other grid cell was ever changed or removed: only the front desk''s portal.invite, billing.create and photos.upload and the coordinator''s billing.edit');
+  'the audit log shows no other grid cell was ever changed or removed: only the front desk''s portal.invite, billing.create and photos.upload, the coordinator''s billing.edit and the assistant''s portal.invite');
 -- A new row of the grid adds a cell for every role and changes none: "Delete clinic photos and X-rays" (photos.delete, 20261016000200,
 -- the owner's "they can delete assistant and coordinator") went in as new cells, ticked for the assistant, the coordinator and admin.
 select pg_temp.check((select count(*) from public.role_permissions where permission_key = 'photos.delete') = (select count(*) from unnest(enum_range(null::public.staff_role)))
@@ -150,9 +151,10 @@ select pg_temp.check((select count(*) from public.role_permissions where permiss
                      and (select string_agg(role::text, ',' order by role::text) from public.role_permissions where permission_key = 'photos.intake' and allowed) = 'admin,assistant,coordinator'
                      and not exists (select 1 from public.audit_log where table_name = 'role_permissions' and action = 'UPDATE' and new_data ->> 'permission_key' = 'photos.intake'),
   'photos.intake came in as new cells (assistant, coordinator and admin ticked), never as a change to a cell');
+-- (the assistant's cell is ticked since 20261017000300: 42_patient_login_simple_test.sql)
 select pg_temp.check((select string_agg(role::text || '=' || allowed::text, ',' order by role::text) from public.role_permissions where permission_key = 'portal.invite')
-                      = 'accountant=false,admin=true,assistant=false,coordinator=true,doctor=false,front_desk=true',
-  'portal.invite: front desk, coordinator and admin yes; assistant, doctor and accountant still no');
+                      = 'accountant=false,admin=true,assistant=true,coordinator=true,doctor=false,front_desk=true',
+  'portal.invite: front desk, assistant, coordinator and admin yes; doctor and accountant still no');
 
 -- The same thing as the website's permission check sees it (has_perm is what the admin-users function asks).
 create temp table t26_staff as select r as role, gen_random_uuid() as id, 'role26-' || r::text || '@dralirashid.com' as email from unnest(enum_range(null::public.staff_role)) as r;
@@ -164,8 +166,8 @@ begin
   return public.has_perm('portal.invite');
 end $$;
 select pg_temp.check((select string_agg(role::text || '=' || pg_temp.can_invite(id)::text, ',' order by role::text) from t26_staff)
-                      = 'accountant=false,admin=true,assistant=false,coordinator=true,doctor=false,front_desk=true',
-  'has_perm(portal.invite) for each role: front desk, coordinator and admin only');
+                      = 'accountant=false,admin=true,assistant=true,coordinator=true,doctor=false,front_desk=true',
+  'has_perm(portal.invite) for each role: front desk, assistant, coordinator and admin only');
 select set_config('request.jwt.claim.sub', '', false);
 
 -- sync_mr_sequence: same signature, still not callable from the website, default minimum 50000.

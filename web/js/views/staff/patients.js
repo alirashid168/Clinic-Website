@@ -4,7 +4,7 @@ import { state, can, branchName, isAdmin, clinicianName, myBranches, defaultBran
 import { signThumbs } from '../../ui/photos.js';
 import { duesBadge, aliBadge, newPatientModal, flagForAliModal, photoUploadModal, documentUploadModal, DOCUMENT_KINDS, guidancePanel, STATUS_LABELS } from './common.js';
 import { xrayUploadModal, deleteDocumentModal, deletePhotoModal, deleteXrayModal } from './common.js';
-import { portalLoginModal } from './portal-login.js';
+import { patientLoginModal, loginWords } from './portal-login.js';
 import { retainerStatuses, checkOverdue } from '../../lib/records.js';
 import { karachiClock, karachiDate, dayLabel } from '../../lib/photo-intake.js';
 import { newInvoiceModal, paymentModal, printInvoice, invoiceBalances, installmentPlanModal, planTable, planProgress, printReceipt, editInvoiceModal, editPaymentModal } from './invoice.js';
@@ -64,7 +64,10 @@ export async function renderPatients(root, params) {
   input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
   mount(root,
     h('div', { class: 'page-head' }, h('h1', {}, 'Patients'),
-      can('patients.create') ? h('button', { class: 'btn btn-primary', onclick: async () => { const p = await newPatientModal(''); if (p) location.hash = `#/staff/patient/${p.id}`; } }, 'New patient') : null),
+      h('div', { class: 'inline' },
+        // Patients who registered themselves on the website wait here for approval (owner, 17 Oct 2026); the count is on the menu too.
+        can('portal.invite') && typeof d.pendingRegistrations === 'function' ? h('a', { class: 'btn', href: '#/staff/registrations' }, 'New registrations') : null,
+        can('patients.create') ? h('button', { class: 'btn btn-primary', onclick: async () => { const p = await newPatientModal(''); if (p) location.hash = `#/staff/patient/${p.id}`; } }, 'New patient') : null)),
     h('div', { class: 'panel' }, input, h('div', { style: { marginTop: '12px' } }, results)));
   run();
   if (params?.get('new') && can('patients.create')) { history.replaceState(null, '', '#/staff/patients'); const p = await newPatientModal(''); if (p) location.hash = `#/staff/patient/${p.id}`; }
@@ -351,12 +354,14 @@ export async function renderPatient(root, id) {
   // The note of the latest visit that has one (the visits come newest first), as the Aaj ki List's row dialog writes it.
   const lastNote = p.visits.find((v) => String(v.notes || '').trim());
 
-  // The "Portal login" line: the username for a login made at the clinic, "own email (invited)" for an invitation, "none yet", or
-  // "could not check" with a retry. "Reset portal password" appears once the login is known to be one made at the clinic (a patient who
-  // logs in with their own email resets it by email).
+  // The "Login" line (owner, 17 Oct 2026: a simple login for every patient, made by the front desk, assistants, the coordinator and
+  // admin): "Mr# 50013 · password = the phone number on file" for a login made at the clinic (never the number itself as a password),
+  // "own email (invited)" for an invitation, "none yet", or "could not check" with a retry. "Reset password" appears once the login is
+  // known to be one made at the clinic (a patient who logs in with their own email resets it by email). A patient who registered
+  // themselves and still waits for approval is said so (the New registrations page decides).
   const resetSlot = h('span', { class: 'inline' });
   const loginState = h('span', {}, 'checking…');
-  const loginLine = can('portal.invite') ? h('p', { class: 'muted portal-login-line', style: { margin: '4px 0 0' }, 'aria-live': 'polite' }, 'Portal login: ', loginState) : null;
+  const loginLine = can('portal.invite') ? h('p', { class: 'muted portal-login-line', style: { margin: '4px 0 0' }, 'aria-live': 'polite' }, 'Login: ', loginState) : null;
   const loadLoginLine = async () => {
     if (!loginLine) return;
     resetSlot.replaceChildren();
@@ -365,8 +370,10 @@ export async function renderPatient(root, id) {
     try {
       const info = await d.portalLoginInfo(id);
       if (info.clinic_login) {
-        loginState.replaceChildren(h('strong', {}, info.username), ' (made at the clinic)');
-        resetSlot.append(h('button', { class: 'btn', onclick: () => portalLoginModal(p, { mode: 'reset', username: info.username, onDone: reload }) }, 'Reset portal password'));
+        const words = loginWords(p, info.username);
+        loginState.replaceChildren(h('strong', {}, words.loginName), ' · password = the phone number on file (unless the patient changed it)',
+          info.pending ? [' · ', h('a', { href: '#/staff/registrations' }, 'registered themselves, waiting for approval')] : null);
+        resetSlot.append(h('button', { class: 'btn', onclick: () => patientLoginModal(p, { mode: 'reset', username: info.username, onDone: reload }) }, 'Reset password'));
       } else loginState.textContent = 'own email (invited)';
     } catch (e) {
       console.error(e);
@@ -409,8 +416,8 @@ export async function renderPatient(root, id) {
       h('div', { class: 'inline' },
         can('patients.edit') ? h('button', { class: 'btn', onclick: editPatient }, 'Edit') : null,
         h('a', { class: 'btn', href: `#/staff/patient/${id}/portal`, title: 'See this record the way the patient sees it in their account' }, 'View as patient'),
-        // A login made at the clinic (username and password handed over on a slip), or, for a patient with a real email, an invitation by email.
-        can('portal.invite') && !p.portal_user_id ? h('button', { class: 'btn', onclick: () => portalLoginModal(p, { mode: 'create', onDone: reload }) }, 'Create portal login') : null,
+        // A login made at the clinic (Mr# and the phone number, one button), or, for a patient with a real email, an invitation by email.
+        can('portal.invite') && !p.portal_user_id ? h('button', { class: 'btn', onclick: () => patientLoginModal(p, { mode: 'create', onDone: reload }) }, 'Create login') : null,
         can('portal.invite') && !p.portal_user_id && p.email ? h('button', { class: 'btn', onclick: busy(async () => {
           await d.invitePatient(id); toast(`Invitation sent to ${p.email}. They set their own password.`, 'ok'); await reload();
         }) }, 'Invite to patient portal') : null,

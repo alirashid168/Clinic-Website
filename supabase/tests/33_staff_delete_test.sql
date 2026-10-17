@@ -152,7 +152,8 @@ insert into staff_ref_excluded (table_name, column_name, reason) values
   ('retainer_cases',             'made_by',               'a retainer team member (public.retainer_team), not a login'),
   ('retainer_cases',             'model_check_by',        'a retainer team member (public.retainer_team), not a login'),
   ('photo_inbox_items',          'edit_lease_by',         'a 10-minute claim of a Photo inbox edit, cleared when it is saved: the photo is counted through its uploaded_by'),
-  ('photo_inbox_batches',        'created_by',            'who started a Photo inbox upload (its kind and note): its photos are counted through their uploaded_by');
+  ('photo_inbox_batches',        'created_by',            'who started a Photo inbox upload (its kind and note): its photos are counted through their uploaded_by'),
+  ('patient_registrations',      'user_id',               'the PATIENT''s own login made by self_register (20261017000300), never a staff login');
 insert into staff_ref_excluded (schema_name, table_name, column_name, reason) values
   ('private', 'checkup_form_imports', 'imported_by', 'who ran a Google Form import: Dr. Ali only (admin), and an admin account is never deleted');
 

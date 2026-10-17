@@ -14,18 +14,22 @@
 //   restore_staff  { user_id }  takes the deleted mark off; the account stays switched off                       (needs users.manage)
 //   invite_patient { patient_id }  sends the patient an email to set a password for the portal              (needs portal.invite)
 //                  Only for a real email address: an address at the clinic domain is refused (use create_patient_login).
-//   create_patient_login   { patient_id, password }  makes the patient's portal login at the clinic: the username is
-//                  the name and Mr# at the clinic domain (alirashid-1705@dralirashid.com), no email is sent, and the
-//                  patient must choose their own password at the first login                                   (needs portal.invite)
-//   reset_patient_password { patient_id, password }  sets a new password for a login made that way             (needs portal.invite)
-//   portal_login_info      { patient_id }  { has_login, clinic_login, username }                                (needs portal.invite)
-// invite_patient and the three patient login actions live in patient-login-actions.ts (tested in Node), the username rules in portal-login.ts,
-// delete_staff and restore_staff in staff-delete-actions.ts (tested in Node).
+//   create_patient_login   { patient_id, password? }  makes the patient's portal login at the clinic: the login name is the
+//                  Mr# at the clinic domain (mr-50013@dralirashid.com), the password the patient's mobile number on file
+//                  (or the one typed), no email is sent, and the patient is not made to change the password      (needs portal.invite)
+//   reset_patient_password { patient_id, password? }  sets the password of a login made that way back to the phone on file
+//                  (or to the one typed)                                                                        (needs portal.invite)
+//   portal_login_info      { patient_id }  { has_login, clinic_login, username, pending }                       (needs portal.invite)
+//   self_register          { full_name, mr, phone, password }  a visitor makes their own login, pending until staff approve; the one
+//                  action that needs NO login (it answers the same sentence matched or not, and is capped)       (no login)
+//   reject_registration    { patient_id, reason? }  rejects a pending registration and removes its login          (needs portal.invite)
+// invite_patient, the patient login actions and the registration actions live in patient-login-actions.ts (tested in Node), the username
+// rules in portal-login.ts, delete_staff and restore_staff in staff-delete-actions.ts (tested in Node).
 //
 // Deploy: supabase functions deploy admin-users (index.ts and the three files next to it)
 // The same release the website pins (web/js/data/supabase.js SDK_VERSION); bump both on purpose, after testing.
 import { createClient } from 'npm:@supabase/supabase-js@2.117.2';
-import { createPatientLogin, findLoginByEmail, invitePatient, portalLoginInfo, resetPatientPassword } from './patient-login-actions.ts';
+import { createPatientLogin, findLoginByEmail, invitePatient, portalLoginInfo, rejectRegistration, resetPatientPassword, selfRegister } from './patient-login-actions.ts';
 import { isPatientLoginName } from './portal-login.ts';
 import { deleteStaff, emailTakenMessage, restoreStaff } from './staff-delete-actions.ts';
 
@@ -58,6 +62,22 @@ Deno.serve(async (req) => {
   const asCaller = createClient(url, anonKey, { global: { headers: { Authorization: authHeader } } });
   const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
 
+  let body: Record<string, unknown>;
+  try { body = await req.json(); } catch { return json({ error: 'Bad request' }, 400); }
+  const action = String(body.action ?? '');
+
+  // The one action for visitors without a login: a patient registering their own login (owner, 17 Oct 2026). It never says whether a
+  // Mr# or a number exists, and it is capped (patient-login-actions.ts selfRegister). The address is for the cap only.
+  if (action === 'self_register') {
+    const ip = (req.headers.get('x-forwarded-for') ?? '').split(',')[0].trim() || req.headers.get('cf-connecting-ip') || 'unknown';
+    try {
+      const result = await selfRegister({ admin, domain: STAFF_DOMAIN }, body, { ip });
+      return json(result.body, result.status);
+    } catch (e) {
+      return json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+  }
+
   const { data: userData } = await asCaller.auth.getUser();
   if (!userData?.user) return json({ error: 'Please log in again.' }, 401);
   const caller = userData.user.id;
@@ -66,10 +86,6 @@ Deno.serve(async (req) => {
     const { data, error } = await asCaller.rpc('has_perm', { p_key: key });
     return !error && data === true;
   };
-
-  let body: Record<string, unknown>;
-  try { body = await req.json(); } catch { return json({ error: 'Bad request' }, 400); }
-  const action = String(body.action ?? '');
 
   try {
     if (action === 'create_staff') {
@@ -185,6 +201,11 @@ Deno.serve(async (req) => {
 
     if (action === 'invite_patient') {
       const result = await invitePatient({ admin, can, caller, domain: STAFF_DOMAIN, siteUrl: SITE_URL }, body);
+      return json(result.body, result.status);
+    }
+
+    if (action === 'reject_registration') {
+      const result = await rejectRegistration({ admin, asCaller, can }, body);
       return json(result.body, result.status);
     }
 

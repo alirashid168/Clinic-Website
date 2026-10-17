@@ -34,6 +34,9 @@ const PAGES = {
   queue: { render: lazy(pagesModule, 'renderQueue'), show: () => can('sheet.view') },
   checkups: { render: lazy(() => import('./checkups.js'), 'renderCheckups'), show: () => can('sheet.view') },
   patients: { render: lazy(patientsModule, 'renderPatients'), show: () => can('patients.view') },
+  // Patients who registered themselves on the website and wait for approval (owner, 17 Oct 2026; 20261017000300_patient_login_simple.sql):
+  // the people who create patient logins decide. Reached from the Patients page (its "New registrations" button and the count on the menu).
+  registrations: { render: lazy(() => import('./registrations.js'), 'renderRegistrations'), show: () => can('portal.invite') },
   // The Photo inbox (owner, 17 Oct 2026: assistants, the coordinator and Dr. Ali upload the day's photos; 20261017000200_photo_intake.sql)
   // and the Photo library (every patient's edited photos, for whoever opens patient profiles).
   'photo-inbox': { render: lazy(() => import('./photo-inbox.js'), 'renderPhotoInbox'), show: () => can('photos.intake') && can('photos.view_raw') },
@@ -143,6 +146,19 @@ function setInboxCount(n) {
   document.querySelectorAll('.photo-inbox-count').forEach(paintInboxBadge);
 }
 window.addEventListener('photo-inbox-count', (e) => setInboxCount(e.detail));
+// The same for patients who registered themselves and wait for approval: the count sits on "Patients" in the menu (the New registrations
+// page sends a fresh count after each decision).
+let regCount = 0;
+function paintRegBadge(el) {
+  el.hidden = !regCount;
+  el.replaceChildren(...(regCount ? [h('span', { 'aria-hidden': 'true' }, String(regCount)),
+    srOnly(` ${regCount} new registration${regCount === 1 ? '' : 's'} ${regCount === 1 ? 'waits' : 'wait'} for approval`)] : []));
+}
+function setRegCount(n) {
+  regCount = Number(n) || 0;
+  document.querySelectorAll('.registrations-count').forEach(paintRegBadge);
+}
+window.addEventListener('registrations-count', (e) => setRegCount(e.detail));
 let renderCtl = null;
 // Another tab of this browser took a new name for the same shared login (the next person at this computer chose "Change name"
 // there): this tab stops the old name too, and asks. deskTab is the shared login of the page on screen, with its "Change name".
@@ -168,7 +184,7 @@ export async function renderStaff(root, path, params, signOut) {
   const [section, id, sub] = path.split('/');
   const page = PAGES[section];
   const s = state.session.staff;
-  const current = (key) => key === section || (section === 'patient' && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || ((section === 'retainers' || section === 'lab') && key === 'coordinator') || (section === 'day-history' && key === 'sheet')
+  const current = (key) => key === section || ((section === 'patient' || section === 'registrations') && key === 'patients') || (section === 'accounts' && key === 'reports') || (section === 'checkups' && key === 'sheet') || ((section === 'retainers' || section === 'lab') && key === 'coordinator') || (section === 'day-history' && key === 'sheet')
     || ((section === 'photo-inbox' || section === 'photo-library') && key === 'photos');
   // The "Which patient?" count (sets waiting, and filed sets Claude flagged) on the Photos drop-down, the Photo inbox link (top bar and
   // drawer) and More when they are arranged under it. Asked once per page (never blocking it); the Photo inbox page sends fresh counts.
@@ -179,6 +195,10 @@ export async function renderStaff(root, path, params, signOut) {
     return el;
   };
   const leadsToInbox = (m) => (m.href === '#/staff/photo-inbox') || (m.items || []).some((i) => leadsToInbox(i));
+  const showsRegCount = can('portal.invite') && !!state.data.pendingRegistrations;
+  const regBadge = () => { const el = h('span', { class: 'badge badge-warn nav-count registrations-count', hidden: !regCount }); paintRegBadge(el); return el; };
+  /** The count badge a menu link carries: the Photo inbox's, or the new registrations' on Patients. */
+  const linkBadge = (href) => (showsInboxCount && href === '#/staff/photo-inbox' ? inboxBadge() : showsRegCount && href === '#/staff/patients' ? regBadge() : null);
   const items = menu();
 
   // ---- dropdowns: the disclosure pattern (a button with aria-expanded over a plain list of links).
@@ -215,7 +235,7 @@ export async function renderStaff(root, path, params, signOut) {
       const same = i.href === location.hash;
       closeAll();
       if (same) btn.focus();
-    } }, i.label, showsInboxCount && i.href === '#/staff/photo-inbox' ? inboxBadge() : null));
+    } }, i.label, linkBadge(i.href)));
     // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): one group named after it, with
     // all its pages and a line inside it (Reports: the reports, then the Accounts tabs) indented under its name.
     const section = (i, n) => h('div', { class: 'menu-section', role: 'group', 'aria-labelledby': `${listId}-${n}` },
@@ -225,8 +245,7 @@ export async function renderStaff(root, path, params, signOut) {
     return disclosure(h('div', { class: 'menu' }, btn, list), btn, list);
   };
   const navEntry = (m) => (m.items ? dropdown(m)
-    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label,
-      showsInboxCount && m.href === '#/staff/photo-inbox' ? inboxBadge() : null));
+    : h('a', { class: ['nav-link', current(m.key) ? 'current' : ''], href: m.href, 'aria-current': current(m.key) ? 'page' : null }, m.label, linkBadge(m.href)));
   const topnav = h('nav', { class: 'topnav', 'aria-label': 'Staff navigation' }); // its entries: arrangeNav, below the drawer
 
   // ---- "Create ▾" beside the search (owner, 15 Oct 2026, as on Healthwire): a new patient, an invoice, a health record
@@ -236,6 +255,8 @@ export async function renderStaff(root, path, params, signOut) {
     can('patients.create') ? ['patient', 'Patient'] : null,
     can('billing.create') ? ['invoice', 'Invoice'] : null,
     can('treatment.enter') || can('patients.edit') ? ['health', 'Health record'] : null,
+    // A patient's login (owner, 17 Oct 2026): find the patient, press once, hand over the card (create-menu.js).
+    can('portal.invite') ? ['login', 'Patient login'] : null,
   ].filter(Boolean);
   const createMenu = createChoices.length ? (() => {
     const btn = h('button', { type: 'button', class: 'nav-link create-btn', 'aria-expanded': 'false', 'aria-controls': 'create-menu-list' },
@@ -351,8 +372,7 @@ export async function renderStaff(root, path, params, signOut) {
   // expanded as groups). It closes on the scrim, on Escape, on its close button and on navigation, gives
   // focus back to ☰, and is inert (out of the tab order) while closed.
   const toggle = h('button', { type: 'button', class: 'icon-btn menu-toggle', 'aria-label': 'Menu', 'aria-expanded': 'false', 'aria-controls': 'staff-drawer' }, h('span', { 'aria-hidden': 'true' }, '☰'));
-  const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label,
-    showsInboxCount && i.href === '#/staff/photo-inbox' ? inboxBadge() : null);
+  const drawerLink = (i, cur = false) => h('a', { class: ['nav-link', cur ? 'current' : ''], href: i.href, 'aria-current': cur ? 'page' : null, onclick: () => closeDrawer(i.href === location.hash) }, i.label, linkBadge(i.href));
   // A drop-down put under More with "Arrange my menu" is a section of it ({ heading, items }): a group of its own, named after
   // it, with all its pages (the drawer draws no lines inside a group). The pages after it are More's own, not that drop-down's,
   // to the eye (they are not indented under it) and to a screen reader.
@@ -437,6 +457,7 @@ export async function renderStaff(root, path, params, signOut) {
     h('div', { class: 'app topnav-layout' }, drawer, content),
     scrim);
   if (showsInboxCount) state.data.photoInboxCounts().then((c) => setInboxCount(c.waiting + c.check)).catch(() => {});
+  if (showsRegCount) state.data.pendingRegistrations().then((rows) => setRegCount(rows.length)).catch(() => {});
   // Before the person can use anything: a shared login says who is at the desk, and only then is the page drawn (and its data read).
   if (needsDeskName(s) && !(await askName())) return;
   if (signal.aborted) return;

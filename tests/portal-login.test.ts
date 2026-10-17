@@ -1,11 +1,14 @@
-// The username and password rules for patient portal logins made at the clinic (src/lib/portal-login.ts), the
-// login page's reading of what a patient types, and the checks that keep staff and patient logins apart.
+// The username and password rules for patient portal logins made at the clinic (src/lib/portal-login.ts): the Mr# login
+// ("mr-50013@...", the owner's 17 Oct 2026 choice: the patient types only the Mr#) and the older name-Mr# usernames that still work,
+// the phone number as the password, the login page's reading of what a patient types, and the checks that keep staff and patient
+// logins apart.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import {
   portalNamePart, portalMrPart, portalUsername, portalLoginEmail, isPatientLoginName, normalizeLoginInput,
-  checkPortalPassword, checkSlipPassword, generatePortalPassword, secureRandomInt, PASSWORD_WORDS, PASSWORD_DIGITS, NAME_PART_MAX, MR_PART_MAX, SLIP_PASSWORD_MIN, NO_USERNAME_MESSAGE,
+  checkPortalPassword, checkPhonePassword, phonePassword, mrLoginEmail, isMrLoginEmail, MR_LOGIN_PREFIX, PHONE_PASSWORD_MESSAGE,
+  NAME_PART_MAX, MR_PART_MAX, PASSWORD_MIN, NO_USERNAME_MESSAGE,
 } from '../src/lib/portal-login.ts';
 
 const DOMAIN = 'dralirashid.com';
@@ -140,7 +143,7 @@ test('login input: the whole address, or just the part before the @', () => {
   assert.equal(normalizeLoginInput('alirashid-1705', DOMAIN), 'alirashid-1705@dralirashid.com');
   assert.equal(normalizeLoginInput('  AliRashid-1705  ', DOMAIN), 'alirashid-1705@dralirashid.com', 'spaces and capitals do not matter');
   assert.equal(normalizeLoginInput('alirashid- 1705', DOMAIN), 'alirashid-1705@dralirashid.com', 'a space in a copied username');
-  assert.equal(normalizeLoginInput('347-1', DOMAIN), '347-1@dralirashid.com');
+  assert.equal(normalizeLoginInput('347-1', DOMAIN), 'mr-347-1@dralirashid.com', 'a legacy Mr# is a Mr#');
 });
 
 test('login input: a real email address is kept as typed (lowercased), never given the clinic domain', () => {
@@ -160,65 +163,59 @@ test('login input: a typed username is read as the same login the builder made',
   assert.equal(normalizeLoginInput(portalUsername('Ali Rashid', '1705'), DOMAIN), made);
 });
 
+// ---------------------------------------------------------------- the Mr# login (since 17 Oct 2026)
+test('Mr# login: "mr-" and the Mr# at the clinic domain; a legacy Mr# keeps its dash; no usable Mr# gives nothing', () => {
+  assert.equal(MR_LOGIN_PREFIX, 'mr-');
+  assert.equal(mrLoginEmail('50013', DOMAIN), 'mr-50013@dralirashid.com');
+  assert.equal(mrLoginEmail(' 347-1 ', ' DrAliRashid.com '), 'mr-347-1@dralirashid.com');
+  assert.equal(mrLoginEmail('347/1', DOMAIN), 'mr-347-1@dralirashid.com');
+  assert.equal(mrLoginEmail('', DOMAIN), '');
+  assert.equal(mrLoginEmail('///', DOMAIN), '');
+  for (const mr of ['50013', '347-1', '9', '9'.repeat(30), 'a1']) assert.equal(isPatientLoginName(mrLoginEmail(mr, DOMAIN), DOMAIN), true, `${mr} has the reserved patient shape`);
+  assert.equal(isPatientLoginName(mrLoginEmail('abc', DOMAIN), DOMAIN), false, 'a Mr# with no digit is outside the shape (refused by the function)');
+});
+
+test('isMrLoginEmail: this patient\'s Mr# login, whatever the case; not another Mr#, not an older name-Mr# login', () => {
+  assert.equal(isMrLoginEmail('mr-50013@dralirashid.com', '50013', DOMAIN), true);
+  assert.equal(isMrLoginEmail('MR-50013@DrAliRashid.com ', '50013', DOMAIN), true);
+  assert.equal(isMrLoginEmail('mr-50014@dralirashid.com', '50013', DOMAIN), false);
+  assert.equal(isMrLoginEmail('alirashid-50013@dralirashid.com', '50013', DOMAIN), false);
+  assert.equal(isMrLoginEmail('', '50013', DOMAIN), false);
+  assert.equal(isMrLoginEmail('mr-@dralirashid.com', '', DOMAIN), false);
+});
+
+test('login input: a Mr# typed in any of the usual ways becomes the Mr# login; an older username and a real email are left as they were', () => {
+  for (const typed of ['50013', ' 50013 ', 'Mr# 50013', 'MR 50013', 'mr-50013', '#50013', 'mr50013', 'Mr#50013'])
+    assert.equal(normalizeLoginInput(typed, DOMAIN), 'mr-50013@dralirashid.com', JSON.stringify(typed));
+  assert.equal(normalizeLoginInput('347-1', DOMAIN), 'mr-347-1@dralirashid.com', 'a legacy Mr#');
+  assert.equal(normalizeLoginInput('mr-347-1@dralirashid.com', DOMAIN), 'mr-347-1@dralirashid.com', 'the whole address');
+  assert.equal(normalizeLoginInput('alirashid-1705', DOMAIN), 'alirashid-1705@dralirashid.com', 'an older slip username starts with a letter');
+  assert.equal(normalizeLoginInput('mrkhan-1705', DOMAIN), 'mrkhan-1705@dralirashid.com', 'a name that starts with "mr" is still a name');
+  assert.equal(normalizeLoginInput('sara@example.com', DOMAIN), 'sara@example.com');
+});
+
 // ---------------------------------------------------------------- passwords
+test('the phone number as the password: digits only, at least 8 of them, at most 72', () => {
+  assert.equal(phonePassword('0300-555 1234'), '03005551234');
+  assert.equal(phonePassword('+92 300 5551234'), '923005551234', 'as on file, digits only (the login server compares the whole string)');
+  assert.equal(phonePassword(null), '');
+  assert.equal(phonePassword(undefined), '');
+  assert.equal(checkPhonePassword('0300 5551234'), null);
+  assert.equal(checkPhonePassword('02134567'), null, 'eight digits will do');
+  assert.equal(checkPhonePassword('0300'), PHONE_PASSWORD_MESSAGE);
+  assert.equal(checkPhonePassword(''), PHONE_PASSWORD_MESSAGE);
+  assert.equal(checkPhonePassword(null), PHONE_PASSWORD_MESSAGE);
+  assert.equal(checkPhonePassword('9'.repeat(73)), PHONE_PASSWORD_MESSAGE);
+  assert.match(PHONE_PASSWORD_MESSAGE, new RegExp(`at least ${PASSWORD_MIN} digits`));
+  assert.match(PHONE_PASSWORD_MESSAGE, /Add the phone number first/);
+});
+
 test('password rules (a patient\'s own password): 8 to 72 characters', () => {
   assert.equal(checkPortalPassword('1234567'), 'The password needs at least 8 characters.');
   assert.equal(checkPortalPassword('12345678'), null);
   assert.equal(checkPortalPassword('x'.repeat(72)), null);
   assert.match(checkPortalPassword('x'.repeat(73)) as string, /at most 72/);
   assert.equal(checkPortalPassword(undefined as unknown as string), 'The password needs at least 8 characters.');
-});
-
-test('a first password staff type for a patient: at least 10 characters and not only digits (the edge function applies the same rule)', () => {
-  assert.equal(SLIP_PASSWORD_MIN, 10);
-  assert.equal(checkSlipPassword('abcdefghi'), 'The password needs at least 10 characters.');
-  assert.equal(checkSlipPassword('12345678'), 'The password needs at least 10 characters.');
-  assert.equal(checkSlipPassword(''), 'The password needs at least 10 characters.');
-  assert.equal(checkSlipPassword(undefined as unknown as string), 'The password needs at least 10 characters.');
-  assert.match(checkSlipPassword('1234567890') as string, /only digits/);
-  assert.match(checkSlipPassword('03001234567') as string, /only digits/);
-  // A phone number written the usual ways is still a phone number.
-  for (const phone of ['0300-1234567', '+92 300 1234567', '(021) 34567890', '0300.123.4567', '0300/1234567'])
-    assert.match(checkSlipPassword(phone) as string, /phone number or only digits/, phone);
-  assert.equal(checkSlipPassword('0300-1234567a'), null, 'a letter makes it a password');
-  assert.equal(checkSlipPassword('abcdefghij'), null);
-  assert.equal(checkSlipPassword('1234567890a'), null);
-  assert.equal(checkSlipPassword('sunny-grape-zebra-4827'), null);
-  assert.match(checkSlipPassword('x'.repeat(73)) as string, /at most 72/);
-  assert.equal(checkPortalPassword('12345678'), null, 'the patient\'s own later password keeps its 8 character rule');
-});
-
-test('generated passwords: three short words and four digits, and nothing that can be misread', () => {
-  const seen = new Set<string>();
-  for (let i = 0; i < 400; i += 1) {
-    const pw = generatePortalPassword();
-    assert.match(pw, /^[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[a-hj-km-np-z]{3,5}-[2-9]{4}$/, pw);
-    assert.equal(checkPortalPassword(pw), null);
-    assert.equal(checkSlipPassword(pw), null, 'a generated password passes the stricter rule');
-    seen.add(pw);
-  }
-  assert.ok(seen.size > 390, 'passwords differ from one another');
-  for (const w of PASSWORD_WORDS) assert.match(w, /^[a-hj-km-np-z]{3,5}$/, `"${w}" has a look-alike letter (i, l or o)`);
-  assert.equal(new Set(PASSWORD_WORDS).size, PASSWORD_WORDS.length, 'no word twice');
-  assert.doesNotMatch(PASSWORD_DIGITS, /[01]/);
-});
-
-test('generated passwords: at least 36 bits (three words from at least 256, four digits from 8), so an unused slip cannot be guessed online', () => {
-  assert.ok(PASSWORD_WORDS.length >= 256, `only ${PASSWORD_WORDS.length} words`);
-  const bits = 3 * Math.log2(PASSWORD_WORDS.length) + 4 * Math.log2(PASSWORD_DIGITS.length);
-  assert.ok(bits >= 36, `${bits.toFixed(1)} bits`);
-  const longest = Math.max(...Array.from({ length: 300 }, () => generatePortalPassword().length));
-  assert.ok(longest <= 5 * 3 + 3 + 4, 'still short enough to read out and type (at most 22 characters)');
-});
-
-test('generated passwords: the random source decides every pick (and an out-of-range source cannot break it)', () => {
-  assert.equal(generatePortalPassword(() => 0), `${PASSWORD_WORDS[0]}-${PASSWORD_WORDS[0]}-${PASSWORD_WORDS[0]}-2222`);
-  const last = (n: number) => n - 1;
-  assert.equal(generatePortalPassword(last), `${PASSWORD_WORDS.at(-1)}-${PASSWORD_WORDS.at(-1)}-${PASSWORD_WORDS.at(-1)}-9999`);
-  for (let i = 0; i < 2000; i += 1) {
-    const n = secureRandomInt(PASSWORD_WORDS.length);
-    assert.ok(Number.isInteger(n) && n >= 0 && n < PASSWORD_WORDS.length);
-  }
 });
 
 // ---------------------------------------------------------------- the copies of the source
@@ -229,7 +226,7 @@ test('the copies of portal-login.ts (browser and Edge Function) are the current 
   assert.match(copy.split('\n')[0], /^\/\/ COPY of src\/lib\/portal-login\.ts/);
   const browser = readFileSync(new URL('../web/js/lib/portal-login.js', import.meta.url), 'utf8');
   assert.match(browser.split('\n')[0], /^\/\/ GENERATED from src\/lib/);
-  for (const name of ['portalUsername', 'portalLoginEmail', 'normalizeLoginInput', 'generatePortalPassword', 'isPatientLoginName', 'checkPortalPassword', 'checkSlipPassword']) {
+  for (const name of ['portalUsername', 'portalLoginEmail', 'normalizeLoginInput', 'mrLoginEmail', 'isMrLoginEmail', 'phonePassword', 'checkPhonePassword', 'isPatientLoginName', 'checkPortalPassword']) {
     assert.match(browser, new RegExp(`export function ${name}\\b`), `web/js/lib/portal-login.js lacks ${name}: run scripts/build-lib.sh`);
   }
 });
