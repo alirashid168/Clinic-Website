@@ -168,27 +168,27 @@
       "permanent": true
     },
     {
-      "source": "/visitor{/}?",
+      "source": "/visitor/",
       "destination": "/#/visitor",
       "permanent": true
     },
     {
-      "source": "/clinics{/}?",
+      "source": "/clinics/",
       "destination": "/#/clinics",
       "permanent": true
     },
     {
-      "source": "/dr-ali{/}?",
+      "source": "/dr-ali/",
       "destination": "/#/dr-ali",
       "permanent": true
     },
     {
-      "source": "/patient{/}?",
+      "source": "/patient/",
       "destination": "/#/patient",
       "permanent": true
     },
     {
-      "source": "/results{/}?",
+      "source": "/results/",
       "destination": "/#/results",
       "permanent": true
     },
