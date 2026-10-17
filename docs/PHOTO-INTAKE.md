@@ -104,6 +104,29 @@ What happens to old photos:
   patient sees) is made later by the inbox's editing on a Safari page (iPhone or Mac); that editing runs once the AI key is set up (Claude
   is still not used for old photos). Easiest: choose old photos as JPEG (most edited photos are JPEG already).
 
+## 3c. A picture and a text box with each photo
+
+After you choose the photos, the list under the upload shows **every photo as a small picture**, with its file name, how far it has got
+("Ready", "Uploading", "Uploaded") and **its own small box: "Details: name, Mr#, month"**. The pictures appear one by one while the page
+reads the photos (50 or 100 photos are fine on a phone or a laptop). An iPhone HEIC photo outside Safari shows a plain tile with its name
+instead of a picture: it is uploaded all the same.
+
+- Type in a photo's box **whenever you like**: before the upload starts, while it runs, or after it says "uploaded". It is saved with that
+  photo by itself ("Saved" under the box). If the wifi drops, it says "Not saved yet" and tries again by itself; keep the page open until
+  it says "Saved". A box typed for a photo that did not finish uploading is kept: choose the same photos again and it comes back.
+- Use it for what that photo is or who it is: "Ayesha Khan Mr# 50013 month 6", "front", "after debond". It is read **exactly like the
+  note box above** (3a), and both can be used together: the upload's note is about all the photos chosen, a photo's box about that photo.
+- **An Mr#** in a photo's box: the photos of that sitting go **straight into that patient's file** when, over the whole set, the boxes and
+  the upload's note name exactly **one** Mr#, one patient has it, and (for today's photos) the patient is on that day's Aaj ki List of the
+  city. A photo's own box does not need the "one visit" rule of the upload's note: it is about that photo.
+- **Two different Mr#s** in one set (two photos, or a photo and the upload's note): nothing is filed by itself; "Which patient?" offers
+  both. Photos whose boxes name different Mr#s are never put in one set: a new set starts at the photo with the other Mr#.
+- **A name alone never files.** It puts that patient first on "Which patient?".
+- If a photo's box names another patient than the one the photo time fits, nothing is filed by itself: the card says so and you choose.
+- The box is shown **under its picture** on "Which patient?" and on Filed. After a set is filed, changing a box only changes what is
+  shown: it never moves the photos (use "Move to another patient").
+- The boxes are for the staff only: patients never see them.
+
 ## 4. The screens
 
 **Which patient?** One card per set of photos that is not clear. The card shows the photos (tap one to see it large), the day, the
@@ -172,6 +195,7 @@ look at the Filed list once a day (the patient sees nothing for 24 hours).
 | No patient has the Mr# in the note. | Check the number; search the patient on the card. |
 | The note names more than one patient. | Tap the right one for these photos. |
 | The note names a patient by name only. | Tap the right patient (a name alone never files). |
+| The notes with these photos name more than one Mr#. | A photo's box and the upload's note (or two photos' boxes) name two patients: tap the right one, or split the set. |
 
 ## 6. Editing with Claude
 
@@ -239,6 +263,7 @@ If it says **"the Anthropic account has no credit left"**: console.anthropic.com
 | "Claude could not edit N photos: basic edit made" | Filed → Try Claude again. |
 | A set went to the wrong patient | Filed → Move to another patient, or Undo filing. Within 24 hours the patient has not seen it. |
 | "The Photo inbox needs the database update of 17 Oct" | The database update has not been run yet (docs/GO-LIVE.md). |
+| "A note with each photo needs the database update of 17 Oct" (under a photo's box) | Dr. Ali: run `20261017000800_photo_item_notes.sql` (SQL Editor). The photos are uploaded; type the box again afterwards. |
 
 ## For the developer (where things are)
 
@@ -249,6 +274,11 @@ If it says **"the Anthropic account has no credit left"**: console.anthropic.com
   filed_rule; old photos have ai_status 'skipped' and photo_inbox_sets.kind 'old'). Tests: `supabase/tests/43_photo_inbox_notes_test.sql`.
   The note is read the same way in SQL (private.photo_inbox_note_mrs, _note_month, _note_words) and in the lib (noteMrs, noteMonth,
   noteWords): change both together.
+- A note with each photo: `supabase/migrations/20261017000800_photo_item_notes.sql` (photo_inbox_items.note and name_patient_ids;
+  photo_inbox_item_note, audited as PHOTO_NOTE; photo_inbox_add_items takes 'note' per photo; photo_inbox_day answers each photo's note and
+  note_patients; photo_inbox_apply reads the photos' notes + the upload's note for note_mr / old_note_mr, refuses a time filing or a join
+  that a photo's note contradicts). Tests: `supabase/tests/44_photo_item_notes_test.sql`. In the lib: noteKey, setNoteKeys, and planDay's
+  keyOf (a photo's own Mr#, else its upload's) that splits groupItems / groupOld.
 - Matching, EXIF, names, edit maths: `web/js/lib/photo-intake.js` (tests/photo-intake.test.ts). Zip: `web/js/lib/zip.js`.
 - Pages: `web/js/views/staff/photo-inbox.js`, `photo-library.js`; pixels: `web/js/ui/photo-edit.js`; data:
   `web/js/data/supabase-inbox.js` and the demo `web/js/data/demo-inbox.js`.
