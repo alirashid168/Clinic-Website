@@ -1821,8 +1821,20 @@ export async function createSupabaseAdapter() {
       if (status === 'draft') check(await sb.from('invoices').update({ status: 'issued' }).eq('id', inv.id));
       return full(inv.id);
     },
-    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null }) {
-      return check(await sb.from('payments').insert({ patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() }).select().single());
+    /**
+     * One payment. Pass { idempotencyKey } (a crypto.randomUUID() per payment, kept across retries): it becomes the payment's id, so a
+     * payment sent again after a lost answer is not saved twice. The database refuses a second row with that id (23505), and the one
+     * saved the first time is read back instead (or, when it cannot be read, answered as it was sent: it is saved either way).
+     */
+    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null, idempotencyKey = null }, opts = {}) {
+      const key = opts.idempotencyKey || idempotencyKey || null;
+      const row = { ...(key ? { id: key } : {}), patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_by: await userId() };
+      const res = await sb.from('payments').insert(row).select().single();
+      if (key && res.error?.code === '23505') {
+        const { data } = await sb.from('payments').select('*').eq('id', key).maybeSingle();
+        return data || { ...row, received_at: new Date().toISOString() };
+      }
+      return check(res);
     },
     async voidInvoice(id, reason) {
       // A blank reason goes to the database as NULL, which its void rule refuses ("A reason is required to void an invoice").

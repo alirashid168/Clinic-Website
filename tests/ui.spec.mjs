@@ -9003,6 +9003,74 @@ await step('Bill: Save pressed twice quickly makes one invoice and one payment; 
   await bill2.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
   await pbill.waitForSelector('.modal', { state: 'detached' });
 });
+// Owner, 17 Oct 2026: "some times patient pays half in cash and half by card or smthng, there should be a add payment too so multiple
+// payment forms could be entered".
+await step('Bill: half in cash, half by card: Rs 35,000 paid as Cash 20,000 + Card 15,000 with "+ Add payment"; Paid in full; the bill and the receipt show both payments with their methods, and the patient\'s payments list has two rows', async () => {
+  await pbill.goto(BASE + '#/staff/sheet');
+  const before = await billingOf(pbill, '9811');
+  const row = pbill.locator('table.sheet tbody tr', { hasText: 'Areeba Siddiqui' });
+  await row.getByRole('button', { name: 'Bill Areeba Siddiqui' }).click();
+  const m = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New invoice · Areeba Siddiqui' }) });
+  await m.getByLabel('Treatment, line 1').fill('Sample treatment');
+  await m.getByLabel('Rate (Rs), line 1').fill('35000');
+  const first = m.getByLabel('Payment (Rs)', { exact: true });
+  assert.equal(await first.inputValue(), '35000', 'one payment, as before, starting at the total');
+  assert.equal(await m.getByRole('button', { name: 'Remove payment 1' }).count(), 0, 'the first payment stays');
+  await first.fill('20000');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Due Rs 15,000');
+  await m.getByRole('button', { name: '+ Add payment' }).click();
+  const second = m.getByLabel('Payment (Rs), payment 2', { exact: true });
+  assert.ok(await second.evaluate((el) => el === document.activeElement), 'the new payment\'s amount has the focus');
+  assert.equal(await second.inputValue(), '15000', 'the new payment starts with what is still due');
+  assert.equal(await m.getByLabel('Payment method, payment 2', { exact: true }).inputValue(), 'card', 'and with a method not used yet');
+  assert.equal((await m.locator('.bill-due').innerText()).trim(), 'Paid in full', 'what stays due counts both payments');
+  // A third one left empty, then removed: not a payment.
+  await m.getByRole('button', { name: '+ Add payment' }).click();
+  assert.equal(await m.getByLabel('Payment (Rs), payment 3', { exact: true }).inputValue(), '', 'nothing left to pay: the third starts empty');
+  await m.getByRole('button', { name: 'Remove payment 3' }).click();
+  assert.equal(await m.getByLabel('Payment (Rs), payment 3').count(), 0);
+  await m.getByRole('button', { name: 'Save & Print' }).click();
+  const bill = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: /^Invoice INV-/ }) });
+  await bill.waitFor();
+  const invoiceNo = (await bill.locator('h2').innerText()).replace('Invoice ', '');
+  assert.match(await bill.locator('.alert-info').innerText(), /Payments saved: Cash Rs 20,000 and Card Rs 15,000\./);
+  const paper = await bill.locator('.bill-sheet').innerText();
+  for (const re of [/Payment Mode: Cash Rs\. 20,000, Card Rs\. 15,000/, /Grand Total\s+Rs\. 35,000/, /Paid Amount\s+Rs\. 35,000/, /Due Amount\s+Rs\. 0/]) assert.match(paper, re);
+  await bill.getByRole('button', { name: 'Print receipt' }).click();
+  const receipt = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'Payment receipt' }) });
+  const text = await receipt.innerText();
+  for (const re of [/Received by Cash\s+Rs 20,000/, /Received by Card\s+Rs 15,000/, /Total received\s+Rs 35,000/]) assert.match(text, re);
+  await receipt.locator('.modal-actions').getByRole('button', { name: 'Close' }).click();
+  await pbill.waitForSelector('.modal', { state: 'detached' });
+  const after = await billingOf(pbill, '9811');
+  const saved = after.invoices.find((i) => i.invoice_no === invoiceNo);
+  assert.deepEqual(after.payments.filter((p) => p.invoice_id === saved.id).map((p) => [p.method, p.amount]), [['cash', 20000], ['card', 15000]], 'two payments on the invoice');
+  assert.equal(after.payments.length, before.payments.length + 2);
+  // The patient's page: the invoice paid, and two rows in the payments list, each with its method.
+  await pbill.goto(BASE + '#/staff/patients?q=9811');
+  await pbill.locator('table.list tbody tr', { hasText: 'Areeba Siddiqui' }).locator('a').first().click();
+  await pbill.waitForSelector('h1:has-text("Areeba Siddiqui")');
+  const money = pbill.locator('section.panel', { has: pbill.locator('h2', { hasText: 'Money' }) });
+  assert.match(await money.locator('table.list').first().locator('tbody tr', { hasText: invoiceNo }).innerText(), /Paid[\s\S]*Rs 35,000/);
+  await money.locator('details summary').click();
+  const lines = money.locator('details table.list tbody tr', { hasText: invoiceNo });
+  assert.equal(await lines.count(), 2, 'two rows in the payments list');
+  const said = (await lines.allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+  assert.ok(said.some((t) => /cash .*Rs 20,000/.test(t)) && said.some((t) => /card .*Rs 15,000/.test(t)), JSON.stringify(said));
+  // Take payment has "+ Add payment" too.
+  await pbill.getByRole('button', { name: 'Take payment', exact: true }).click();
+  const take = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'Take payment · Areeba Siddiqui' }) });
+  await take.getByLabel('Amount (Rs)').fill('1000'); // (the first payment's label: "Amount (Rs) (required)")
+  await take.getByRole('button', { name: '+ Add payment' }).click();
+  await take.getByLabel('Amount (Rs), payment 2', { exact: true }).fill('500');
+  assert.equal(await take.getByLabel('Method, payment 2', { exact: true }).inputValue(), 'card');
+  await take.getByRole('button', { name: 'Save payment' }).click();
+  await pbill.waitForSelector('.toast:has-text("Payments saved: Cash Rs 1,000 and Card Rs 500.")');
+  const taken = await billingOf(pbill, '9811');
+  assert.deepEqual(taken.payments.slice(-2).map((p) => [p.method, p.amount]), [['cash', 1000], ['card', 500]], 'two payments from Take payment');
+  await pbill.goto(BASE + '#/staff/sheet');
+  await row.waitFor();
+});
 await step('Create ▾ (front desk): Invoice finds the patient by name, then the invoice form for them at the front desk\'s branch, for their visit on today\'s list; Patient opens the new-patient registration', async () => {
   await pbill.locator('.create-btn').click();
   assert.deepEqual(await pbill.locator('#create-menu-list button').allInnerTexts(), ['Patient', 'Invoice', 'Health record', 'Patient login'], 'front desk: patients.create, billing.create, patients.edit and portal.invite');

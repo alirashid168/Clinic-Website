@@ -1661,6 +1661,13 @@ table.invoice-lines input { min-width: 0; }
   .bill-form > .bill-pay { position: sticky; bottom: 0; z-index: 1; background: var(--surface); box-shadow: 0 -10px 12px -12px rgb(0 0 0 / 0.35); }
 }
 .bill-due { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+/* The money taken now as one or more payments (owner, 17 Oct 2026: half in cash, half by card): a row each with its method, its amount
+   and × (the first row, which has the names above its boxes, has none), then "+ Add payment" with what stays due on its right. */
+.bill-pay-row { display: grid; gap: 0 var(--space-4); grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 2.75rem; align-items: start; }
+.bill-pay-row > .bill-remove { margin-top: 2px; }
+.bill-pay-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
+.bill-pay-foot .bill-due { margin-left: auto; }
+.bill-pay .bill-pay-foot { margin-bottom: 0; }
 /* The printed bill (A4), on white paper also in dark mode: the clinic's mark and name centred, a rule, the patient and the invoice, a
    rule, the boxed lines, the totals on the right with the payment mode on their left. */
 .invoice-sheet.bill-sheet { max-width: 794px; padding: var(--space-8); background: #ffffff; color: #1b1b1b; font-size: 14px; line-height: 1.45; }

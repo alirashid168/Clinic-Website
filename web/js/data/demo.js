@@ -1508,12 +1508,17 @@ export function createDemoAdapter() {
       if (pending) db.discount_requests.push({ id: uid(), invoice_id: inv.id, requested_by: me().full_name, discount_amount: inv.discount_amount, reason: discount_reason, status: 'pending', created_at: new Date().toISOString() });
       return clone(inv);
     },
-    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null }) {
+    async recordPayment({ patient_id, branch_id, amount, method = 'cash', invoice_id = null, notes = null, idempotencyKey = null }, opts = {}) {
       need('billing.create');
       if (Number(amount) < 0) need('billing.refund');
       if (!branchOk(branch_id)) fail('new row violates row-level security policy (branch)');
+      // As the live data layer: the key is the payment's id, so the same payment sent again is the one saved the first time.
+      const key = opts.idempotencyKey || idempotencyKey;
+      const prior = key && db.payments.find((x) => x.id === saved.get('payment:' + key));
+      if (prior) return clone(prior);
       const pay = { id: uid(), patient_id, branch_id: Number(branch_id), amount: Number(amount), method, invoice_id, notes, received_at: new Date().toISOString(), received_by: me().full_name };
       db.payments.push(pay); audit('payments', 'INSERT', pay);
+      if (key) saved.set('payment:' + key, pay.id);
       return clone(pay);
     },
     async patientBilling(patientId) {
