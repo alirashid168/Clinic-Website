@@ -188,7 +188,7 @@ If it says **"the Anthropic account has no credit left"**: console.anthropic.com
 ## For the developer (where things are)
 
 - Database: `supabase/migrations/20261017000200_photo_intake.sql` (tables photo_inbox_items, photo_inbox_sets, photo_ai_calls; the
-  photo_inbox_* functions; storage rules; the 24-hour window). Tests: `supabase/tests/40_photo_intake_test.sql`.
+  photo_inbox_* functions; storage rules; the 24-hour window). Tests: `supabase/tests/41_photo_intake_test.sql`.
 - Matching, EXIF, names, edit maths: `web/js/lib/photo-intake.js` (tests/photo-intake.test.ts). Zip: `web/js/lib/zip.js`.
 - Pages: `web/js/views/staff/photo-inbox.js`, `photo-library.js`; pixels: `web/js/ui/photo-edit.js`; data:
   `web/js/data/supabase-inbox.js` and the demo `web/js/data/demo-inbox.js`.
