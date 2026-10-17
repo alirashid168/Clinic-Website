@@ -4983,8 +4983,20 @@ await step('busy day at 1366x768: the bars that come and go (the Undo of a remov
     document.dispatchEvent(new CustomEvent('sheet-reload'));
   });
   const warn = pb.locator('.sheet-bars .alert-warning', { hasText: 'Checkup patients could not be loaded' });
-  await warn.waitFor({ timeout: 10000 });
-  assert.deepEqual(await onLine(warn), onLineOk, 'the warning');
+  // (measured in the page the moment it shows: the list's 20-second check, fetched while the cursor was in the list above, may draw a
+  // moment later and rightly take the warning away again, which made reading it in a second call a race)
+  const warnAt = await (await pb.waitForFunction(() => {
+    const el = [...document.querySelectorAll('.sheet-bars .alert-warning')].find((x) => x.textContent.includes('Checkup patients could not be loaded'));
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    const line = document.querySelector('.sheet-subhead').getBoundingClientRect();
+    const w = document.querySelector('.sheet-wrap').getBoundingClientRect();
+    const s = document.querySelector('.save-status').getBoundingClientRect();
+    const c = document.querySelector('.sheet-counts').getBoundingClientRect();
+    const hits = (r) => !(b.right <= r.left || b.left >= r.right || b.bottom <= r.top || b.top >= r.bottom);
+    return { onCountsLine: b.top >= line.top - 0.5 && b.bottom <= line.bottom + 0.5, aboveList: b.bottom <= w.top + 0.5, coversSave: hits(s), coversCounts: hits(c) };
+  }, null, { timeout: 10000 })).jsonValue();
+  assert.deepEqual(warnAt, onLineOk, 'the warning');
   assert.equal(await wrapTop(), top0);
   await pb.evaluate(() => document.dispatchEvent(new CustomEvent('sheet-reload')));
   await warn.waitFor({ state: 'hidden' });
