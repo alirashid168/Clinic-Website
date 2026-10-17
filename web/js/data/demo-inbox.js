@@ -56,7 +56,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   const branch = (id) => db().branches.find((b) => b.id === Number(id));
   const cityOk = (cityId) => {
     const s = me();
-    return !!s && s.active && (s.role === 'admin' || !s.restrict_to_branches || s.branch_ids.some((b) => branch(b)?.city_id === Number(cityId)));
+    return !!s && s.active && (can('photos.intake') || s.role === 'admin' || !s.restrict_to_branches || s.branch_ids.some((b) => branch(b)?.city_id === Number(cityId)));
   };
   const allowed = () => !!me() && can('photos.intake') && can('photos.view_raw');
   const require = (cityId) => { if (!allowed() || (cityId != null && (!city(cityId) || !cityOk(cityId)))) fail(NOT_ALLOWED); };

@@ -67,6 +67,7 @@ select pg_temp.act_as('');
 create temp table t40_before as
   select pg_temp.grid40() as grid, coalesce((select max(id) from public.audit_log), 0) as audit_id;
 \ir ../migrations/20261017000200_photo_intake.sql
+\ir ../migrations/20261017000500_photo_inbox_all_cities.sql
 select pg_temp.check((select grid from t40_before) = pg_temp.grid40()
                      and not exists (select 1 from public.audit_log where id > (select audit_id from t40_before) and table_name = 'role_permissions'),
   'the file run a second time changes no grid cell and writes no audit row');
@@ -149,13 +150,15 @@ select pg_temp.act_as(:pat);
 select pg_temp.expect_error(format('select public.photo_inbox_day(1::smallint, %L::date)', :'d1'), 'NOT_ALLOWED', 'a patient login is refused');
 select pg_temp.check(public.photo_inbox_counts() = '{"waiting": 0, "check": 0}'::jsonb, 'a patient: zeros');
 select pg_temp.act_as(:asst);
-select pg_temp.check((select string_agg(x ->> 'name', ',') from jsonb_array_elements(public.photo_inbox_cities()) x) = 'Karachi'
-                     and (select jsonb_array_length(public.photo_inbox_cities() -> 0 -> 'branches')) = 3
-                     and public.photo_inbox_cities() -> 0 ->> 'slug' = 'karachi',
-  'the assistant working at Gulshan has the Karachi folder (with its three branches), not Lahore or Islamabad');
+-- Every city folder for everyone who uses the inbox (owner, 17 Oct 2026: "just give photos section to assistants too";
+-- 20261017000500_photo_inbox_all_cities.sql), whatever branch the login works at.
+select pg_temp.check((select array_agg(x ->> 'name') from jsonb_array_elements(public.photo_inbox_cities()) x) @> array['Karachi', 'Lahore']
+                     and public.photo_inbox_cities() -> 0 ->> 'slug' = 'karachi'
+                     and (select jsonb_array_length(public.photo_inbox_cities() -> 0 -> 'branches')) = 3,
+  'the assistant working at Gulshan has every city folder (Karachi first, with its three branches), not only Karachi');
 select pg_temp.check(public.photo_inbox_day(1::smallint, :'d1'::date) -> 'visits' @> jsonb_build_array(jsonb_build_object('visit_id', :'v1', 'full_name', 'Sample Forty One')),
   'she sees the whole city''s day list (DHA too) for matching');
-select pg_temp.expect_error(format('select public.photo_inbox_day(2::smallint, %L::date)', :'d1'), 'NOT_ALLOWED', 'but not Lahore''s');
+select pg_temp.check(public.photo_inbox_day(2::smallint, :'d1'::date) ? 'visits', 'and Lahore''s day too (all city folders)');
 reset role;
 set role anon;
 select pg_temp.act_as('');
@@ -169,7 +172,8 @@ select pg_temp.expect_error(format('select pg_temp.obj(%L)', pg_temp.path(pg_tem
 select pg_temp.obj(:'p1' || '/raw/2026-10-16_Front_aa400001.jpg');
 select pg_temp.check(true, 'the front desk still stores a picture in the patient''s own folder');
 select pg_temp.act_as(:asst2);
-select pg_temp.expect_error(format('select pg_temp.obj(%L)', pg_temp.path(pg_temp.sha('9'), :'d1'::date)), 'row-level security', 'a Lahore assistant cannot store into the Karachi folder');
+select pg_temp.obj(pg_temp.path(pg_temp.sha('7'), :'d1'::date), 100);
+select pg_temp.check(true, 'a Lahore assistant stores into the Karachi folder too (all city folders)');
 select pg_temp.act_as(:asst);
 select pg_temp.obj(pg_temp.path(pg_temp.sha('a'), :'d1'::date), 100);
 select pg_temp.obj(public.photo_thumb_path(pg_temp.path(pg_temp.sha('a'), :'d1'::date)), 10);
