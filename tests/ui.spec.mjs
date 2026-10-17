@@ -9027,7 +9027,7 @@ await step('Create ▾ (front desk): Invoice finds the patient by name, then the
   await m.getByRole('button', { name: 'Cancel' }).click();
   await pbill.waitForSelector('.modal', { state: 'detached' });
   await pbill.locator('.create-btn').click();
-  await pbill.locator('#create-menu-list button', { hasText: 'Patient' }).click();
+  await pbill.locator('#create-menu-list button', { hasText: /^Patient$/ }).click(); // not "Patient login"
   const reg = pbill.locator('.modal', { has: pbill.locator('h2', { hasText: 'New patient' }) });
   await reg.waitFor();
   await reg.getByRole('button', { name: 'Cancel' }).click();
