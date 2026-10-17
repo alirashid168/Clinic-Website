@@ -51,6 +51,8 @@
 -- 8. Unchanged on purpose: private.photo_guard (inbox functions need photos.view_raw, and for such callers the guard only fixes who saved
 --    a photo and when), private.photo_files (for a row pointing into inbox/ it names no file, so the profile's Delete removes the row and
 --    keeps the original in the inbox), the profile uploads.
+-- 9. Admin -> Staff accounts -> Delete (20261015000200): private.staff_record_columns() also counts the Photo inbox photos a login uploaded,
+--    the sets it filed and its Claude calls, so such an account is kept (switched off), never removed.
 --
 -- Additive and safe to run more than once (tables and columns made if missing, policies and triggers dropped if they exist and made
 -- again, functions replaced, the grid cells and the setting added only where missing, so a choice made in the access list is never
@@ -63,7 +65,7 @@
 -- and private.photo_inbox_*; the storage policies "photo inbox uploads", "staff read filed intake edits", "patients read visible intake
 -- photos"; the tables photo_inbox_items, photo_ai_calls, photo_inbox_sets; the photos columns intake_item_id, intake_set_id, view_key,
 -- occasion, release_after, held_back; restore "staff view photos" (20261005000300), "staff upload clinic photos" (20261005000500) and the
--- trigger photos_mark_visit (after insert only, 20261005000200).
+-- trigger photos_mark_visit (after insert only, 20261005000200) and private.staff_record_columns() (20261015000200).
 -- =============================================================================
 begin;
 
@@ -246,6 +248,56 @@ on conflict (key) do nothing;
 -- Helpers (private: nobody calls them directly)
 -- ---------------------------------------------------------------------------------------------------------------
 create schema if not exists private;
+
+-- The staff records of a login (Admin -> Staff accounts -> Delete, 20261015000200): the same list plus the Photo inbox's photos uploaded,
+-- sets filed and Claude calls made, so an account that uploaded photos is kept (switched off), never removed. (The 10-minute edit claim,
+-- photo_inbox_items.edit_lease_by, is not a record.)
+create or replace function private.staff_record_columns()
+returns table (table_name text, column_name text, label text, one text, sort integer)
+language sql immutable set search_path = public
+as $$
+  select t, c, l, o, s::integer from (values
+    ('visits',                 'created_by',           'visits',                       'visit',                       10),
+    ('visits',                 'updated_by',           'visits last changed',          'visit last changed',          11),
+    ('visits',                 'dues_override_by',     'dues holds overridden',        'dues hold overridden',        12),
+    ('visits',                 'protocol_override_by', 'braces rule overrides',        'braces rule override',        13),
+    ('payments',               'received_by',          'payments',                     'payment',                     20),
+    ('invoices',               'created_by',           'invoices',                     'invoice',                     21),
+    ('invoices',               'discount_approved_by', 'discounts approved',           'discount approved',           22),
+    ('discount_requests',      'requested_by',         'discount requests',            'discount request',            23),
+    ('discount_requests',      'decided_by',           'discount requests decided',    'discount request decided',    24),
+    ('payment_plans',          'created_by',           'installment plans',            'installment plan',            25),
+    ('expenses',               'created_by',           'expenses',                     'expense',                     26),
+    ('cash_closings',          'closed_by',            'cash closings',                'cash closing',                27),
+    ('cash_closings',          'verified_by',          'cash closings verified',       'cash closing verified',       28),
+    ('patients',               'created_by',           'patients registered',          'patient registered',          30),
+    ('braces_cases',           'created_by',           'braces cases',                 'braces case',                 31),
+    ('checkups',               'created_by',           'checkup patients',             'checkup patient',             32),
+    ('day_list_closings',      'closed_by',            'days ended',                   'day ended',                   33),
+    ('retainer_cases',         'created_by',           'retainer records',             'retainer record',             34),
+    ('lab_cases',              'created_by',           'lab work cases',               'lab work case',               35),
+    ('inventory_moves',        'created_by',           'stock entries',                'stock entry',                 36),
+    ('photos',                 'uploaded_by',          'photos',                       'photo',                       40),
+    ('xrays',                  'uploaded_by',          'X-rays',                       'X-ray',                       41),
+    ('patient_documents',      'uploaded_by',          'documents',                    'document',                    42),
+    ('patient_flags',          'raised_by',            'patient flags raised',         'patient flag raised',         43),
+    ('patient_flags',          'cleared_by',           'patient flags cleared',        'patient flag cleared',        44),
+    ('photo_inbox_items',      'uploaded_by',          'Photo inbox photos uploaded',  'Photo inbox photo uploaded',  45),
+    ('photo_inbox_sets',       'filed_by',             'Photo inbox sets filed',       'Photo inbox set filed',       46),
+    ('photo_ai_calls',         'called_by',            'Claude photo editing calls',   'Claude photo editing call',   47),
+    ('reminders',              'created_by',           'reminders made',               'reminder made',               50),
+    ('reminders',              'assigned_to',          'reminders assigned',           'reminder assigned',           51),
+    ('complaints',             'resolved_by',          'complaints resolved',          'complaint resolved',          52),
+    ('complaint_messages',     'author_staff',         'complaint replies',            'complaint reply',             53),
+    ('visit_ratings',          'followed_up_by',       'rating follow-ups',            'rating follow-up',            54),
+    ('job_applications',       'updated_by',           'job applications updated',     'job application updated',     55),
+    ('job_application_events', 'by_staff',             'job application notes',        'job application note',        56),
+    ('staff',                  'deactivated_by',       'staff accounts switched off',  'staff account switched off',  60),
+    ('staff',                  'deleted_by',           'staff accounts deleted',       'staff account deleted',       61),
+    ('audit_log',              'actor',                'changes in the audit log',     'change in the audit log',     90)
+  ) as x(t, c, l, o, s)
+$$;
+revoke all on function private.staff_record_columns() from public, anon, authenticated;
 
 -- The city's folder name: karachi, lahore, islamabad (the website's citySlug is the same).
 create or replace function private.photo_inbox_city_slug(p_city smallint)

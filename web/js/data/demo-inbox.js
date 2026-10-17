@@ -41,7 +41,10 @@ function seedInboxDay(db, uid) {
 
 export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   const store = () => { const D = db(); if (!files.has(D)) files.set(D, new Map()); return files.get(D); };
-  const inbox = () => { const D = db(); if (!D.inbox) D.inbox = { items: [], sets: [], calls: [] }; seedInboxDay(D, uid); return D.inbox; };
+  const inbox = () => { const D = db(); if (!D.inbox) D.inbox = { items: [], sets: [], calls: [] }; return D.inbox; };
+  // The demo's day of the Photo inbox comes with the Photo inbox page itself (its city list, overview, day, uploads), never with the
+  // badge every page asks for, so no other screen's sample numbers change.
+  const openInbox = () => { seedInboxDay(db(), uid); return inbox(); };
   const nowIso = () => new Date().toISOString();
   const hold = () => { const v = Number(db().settings.photo_inbox_hold_hours ?? 24); return Math.min(168, Math.max(0, Number.isFinite(v) ? v : 24)) * 60 * MIN; };
   const city = (id) => db().cities.find((c) => c.id === Number(id));
@@ -228,7 +231,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
   return {
     async photoInboxCities() {
       if (!allowed()) return [];
-      inbox();
+      openInbox();
       return db().cities.filter((c) => cityOk(c.id) && db().branches.some((b) => b.city_id === c.id && b.active)).map((c) => ({
         id: c.id, name: c.name, slug: citySlug(c.name), branches: db().branches.filter((b) => b.city_id === c.id && b.active).map((b) => ({ id: b.id, code: b.code, name: b.name })),
       }));
@@ -250,6 +253,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     },
     async photoInboxAddItems(list) {
       require(null);
+      openInbox();
       const out = [];
       const today = todayISO();
       const dayNum = (iso) => Date.parse(`${iso}T12:00:00Z`) / (24 * 60 * MIN);
@@ -284,6 +288,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
     },
     async photoInboxOverview(cityId) {
       require(cityId);
+      openInbox();
       const c = city(cityId);
       const its = inbox().items.filter((i) => i.city_id === Number(cityId));
       const sets = inbox().sets.filter((s) => s.city_id === Number(cityId));
@@ -304,7 +309,7 @@ export function inboxDemo({ db, me, can, fail, uid, clone, audit, patient }) {
         check_days: [...new Set(sets.filter((s) => s.status === 'filed' && s.ai_flag).map((s) => s.photo_day))].sort(),
       };
     },
-    async photoInboxDay(cityId, day) { require(cityId); inbox(); return dayView(cityId, day); },
+    async photoInboxDay(cityId, day) { require(cityId); openInbox(); return dayView(cityId, day); },
     async photoInboxApply(cityId, day, plan) {
       require(cityId);
       const regroupable = inbox().items.filter((i) => i.city_id === Number(cityId) && i.photo_day === day && (!i.set_id || (setById(i.set_id)?.status === 'waiting' && !setById(i.set_id)?.manual)));

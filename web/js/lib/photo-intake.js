@@ -549,6 +549,7 @@ const WAIT_SENTENCES = {
   MANUAL: () => 'Split or put back: choose the patient.',
   UNDONE: () => 'The filing was undone: choose the patient.',
   MIXED: () => 'Claude thinks these photos show more than one patient. Split the set if needed.',
+  NOT_CLINICAL: () => 'Claude thinks a photo here is not a patient photo (floor, ceiling, an accidental shot). Split it off, or choose the patient.',
   LONG_SET: () => 'Many photos over a long time: maybe more than one patient.',
   WEAK_TIMES: () => 'The list has no real check-in or treatment times at that time (statuses were marked late or in one go), so the system cannot tell who it was.',
   BEFORE_ARRIVAL: () => 'Taken before the patient was checked in.',
@@ -671,6 +672,7 @@ export function planDay(day) {
     else if (!cands.length) reason = 'NO_VISIT_DAY';
     else if (u.manual) reason = u.prev_reason === 'UNDONE' ? 'UNDONE' : 'MANUAL';
     else if (u.ai_flag === 'mixed_people') reason = 'MIXED';
+    else if (u.ai_flag === 'not_clinical') reason = 'NOT_CLINICAL';
     else if (u.count > MAX_AUTO_PHOTOS || u.span > SPAN_SEC) reason = 'LONG_SET';
     else if (!f || f.quality !== 'good' || f.status === 'waiting') reason = 'WEAK_TIMES';
     else if (u.first < f.anchor - 10 * MIN) reason = 'BEFORE_ARRIVAL';
