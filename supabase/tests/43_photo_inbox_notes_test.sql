@@ -1,7 +1,7 @@
 -- The note box and old photos (20261017000600_photo_inbox_notes.sql). Made-up people only.
 --   0. the file runs again (after 41 ran 20261017000200 once more): nothing breaks; the ai_status check takes 'skipped'; one read policy;
---   1. who may: the front desk and anonymous visitors start no upload; an assistant only in her city; nobody writes the uploads table
---      directly; the uploads are read by inbox staff of that city only;
+--   1. who may: the front desk and anonymous visitors start no upload; nobody writes the uploads table directly; the uploads are read by
+--      Photo inbox staff (the city rule photo_inbox_city_ok of 20261017000500), never by the front desk;
 --   2. the note is stored (spaces tidied, at most 500 characters); the same upload again answers the stored one; another kind, city or
 --      person is refused; photos cannot be registered under another person's upload;
 --   3. the note is read like the website reads it (Mr#s without phone numbers, dates and years; the month);
@@ -15,7 +15,7 @@
 \set ON_ERROR_STOP 1
 \set fd43    '''00000000-0000-0000-0000-000000004301'''
 \set asst43  '''00000000-0000-0000-0000-000000004302'''
-\set lah43   '''00000000-0000-0000-0000-000000004303'''
+\set nn43    '''00000000-0000-0000-0000-000000004303'''
 \set bA      '''00000000-0000-4000-8000-0000000043a1'''
 \set bB      '''00000000-0000-4000-8000-0000000043b1'''
 \set bC      '''00000000-0000-4000-8000-0000000043c1'''
@@ -92,11 +92,11 @@ select pg_temp.check(cardinality(private.photo_inbox_note_words('Aisha Khan phot
   'the name words of a note, in their everyday spelling ("Aisha" = "Ayesha")');
 
 begin;
-insert into auth.users (id, email) values (:fd43, 'fd43@dralirashid.com'), (:asst43, 'asst43@dralirashid.com'), (:lah43, 'lah43@dralirashid.com');
+insert into auth.users (id, email) values (:fd43, 'fd43@dralirashid.com'), (:asst43, 'asst43@dralirashid.com'), (:nn43, 'nn43@dralirashid.com');
 insert into public.staff (id, full_name, email, role, restrict_to_branches, branch_ids) values
   (:fd43, 'Front Desk Fortythree', 'fd43@dralirashid.com', 'front_desk', true, '{1}'),
   (:asst43, 'Assistant Fortythree', 'asst43@dralirashid.com', 'assistant', true, '{1}'),
-  (:lah43, 'Assistant Lahore Fortythree', 'lah43@dralirashid.com', 'assistant', true, '{4}');
+  (:nn43, 'Assistant NN Fortythree', 'nn43@dralirashid.com', 'assistant', true, '{2}');
 insert into public.patients (mr_number, full_name, phone, first_branch_id) values ('43001', 'Sample Fortythree One', '03005554301', 3);
 insert into public.patients (mr_number, full_name, phone, first_branch_id) values ('43002', 'Sample Fortythree Two', '03005554302', 3);
 insert into public.patients (mr_number, full_name, phone, first_branch_id) values ('43003', 'Sample Fortythree Three', '03005554303', 4);
@@ -121,8 +121,8 @@ select id as v3 from public.visits where patient_id = :'p3' and visit_date = :'d
 set role authenticated;
 select pg_temp.act_as(:fd43);
 select pg_temp.expect_error(format('select public.photo_inbox_start_batch(%L, 1::smallint, %L, %L)', :bA, 'day', 'x'), 'NOT_ALLOWED', 'the front desk starts no upload');
-select pg_temp.act_as(:lah43);
-select pg_temp.expect_error(format('select public.photo_inbox_start_batch(%L, 1::smallint, %L, %L)', :bA, 'day', 'x'), 'NOT_ALLOWED', 'a Lahore assistant starts no upload in the Karachi folder');
+select pg_temp.check((select qual from pg_policies where schemaname = 'public' and tablename = 'photo_inbox_batches') like '%photo_inbox_city_ok%',
+  'the uploads are read by the Photo inbox city rule (photo_inbox_city_ok: every "Use the Photo inbox" holder, every city folder)');
 select pg_temp.act_as(:asst43);
 select pg_temp.expect_error(format('insert into public.photo_inbox_batches (id, city_id, kind, created_by) values (%L, 1, %L, %L)', :bA, 'day', :asst43),
   'permission denied', 'nobody writes the uploads table directly');
@@ -154,9 +154,9 @@ select pg_temp.check((select count(*) from public.photo_inbox_batches where crea
   'the assistant reads her uploads (8: 5 of today''s photos, 3 of old photos)');
 select pg_temp.act_as(:fd43);
 select pg_temp.check((select count(*) from public.photo_inbox_batches) = 0, 'the front desk reads no upload');
-select pg_temp.act_as(:lah43);
-select pg_temp.check((select count(*) from public.photo_inbox_batches where city_id = 1) = 0, 'a Lahore assistant reads no Karachi upload');
-select pg_temp.expect_error(format('select public.photo_inbox_start_batch(%L, 1::smallint, %L, null)', :bA, 'day'), 'NOT_ALLOWED', 'nor reuses one');
+select pg_temp.act_as(:nn43);
+select pg_temp.check((select count(*) from public.photo_inbox_batches where city_id = 1) = 8, 'another assistant with "Use the Photo inbox" reads the uploads of the folder (with their notes)');
+select pg_temp.expect_error(format('select public.photo_inbox_start_batch(%L, 1::smallint, %L, null)', :bA, 'day'), 'PHOTO_BAD_INPUT', 'but cannot take over one');
 
 -- 4. Old photos: any past day, no trusted time, no Claude; registered edited with their as-it-is copy. Today's photos keep the week.
 select pg_temp.act_as(:asst43);
@@ -185,9 +185,9 @@ select pg_temp.expect_error(format('select public.photo_inbox_add_items(jsonb_bu
   pg_temp.sha43('7'), '2024-03-11', '2024-03-10 11:00:00+05', :bO, 'exif_modified'), 'PHOTO_BAD_INPUT', 'an old photo goes to the day its own time says');
 reset role;
 set role authenticated;
-select pg_temp.act_as(:lah43);
+select pg_temp.act_as(:nn43);
 select pg_temp.expect_error(format('select public.photo_inbox_add_items(jsonb_build_array(pg_temp.it43(%L, %L::date, %L::timestamptz, %L)))',
-  pg_temp.sha43('1'), :'d1', :'d1' || ' 18:35:00+05', :bA), 'NOT_ALLOWED', 'a Lahore assistant registers nothing in Karachi');
+  pg_temp.sha43('1'), :'d1', :'d1' || ' 18:35:00+05', :bA), 'PHOTO_BAD_INPUT', 'nor register photos under another person''s upload (and its note)');
 select pg_temp.act_as(:asst43);
 select public.photo_inbox_add_items(jsonb_build_array(
   pg_temp.it43(pg_temp.sha43('1'), :'d1'::date, (:'d1' || ' 18:35:00+05')::timestamptz, :bA),

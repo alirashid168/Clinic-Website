@@ -33,7 +33,9 @@
 -- 5. photo_inbox_sets.kind ('day' / 'old', worked out with the set's photos); file_set and move_set file an old set to a patient without a
 --    visit, with its note's occasion. photo_inbox_overview also lists the days of photos uploaded in the last 30 days (an old photo of 2024
 --    filed today is on Filed). photo_inbox_day answers the day's batches (kind, note, the Mr#s read, the patients they name).
--- 6. Nothing else changes: the permissions (photos.intake + photos.view_raw + the city), the storage rules, the 24-hour window, the editing.
+-- 6. Nothing else changes: the permissions (photos.intake + photos.view_raw + the city folder by public.photo_inbox_city_ok, which opens
+--    every city folder to every "Use the Photo inbox" holder: 20261017000500_photo_inbox_all_cities.sql, made here the same way when that
+--    file has not run yet), the storage rules, the 24-hour window, the editing.
 --
 -- Additive and safe to run more than once (table, column and policy made if missing or dropped and made again, the ai_status check widened,
 -- functions replaced). No backslash anywhere in this file.
@@ -69,10 +71,25 @@ create table if not exists public.photo_inbox_batches (
 -- upload starts (it reads every patient's name: about half a second), so the day's list stays quick.
 alter table public.photo_inbox_batches add column if not exists name_patient_ids uuid[] not null default '{}';
 create index if not exists photo_inbox_items_batch_idx on public.photo_inbox_items (upload_batch) where upload_batch is not null;
+-- The city rule of the Photo inbox (owner, 17 Oct 2026: "just give photos section to assistants too"): every "Use the Photo inbox" holder
+-- may use every city folder. public.photo_inbox_city_ok() is made by 20261017000500_photo_inbox_all_cities.sql; when that file has not run
+-- yet it is made here with the very same body (that file replaces it, and the inbox functions, when it runs).
+do $$
+begin
+  if to_regprocedure('public.photo_inbox_city_ok(smallint)') is null then
+    execute $f$
+      create function public.photo_inbox_city_ok(p_city smallint)
+      returns boolean language sql stable security definer set search_path = public as $b$
+        select auth.uid() is not null and (public.has_perm('photos.intake') or public.can_access_city(p_city))
+      $b$ $f$;
+    execute 'revoke all on function public.photo_inbox_city_ok(smallint) from public, anon';
+    execute 'grant execute on function public.photo_inbox_city_ok(smallint) to authenticated';
+  end if;
+end $$;
 alter table public.photo_inbox_batches enable row level security;
 drop policy if exists "photo inbox staff read" on public.photo_inbox_batches;
 create policy "photo inbox staff read" on public.photo_inbox_batches for select to authenticated
-  using (public.has_perm('photos.intake') and public.has_perm('photos.view_raw') and public.can_access_city(city_id));
+  using (public.has_perm('photos.intake') and public.has_perm('photos.view_raw') and public.photo_inbox_city_ok(city_id));
 revoke insert, update, delete, truncate on public.photo_inbox_batches from anon, authenticated;
 revoke all on public.photo_inbox_batches from anon;
 
