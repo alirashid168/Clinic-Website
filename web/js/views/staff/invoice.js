@@ -2,6 +2,7 @@
 import { h, mount, rupees, shortDate, modal, field, select, toast, friendlyError, isLostAnswer, showFormErrors, clearFieldErrors, localISO, addMonthsISO, addDaysISO, capFirst, announce } from '../../ui/dom.js';
 import { state, branchName, can, myBranches, defaultBranchId } from '../../state.js';
 import { CONFIG } from '../../config.js';
+import { readPayments, nextMethod } from '../../lib/split-payments.js';
 
 // Accents come from the CSS tokens so a brand colour change is made in one place.
 export const TEMPLATES = {
@@ -62,6 +63,93 @@ const PAY_METHODS = [
   { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' },
 ];
 const METHOD_WORDS = { cash: 'Cash', card: 'Card', bank_transfer: 'Online', cheque: 'Cheque', other: 'Other' };
+/** "Cash Rs 20,000 and Card Rs 15,000": payments ([{ method, amount }]) as a message says them. */
+const payWords = (pays) => {
+  const said = pays.map((p) => `${METHOD_WORDS[p.method] || p.method} ${rupees(Math.abs(Number(p.amount)))}`);
+  return said.length > 1 ? `${said.slice(0, -1).join(', ')} and ${said[said.length - 1]}` : said[0] || '';
+};
+
+/**
+ * The money taken now as one or more payments (owner, 17 Oct 2026: "some times patient pays half in cash and half by card or smthng,
+ * there should be a add payment too so multiple payment forms could be entered"): a row per payment with its method, its amount and
+ * × (the first row stays), and "+ Add payment" under them. A new row starts with a method no row has yet and with fillNew(paid so far).
+ * labels: the first row's method and amount labels (hint under its amount, required on it); the rows after it are named "<label>,
+ * payment 2" for a screen reader, as the invoice lines are. onChange() on every change; onType() when an amount is typed.
+ * Each row keeps its own idempotency key while the form is open (row.key), and the payment it saved (row.saved): a saved row, or one
+ * whose answer was lost (row.unsure), is locked, so what was sent under its key cannot change. read() gives readPayments' answer with
+ * each payment's row, and the form's errors on the amount boxes.
+ */
+function paymentRows({ methods = PAY_METHODS, method = 'cash', amount = '', labels = { method: 'Payment method', amount: 'Payment (Rs)' }, hint = null, required = false, fillNew = () => '', onChange, onType } = {}) {
+  const rows = [];
+  const box = h('div', { class: 'bill-pay-rows' });
+  const addBtn = h('button', { class: 'btn btn-small', type: 'button', onclick: () => { const r = addRow(); onChange?.(); r.amount.focus(); } }, '+ Add payment');
+  const relabel = () => rows.forEach((r, k) => {
+    if (!k) return;
+    r.method.setAttribute('aria-label', `${labels.method}, payment ${k + 1}`);
+    r.amount.setAttribute('aria-label', `${labels.amount}, payment ${k + 1}`);
+    r.remove.setAttribute('aria-label', `Remove payment ${k + 1}`);
+  });
+  const read = () => {
+    const out = readPayments(rows.map((r) => ({ method: r.method.value, amount: r.amount.value })));
+    return { ...out, errors: out.errors.map((e) => ({ input: rows[e.index].amount, message: e.message })), payments: out.payments.map((p) => ({ ...p, row: rows[p.index] })) };
+  };
+  function addRow() {
+    const first = !rows.length;
+    const r = { key: crypto.randomUUID(), saved: null, unsure: false };
+    r.method = select(methods, first ? method : nextMethod(methods, rows.map((x) => x.method.value)), { onchange: () => onChange?.() });
+    const start = first ? amount : fillNew(read().paid);
+    r.amount = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', value: start === '' || start === null || start === undefined ? '' : String(start), oninput: () => { onType?.(); onChange?.(); } });
+    r.remove = h('button', { type: 'button', class: 'icon-btn bill-remove', title: 'Remove this payment', hidden: first, onclick: () => {
+      rows.splice(rows.indexOf(r), 1);
+      r.row.remove();
+      relabel();
+      onChange?.();
+      addBtn.focus();
+    } }, h('span', { 'aria-hidden': 'true' }, '×'));
+    r.row = first
+      ? h('div', { class: 'bill-pay-row' }, field(labels.method, r.method), field(labels.amount, r.amount, hint, { required }), r.remove)
+      : h('div', { class: 'bill-pay-row' }, h('div', { class: 'field' }, r.method), h('div', { class: 'field' }, r.amount), r.remove);
+    rows.push(r);
+    box.append(r.row);
+    relabel();
+    return r;
+  }
+  addRow();
+  const lock = (r) => { r.method.disabled = true; r.amount.disabled = true; r.remove.disabled = true; };
+  return { el: box, addBtn, rows, read, lock, first: () => rows[0] };
+}
+
+/**
+ * Saves each payment of list (paymentRows' read().payments) that is not saved yet, one recordPayment each with its row's key, so a
+ * retry never saves one twice; base: what they share (patient, branch, invoice, notes); sign -1 for a refund. One that fails does not
+ * stop the others. Gives { failed: [{ pay, error }] }; each row saved has row.saved, and a lost answer marks row.unsure.
+ */
+async function sendPayments(list, base, { sign = 1, lock } = {}) {
+  const failed = [];
+  for (const p of list) {
+    const r = p.row;
+    if (r.saved) continue;
+    try {
+      const sent = { ...base, amount: sign * p.amount, method: p.method };
+      // The key goes in the options argument (data contract); it is also on the payload for adapters that read it there.
+      r.saved = { ...sent, ...(await state.data.recordPayment({ ...sent, idempotencyKey: r.key }, { idempotencyKey: r.key })) };
+      r.unsure = false;
+      lock?.(r);
+    } catch (error) {
+      r.unsure = r.unsure || isLostAnswer(error);
+      if (r.unsure) lock?.(r);
+      failed.push({ pay: p, error });
+    }
+  }
+  return { failed };
+}
+
+/** What a failed payment is told as: "Card Rs 15,000 was not saved: <why>" or, after a lost answer, "may or may not have been saved". */
+const notSavedWords = ({ pay, error }) => {
+  if (pay.row.unsure) return `${payWords([pay])} may or may not have been saved (${navigator.onLine ? 'the server did not answer' : 'the connection dropped'}).`;
+  const why = friendlyError(error);
+  return `${payWords([pay])} was not saved: ${why}${/[.!?]$/.test(why) ? '' : '.'}`;
+};
 
 /**
  * The patient as the printed bill needs them (phone, gender, date of birth). A row of the Aaj ki List carries only a few of the
@@ -112,7 +200,10 @@ function billSheet(inv, patient, t, payments, credit = 0) {
   // credit: money the patient paid ahead (an advance, or more than an earlier invoice) that goes towards this one (invoiceBalances).
   const ahead = Math.max(0, Math.min(Number(credit) || 0, total - mine.reduce((s, p) => s + Number(p.amount), 0)));
   const paid = mine.reduce((s, p) => s + Number(p.amount), 0) + ahead;
-  const modes = [...new Set(mine.filter((p) => Number(p.amount) > 0).map((p) => METHOD_WORDS[p.method] || p.method))];
+  // Paid in more than one way (half in cash, half by card), the bill says how much each way: "Cash Rs. 20,000, Card Rs. 15,000".
+  const byMode = new Map();
+  for (const p of mine) if (Number(p.amount) > 0) { const w = METHOD_WORDS[p.method] || p.method; byMode.set(w, (byMode.get(w) || 0) + Number(p.amount)); }
+  const modes = byMode.size > 1 ? [...byMode].map(([w, a]) => `${w} ${billRupees(a)}`) : [...byMode.keys()];
   const age = ageOn(patient?.date_of_birth);
   const ageGender = [age === null ? '' : `${age} Y`, patient?.gender ? capFirst(patient.gender) : ''].filter(Boolean).join(' / ');
   const line = (label, value) => (value || value === 0 ? h('div', { class: 'bill-field' }, h('strong', {}, `${label}: `), String(value)) : null);
@@ -400,9 +491,10 @@ function invoiceEditor({ items = null, treatment = '', doctorId = '', discount =
  * "Performed by"), treatment (the row's treatment: the first line when it is on the price list), onDone(invoice) after saving,
  * afterBill() once the bill shown after saving is closed (or the form, when only the invoice was saved).
  *
+ * The money now may be more than one payment (half in cash, half by card: "+ Add payment"); each is saved as a payment of its own.
  * A slow line or a double click never makes a second invoice or a second payment: the invoice has one idempotency key per opened
- * form (save_invoice); once it is saved the form keeps it and only the payment is left to save, and a payment whose answer was lost
- * is looked up on that invoice before it is sent again.
+ * form (save_invoice), and so has each payment (its id); once the invoice is saved the form keeps it and only the payments not saved
+ * yet are left to save (the saved ones are locked and named).
  */
 export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatment, onDone, afterBill } = {}) {
   // One key per opened form: pressing Save again after a failure cannot create a second invoice.
@@ -412,15 +504,17 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
   const details = billPatient(patient).then((p) => { who = p || patient; });
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
   const dueEl = h('div', { class: 'bill-due', 'aria-live': 'polite' });
-  const method = select(PAY_METHODS, 'cash');
-  let paidTyped = false; // the amount follows the total until it is typed in
+  let paidTyped = false; // the first payment follows the total until an amount is typed in or a payment is added
   let total = 0;
   const showDue = () => {
-    const paid = Math.max(0, Number(paidNow.value || 0));
+    const paid = pays.read().paid;
     dueEl.textContent = paid < total ? `Due ${rupees(total - paid)}` : paid > total ? `Advance ${rupees(paid - total)} (counts towards the next invoice)` : 'Paid in full';
     dueEl.className = ['bill-due', paid < total ? 'status-bad' : 'status-ok'].join(' ');
   };
-  const paidNow = h('input', { type: 'number', min: 0, step: 100, inputmode: 'numeric', oninput: () => { paidTyped = true; showDue(); } });
+  // Half in cash and half by card: "+ Add payment" starts the next payment with what is still due.
+  const pays = paymentRows({ hint: 'What the patient pays now. Less is fine; 0 when nothing is paid now.', fillNew: (paid) => Math.max(0, total - paid) || '',
+    onType: () => { paidTyped = true; }, onChange: () => { if (pays.rows.length > 1) paidTyped = true; showDue(); } });
+  const paidNow = pays.first().amount;
   const editor = invoiceEditor({
     treatment, doctorId: (visitStaff || []).find((s) => s.role === 'doctor')?.clinician_id || '',
     onChange: (t) => { total = t.total; if (!paidTyped) paidNow.value = String(total); showDue(); },
@@ -431,35 +525,32 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
     savedLine,
     invoicePart,
     h('fieldset', { class: 'bill-pay' }, h('legend', {}, 'Payment now'),
-      h('div', { class: 'form-grid' }, field('Payment method', method), field('Payment (Rs)', paidNow, 'What the patient pays now. Less is fine; 0 when nothing is paid now.')),
-      dueEl),
+      pays.el,
+      h('div', { class: 'bill-pay-foot' }, pays.addBtn, dueEl)),
     editor.noteField);
   showDue();
 
   let stuck = null; // the message of an IDEMPOTENCY_MISMATCH: this form's key is used up, so Save is refused until a new form is opened
-  let inv = null; // the saved invoice: Save again only finishes the payment
-  let pay = null; // the saved payment
-  let paySent = null; // the payment as it was last sent (a lost answer: what may have been saved)
-  let payUnsure = false; // a payment was sent and its answer was lost: it may be saved
+  let inv = null; // the saved invoice: Save again only finishes the payments
   let credit = 0; // an advance the patient paid earlier that goes towards this invoice (shown on the bill)
   let finished = false;
   let print = false;
   let savedWords = '';
+  const savedPays = () => pays.rows.filter((r) => r.saved).map((r) => r.saved);
   const lockInvoice = () => {
     editor.lock();
     branchSel.disabled = true;
-    savedLine.textContent = `Invoice ${inv.invoice_no} is saved. Only the payment is left: press Save again, or Cancel and use Take payment later.`;
+    const done = savedPays();
+    savedLine.textContent = `Invoice ${inv.invoice_no} is saved.${done.length ? ` Saved with it: ${payWords(done)}.` : ''} Only the ${done.length ? 'rest of the payment' : 'payment'} is left: press Save again, or Cancel and use Take payment later.`;
     savedLine.hidden = false;
   };
 
   async function save(andPrint) {
     if (stuck) { toast(stuck, 'error', 10000); return false; }
     clearFieldErrors(body);
-    const paidText = paidNow.value.trim();
-    const paid = paidText === '' ? 0 : Number(paidText);
     const form = inv ? null : editor.read();
-    const errors = form ? [...form.errors] : [];
-    if (!(paid >= 0)) errors.push({ input: paidNow, message: 'The payment cannot be negative. Write 0 when nothing is paid now.' });
+    const money = pays.read();
+    const errors = [...(form ? form.errors : []), ...money.errors];
     if (errors.length) { showFormErrors(body, errors); return false; }
 
     if (!inv) {
@@ -475,31 +566,22 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
       }
       lockInvoice();
     }
-    if (paid > 0 && !pay) {
-      try {
-        // The earlier try may have been saved: this invoice is new, so a payment on it can only be that one. The look-up reads a few of
-        // its columns (the live patientBilling: id, invoice, amount, time), so the rest (method, branch) are those of the try that was
-        // sent, for the bill's Payment Mode and the receipt.
-        if (payUnsure) {
-          const found = (await d.patientBilling(patient.id)).payments?.find((x) => x.invoice_id === inv.id);
-          if (found) pay = { ...paySent, ...found };
-        }
-        if (!pay) {
-          paySent = { patient_id: patient.id, branch_id: inv.branch_id, amount: paid, method: method.value, invoice_id: inv.id, notes: null };
-          pay = await d.recordPayment(paySent);
-        }
-      } catch (e) {
-        payUnsure = payUnsure || isLostAnswer(e);
-        // (a lost answer: the payment may be saved, so the error's own words, "did not go through", are not said)
-        toast(`Invoice ${inv.invoice_no} is saved. ${payUnsure ? `The payment may or may not have been saved: ${navigator.onLine ? 'the server did not answer' : 'the connection dropped'}.` : `The payment was not saved: ${friendlyError(e)}`} Press Save again to ${payUnsure ? 'check and finish' : 'try again'}.`, 'error', 12000);
-        return false;
-      }
+    // Each payment is saved on its own with its own key (half in cash, half by card), so Save again after a lost answer or a failure
+    // saves only those not saved yet, never one twice, and does not send the invoice again.
+    const { failed } = await sendPayments(money.payments, { patient_id: patient.id, branch_id: inv.branch_id, invoice_id: inv.id, notes: null }, { lock: pays.lock });
+    if (failed.length) {
+      const done = savedPays();
+      lockInvoice();
+      // (a lost answer: the payment may be saved, so the error's own words, "did not go through", are not said)
+      toast(`Invoice ${inv.invoice_no} is saved.${done.length ? ` Saved: ${payWords(done)}.` : ''} ${failed.map(notSavedWords).join(' ')} Press Save again to ${failed.some((f) => f.pay.row.unsure) ? 'check and finish' : 'try again'}.`, 'error', 12000);
+      return false;
     }
     finished = true;
     print = andPrint;
     // Said on the bill that opens next (a toast would lie over its buttons).
     const words = inv.status === 'pending_approval' ? 'Invoice saved. The discount is waiting for approval.' : `Invoice ${inv.invoice_no} saved.`;
-    savedWords = pay ? `${words} Payment of ${rupees(pay.amount)} saved.` : words;
+    const done = savedPays();
+    savedWords = done.length > 1 ? `${words} Payments saved: ${payWords(done)}.` : done.length ? `${words} Payment of ${rupees(done[0].amount)} saved.` : words;
     announce(savedWords);
     await Promise.all([details, afterSave(onDone, inv), creditFor()]);
     return undefined;
@@ -507,7 +589,7 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
   // What stays due on the bill counts an advance paid earlier (invoiceBalances). Only asked when something stays due; without an answer
   // the bill shows this invoice's own payments, as before.
   async function creditFor() {
-    const due = Number(inv.total ?? inv.subtotal - inv.discount_amount) - Number(pay?.amount || 0);
+    const due = Number(inv.total ?? inv.subtotal - inv.discount_amount) - savedPays().reduce((s, p) => s + Number(p.amount), 0);
     if (!(due > 0)) return;
     try {
       const { invoices, payments } = await d.patientBilling(patient.id);
@@ -525,8 +607,11 @@ export function newInvoiceModal(patient, { branchId, visitId, visitStaff, treatm
       // Saved: the bill, with Print (and Print receipt for the money taken); "Save & Print" prints it at once.
       if (finished) {
         const due = Number(inv.total ?? inv.subtotal - inv.discount_amount);
-        printInvoice(inv, who, { payments: pay ? [pay] : [], credit, receipt: pay ? { payment: pay, due: Math.max(0, due - Number(pay.amount) - credit) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
-      } else if (inv) afterSave(onDone, inv).then(() => afterBill?.()); // the invoice was saved, the payment was not: the page still shows the new invoice
+        const done = savedPays();
+        const paid = done.reduce((s, p) => s + Number(p.amount), 0);
+        // One receipt for the money taken now, with each payment on it when there are more than one.
+        printInvoice(inv, who, { payments: done, credit, receipt: done.length ? { payment: done.length > 1 ? done : done[0], due: Math.max(0, due - paid - credit) } : null, autoPrint: print, saved: savedWords, onClose: afterBill });
+      } else if (inv) afterSave(onDone, inv).then(() => afterBill?.()); // the invoice was saved, a payment was not: the page still shows the new invoice
     },
   });
 }
@@ -689,42 +774,71 @@ export async function paymentModal(patient, { branchId, dues, invoices, payments
   // its invoice looking unpaid here, while the dues count every branch. So the amount filled in is never more than the dues.
   const cap = can('dues.view') && Number.isFinite(dues) ? Math.max(0, dues) : Infinity;
   const fill = (i) => Math.min(i.remaining, cap) || '';
-  const amount = h('input', { type: 'number', min: 1, step: 100, value: first ? fill(first) : dues > 0 ? dues : '' });
-  const method = select([{ value: 'cash', label: 'Cash' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'card', label: 'Card' }, { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' }], 'cash');
+  const target = () => { const i = open.find((x) => x.id === invoiceSel.value); return i ? fill(i) || 0 : 0; };
+  // Half in cash and half by card: "+ Add payment" starts the next payment with what is still unpaid on the invoice picked.
+  const pays = paymentRows({ methods: [{ value: 'cash', label: 'Cash' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'card', label: 'Card' }, { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' }],
+    amount: first ? fill(first) : dues > 0 ? dues : '', labels: { method: 'Method', amount: 'Amount (Rs)' }, required: true, fillNew: (paid) => Math.max(0, target() - paid) || '' });
+  const amount = pays.first().amount;
+  amount.min = 1;
   const branchSel = select(myBranches().map((b) => ({ value: b.id, label: b.name })), branchId || defaultBranchId());
   const invoiceSel = select([
     ...open.map((i) => ({ value: i.id, label: `${i.invoice_no} · ${shortDate(i.issue_date)} · ${rupees(i.remaining)} unpaid` })),
     ...balances.filter((i) => i.remaining <= 0).map((i) => ({ value: i.id, label: `${i.invoice_no} · ${shortDate(i.issue_date)} · paid` })),
     { value: '', label: 'Not for a particular invoice (advance)' },
-  ], first?.id || '', { onchange: (e) => { const i = open.find((x) => x.id === e.target.value); if (i && !refund?.checked) amount.value = fill(i); } });
+  ], first?.id || '', { onchange: (e) => { const i = open.find((x) => x.id === e.target.value); if (i && !refund?.checked && pays.rows.length === 1 && !pays.first().saved) amount.value = fill(i); } });
   const notes = h('input', { placeholder: 'Optional' });
   const refund = can('billing.refund') ? h('input', { type: 'checkbox' }) : null;
   const body = h('div', {},
     h('p', { class: 'muted' }, `Pending dues: ${rupees(Math.max(0, dues || 0))}`),
-    h('div', { class: 'form-grid' }, field('Amount (Rs)', amount, null, { required: true }), field('Method', method), field('Branch', branchSel)),
+    pays.el,
+    h('div', { class: 'bill-pay-foot' }, pays.addBtn),
+    h('div', { class: 'form-grid' }, field('Branch', branchSel)),
     field('For invoice', invoiceSel, open.length ? 'Pick the invoice this money is for. The unpaid amount fills in by itself.' : 'No unpaid invoice. An advance counts towards the next invoice.'),
     field('Notes', notes),
     refund ? h('label', { class: 'inline' }, refund, 'This is a refund (money given back)') : null);
+  // Once one of the payments is saved, what they share (the branch, the invoice, the note, refund or not) stays as it was saved with.
+  const lockShared = () => { for (const el of [branchSel, invoiceSel, notes, refund]) if (el) el.disabled = true; };
+  let anySaved = false;
+  let finished = false;
   modal(`Take payment · ${patient.full_name}`, body, [
     { label: 'Cancel' },
     { label: 'Save payment', primary: true, onClick: async () => {
       clearFieldErrors(body);
-      const value = Number(amount.value);
-      if (!(value > 0)) { showFormErrors(body, [{ input: amount, message: 'Enter an amount above zero.' }]); return false; }
-      try {
-        await state.data.recordPayment({ patient_id: patient.id, branch_id: Number(branchSel.value), amount: refund?.checked ? -value : value, method: method.value, invoice_id: invoiceSel.value || null, notes: notes.value || null });
-      } catch (e) { toast(friendlyError(e), 'error'); return false; }
-      toast(refund?.checked ? 'Refund recorded.' : `Payment of ${rupees(value)} saved.`, 'ok');
+      const money = pays.read();
+      if (money.errors.length) { showFormErrors(body, money.errors); return false; }
+      if (!money.payments.length && !anySaved) { showFormErrors(body, [{ input: amount, message: 'Enter an amount above zero.' }]); return false; }
+      const sign = refund?.checked ? -1 : 1;
+      const { failed } = await sendPayments(money.payments, { patient_id: patient.id, branch_id: Number(branchSel.value), invoice_id: invoiceSel.value || null, notes: notes.value || null },
+        { sign, lock: pays.lock });
+      const done = pays.rows.filter((r) => r.saved).map((r) => r.saved);
+      if (done.length) { anySaved = true; lockShared(); }
+      if (failed.length) {
+        toast(`${done.length ? `Saved: ${payWords(done)}. ` : ''}${failed.map(notSavedWords).join(' ')}${done.length || failed.some((f) => f.pay.row.unsure) ? ` Press Save payment again to ${failed.some((f) => f.pay.row.unsure) ? 'check and finish' : 'save the rest'}.` : ''}`, 'error', 12000);
+        return false;
+      }
+      finished = true;
+      toast(sign < 0 ? 'Refund recorded.' : done.length > 1 ? `Payments saved: ${payWords(done)}.` : `Payment of ${rupees(done[0]?.amount || 0)} saved.`, 'ok');
       await afterSave(onDone);
     } },
-  ]);
+  ], { onClose: () => { if (anySaved && !finished) afterSave(onDone); } }); // (some were saved, then Cancel: the page shows them)
 }
 
-/** A payment receipt (the money received, which invoice it was for, what is still unpaid). */
+/**
+ * A payment receipt (the money received, which invoice it was for, what is still unpaid). payment may be a list: the payments taken
+ * together (half in cash, half by card), each on its own line with its method, then what they add up to.
+ */
 export function receiptSheet(payment, patient, invoice, remainingDues) {
+  const all = Array.isArray(payment) ? payment : [payment];
+  payment = all[0];
   const branch = state.ref.branches.find((b) => b.id === payment.branch_id);
-  const method = { cash: 'Cash', bank_transfer: 'Bank transfer', card: 'Card', cheque: 'Cheque', other: 'Other' }[payment.method] || payment.method;
+  const methodOf = (p) => ({ cash: 'Cash', bank_transfer: 'Bank transfer', card: 'Card', cheque: 'Cheque', other: 'Other' }[p.method] || p.method);
+  const method = methodOf(payment);
   const row = (label, value) => h('tr', {}, h('td', {}, label), h('td', { class: 'right' }, value));
+  const sum = all.reduce((s, p) => s + Number(p.amount), 0);
+  const gave = Number(payment.amount) < 0 ? 'Refunded' : 'Received';
+  const lines = all.length > 1
+    ? [...all.map((p) => row(`${gave} by ${methodOf(p)}`, rupees(Math.abs(Number(p.amount))))), row(`Total ${gave.toLowerCase()}`, h('strong', {}, rupees(Math.abs(sum))))]
+    : [row(gave, h('strong', {}, rupees(Math.abs(Number(payment.amount))))), row('By', method)];
   const sheet = h('div', { class: 'invoice-sheet print-area' },
     h('header', {},
       h('div', {}, h('strong', { style: { fontSize: 'var(--fs-xl, 1.25rem)', color: 'var(--inv-accent)' } }, CONFIG.CLINIC_NAME),
@@ -733,8 +847,7 @@ export function receiptSheet(payment, patient, invoice, remainingDues) {
         h('div', { class: 'muted' }, `No. ${String(payment.id || '').slice(0, 8).toUpperCase()}`))),
     h('p', {}, h('strong', {}, patient?.full_name || ''), patient ? ` · Mr# ${patient.mr_number}` : ''),
     h('div', { class: 'table-scroll' }, h('table', { class: 'list' }, h('tbody', {},
-      row(Number(payment.amount) < 0 ? 'Refunded' : 'Received', h('strong', {}, rupees(Math.abs(Number(payment.amount))))),
-      row('By', method),
+      lines,
       invoice ? row('For invoice', `${invoice.invoice_no} · ${shortDate(invoice.issue_date)} · ${rupees(invoice.total ?? invoice.subtotal - invoice.discount_amount)}`) : null,
       remainingDues !== undefined && remainingDues !== null ? row('Still to pay', rupees(Math.max(0, remainingDues))) : null,
       payment.notes ? row('Notes', payment.notes) : null))),
