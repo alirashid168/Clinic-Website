@@ -8,13 +8,15 @@ import { ROLE_LABELS } from '../../lib/permissions.js';
 import { tabbed } from './accounts.js';
 import { printSheet } from './invoice.js';
 
+// The families answered by the database's clinic_report (Patients, HR, OPD → Monthly) open only for who it answers:
+// finance.view or Dr. Ali (it refuses every kind to anyone else, so offering them would give an error on every tab).
 const GROUPS = [
   ['financial', 'Financial', () => can('finance.view')],
-  ['patients', 'Patients', () => can('patients.view')],
+  ['patients', 'Patients', () => can('finance.view') || isAdmin()],
   ['opd', 'OPD', () => can('sheet.view')],
   ['inventory', 'Inventory', () => can('inventory.manage')],
   ['accounts', 'Accounts', () => can('finance.view') || can('cash.verify')],
-  ['hr', 'HR', () => can('doctor_log.view_all') || isAdmin()],
+  ['hr', 'HR', () => can('finance.view') || isAdmin()],
 ];
 const TABS = {
   financial: [['transactions', 'Transactions'], ['summary', 'Summary'], ['methods', 'Payment mode'], ['procedures', 'Procedures'], ['income', 'Income statement'], ['doctors', 'Doctors share'],
@@ -27,7 +29,8 @@ const TABS = {
 };
 // A report of the clinic's money in a family others may open (owner, 15 Oct 2026): only for who sees the totals. "Highest dues" adds up
 // every patient's dues by branch (the database refuses it to anyone without finance.view as well: clinic_report).
-const MONEY_TABS = { 'patients/dues': () => can('finance.view') };
+// OPD → Monthly is the Statistics report (clinic_report 'visits'), which the database answers only for finance.view or Dr. Ali.
+const MONEY_TABS = { 'patients/dues': () => can('finance.view'), 'opd/monthly': () => can('finance.view') || isAdmin() };
 const tabsFor = (group) => TABS[group].filter(([key]) => MONEY_TABS[`${group}/${key}`]?.() ?? true);
 // Reports that take a search box, a payment-mode filter, or no period at all (they show the position today).
 const SEARCHABLE = ['financial/transactions', 'financial/summary', 'financial/methods', 'financial/procedures', 'financial/doctors', 'financial/pending', 'financial/advance', 'financial/void', 'financial/refunds', 'financial/discounts', 'patients/dues', 'hr/doctors'];
@@ -320,7 +323,7 @@ export async function renderReports(root, params) {
 
     'hr/doctors': async () => {
       const rows = (await report('doctors')).filter((r) => !q() || String(r.name).toLowerCase().includes(q())).map((r) => ({ ...r, group: r.group ? `Group ${r.group}` : '' }));
-      // What the doctors billed is the clinic's money: only for finance.view (the HR family also opens for "See every doctor's daily log").
+      // What the doctors billed is the clinic's money: only for finance.view (Dr. Ali opens the HR family without it).
       const billed = can('finance.view');
       return [table('Doctors', 'Completed visits in the period: treated, checked (as the checker group) and assisted, and the days each doctor worked. Open a doctor\'s own log under More → Doctor log.', rows, [['Doctor', 'name', 'text'], ['Group', 'group', 'text'], ['Treated', 'treated', 'num'], ['Checked', 'checked', 'num'], ['Assisted', 'assisted', 'num'], ['Days', 'days', 'num'], ...(billed ? [['Billed (treated)', 'billed', 'money']] : [])], 'doctors', { treated: total(rows, 'treated'), checked: total(rows, 'checked'), assisted: total(rows, 'assisted'), ...(billed ? { billed: total(rows, 'billed') } : {}) })];
     },

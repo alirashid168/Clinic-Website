@@ -1473,10 +1473,16 @@ await step('money: the front desk sees today\'s payments of its branch one by on
   await money.locator('summary', { hasText: 'payments' }).click();
   assert.ok(await money.getByRole('button', { name: /^Receipt, / }).count(), 'the receipt of the payment, to print');
   for (const name of ['New invoice', 'Take payment']) assert.ok(await pfin.getByRole('button', { name, exact: true }).count(), name);
-  // Reports: no "Highest dues" (every patient's dues added up by branch).
+  // Reports: no "Highest dues" (every patient's dues added up by branch), and no Patients, HR or OPD → Monthly either:
+  // the database (clinic_report) answers those only for finance.view or Dr. Ali, so offering them gave an error on every tab.
   await pfin.goto(BASE + '#/staff/reports?group=patients&tab=dues');
   await pfin.waitForSelector('.report-tabs .tab');
   assert.ok(!(await pfin.locator('.report-tabs .tab').allInnerTexts()).some((t) => /dues/i.test(t)), 'no "Highest dues" report');
+  const fdGroups = await pfin.locator('.report-groups .tab').allInnerTexts();
+  assert.ok(fdGroups.includes('OPD') && !fdGroups.includes('Patients') && !fdGroups.includes('HR'), `front desk report families: ${fdGroups.join(', ')}`);
+  await pfin.goto(BASE + '#/staff/reports?group=opd&tab=monthly');
+  await pfin.waitForSelector('h2:text("OPD by day")');
+  assert.ok(!(await pfin.locator('.report-tabs .tab').allInnerTexts()).includes('Monthly'), 'no OPD → Monthly for the front desk');
 });
 await step('money: the front desk\'s cash closing is a blind count: no expected cash, no difference, "Saved. Accounts will check it."', async () => {
   await pfin.goto(BASE + '#/staff/accounts?tab=cash');

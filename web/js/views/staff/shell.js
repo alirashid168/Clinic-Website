@@ -65,11 +65,11 @@ function menu() {
     link('Billing', 'billing'),
     { label: 'Reports', key: 'reports', show: () => show('reports') || show('accounts'), items: [
       { ...link('Financial', 'reports?group=financial'), show: () => can('finance.view') },
-      { ...link('Patients', 'reports?group=patients'), show: () => can('patients.view') },
+      { ...link('Patients', 'reports?group=patients'), show: () => can('finance.view') || isAdmin() },
       { ...link('OPD', 'reports?group=opd'), show: () => can('sheet.view') },
       { ...link('Inventory', 'reports?group=inventory'), show: () => can('inventory.manage') },
       { ...link('Accounts', 'reports?group=accounts'), show: () => can('finance.view') || can('cash.verify') },
-      { ...link('HR', 'reports?group=hr'), show: () => can('doctor_log.view_all') || isAdmin() },
+      { ...link('HR', 'reports?group=hr'), show: () => can('finance.view') || isAdmin() },
       { divider: true, show: () => show('accounts') },
       { ...link('Branch income vs expenses', 'accounts?tab=pnl'), show: () => can('finance.view') },
       { ...link('Expenses', 'accounts?tab=expenses'), show: () => can('finance.view') },

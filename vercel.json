@@ -31,7 +31,7 @@
         },
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://*.supabase.co; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdn.jsdelivr.net; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+          "value": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://*.supabase.co; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdn.jsdelivr.net; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         }
       ]
     },
@@ -55,6 +55,24 @@
     },
     {
       "source": "/img/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=86400, stale-while-revalidate=86400"
+        }
+      ]
+    },
+    {
+      "source": "/results/(.*\\.(jpe?g|png|webp))",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=86400, stale-while-revalidate=86400"
+        }
+      ]
+    },
+    {
+      "source": "/(icon-192\\.png|icon-512\\.png|icon-maskable-512\\.png|apple-touch-icon\\.png|favicon\\.svg|favicon\\.ico|logo-mark\\.svg|og-image\\.jpg)",
       "headers": [
         {
           "key": "Cache-Control",
@@ -147,6 +165,31 @@
     {
       "source": "/:slug([a-z0-9-]*(?:service|treatment|brace|price|orthodont|veneer|smile)[a-z0-9-]*)/",
       "destination": "/#/visitor",
+      "permanent": true
+    },
+    {
+      "source": "/visitor{/}?",
+      "destination": "/#/visitor",
+      "permanent": true
+    },
+    {
+      "source": "/clinics{/}?",
+      "destination": "/#/clinics",
+      "permanent": true
+    },
+    {
+      "source": "/dr-ali{/}?",
+      "destination": "/#/dr-ali",
+      "permanent": true
+    },
+    {
+      "source": "/patient{/}?",
+      "destination": "/#/patient",
+      "permanent": true
+    },
+    {
+      "source": "/results{/}?",
+      "destination": "/#/results",
       "permanent": true
     },
     {
