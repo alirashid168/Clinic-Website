@@ -63,7 +63,7 @@
       ]
     },
     {
-      "source": "/results/(.*\\.(jpe?g|png|webp))",
+      "source": "/results/:file(.*\\.jpg)",
       "headers": [
         {
           "key": "Cache-Control",
