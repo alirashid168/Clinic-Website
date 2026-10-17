@@ -740,7 +740,11 @@ export function createServer({ now, secret = 'sync-secret', clinicians = DEFAULT
     const total = S.visits.filter((v) => v.branch === tab.branch && v.date === date && v.sheet_key && v.status !== 'cancelled' && !S.released.has(v.id)).length
       + S.checkups.filter((c) => c.branch === tab.branch && c.date === date && c.sheet_key && c.day_status !== 'cancelled' && !S.released.has(c.id)).length;
     const done = S.removedToday[tab.branch] || 0;
-    const cap = Math.max(15, Math.ceil(0.35 * (total + done)));      // 35 in 100 of the day's rows, at least 15 (RS12-1)
+    // keep_rows: the records taken off the sheet earlier today while done are still rows the sheet had today: they stay in the cap's base
+    const isDone = (x) => S.released.get(x.id) === 'completed' || S.released.get(x.id) === 'in_treatment';
+    const offDone = keep ? S.visits.filter((v) => v.branch === tab.branch && v.date === date && isDone(v)).length
+      + S.checkups.filter((c) => c.branch === tab.branch && c.date === date && isDone(c)).length : 0;
+    const cap = Math.max(15, Math.ceil(0.35 * (total + done + offDone)));      // 35 in 100 of the day's rows, at least 15 (RS12-1)
     // "at once" counts every row that left the sheet (done ones too: waiting patients in a big deletion are likely a mistake); the day's cap
     // counts removals only
     const hold = n > 3 || (n >= 2 && (present.length === 0 || n * 4 >= total)) || done + (n - off) > cap;

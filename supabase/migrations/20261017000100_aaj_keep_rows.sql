@@ -24,17 +24,26 @@
 --       with the same caps, audit and Ctrl+Z as before. In a deletion of many rows at once (4 or more rows, or a quarter of the tab, 2 or
 --       more; the rows of done patients count, since waiting patients deleted in a big selection are most likely a mistake) they are
 --       not removed: they come back with "Needs attention: N rows disappeared at once ..." as before, plus "(The rows of patients who are
---       done stay off the sheet.)" when some were. The day's cap counts removals only (not the rows taken off the sheet).
+--       done stay off the sheet.)" when some were. The day's cap counts removals only (taking a done patient off the sheet is not a
+--       removal), and its base keeps the records taken off the sheet earlier that day: they are still rows the sheet had today, so the
+--       cap stays about a third of the day's rows after the assistant has cleared the evening's done rows (before, it fell back to 15).
+--       Before deleting a row of today the assistant checks that it says Completed (docs/AAJ-SYNC-SETUP.md, section 5): a row still
+--       Waiting is a wrong entry by the owner's rule.
 --     * A record the website itself let go (SHEET_LETGO, an Mr# or a Month typed into the row, RV9-2) keeps its own rule.
 --     * Ctrl+Z right after a deletion: the row comes back with its key, aaj_sync takes the released mark away (as before) and the row is
 --       linked again; nothing was removed for a done patient, so nothing needs to be put back.
+--     * A done patient's row that another patient was TYPED OVER (not deleted) cannot be told apart here from a deleted one. The new
+--       script knows it typed-over rows and puts that patient back at the bottom of the tab itself ("Put back: another patient was typed
+--       over this row"), as before this file. That minute it asks for no removal pass, so the record is never released here; its key is
+--       on the sheet again in the next call.
 --   A call WITHOUT "keep_rows" (the old script, still pasted in the sheet) gets exactly the old answers.
 --
 -- WHAT THIS FILE REPLACES (three CREATE OR REPLACE, no table, column or grant changes)
 --   * public.aaj_sync: the body of 20261009000300_aaj_two_way_sync.sql (checked identical to the live database on 17 Oct 2026) with
 --     three narrow changes, all inside it: it reads "keep_rows" and sets the transaction setting aaj.keep_rows for aaj_removals; the
---     Cancelled records it releases in a keep_rows call are named in "removed"; nothing else. 214 lines.
---   * private.aaj_removals: the same body with the done records taken off the sheet first (keep_rows only). 202 lines.
+--     Cancelled records it releases in a keep_rows call are named in "removed"; nothing else. 213 lines.
+--   * private.aaj_removals: the same body with the done records taken off the sheet first, and the day's cap counting the records taken
+--     off earlier that day (keep_rows only). 212 lines.
 --   * private.aaj_day_list: the same list, with "removed" for a record taken off the sheet while done (see above). 20 lines.
 --   Replaced functions keep their grants; the revokes and the one grant of 20261009000300 are repeated at the end anyway.
 --   No backslash anywhere in this file (the live apply tool decodes backslash escapes).
@@ -44,8 +53,21 @@
 --     goes on; a deleted Completed row still comes back).
 --   * new script first, this file not applied yet: the old aaj_sync ignores "keep_rows"; the rows stay on the tab at night (the script
 --     does that) and a deleted Completed row still comes back with "Not removed", as now. Nothing is lost either way.
---   Suggested order: apply this file, check it (supabase/tests/40_aaj_keep_rows_test.sql), then paste the new script
---   (docs/AAJ-SYNC-SETUP.md, "Updating the script"). Set up does not need to be run again.
+--   Suggested order: apply this file, check it with the read-only queries below, then paste the new script (docs/AAJ-SYNC-SETUP.md,
+--   section 14 "Updating the script"). Set up does not need to be run again.
+--
+-- CHECKING IT ON THE LIVE DATABASE (read-only; never run supabase/tests/40_aaj_keep_rows_test.sql there)
+--   Test 40 is for the local SQL suite only (psql, .omc/golive/gates.sh): it cannot run in the SQL Editor (it uses psql's set lines), and run
+--   with psql against the live database it would replace the sync secret's hash, delete Islamabad's visits and checkups of today and
+--   yesterday, and hold the sync's lock until its rollback (every sheet call answered BUSY meanwhile). On the live database run only:
+--     select p.proname, md5(p.prosrc) from pg_proc p
+--      where (p.pronamespace = 'public'::regnamespace and p.proname = 'aaj_sync')
+--         or (p.pronamespace = 'private'::regnamespace and p.proname in ('aaj_removals', 'aaj_day_list')) order by 1;
+--   and compare: after this file, aaj_day_list e06e36c82cdb77bc6ff38fca7fc743fb, aaj_removals 042ac2530063f70660eec06617abfa3e,
+--   aaj_sync b36b7678493aa134c9e733b73a3d8005 (the md5 of each body below, checked in the local suite; any edit of a body changes it), and
+--     select b.code, jsonb_array_length(private.aaj_day_list(b.id, (now() at time zone 'Asia/Karachi')::date)) from public.branches b
+--      where b.code in ('GUL', 'NN', 'DHA', 'LHR', 'ISB') order by 1;
+--   before and after applying: every branch keeps the same number of rows on today's list.
 --
 -- HOW TO APPLY
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file -> Run. It is safe to run more than once. With the Supabase CLI,
@@ -286,6 +308,7 @@ declare
   -- done (Completed, Treatment) whose rows left the sheet, taken off it before anything else
   v_keep boolean := coalesce(current_setting('aaj.keep_rows', true), '') = 'on';
   v_offv uuid[] := '{}'; v_offc uuid[] := '{}'; v_off int := 0;
+  v_offdone int := 0;                              -- the day's records of this tab already taken off the sheet while done (still the day's rows)
 begin
   select code into v_code from public.branches where id = p_branch;
   -- a Cancelled record, and one released already (its row left the sheet while it was Cancelled / No show), is never a removal
@@ -306,7 +329,8 @@ begin
        and not exists (select 1 from private.aaj_released rl where rl.checkup_id = x.id)) y;
   select count(*) into v_done from public.audit_log
    where action = 'SHEET_REMOVED' and new_data->>'branch' = v_code and at >= v_day and new_data->>'action' in ('deleted', 'kept_cancelled');
-  -- the day's removals: at least 15, and 35 in 100 of the rows the sheet has had today (the ones removed today included), so a busy day of 120
+  -- the day's removals: at least 15, and 35 in 100 of the rows the sheet has had today (the ones removed today included, and in a keep_rows
+  -- call the ones taken off the sheet while done, v_offdone below), so a busy day of 120
   -- patients may lose 42 wrong entries and no-shows (owner, 11 Oct 2026: "sometimes on a busy day, we have like 120 patients"; RS12-1)
   -- keep_rows: a visit or checkup of a patient who is done (Completed, Treatment) whose row left the sheet only goes off the sheet: kept
   -- here exactly as it is, released, its row not put back while it stays done (aaj_day_list), one row or a whole tab alike (owner, 17 Oct
@@ -323,8 +347,17 @@ begin
        and not exists (select 1 from private.aaj_released rl where rl.checkup_id = x.id)
        and not private.aaj_let_go_seen('checkups', x.id, x.sheet_key, x.updated_at);
     v_off := cardinality(v_offv) + cardinality(v_offc);
+    -- the records taken off the sheet earlier today while done are released, so v_total leaves them out; they are still rows the sheet had
+    -- today, so they count for the day's cap (the guide: about a third of the day's rows). Without it the cap fell back to 15 in the evening,
+    -- once the assistant had cleared the done rows, and a single no-show deleted after that came back (RV10-9).
+    select count(*) into v_offdone from (
+      select 1 from private.aaj_released rl join public.visits x on x.id = rl.visit_id
+       where x.branch_id = p_branch and x.visit_date = p_date and rl.status in ('completed', 'in_treatment')
+      union all
+      select 1 from private.aaj_released rl join public.checkups x on x.id = rl.checkup_id
+       where x.branch_id = p_branch and x.checkup_date = p_date and rl.status in ('completed', 'in_treatment')) y;
   end if;
-  v_cap := greatest(15, ceil(0.35 * (v_total + v_done))::int);
+  v_cap := greatest(15, ceil(0.35 * (v_total + v_done + v_offdone))::int);
   -- "at once" counts every row that left the sheet, the done ones too (waiting patients deleted in a big selection are most likely a
   -- mistake); the day's cap counts the rows that would be removed (v_off is 0 without keep_rows: the rule of 20261009000300)
   v_hold := v_n > 3 or (v_n >= 2 and (cardinality(v_pres) = 0 or v_n * 4 >= v_total)) or v_done + (v_n - v_off) > v_cap;

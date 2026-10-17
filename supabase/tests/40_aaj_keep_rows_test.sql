@@ -279,5 +279,86 @@ select pg_temp.check(not has_function_privilege('anon', 'private.aaj_removals(sm
                      and not has_function_privilege('authenticated', 'public.aaj_sync(text, jsonb)', 'execute'),
   'grants as before: only anon may call the door, the private helpers stay private');
 
+-- =====================================================================
+-- 9. keep_rows: the day's cap keeps the rows taken off the sheet in its base (RV10-9), and a done row leaving together with a wrong row
+--    does not use it up (RV10-10). (Last, because it writes removals into the audit log that the cases above do not expect.)
+-- =====================================================================
+-- the sheet now: every record of today except the ones taken off it while done (301-316 and 401-420 below) and row 11 (kept Cancelled)
+create or replace function pg_temp.s40_sheet(p_off text[] default '{}') returns text[] language sql as $$
+  select pg_temp.s40_keys(array(select pg_temp.s40_k(g) from generate_series(301, 316) g) || array(select pg_temp.s40_k(g) from generate_series(401, 420) g)
+                          || pg_temp.s40_k(11) || p_off) $$;
+-- (the day's cap as private.aaj_removals counts it: records on the sheet today, removals today, records taken off while done)
+create or replace function pg_temp.s40_counts(out v_total int, out v_done int, out v_off int) language sql as $$
+  select (select count(*)::int from (
+            select 1 from public.visits x where x.branch_id = pg_temp.s40_bid() and x.visit_date = pg_temp.s40_today() and x.sheet_key is not null and x.status <> 'cancelled'
+               and not exists (select 1 from private.aaj_released rl where rl.visit_id = x.id)
+            union all
+            select 1 from public.checkups x where x.branch_id = pg_temp.s40_bid() and x.checkup_date = pg_temp.s40_today() and x.source <> 'archive' and not x.date_is_month
+               and x.sheet_key is not null and coalesce(x.day_status, '') <> 'cancelled'
+               and not exists (select 1 from private.aaj_released rl where rl.checkup_id = x.id)) y),
+         (select count(*)::int from public.audit_log where action = 'SHEET_REMOVED' and new_data->>'branch' = 'ISB'
+             and at >= (pg_temp.s40_today()::timestamp at time zone 'Asia/Karachi') and new_data->>'action' in ('deleted', 'kept_cancelled')),
+         (select count(*)::int from (
+            select 1 from private.aaj_released rl join public.visits x on x.id = rl.visit_id
+             where x.branch_id = pg_temp.s40_bid() and x.visit_date = pg_temp.s40_today() and rl.status in ('completed', 'in_treatment')
+            union all
+            select 1 from private.aaj_released rl join public.checkups x on x.id = rl.checkup_id
+             where x.branch_id = pg_temp.s40_bid() and x.checkup_date = pg_temp.s40_today() and rl.status in ('completed', 'in_treatment')) y) $$;
+-- (made-up removals of today, written the way aaj_removals writes them: they only make the day's count of removals higher)
+create or replace function pg_temp.s40_removals(p_n int) returns void language sql as $$
+  insert into public.audit_log (table_name, row_id, action, old_data, new_data, actor)
+  select 'visits', gen_random_uuid()::text, 'SHEET_REMOVED', null,
+         jsonb_build_object('tab', 'Islamabad', 'branch', 'ISB', 'date', pg_temp.s40_today(), 'key', 'S-none', 'action', 'deleted', 'kind', 'visit'), private.aaj_sync_actor()
+    from generate_series(1, p_n) $$;
+insert into public.patients (mr_number, full_name, phone, first_branch_id)
+  select '4000' || lpad(g::text, 2, '0'), 'Keep Patient ' || lpad(g::text, 2, '0'), '031400000' || lpad(g::text, 2, '0'), pg_temp.s40_bid() from generate_series(41, 70) g;
+-- twenty more patients who are done (taken off the sheet in one go below), six waiting patients who stay on it
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, sheet_key)
+  select p.id, pg_temp.s40_bid(), pg_temp.s40_today(), 'completed', 'Polish', pg_temp.s40_k(400 + g)
+    from generate_series(1, 20) g join public.patients p on p.mr_number = '4000' || (40 + g);
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, sheet_key)
+  select p.id, pg_temp.s40_bid(), pg_temp.s40_today(), 'waiting', 'Scaling', pg_temp.s40_k(430 + g)
+    from generate_series(1, 6) g join public.patients p on p.mr_number = '4000' || (60 + g);
+insert into s40_resp select 'cb0', pg_temp.s40_sync(pg_temp.s40_pl('[]', pg_temp.s40_sheet(), true, true));
+select pg_temp.check((select count(*) = 20 and bool_and(x->>'action' = 'released') from jsonb_array_elements((select resp->'tabs'->0->'removed' from s40_resp where n = 'cb0')) x
+                        where x->>'key' = any (array(select pg_temp.s40_k(g) from generate_series(401, 420) g))),
+  'setup: twenty more done patients taken off the sheet at once (the evening cleared in one go)');
+-- the day's removals brought to 15, the least the cap ever is
+select pg_temp.s40_removals(15 - (select v_done from pg_temp.s40_counts()));
+select pg_temp.check((select v_done = 15 and v_off >= 30 and greatest(15, ceil(0.35 * (v_total + v_done + v_off))::int) > 16
+                             and greatest(15, ceil(0.35 * (v_total + v_done))::int) = 15 from pg_temp.s40_counts()),
+  'setup: 15 removals today; with the done rows taken off counted the cap is above 16, without them it is 15');
+insert into s40_resp select 'cb1', pg_temp.s40_sync(pg_temp.s40_pl('[]', pg_temp.s40_sheet(array[pg_temp.s40_k(6)]), true, false));
+select pg_temp.check((select x->>'action' = 'restore' and x->>'message' = 'Needs attention: too many rows were deleted from this tab today, so nothing was removed from the website. Delete wrong entries on the website.'
+                        from (select pg_temp.s40_rm((select resp from s40_resp where n = 'cb1'), pg_temp.s40_k(6)) x) y)
+                     and (pg_temp.s40_vis(pg_temp.s40_k(6))).id is not null,
+  'old script: a 16th single deletion is held by the old cap (15), as before');
+insert into s40_resp select 'cb2', pg_temp.s40_sync(pg_temp.s40_pl('[]', pg_temp.s40_sheet(array[pg_temp.s40_k(6)]), true, true));
+select pg_temp.check((select x->>'action' = 'deleted' from (select pg_temp.s40_rm((select resp from s40_resp where n = 'cb2'), pg_temp.s40_k(6)) x) y)
+                     and pg_temp.s40_vis(pg_temp.s40_k(6)) is null,
+  'keep_rows: the done patients taken off the sheet today still count in the day''s cap (about a third of the day''s rows): the 16th wrong entry deleted alone is removed (RV10-9)');
+-- one done row and one wrong Waiting row leave together, with the day's removals just below the cap: the done one does not use it up
+insert into public.visits (patient_id, branch_id, visit_date, status, treatment_label, sheet_key)
+  select p.id, pg_temp.s40_bid(), pg_temp.s40_today(), 'completed', 'Polish', pg_temp.s40_k(440) from public.patients p where p.mr_number = '400067';
+do $$
+declare c record; d int; v_cap int;
+begin
+  select * into c from pg_temp.s40_counts();
+  if 2 * 4 >= c.v_total then raise exception 'TEST FAILED: setup: the tab is too small (two rows would be a quarter of it)'; end if;
+  d := c.v_done;
+  loop
+    v_cap := greatest(15, ceil(0.35 * (c.v_total + d + c.v_off))::int);
+    exit when d + 2 > v_cap and d + 1 <= v_cap;
+    d := d + 1;
+    if d > c.v_done + 300 then raise exception 'TEST FAILED: setup: no number of removals fits'; end if;
+  end loop;
+  perform pg_temp.s40_removals(d - c.v_done);
+end $$;
+insert into s40_resp select 'cb3', pg_temp.s40_sync(pg_temp.s40_pl('[]', pg_temp.s40_sheet(array[pg_temp.s40_k(440), pg_temp.s40_k(8)]), true, true));
+select pg_temp.check((select x->>'action' = 'released' and x->>'message' = 'Taken off the sheet; kept on the website (Completed).' from (select pg_temp.s40_rm((select resp from s40_resp where n = 'cb3'), pg_temp.s40_k(440)) x) y)
+                     and (select x->>'action' = 'deleted' from (select pg_temp.s40_rm((select resp from s40_resp where n = 'cb3'), pg_temp.s40_k(8)) x) y)
+                     and pg_temp.s40_vis(pg_temp.s40_k(8)) is null and (pg_temp.s40_vis(pg_temp.s40_k(440))).status = 'completed',
+  'keep_rows: a done row and a wrong Waiting row deleted together one removal below the cap: the done one is taken off, the wrong one removed (the done row does not count toward the cap, RV10-10)');
+
 update private.aaj_sync_config set value = '20' where key = 'calls_per_minute';
 rollback;
