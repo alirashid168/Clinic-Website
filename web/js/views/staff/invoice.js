@@ -776,7 +776,7 @@ export async function paymentModal(patient, { branchId, dues, invoices, payments
   const fill = (i) => Math.min(i.remaining, cap) || '';
   const target = () => { const i = open.find((x) => x.id === invoiceSel.value); return i ? fill(i) || 0 : 0; };
   // Half in cash and half by card: "+ Add payment" starts the next payment with what is still unpaid on the invoice picked.
-  const pays = paymentRows({ methods: [{ value: 'cash', label: 'Cash' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'card', label: 'Card' }, { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' }],
+  const pays = paymentRows({ methods: [{ value: 'cash', label: 'Cash' }, { value: 'card', label: 'Card' }, { value: 'bank_transfer', label: 'Bank transfer' }, { value: 'cheque', label: 'Cheque' }, { value: 'other', label: 'Other' }],
     amount: first ? fill(first) : dues > 0 ? dues : '', labels: { method: 'Method', amount: 'Amount (Rs)' }, required: true, fillNew: (paid) => Math.max(0, target() - paid) || '' });
   const amount = pays.first().amount;
   amount.min = 1;
