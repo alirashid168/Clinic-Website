@@ -262,6 +262,7 @@ export function isLostAnswer(err) {
  */
 export function friendlyError(err, { audience = 'staff' } = {}) {
   const msg = (err && (err.message || err.error_description || String(err))) || 'Something went wrong';
+  if (STALE_CODE.test(msg)) return 'The website was just updated. Reload the page (Ctrl+Shift+R) to load the new version.';
   const isPublic = audience === 'public';
   if (err?.code === '57014' || DB_BUSY.test(msg)) {
     return isPublic
@@ -506,6 +507,20 @@ export function modal(title, body, actions = [], opts = {}) {
 
 /** Whether an open dialog holds unsaved work (opts.unsaved). */
 export const unsavedWork = () => openModals.some((m) => m.unsaved?.());
+
+// After an update, a tab that was open before it can still hold an older copy of a file: a page then fails with "does not provide an
+// export named ..." or "Failed to fetch dynamically imported module" (17 Oct 2026: a patient profile). One reload loads the new files.
+// Not with unsaved work open, and at most once a minute (a real fault would otherwise reload for ever). True when it reloads.
+const STALE_CODE = /does not provide an export named|Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i;
+export function reloadIfStale(err) {
+  if (!STALE_CODE.test(String(err?.message || err || '')) || unsavedWork()) return false;
+  try {
+    if (Date.now() - Number(sessionStorage.getItem('stale-reload-at') || 0) < 60000) return false;
+    sessionStorage.setItem('stale-reload-at', String(Date.now()));
+  } catch { return false; }
+  location.reload();
+  return true;
+}
 
 /**
  * Before the page changes: each dialog with unsaved work asks (the top one first). Resolves true when the page may change; the dialogs

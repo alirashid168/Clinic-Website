@@ -5,7 +5,7 @@
 // A shared login (several people at one branch's desk) first asks the person's name (desk-name.js).
 // Each page's module is loaded the first time it is opened, so the heavy ones (reports, admin with
 // its importers) are only downloaded by the people who use them.
-import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce, unsavedWork } from '../../ui/dom.js';
+import { h, mount, toast, friendlyError, empty, rupees, srOnly, announce, unsavedWork, reloadIfStale } from '../../ui/dom.js';
 import { state, can, isAdmin, loadStaffRef, branchName } from '../../state.js';
 import { ROLE_LABELS } from '../../lib/permissions.js';
 import { combobox } from './common.js';
@@ -264,7 +264,7 @@ export async function renderStaff(root, path, params, signOut) {
     const list = h('div', { class: 'menu-list', id: 'create-menu-list' }, createChoices.map(([key, label]) => h('button', {
       type: 'button', class: 'menu-btn', 'aria-haspopup': 'dialog',
       // The menu closes and focus goes back to "Create" first, so the dialog gives focus back to something visible.
-      onclick: () => { closeAll(); btn.focus(); openCreate(key).catch((e) => toast(friendlyError(e), 'error')); },
+      onclick: () => { closeAll(); btn.focus(); openCreate(key).catch((e) => { if (!reloadIfStale(e)) toast(friendlyError(e), 'error'); }); },
     }, label)));
     return disclosure(h('div', { class: 'menu create-menu' }, btn, list), btn, list);
   })() : null;
@@ -472,6 +472,7 @@ export async function renderStaff(root, path, params, signOut) {
         empty('This page is not available for your account.', h('a', { class: 'btn', href: '#/staff/today' }, 'Go to Today')));
     }
   } catch (e) {
+    if (reloadIfStale(e)) return;
     toast(friendlyError(e), 'error');
     // The tab and screen-reader title say so too, like "Page not available" above. Not when the person has
     // already moved on (this render was aborted): the route they went to has set its own title by now.

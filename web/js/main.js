@@ -6,7 +6,7 @@
 //
 // The public pages render straight away and fill in their data when
 // state.ready resolves. Login, portal and staff code load only when visited.
-import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink, unsavedWork, confirmLeave } from './ui/dom.js';
+import { h, mount, toast, friendlyError, empty, modal, closeAllModals, clearMessages, extLink, unsavedWork, confirmLeave, reloadIfStale } from './ui/dom.js';
 import { state } from './state.js';
 import { authChangeHandler, endedNotice, startRecheck, RECHECK_EVENT } from './auth-watch.js';
 import { CONFIG } from './config.js';
@@ -193,6 +193,7 @@ async function route() {
   } catch (e) {
     console.error(e);
     if (!current()) return;
+    if (reloadIfStale(e)) return;
     // The tab and screen-reader title say what is on screen now, not the route that failed (shell.js does the same
     // for its own pages). Staff titles stay fixed page names.
     setMeta(parts[0] === 'staff' ? 'This page could not load | Clinic system' : `Sorry, this page could not load | ${SITE}`);
